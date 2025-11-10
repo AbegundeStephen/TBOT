@@ -1,0 +1,37 @@
+# Environment & Secrets
+.env
+config.json
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Models & Data
+models/*.pkl
+data/*.csv
+data/*.parquet
+logs/*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backtest results
+backtest_results/
+*.html
+
+# OS
+.DS_Store
+Thumbs.db
+EOF
