@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Bot Interface for Trading Bot
+Fixed Telegram Bot Interface for Trading Bot
 Provides notifications and remote control capabilities
 """
 
@@ -69,11 +69,22 @@ class TradingTelegramBot:
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
     
     async def initialize(self):
-        """Initialize the bot application"""
+        """Initialize the bot application with polling"""
         try:
-            self.application = Application.builder().token(self.token).build()
+            logger.info("[TELEGRAM] Building application...")
+            self.application = (
+                Application.builder()
+                .token(self.token)
+                .connect_timeout(30)
+                .read_timeout(30)
+                .write_timeout(30)
+                .pool_timeout(30)
+                .get_updates_read_timeout(30)
+                .build()
+            )
             
             # Register command handlers
+            logger.info("[TELEGRAM] Registering command handlers...")
             self.application.add_handler(CommandHandler("start", self.cmd_start))
             self.application.add_handler(CommandHandler("help", self.cmd_help))
             self.application.add_handler(CommandHandler("status", self.cmd_status))
@@ -85,11 +96,24 @@ class TradingTelegramBot:
             self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
             self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
             
-            # Callback query handler for inline buttons
+            # Callback query handler
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
             
+            logger.info("[TELEGRAM] Initializing application...")
             await self.application.initialize()
+            
+            logger.info("[TELEGRAM] Starting application...")
             await self.application.start()
+            
+            # ✅ KEY FIX: Start polling for updates with proper configuration
+            logger.info("[TELEGRAM] Starting update polling...")
+            await self.application.updater.start_polling(
+                poll_interval=1.0,
+                timeout=30,
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                bootstrap_retries=5
+            )
             
             # Send startup notification
             await self.send_notification(
@@ -99,11 +123,25 @@ class TradingTelegramBot:
             )
             
             self.is_running = True
-            logger.info("Telegram bot started successfully")
+            logger.info("[TELEGRAM] Bot fully operational and listening for commands")
             
         except Exception as e:
             logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
             raise
+    
+    async def run_polling(self):
+        """Keep the bot running with polling - FIXED VERSION"""
+        try:
+            logger.info("[TELEGRAM] Starting polling loop...")
+            
+            # The bot will keep running as long as this doesn't exit
+            while self.is_running:
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logger.info("[TELEGRAM] Polling cancelled")
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Error in polling loop: {e}", exc_info=True)
     
     async def shutdown(self):
         """Shutdown the bot gracefully"""
@@ -116,10 +154,17 @@ class TradingTelegramBot:
             )
             
             if self.application:
+                logger.info("[TELEGRAM] Stopping updater...")
+                if self.application.updater and self.application.updater.running:
+                    await self.application.updater.stop()
+                
+                logger.info("[TELEGRAM] Stopping application...")
                 await self.application.stop()
+                
+                logger.info("[TELEGRAM] Shutting down application...")
                 await self.application.shutdown()
             
-            logger.info("Telegram bot shutdown complete")
+            logger.info("[TELEGRAM] Shutdown complete")
         except Exception as e:
             logger.error(f"Error during Telegram bot shutdown: {e}")
     
@@ -392,9 +437,6 @@ class TradingTelegramBot:
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Generate and send equity curve chart
-            await self._send_equity_curve(update, closed_positions, initial_capital)
-            
         except Exception as e:
             logger.error(f"Error in cmd_performance: {e}", exc_info=True)
             await update.message.reply_text("❌ Error calculating performance.")
@@ -607,17 +649,6 @@ class TradingTelegramBot:
         
         await self.send_notification(msg)
     
-    async def notify_market_status(self, asset: str, status: str):
-        """Notify about market status changes"""
-        msg = (
-            f"🏛️ *Market Status Change*\n\n"
-            f"Asset: {asset}\n"
-            f"Status: {status}\n\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        
-        await self.send_notification(msg)
-    
     async def send_daily_summary(self):
         """Send end-of-day performance summary"""
         try:
@@ -673,52 +704,6 @@ class TradingTelegramBot:
                 return f"🔴 Closed - {message.split('-')[1].strip() if '-' in message else 'Weekend'}"
         except:
             return "❓ Unknown"
-    
-    async def _send_equity_curve(self, update: Update, closed_positions: List, 
-                                  initial_capital: float):
-        """Generate and send equity curve chart"""
-        try:
-            # Calculate equity over time
-            equity_values = [initial_capital]
-            dates = [closed_positions[0]['entry_time'] if closed_positions else datetime.now()]
-            
-            cumulative_pnl = 0
-            for trade in closed_positions:
-                cumulative_pnl += trade['pnl']
-                equity_values.append(initial_capital + cumulative_pnl)
-                dates.append(trade['exit_time'])
-            
-            # Create plot
-            plt.figure(figsize=(10, 6))
-            plt.plot(dates, equity_values, linewidth=2, color='#2E86AB')
-            plt.axhline(y=initial_capital, color='gray', linestyle='--', alpha=0.5)
-            plt.fill_between(dates, equity_values, initial_capital, 
-                            where=[e >= initial_capital for e in equity_values],
-                            alpha=0.3, color='green')
-            plt.fill_between(dates, equity_values, initial_capital,
-                            where=[e < initial_capital for e in equity_values],
-                            alpha=0.3, color='red')
-            
-            plt.title('Equity Curve', fontsize=14, fontweight='bold')
-            plt.xlabel('Date')
-            plt.ylabel('Equity ($)')
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            
-            # Save to buffer
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=100)
-            buf.seek(0)
-            plt.close()
-            
-            # Send chart
-            await update.message.reply_photo(
-                photo=buf,
-                caption="📈 Portfolio Equity Curve"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error generating equity curve: {e}", exc_info=True)
     
     async def _send_status_message(self, query):
         """Send status message (for callback)"""
