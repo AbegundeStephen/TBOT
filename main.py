@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Main Trading Bot - WITH MARKET HOURS CHECKING
+Main Trading Bot - WITH TELEGRAM INTEGRATION
 """
 
 import json
 import logging
 import sys
 import time
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import schedule
 import io
+from threading import Thread
 
 # FIX Windows encoding BEFORE any imports that use logging
 if sys.platform == 'win32':
@@ -28,6 +30,10 @@ from src.execution.binance_handler import BinanceExecutionHandler
 from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.utils.market_hours import MarketHours, should_trade_btc, should_trade_gold
+
+# Import Telegram bot
+from src.telegram import TradingTelegramBot
+from telegram_config import TELEGRAM_CONFIG
 
 # Setup logging with UTF-8 encoding
 def setup_logging(config):
@@ -60,12 +66,12 @@ logger = logging.getLogger(__name__)
 
 class TradingBot:
     """
-    Main trading bot - WITH MARKET HOURS CHECKING
+    Main trading bot - WITH TELEGRAM INTEGRATION
     """
 
     def __init__(self, config_path: str = "config/config.json"):
         logger.info("=" * 70)
-        logger.info("INITIALIZING TRADING BOT")
+        logger.info("INITIALIZING TRADING BOT WITH TELEGRAM")
         logger.info("=" * 70)
 
         with open(config_path, encoding='utf-8') as f:
@@ -92,9 +98,43 @@ class TradingBot:
         self.daily_loss = 0.0
         self.last_trade_date = None
         self.last_trade_times = {}
-        
-        # Track last market status check
         self.last_market_status_log = None
+        
+        # TELEGRAM INTEGRATION
+        self.telegram_bot = None
+        self.telegram_loop = None
+        self.telegram_thread = None
+        self._initialize_telegram()
+
+    def _initialize_telegram(self):
+        """Initialize Telegram bot"""
+        try:
+            if not TELEGRAM_CONFIG.get("enabled", False):
+                logger.info("[TELEGRAM] Disabled in config")
+                return
+            
+            token = TELEGRAM_CONFIG.get("bot_token")
+            admin_ids = TELEGRAM_CONFIG.get("admin_ids", [])
+            
+            if not token:
+                logger.warning("[TELEGRAM] No bot token provided, skipping")
+                return
+            
+            if not admin_ids:
+                logger.warning("[TELEGRAM] No admin IDs provided, skipping")
+                return
+            
+            self.telegram_bot = TradingTelegramBot(
+                token=token,
+                admin_ids=admin_ids,
+                trading_bot=self
+            )
+            
+            logger.info(f"[TELEGRAM] Bot initialized for {len(admin_ids)} admin(s)")
+            
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Failed to initialize: {e}")
+            self.telegram_bot = None
 
     def _initialize_strategies(self):
         """Initialize strategies for each enabled asset"""
@@ -250,6 +290,16 @@ class TradingBot:
             self.daily_loss = 0.0
             self.last_trade_date = current_date
             logger.info(f"[RESET] Daily counters reset for {current_date}")
+            
+            # Send daily summary if Telegram is enabled
+            if self.telegram_bot and self.telegram_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.send_daily_summary(),
+                        self.telegram_loop
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send daily summary: {e}")
 
     def check_trading_limits(self) -> bool:
         """Check if trading limits are reached"""
@@ -269,6 +319,21 @@ class TradingBot:
         total_loss_pct = self.daily_loss / self.config["portfolio"]["initial_capital"]
         if total_loss_pct >= circuit_breaker:
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {total_loss_pct:.2%}")
+            
+            # Notify via Telegram
+            if self.telegram_bot and self.telegram_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.notify_error(
+                            f"🚨 CIRCUIT BREAKER ACTIVATED!\n"
+                            f"Loss: {total_loss_pct:.2%}\n"
+                            f"Trading halted."
+                        ),
+                        self.telegram_loop
+                    )
+                except:
+                    pass
+            
             return False
         
         trading_config = self.config["trading"]
@@ -297,27 +362,20 @@ class TradingBot:
         return True
 
     def check_market_hours(self, asset_name: str) -> bool:
-        """
-        NEW: Check if market is open for the given asset
-        Returns True if trading is allowed, False otherwise
-        """
+        """Check if market is open for the given asset"""
         if asset_name == "BTC":
-            # BTC is 24/7, always allow
             return True
         
         elif asset_name == "GOLD":
-            # GOLD follows Forex hours (Sun 22:00 GMT - Fri 22:00 GMT)
             is_open = should_trade_gold()
             
             if not is_open:
                 status, message = MarketHours.get_market_status("gold")
                 
-                # Only log market status once per hour to avoid spam
                 current_hour = datetime.now().hour
                 if self.last_market_status_log != current_hour:
                     logger.info(f"[MARKET] {asset_name}: {message}")
                     
-                    # Show when market opens
                     seconds_until = MarketHours.time_until_market_open("gold")
                     if seconds_until > 0:
                         hours_until = seconds_until / 3600
@@ -327,19 +385,15 @@ class TradingBot:
             
             return is_open
         
-        # Default: allow trading (for any future assets)
         return True
 
     def trade_asset(self, asset_name: str):
-        """
-        Execute trading logic with market hours checking
-        """
+        """Execute trading logic with market hours checking"""
         asset_config = self.config["assets"][asset_name]
         
         if not asset_config.get("enabled", False):
             return
         
-        # CHECK MARKET HOURS FIRST
         if not self.check_market_hours(asset_name):
             logger.debug(f"[SKIP] {asset_name}: Market is closed")
             return
@@ -423,8 +477,6 @@ class TradingBot:
                 current_price = df['close'].iloc[-1]
             
             logger.info(f"[PRICE] Current {asset_name} Price: ${current_price:,.2f}")
-            logger.info(f"[PRICE] Last Bar Close: ${df['close'].iloc[-1]:,.2f}")
-            logger.info(f"[PRICE] Last Bar Time: {df.index[-1].strftime('%Y-%m-%d %H:%M')} UTC")
             
             # Get signal
             aggregator = self.aggregators.get(asset_name)
@@ -442,7 +494,11 @@ class TradingBot:
             logger.info(f"  >> Combined Confidence: {details['combined_confidence']:.3f}")
             logger.info(f"  >> Reasoning: {details['reasoning']}")
             
-            # Execute signal (even HOLD signals check SL/TP)
+            # Check if we're opening a new position (for Telegram notification)
+            was_new_position = False
+            existing_position = self.portfolio_manager.get_position(asset_name)
+            
+            # Execute signal
             success = False
             
             if exchange == "binance":
@@ -460,7 +516,53 @@ class TradingBot:
                 )
                 self.mt5_handler.check_and_update_positions(asset_name)
             
-            # Only count as trade if we opened a new position
+            # Check if a new position was opened
+            new_position = self.portfolio_manager.get_position(asset_name)
+            if new_position and not existing_position and signal != 0:
+                was_new_position = True
+            
+            # Telegram notification for new position
+            if was_new_position and success and self.telegram_bot and self.telegram_loop:
+                try:
+                    pos = new_position
+                    asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.notify_trade_opened(
+                            asset=asset_name,
+                            side=pos.side if hasattr(pos, 'side') else pos.get('side'),
+                            price=current_price,
+                            size=pos.quantity * current_price if hasattr(pos, 'quantity') else pos.get('current_value', 0),
+                            sl=pos.stop_loss if hasattr(pos, 'stop_loss') else pos.get('stop_loss', 0),
+                            tp=pos.take_profit if hasattr(pos, 'take_profit') else pos.get('take_profit', 0)
+                        ),
+                        self.telegram_loop
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send Telegram notification: {e}")
+            
+            # Check if position was closed
+            if existing_position and not new_position:
+                # Position was closed - send notification
+                if self.telegram_bot and self.telegram_loop:
+                    try:
+                        # Get the last closed position for this asset
+                        closed = self.portfolio_manager.closed_positions
+                        if closed:
+                            last_trade = closed[-1]
+                            if last_trade['asset'] == asset_name:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.telegram_bot.notify_trade_closed(
+                                        asset=asset_name,
+                                        side=last_trade['side'],
+                                        pnl=last_trade['pnl'],
+                                        pnl_pct=last_trade['pnl_pct'] * 100,
+                                        reason=last_trade['reason']
+                                    ),
+                                    self.telegram_loop
+                                )
+                    except Exception as e:
+                        logger.error(f"Failed to send close notification: {e}")
+            
+            # Count trade if opened
             if signal != 0 and success:
                 if not self.check_trading_limits():
                     logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
@@ -484,6 +586,18 @@ class TradingBot:
         
         except Exception as e:
             logger.error(f"[ERROR] Error in {asset_name} trading: {e}", exc_info=True)
+            
+            # Telegram error notification
+            if self.telegram_bot and self.telegram_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.notify_error(
+                            f"Error in {asset_name} trading:\n{str(e)[:200]}"
+                        ),
+                        self.telegram_loop
+                    )
+                except:
+                    pass
         
     def _log_trade(self, asset_name: str, signal: int, details: dict, price: float):
         """Log trade details to separate file"""
@@ -503,7 +617,6 @@ class TradingBot:
         logger.info(f"[CYCLE] TRADING CYCLE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 70)
         
-        # Show current market status for all assets
         logger.info("\n[MARKET STATUS]")
         for asset_name in ["BTC", "GOLD"]:
             if self.config["assets"].get(asset_name, {}).get("enabled", False):
@@ -540,6 +653,31 @@ class TradingBot:
         logger.info("\n[OK] Trading cycle complete")
         logger.info("=" * 70)
 
+    async def _start_telegram_bot(self):
+        """Start Telegram bot in async context"""
+        try:
+            await self.telegram_bot.initialize()
+            
+            # Keep the bot running
+            while self.is_running:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"Telegram bot error: {e}", exc_info=True)
+        finally:
+            if self.telegram_bot:
+                await self.telegram_bot.shutdown()
+
+    def _run_telegram_loop(self):
+        """Run Telegram bot in separate thread"""
+        self.telegram_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.telegram_loop)
+        
+        try:
+            self.telegram_loop.run_until_complete(self._start_telegram_bot())
+        finally:
+            self.telegram_loop.close()
+
     def start(self):
         """Start the trading bot"""
         logger.info("\n" + "=" * 70)
@@ -548,7 +686,6 @@ class TradingBot:
         logger.info(f"Mode: {self.config['trading']['mode'].upper()}")
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Show market hours info
         logger.info("\n[MARKET HOURS]")
         logger.info("  BTC (Crypto): 24/7 - Always trading")
         logger.info("  GOLD (Forex):  Sun 22:00 GMT - Fri 22:00 GMT")
@@ -563,6 +700,14 @@ class TradingBot:
             logger.error("Cannot proceed with trading.")
             logger.error("=" * 70)
             sys.exit(1)
+        
+        # Start Telegram bot in separate thread
+        if self.telegram_bot:
+            logger.info("\n[TELEGRAM] Starting Telegram bot...")
+            self.telegram_thread = Thread(target=self._run_telegram_loop, daemon=True)
+            self.telegram_thread.start()
+            time.sleep(2)  # Give Telegram bot time to start
+            logger.info("[TELEGRAM] Telegram bot started")
         
         check_interval = self.config["trading"].get("check_interval_seconds", 300)
         schedule.every(check_interval).seconds.do(self.run_trading_cycle)
@@ -594,6 +739,17 @@ class TradingBot:
         if self.config["trading"].get("close_positions_on_shutdown", False):
             logger.info("Closing all open positions...")
             self.portfolio_manager.close_all_positions()
+        
+        # Shutdown Telegram bot
+        if self.telegram_bot and self.telegram_loop:
+            try:
+                logger.info("[TELEGRAM] Shutting down Telegram bot...")
+                asyncio.run_coroutine_threadsafe(
+                    self.telegram_bot.shutdown(),
+                    self.telegram_loop
+                ).result(timeout=5)
+            except Exception as e:
+                logger.error(f"Error shutting down Telegram: {e}")
         
         self.data_manager.shutdown()
         
