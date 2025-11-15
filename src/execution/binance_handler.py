@@ -1,154 +1,274 @@
-# **src/execution/binance_handler.py**
-
-
+# src/execution/binance_handler.py
 """
-Binance Execution Handler
-Manages order placement and position tracking
+FIXED: Binance Execution Handler with proper parameter passing
 """
 
 import logging
 from binance.client import Client
 from binance.enums import *
 from typing import Dict, Optional
-import time
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
 class BinanceExecutionHandler:
     """
-    Handles trade execution on Binance
+    FIXED: Handles trade execution with proper position management
     """
 
-    def __init__(self, config: Dict, client: Client):
+    def __init__(self, config: Dict, client: Client, portfolio_manager):
         self.config = config
         self.client = client
-        self.asset_config = config["trading"]["assets"]["btc"]
-        self.risk_config = config["trading"]["risk_management"]
+        self.portfolio_manager = portfolio_manager
+        
+        self.asset_config = config["assets"]["BTC"]
+        self.risk_config = config["risk_management"]
+        self.trading_config = config["trading"]
+        
         self.symbol = self.asset_config["symbol"]
-        self.position_size_pct = self.asset_config["position_size_pct"]
-        self.open_positions = {}
+        self.mode = self.trading_config.get("mode", "paper")
+        
+        logger.info(f"BinanceExecutionHandler initialized - Mode: {self.mode.upper()}")
 
-    def get_account_balance(self) -> float:
-        """Get current USDT balance"""
-        try:
-            account = self.client.get_account()
-            for balance in account["balances"]:
-                if balance["asset"] == "USDT":
-                    return float(balance["free"])
-            return 0.0
-        except Exception as e:
-            logger.error(f"Error fetching balance: {e}")
-            return 0.0
-
-    def calculate_position_size(self, current_price: float) -> float:
-        """Calculate position size based on account equity"""
-        balance = self.get_account_balance()
-        position_value = balance * self.position_size_pct
-        quantity = position_value / current_price
-
-        # Round to appropriate precision (Binance requires specific lot sizes)
-        quantity = round(quantity, 5)
-
-        logger.info(f"Position size calculated: {quantity} BTC (${position_value:.2f})")
-        return quantity
-
-    def place_market_order(
-        self, side: str, quantity: float, stop_loss_pct: float, take_profit_pct: float
-    ) -> Optional[Dict]:
-        """
-        Place market order with stop-loss and take-profit
-        """
-        try:
-            # Place main order
-            order = self.client.create_order(
-                symbol=self.symbol, side=side, type=ORDER_TYPE_MARKET, quantity=quantity
-            )
-
-            logger.info(f"Market order placed: {order}")
-
-            # Get fill price
-            fill_price = float(order["fills"][0]["price"])
-
-            # Calculate stop-loss and take-profit prices
-            if side == SIDE_BUY:
-                stop_price = fill_price * (1 - stop_loss_pct)
-                take_profit_price = fill_price * (1 + take_profit_pct)
-                sl_side = SIDE_SELL
-                tp_side = SIDE_SELL
-            else:  # SELL
-                stop_price = fill_price * (1 + stop_loss_pct)
-                take_profit_price = fill_price * (1 - take_profit_pct)
-                sl_side = SIDE_BUY
-                tp_side = SIDE_BUY
-
-            # Place OCO order (One-Cancels-Other) for SL and TP
-            try:
-                oco_order = self.client.create_oco_order(
-                    symbol=self.symbol,
-                    side=sl_side,
-                    quantity=quantity,
-                    price=round(take_profit_price, 2),
-                    stopPrice=round(stop_price, 2),
-                    stopLimitPrice=round(stop_price * 0.99, 2),
-                    stopLimitTimeInForce=TIME_IN_FORCE_GTC,
-                )
-                logger.info(
-                    f"OCO order placed: SL={stop_price}, TP={take_profit_price}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to place OCO order: {e}")
-
-            return order
-
-        except Exception as e:
-            logger.error(f"Error placing market order: {e}")
-            return None
-
-    def execute_signal(self, signal: int, current_price: float) -> bool:
-        """
-        Execute trade based on signal
-        Returns True if order was placed
-        """
-        if signal == 0:
-            return False
-
-        # Check if max positions reached
-        if len(self.open_positions) >= self.risk_config["max_open_positions"]:
-            logger.warning("Max open positions reached, skipping trade")
-            return False
-
-        quantity = self.calculate_position_size(current_price)
-
-        if quantity <= 0:
-            logger.error("Invalid position size calculated")
-            return False
-
-        side = SIDE_BUY if signal == 1 else SIDE_SELL
-
-        order = self.place_market_order(
-            side=side,
-            quantity=quantity,
-            stop_loss_pct=self.risk_config["stop_loss_pct"],
-            take_profit_pct=self.risk_config["take_profit_pct"],
-        )
-
-        if order:
-            self.open_positions[order["orderId"]] = {
-                "side": side,
-                "quantity": quantity,
-                "price": current_price,
-                "timestamp": order["transactTime"],
-            }
-            return True
-
-        return False
-
-    def get_current_price(self) -> float:
+    def get_current_price(self, symbol: str = None) -> Optional[float]:
         """Get current market price"""
+        if symbol is None:
+            symbol = self.symbol
+            
         try:
-            ticker = self.client.get_symbol_ticker(symbol=self.symbol)
+            ticker = self.client.get_symbol_ticker(symbol=symbol)
             return float(ticker["price"])
         except Exception as e:
-            logger.error(f"Error fetching price: {e}")
-            return 0.0
+            logger.error(f"Error fetching price for {symbol}: {e}")
+            return None
+
+    def execute_signal(
+        self, 
+        signal: int, 
+        current_price: float,
+        asset_name: str = "BTC"
+    ) -> bool:
+        """
+        FIXED: Execute trade based on signal with proper position closing
+        
+        Signal Logic:
+        - signal = 1 (BUY): Close any SHORT, open LONG
+        - signal = -1 (SELL): Close any LONG, open SHORT  
+        - signal = 0 (HOLD): Check SL/TP on existing positions
+        """
+        try:
+            # STEP 1: Check and manage existing position
+            existing_position = self.portfolio_manager.get_position(asset_name)
+            
+            if existing_position:
+                position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
+                
+                # Check if we should close the position
+                should_close = False
+                close_reason = None
+                
+                if signal == 1 and position_side == 'short':
+                    should_close = True
+                    close_reason = "opposite_signal_long"
+                elif signal == -1 and position_side == 'long':
+                    should_close = True
+                    close_reason = "opposite_signal_short"
+                elif signal == 0:
+                    # Check SL/TP even on HOLD
+                    should_close, close_reason = self._check_stop_loss_take_profit(
+                        existing_position, 
+                        current_price
+                    )
+                
+                if should_close:
+                    logger.info(f"[CLOSE] {asset_name}: Closing position - {close_reason}")
+                    success = self._close_position(existing_position, current_price, asset_name, close_reason)
+                    
+                    if not success:
+                        logger.error(f"[FAIL] Failed to close {asset_name} position")
+                        return False
+            
+            # STEP 2: Open new position if signal is BUY or SELL
+            if signal != 0:
+                # Don't open if we already have a position in the same direction
+                if existing_position:
+                    position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
+                    if (signal == 1 and position_side == 'long') or (signal == -1 and position_side == 'short'):
+                        logger.info(f"[HOLD] {asset_name}: Already have position in signal direction")
+                        return False
+                
+                return self._open_position(signal, current_price, asset_name)
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
+            return False
+
+    def _check_stop_loss_take_profit(self, position, current_price: float) -> tuple:
+        """
+        Check if stop-loss or take-profit is hit
+        Returns: (should_close: bool, reason: str)
+        """
+        try:
+            # Get position details - handle both dict and object
+            if hasattr(position, 'entry_price'):
+                entry_price = position.entry_price
+                stop_loss = position.stop_loss
+                take_profit = position.take_profit
+                side = position.side
+            else:
+                entry_price = position.get('entry_price')
+                stop_loss = position.get('stop_loss')
+                take_profit = position.get('take_profit')
+                side = position.get('side')
+            
+            if side == 'long':
+                # Long position: close if price drops below SL or rises above TP
+                if stop_loss and current_price <= stop_loss:
+                    return True, f"stop_loss_hit (${current_price:.2f} <= ${stop_loss:.2f})"
+                if take_profit and current_price >= take_profit:
+                    return True, f"take_profit_hit (${current_price:.2f} >= ${take_profit:.2f})"
+            else:  # short
+                # Short position: close if price rises above SL or drops below TP
+                if stop_loss and current_price >= stop_loss:
+                    return True, f"stop_loss_hit (${current_price:.2f} >= ${stop_loss:.2f})"
+                if take_profit and current_price <= take_profit:
+                    return True, f"take_profit_hit (${current_price:.2f} <= ${take_profit:.2f})"
+            
+            return False, None
+        
+        except Exception as e:
+            logger.error(f"Error checking SL/TP: {e}")
+            return False, None
+
+    def _close_position(self, position, current_price: float, asset_name: str, reason: str) -> bool:
+        """Close existing position"""
+        try:
+            # Get position details - FIXED attribute access
+            if hasattr(position, 'entry_price'):
+                entry_price = position.entry_price
+                # FIXED: Use correct attribute name
+                position_size_usd = position.quantity * entry_price
+                side = position.side
+            else:
+                entry_price = position['entry_price']
+                quantity = position.get('quantity', 0)
+                position_size_usd = quantity * entry_price
+                side = position['side']
+            
+            # Calculate P&L
+            if side == 'long':
+                pnl = (current_price - entry_price) / entry_price * position_size_usd
+            else:  # short
+                pnl = (entry_price - current_price) / entry_price * position_size_usd
+            
+            pnl_pct = (pnl / position_size_usd) * 100 if position_size_usd > 0 else 0
+            
+            logger.info(
+                f"[CLOSE] {asset_name} - Entry: ${entry_price:,.2f}, "
+                f"Exit: ${current_price:,.2f}, P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) - {reason}"
+            )
+            
+            # Close position in portfolio manager
+            self.portfolio_manager.close_position(
+                asset=asset_name,
+                exit_price=current_price,
+                reason=reason
+            )
+            
+            logger.info(f"[OK] {asset_name} position closed")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error closing position: {e}", exc_info=True)
+            return False
+
+    def _open_position(self, signal: int, current_price: float, asset_name: str) -> bool:
+        """Open new position"""
+        try:
+            # Calculate position size
+            position_size_usd = self.portfolio_manager.calculate_position_size(
+                asset_name,
+                current_price
+            )
+            
+            if position_size_usd == 0:
+                logger.warning(f"{asset_name}: Position size is 0, skipping trade")
+                return False
+            
+            quantity = position_size_usd / current_price
+            side = "long" if signal == 1 else "short"
+            order_side = "BUY" if signal == 1 else "SELL"
+            
+            # Get risk parameters
+            risk = self.asset_config.get("risk", {})
+            stop_loss_pct = risk.get("stop_loss_pct", 0.05)
+            take_profit_pct = risk.get("take_profit_pct", 0.10)
+            trailing_stop_pct = risk.get("trailing_stop_pct", 0.03)
+            
+            # Calculate SL/TP prices
+            if signal == 1:  # Long
+                stop_loss = current_price * (1 - stop_loss_pct)
+                take_profit = current_price * (1 + take_profit_pct)
+            else:  # Short
+                stop_loss = current_price * (1 + stop_loss_pct)
+                take_profit = current_price * (1 - take_profit_pct)
+            
+            logger.info(
+                f"[OPEN] {order_side} {quantity:.5f} {self.symbol} @ ${current_price:,.2f}"
+            )
+            logger.info(f"   Size: ${position_size_usd:,.2f}")
+            logger.info(f"   SL: ${stop_loss:,.2f} ({stop_loss_pct:.1%})")
+            logger.info(f"   TP: ${take_profit:,.2f} ({take_profit_pct:.1%})")
+            
+            # FIXED: Record position with correct parameters (removed stop_loss_pct and take_profit_pct)
+            success = self.portfolio_manager.add_position(
+                asset=asset_name,
+                symbol=self.symbol,
+                side=side,
+                entry_price=current_price,
+                position_size_usd=position_size_usd,
+                stop_loss=stop_loss,  # Pass actual price
+                take_profit=take_profit,  # Pass actual price
+                trailing_stop_pct=trailing_stop_pct  # Only percentage parameter
+            )
+            
+            if success:
+                logger.info(f"[OK] {order_side} {asset_name} - Position opened")
+                return True
+            else:
+                logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")
+                return False
+        
+        except Exception as e:
+            logger.error(f"Error opening position: {e}", exc_info=True)
+            return False
+
+    def check_and_update_positions(self, asset_name: str = "BTC"):
+        """
+        NEW: Actively check and update all positions (for HOLD signals)
+        Should be called on every cycle
+        """
+        try:
+            position = self.portfolio_manager.get_position(asset_name)
+            
+            if not position:
+                return
+            
+            current_price = self.get_current_price()
+            
+            if current_price is None:
+                logger.warning(f"Could not get price for {asset_name}")
+                return
+            
+            # Check if SL/TP hit
+            should_close, reason = self._check_stop_loss_take_profit(position, current_price)
+            
+            if should_close:
+                logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
+                self._close_position(position, current_price, asset_name, reason)
+        
+        except Exception as e:
+            logger.error(f"Error checking positions: {e}", exc_info=True)
