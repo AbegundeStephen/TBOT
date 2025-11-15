@@ -1,6 +1,6 @@
 # src/execution/mt5_handler.py
 """
-FIXED: MT5 Execution Handler with proper SL/TP and position closing
+MT5 Execution Handler with proper SL/TP and position closing
 """
 
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class MT5ExecutionHandler:
     """
-    FIXED: Handles MT5 execution with proper position management
+     Handles MT5 execution with proper position management
     """
 
     def __init__(self, config: Dict, portfolio_manager):
@@ -44,23 +44,9 @@ class MT5ExecutionHandler:
         
         return tick.ask
 
-    def execute_signal(
-        self,
-        signal: int,
-        symbol: str = None,
-        asset: str = "GOLD"
-    ) -> bool:
-        """
-        FIXED: Execute trade with proper position closing logic
-        
-        Signal Logic:
-        - signal = 1 (BUY): Close any SHORT, open LONG
-        - signal = -1 (SELL): Close any LONG, open SHORT
-        - signal = 0 (HOLD): Check SL/TP on existing positions
-        """
+    def execute_signal(self, signal: int, symbol: str = None, asset: str = "GOLD") -> bool:
         if symbol is None:
             symbol = self.symbol
-
         try:
             # Get current price
             current_price = self.get_current_price(symbol)
@@ -70,47 +56,46 @@ class MT5ExecutionHandler:
 
             # STEP 1: Check and manage existing position
             existing_position = self.portfolio_manager.get_position(asset)
-            
+
             if existing_position:
                 position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
-                
-                # Determine if we should close
-                should_close = False
-                close_reason = None
-                
-                if signal == 1 and position_side == 'short':
-                    should_close = True
-                    close_reason = "opposite_signal_long"
-                elif signal == -1 and position_side == 'long':
-                    should_close = True
-                    close_reason = "opposite_signal_short"
-                elif signal == 0:
-                    # Check SL/TP on HOLD
-                    should_close, close_reason = self._check_stop_loss_take_profit(
-                        existing_position,
-                        current_price
-                    )
-                
-                if should_close:
-                    logger.info(f"[CLOSE] {asset}: Closing position - {close_reason}")
-                    success = self._close_mt5_position(existing_position, current_price, asset, close_reason)
-                    
+
+                # Close long position on SELL signal
+                if signal == -1 and position_side == 'long':
+                    logger.info(f"[CLOSE] {asset}: Closing long position on SELL signal")
+                    success = self._close_mt5_position(existing_position, current_price, asset, "sell_signal")
                     if not success:
                         logger.error(f"[FAIL] Failed to close {asset} position")
                         return False
 
-            # STEP 2: Open new position if signal is BUY or SELL
-            if signal != 0:
-                # Don't open if we already have position in same direction
-                if existing_position:
-                    position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
-                    if (signal == 1 and position_side == 'long') or (signal == -1 and position_side == 'short'):
-                        logger.info(f"[HOLD] {asset}: Already have position in signal direction")
+                # Close short position on BUY signal
+                elif signal == 1 and position_side == 'short':
+                    logger.info(f"[CLOSE] {asset}: Closing short position on BUY signal")
+                    success = self._close_mt5_position(existing_position, current_price, asset, "buy_signal")
+                    if not success:
+                        logger.error(f"[FAIL] Failed to close {asset} position")
                         return False
-                
+
+                # Check SL/TP on HOLD signal
+                elif signal == 0:
+                    should_close, close_reason = self._check_stop_loss_take_profit(existing_position, current_price)
+                    if should_close:
+                        logger.info(f"[CLOSE] {asset}: Closing position - {close_reason}")
+                        success = self._close_mt5_position(existing_position, current_price, asset, close_reason)
+                        if not success:
+                            logger.error(f"[FAIL] Failed to close {asset} position")
+                            return False
+
+            # Open new long position on BUY signal if no position exists
+            if signal == 1 and not existing_position:
                 return self._open_mt5_position(signal, current_price, symbol, asset)
-            
+
+            # Do nothing on SELL signal if no position exists
             return True
+
+        except Exception as e:
+            logger.error(f"Error executing {asset} signal: {e}", exc_info=True)
+            return False
 
         except Exception as e:
             logger.error(f"Error executing {asset} signal: {e}", exc_info=True)
@@ -287,7 +272,7 @@ class MT5ExecutionHandler:
                 logger.error(f"Order failed: {result.comment if result else 'No result'}")
                 return False
 
-            # FIXED: Add position to portfolio manager with correct parameters
+            #  Add position to portfolio manager with correct parameters
             success = self.portfolio_manager.add_position(
                 asset=asset,
                 symbol=symbol,

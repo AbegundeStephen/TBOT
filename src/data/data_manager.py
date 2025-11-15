@@ -225,13 +225,13 @@ class DataManager:
         """
         Fetch historical OHLCV data from Binance with robust date handling and retry logic.
         
-        FIXED: Properly handles datetime strings with time components
+         Properly handles datetime strings with time components
         """
         if self.binance_client is None:
             raise RuntimeError("Binance client not initialized")
 
         try:
-            # FIXED: Parse datetime strings that may include time
+            #  Parse datetime strings that may include time
             # This handles both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" formats
             start_dt = pd.to_datetime(start_date)
             
@@ -241,7 +241,7 @@ class DataManager:
             else:
                 start_dt = start_dt.tz_convert('UTC')
             
-            # FIXED: Handle end_date properly
+            #  Handle end_date properly
             if end_date:
                 end_dt = pd.to_datetime(end_date)
                 if end_dt.tz is None:
@@ -377,7 +377,7 @@ class DataManager:
         """
         Fetch historical OHLCV data from MT5
         
-        FIXED: Properly handles datetime strings with time components
+         Properly handles datetime strings with time components
         """
         if not self.mt5_initialized:
             raise RuntimeError("MT5 not initialized")
@@ -397,7 +397,7 @@ class DataManager:
             
             tf = timeframe_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
             
-            # FIXED: Handle datetime strings with time components
+            #  Handle datetime strings with time components
             start_dt = pd.to_datetime(start_date)
             if end_date:
                 end_dt = pd.to_datetime(end_date)
