@@ -319,7 +319,7 @@ def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict)
 def calculate_data_correlation(btc_df: pd.DataFrame, gold_df: pd.DataFrame) -> dict:
     """
     Calculate correlation between BTC and Gold
-    FIXED: Handles timezone-aware and timezone-naive dataframes
+     Handles timezone-aware and timezone-naive dataframes
     """
     try:
         # FIX: Normalize timezones before merging

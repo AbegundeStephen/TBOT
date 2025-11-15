@@ -34,10 +34,10 @@ class MeanReversionStrategy(BaseStrategy):
         self.bb_lower_threshold = config.get('bb_lower_threshold', 0.30)
         self.bb_upper_threshold = config.get('bb_upper_threshold', 0.70)
         
-        # FIXED: More realistic thresholds
+        #  More realistic thresholds
         self.min_return_threshold = config.get('min_return_threshold', 0.0015)  # 0.15%
         
-        # FIXED: Use raw value, not multiplier
+        #  Use raw value, not multiplier
         self.min_score_threshold = config.get('min_conditions', 2)  # Direct score threshold
         
         logger.info(f"[{self.name}] Initialized with:")

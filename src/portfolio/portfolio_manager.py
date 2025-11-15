@@ -1,5 +1,5 @@
 """
-Portfolio Manager - FIXED with proper parameter handling
+Portfolio Manager - with proper parameter handling
 """
 
 import logging
@@ -24,7 +24,7 @@ class Position:
         entry_time: datetime,
         stop_loss: float = None,
         take_profit: float = None,
-        trailing_stop_pct: float = None  # FIXED: Changed from trailing_stop
+        trailing_stop_pct: float = None  # Changed from trailing_stop
     ):
         self.asset = asset
         self.symbol = symbol
@@ -34,7 +34,7 @@ class Position:
         self.entry_time = entry_time
         self.stop_loss = stop_loss
         self.take_profit = take_profit
-        self.trailing_stop_pct = trailing_stop_pct  # FIXED: Now stores percentage
+        self.trailing_stop_pct = trailing_stop_pct  # Now stores percentage
         self.highest_price = entry_price if side == 'long' else entry_price
         self.lowest_price = entry_price if side == 'short' else entry_price
         
@@ -278,10 +278,10 @@ class PortfolioManager:
         symbol: str,
         side: str,
         entry_price: float,
-        position_size_usd: float,  # FIXED: Added this parameter
+        position_size_usd: float,  # Added this parameter
         stop_loss: float = None,
         take_profit: float = None,
-        trailing_stop_pct: float = None  # FIXED: Changed name
+        trailing_stop_pct: float = None  # Changed name
     ) -> bool:
         """
         Add a new position to the portfolio
@@ -317,7 +317,7 @@ class PortfolioManager:
             entry_time=datetime.now(),
             stop_loss=stop_loss,
             take_profit=take_profit,
-            trailing_stop_pct=trailing_stop_pct  # FIXED: Changed parameter name
+            trailing_stop_pct=trailing_stop_pct  # Changed parameter name
         )
         
         self.positions[asset] = position
@@ -444,7 +444,7 @@ class PortfolioManager:
             for pos in self.positions.values()
         )
         
-        # FIXED: Calculate total value properly
+        # Calculate total value properly
         total_value = self.current_capital + sum(
             pos.get_pnl(pos.entry_price) for pos in self.positions.values()
         )
@@ -456,8 +456,8 @@ class PortfolioManager:
         daily_pnl = self.equity - self.initial_capital
         
         return {
-            "total_value": total_value,  # FIXED: Added this
-            "cash": self.current_capital,  # FIXED: Added this
+            "total_value": total_value,  # Added this
+            "cash": self.current_capital,  # Added this
             "capital": self.current_capital,
             "equity": self.equity,
             "peak_equity": self.peak_equity,
@@ -466,7 +466,7 @@ class PortfolioManager:
             "drawdown": drawdown,
             "open_positions": self.get_open_positions_count(),
             "total_trades": len(self.closed_positions),
-            "daily_pnl": daily_pnl,  # FIXED: Added this
+            "daily_pnl": daily_pnl,  # Added this
             "positions": {
                 asset: {
                     "side": pos.side,

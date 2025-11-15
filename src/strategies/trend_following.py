@@ -34,10 +34,10 @@ class TrendFollowingStrategy(BaseStrategy):
         self.adx_threshold = config.get('adx_threshold', 15)
         self.require_adx = config.get('require_adx', False)
         
-        # FIXED: More realistic thresholds
+        #  More realistic thresholds
         self.min_return_threshold = config.get('min_return_threshold', 0.002)  # 0.2%
         
-        # FIXED: Direct score threshold (not multiplier)
+        #  Direct score threshold (not multiplier)
         self.min_score_threshold = config.get('min_conditions', 2)
         
         logger.info(f"[{self.name}] Initialized with:")

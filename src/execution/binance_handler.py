@@ -1,6 +1,6 @@
 # src/execution/binance_handler.py
 """
-FIXED: Binance Execution Handler with proper parameter passing
+Binance Execution Handler with proper parameter passing
 """
 
 import logging
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class BinanceExecutionHandler:
     """
-    FIXED: Handles trade execution with proper position management
+     Handles trade execution with proper position management
     """
 
     def __init__(self, config: Dict, client: Client, portfolio_manager):
@@ -43,65 +43,46 @@ class BinanceExecutionHandler:
             logger.error(f"Error fetching price for {symbol}: {e}")
             return None
 
-    def execute_signal(
-        self, 
-        signal: int, 
-        current_price: float,
-        asset_name: str = "BTC"
-    ) -> bool:
-        """
-        FIXED: Execute trade based on signal with proper position closing
-        
-        Signal Logic:
-        - signal = 1 (BUY): Close any SHORT, open LONG
-        - signal = -1 (SELL): Close any LONG, open SHORT  
-        - signal = 0 (HOLD): Check SL/TP on existing positions
-        """
+    def execute_signal(self, signal: int, current_price: float, asset_name: str = "BTC") -> bool:
         try:
-            # STEP 1: Check and manage existing position
             existing_position = self.portfolio_manager.get_position(asset_name)
-            
+
             if existing_position:
-                position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
-                
-                # Check if we should close the position
-                should_close = False
-                close_reason = None
-                
-                if signal == 1 and position_side == 'short':
-                    should_close = True
-                    close_reason = "opposite_signal_long"
-                elif signal == -1 and position_side == 'long':
-                    should_close = True
-                    close_reason = "opposite_signal_short"
-                elif signal == 0:
-                    # Check SL/TP even on HOLD
-                    should_close, close_reason = self._check_stop_loss_take_profit(
-                        existing_position, 
-                        current_price
-                    )
-                
-                if should_close:
-                    logger.info(f"[CLOSE] {asset_name}: Closing position - {close_reason}")
-                    success = self._close_position(existing_position, current_price, asset_name, close_reason)
-                    
+                position_side = existing_position.side
+
+                # Close long position on SELL signal
+                if signal == -1 and position_side == 'long':
+                    logger.info(f"[CLOSE] {asset_name}: Closing long position on SELL signal")
+                    success = self._close_position(existing_position, current_price, asset_name, "sell_signal")
                     if not success:
                         logger.error(f"[FAIL] Failed to close {asset_name} position")
                         return False
-            
-            # STEP 2: Open new position if signal is BUY or SELL
-            if signal != 0:
-                # Don't open if we already have a position in the same direction
-                if existing_position:
-                    position_side = existing_position.side if hasattr(existing_position, 'side') else existing_position.get('side')
-                    if (signal == 1 and position_side == 'long') or (signal == -1 and position_side == 'short'):
-                        logger.info(f"[HOLD] {asset_name}: Already have position in signal direction")
+
+                # Close short position on BUY signal
+                elif signal == 1 and position_side == 'short':
+                    logger.info(f"[CLOSE] {asset_name}: Closing short position on BUY signal")
+                    success = self._close_position(existing_position, current_price, asset_name, "buy_signal")
+                    if not success:
+                        logger.error(f"[FAIL] Failed to close {asset_name} position")
                         return False
-                
+
+                # Check SL/TP on HOLD signal
+                elif signal == 0:
+                    should_close, close_reason = self._check_stop_loss_take_profit(existing_position, current_price)
+                    if should_close:
+                        logger.info(f"[CLOSE] {asset_name}: Closing position - {close_reason}")
+                        success = self._close_position(existing_position, current_price, asset_name, close_reason)
+                        if not success:
+                            logger.error(f"[FAIL] Failed to close {asset_name} position")
+                            return False
+
+            # Open new long position on BUY signal if no position exists
+            if signal == 1 and not existing_position:
                 return self._open_position(signal, current_price, asset_name)
-            
+
+            # Do nothing on SELL signal if no position exists
             return True
-        
+
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
             return False
@@ -149,7 +130,7 @@ class BinanceExecutionHandler:
             # Get position details - FIXED attribute access
             if hasattr(position, 'entry_price'):
                 entry_price = position.entry_price
-                # FIXED: Use correct attribute name
+                #  Use correct attribute name
                 position_size_usd = position.quantity * entry_price
                 side = position.side
             else:
@@ -223,7 +204,7 @@ class BinanceExecutionHandler:
             logger.info(f"   SL: ${stop_loss:,.2f} ({stop_loss_pct:.1%})")
             logger.info(f"   TP: ${take_profit:,.2f} ({take_profit_pct:.1%})")
             
-            # FIXED: Record position with correct parameters (removed stop_loss_pct and take_profit_pct)
+            #  Record position with correct parameters (removed stop_loss_pct and take_profit_pct)
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
