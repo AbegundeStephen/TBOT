@@ -302,7 +302,7 @@ custom_config = {
     "require_agreement": False,
 }
 
-aggregator = EnhancedSignalAggregator(
+aggregator = SignalAggregator(
     mean_reversion_strategy=mr_strategy,
     trend_following_strategy=tf_strategy,
     mode="adaptive_tiered",

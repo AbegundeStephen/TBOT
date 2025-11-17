@@ -104,6 +104,7 @@ class TradingBot:
         self.telegram_bot = None
         self.telegram_loop = None
         self.telegram_thread = None
+        self.telegram_ready = asyncio.Event()
         self._initialize_telegram()
 
     def _initialize_telegram(self):
@@ -522,82 +523,76 @@ class TradingBot:
                 was_new_position = True
             
             # Telegram notification for new position
-            if was_new_position and success and self.telegram_bot and self.telegram_loop:
-                try:
-                    pos = new_position
-                    asyncio.run_coroutine_threadsafe(
-                        self.telegram_bot.notify_trade_opened(
-                            asset=asset_name,
-                            side=pos.side if hasattr(pos, 'side') else pos.get('side'),
-                            price=current_price,
-                            size=pos.quantity * current_price if hasattr(pos, 'quantity') else pos.get('current_value', 0),
-                            sl=pos.stop_loss if hasattr(pos, 'stop_loss') else pos.get('stop_loss', 0),
-                            tp=pos.take_profit if hasattr(pos, 'take_profit') else pos.get('take_profit', 0)
-                        ),
-                        self.telegram_loop
-                    )
-                except Exception as e:
+            if was_new_position and success:
+                        pos = new_position
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_trade_opened(
+                                asset=asset_name,
+                                side=pos.side if hasattr(pos, 'side') else pos.get('side'),
+                                price=current_price,
+                                size=pos.quantity * current_price if hasattr(pos, 'quantity') else pos.get('current_value', 0),
+                                sl=pos.stop_loss if hasattr(pos, 'stop_loss') else pos.get('stop_loss', 0),
+                                tp=pos.take_profit if hasattr(pos, 'take_profit') else pos.get('take_profit', 0)
+                            )
+                        )
+        except Exception as e:
                     logger.error(f"Failed to send Telegram notification: {e}")
             
             # Check if position was closed
-            if existing_position and not new_position:
-                # Position was closed - send notification
-                if self.telegram_bot and self.telegram_loop:
-                    try:
-                        # Get the last closed position for this asset
-                        closed = self.portfolio_manager.closed_positions
-                        if closed:
-                            last_trade = closed[-1]
-                            if last_trade['asset'] == asset_name:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.telegram_bot.notify_trade_closed(
-                                        asset=asset_name,
-                                        side=last_trade['side'],
-                                        pnl=last_trade['pnl'],
-                                        pnl_pct=last_trade['pnl_pct'] * 100,
-                                        reason=last_trade['reason']
-                                    ),
-                                    self.telegram_loop
-                                )
-                    except Exception as e:
+                    if existing_position and not new_position:
+                            closed = self.portfolio_manager.closed_positions
+                            if closed:
+                                last_trade = closed[-1]
+                                if last_trade['asset'] == asset_name:
+                                    self._send_telegram_notification(
+                                        self.telegram_bot.notify_trade_closed(
+                                            asset=asset_name,
+                                            side=last_trade['side'],
+                                            pnl=last_trade['pnl'],
+                                            pnl_pct=last_trade['pnl_pct'] * 100,
+                                            reason=last_trade['reason']
+                                        )
+                                    )
+                    
+        except Exception as e:
                         logger.error(f"Failed to send close notification: {e}")
             
-            # Count trade if opened
-            if signal != 0 and success:
-                if not self.check_trading_limits():
-                    logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
-                    return
+                # Count trade if opened
+                        if signal != 0 and success:
+                            if not self.check_trading_limits():
+                                logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
+                                return
+                        
+                        if not self.check_min_time_between_trades(asset_name):
+                            logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
+                            return
+                        
+                        self.trade_count_today += 1
+                        self.last_trade_times[asset_name] = datetime.now()
+                        
+                        signal_type = "BUY" if signal == 1 else "SELL"
+                        logger.info(
+                            f"[SUCCESS] {asset_name} {signal_type} executed "
+                            f"(Daily count: {self.trade_count_today})"
+                        )
+                        
+                        if self.config.get("logging", {}).get("save_trades", True):
+                            self._log_trade(asset_name, signal, details, current_price)
                 
-                if not self.check_min_time_between_trades(asset_name):
-                    logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
-                    return
-                
-                self.trade_count_today += 1
-                self.last_trade_times[asset_name] = datetime.now()
-                
-                signal_type = "BUY" if signal == 1 else "SELL"
-                logger.info(
-                    f"[SUCCESS] {asset_name} {signal_type} executed "
-                    f"(Daily count: {self.trade_count_today})"
-                )
-                
-                if self.config.get("logging", {}).get("save_trades", True):
-                    self._log_trade(asset_name, signal, details, current_price)
-        
         except Exception as e:
-            logger.error(f"[ERROR] Error in {asset_name} trading: {e}", exc_info=True)
-            
-            # Telegram error notification
-            if self.telegram_bot and self.telegram_loop:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        self.telegram_bot.notify_error(
-                            f"Error in {asset_name} trading:\n{str(e)[:200]}"
-                        ),
-                        self.telegram_loop
-                    )
-                except:
-                    pass
+                    logger.error(f"[ERROR] Error in {asset_name} trading: {e}", exc_info=True)
+                
+                # Telegram error notification
+                    if self.telegram_bot and self.telegram_loop:
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                self.telegram_bot.notify_error(
+                                    f"Error in {asset_name} trading:\n{str(e)[:200]}"
+                                ),
+                                self.telegram_loop
+                            )
+                        except:
+                            pass
         
     def _log_trade(self, asset_name: str, signal: int, details: dict, price: float):
         """Log trade details to separate file"""
@@ -654,29 +649,57 @@ class TradingBot:
         logger.info("=" * 70)
 
     async def _start_telegram_bot(self):
-        """Start Telegram bot in async context"""
+        """Start Telegram bot with proper error handling"""
         try:
+            logger.info("[TELEGRAM] Initializing bot...")
             await self.telegram_bot.initialize()
+            
+            # Signal that bot is ready
+            logger.info("[TELEGRAM] Bot ready, signaling main thread")
             
             # Keep the bot running
             while self.is_running:
                 await asyncio.sleep(1)
                 
         except Exception as e:
-            logger.error(f"Telegram bot error: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] Fatal error: {e}", exc_info=True)
         finally:
             if self.telegram_bot:
                 await self.telegram_bot.shutdown()
 
     def _run_telegram_loop(self):
-        """Run Telegram bot in separate thread"""
+        """Run Telegram bot event loop"""
         self.telegram_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.telegram_loop)
         
         try:
             self.telegram_loop.run_until_complete(self._start_telegram_bot())
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
         finally:
             self.telegram_loop.close()
+    def _send_telegram_notification(self, coro):
+        """
+        Helper to safely send Telegram notifications from main thread
+        
+        Args:
+            coro: Coroutine to run (e.g., self.telegram_bot.notify_trade_opened(...))
+        """
+        if not self.telegram_bot or not self.telegram_loop:
+            return
+        
+        if not self.telegram_bot._is_ready:
+            logger.warning("[TELEGRAM] Bot not ready for notifications yet")
+            return
+        
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
+            # Wait briefly for completion (non-blocking)
+            future.result(timeout=5)
+        except TimeoutError:
+            logger.warning("[TELEGRAM] Notification timed out")
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Notification error: {e}")
 
     def start(self):
         """Start the trading bot"""
@@ -706,9 +729,21 @@ class TradingBot:
             logger.info("\n[TELEGRAM] Starting Telegram bot...")
             self.telegram_thread = Thread(target=self._run_telegram_loop, daemon=True)
             self.telegram_thread.start()
-            time.sleep(2)  # Give Telegram bot time to start
-            logger.info("[TELEGRAM] Telegram bot started")
+            
+            # CRITICAL: Wait for bot to be fully ready
+            logger.info("[TELEGRAM] Waiting for bot to be ready...")
+            timeout = 30
+            start_wait = time.time()
+            
+            while not self.telegram_bot._is_ready and (time.time() - start_wait) < timeout:
+                time.sleep(0.5)
+            
+            if self.telegram_bot._is_ready:
+                logger.info("[TELEGRAM] ✅ Bot is ready for notifications")
+            else:
+                logger.error("[TELEGRAM] ❌ Bot failed to become ready within timeout")
         
+        # Now start trading
         check_interval = self.config["trading"].get("check_interval_seconds", 300)
         schedule.every(check_interval).seconds.do(self.run_trading_cycle)
         
