@@ -35,4 +35,4 @@ backtest_results/
 .DS_Store
 Thumbs.db
 EOF
-training_metadata.json
+models/training_metadata.json
