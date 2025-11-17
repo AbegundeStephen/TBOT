@@ -1,3 +1,6 @@
+# The `BaseStrategy` class provides a framework for trading strategies with machine learning
+# integration, allowing for the generation of features, training of models, and generation of trade
+# signals with raw confidence scores.
 """
 Fixed Base Strategy - Returns raw confidence scores without filtering
 Lets the aggregator make the final decision

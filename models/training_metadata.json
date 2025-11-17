@@ -1,5 +1,5 @@
 {
-  "training_date": "2025-11-15T20:58:00.095752",
+  "training_date": "2025-11-15T23:58:32.758447",
   "data_sources": {
     "BTC": "Binance",
     "GOLD": "MT5"
@@ -17,9 +17,9 @@
       },
       "trend_following": {
         "success": true,
-        "cv_mean_accuracy": 0.6858275520317145,
-        "cv_std_accuracy": 0.02538404058447116,
-        "train_samples": 6055,
+        "cv_mean_accuracy": 0.4366026289180991,
+        "cv_std_accuracy": 0.043416609239270196,
+        "train_samples": 5934,
         "n_features": 30
       }
     },
@@ -35,9 +35,9 @@
       },
       "trend_following": {
         "success": true,
-        "cv_mean_accuracy": 0.7110062893081761,
-        "cv_std_accuracy": 0.030136222769084134,
-        "train_samples": 3820,
+        "cv_mean_accuracy": 0.3676282051282051,
+        "cv_std_accuracy": 0.09582529337683282,
+        "train_samples": 3747,
         "n_features": 30
       }
     }
