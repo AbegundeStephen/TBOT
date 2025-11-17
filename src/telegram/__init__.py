@@ -80,153 +80,200 @@ class TradingTelegramBot:
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
 
     async def initialize(self):
-            """Initialize with proper error handling and verification"""
-            try:
-                async with self._init_lock:
-                    logger.info("[TELEGRAM] Building application...")
-                    self.application = (
-                        Application.builder()
-                        .token(self.token)
-                        .connect_timeout(30)
-                        .read_timeout(30)
-                        .write_timeout(30)
-                        .pool_timeout(30)
-                        .get_updates_read_timeout(30)
-                        .build()
+        """Initialize with proper error handling and verification"""
+        try:
+            async with self._init_lock:
+                logger.info("[TELEGRAM] Building application...")
+                self.application = (
+                    Application.builder()
+                    .token(self.token)
+                    .connect_timeout(30)
+                    .read_timeout(30)
+                    .write_timeout(30)
+                    .pool_timeout(30)
+                    .get_updates_read_timeout(30)
+                    .build()
+                )
+
+                # Register handlers
+                logger.info("[TELEGRAM] Registering command handlers...")
+                self._register_handlers()
+
+                logger.info("[TELEGRAM] Initializing application...")
+                await self.application.initialize()
+
+                logger.info("[TELEGRAM] Starting application...")
+                await self.application.start()
+
+                logger.info("[TELEGRAM] Starting update polling...")
+                await self.application.updater.start_polling(
+                    poll_interval=1.0,
+                    timeout=30,
+                    drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES,
+                    bootstrap_retries=5,
+                )
+
+                # CRITICAL: Wait for polling to actually start
+                await asyncio.sleep(2)
+
+                # Verify bot is responsive
+                if await self._verify_bot_ready():
+                    self._is_ready = True
+                    self.is_running = True
+                    logger.info("[TELEGRAM] ✅ Bot fully operational")
+
+                    # Send startup notification
+                    await self.send_notification(
+                        "🤖 *Trading Bot Started*\n\n"
+                        f"Bot initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        "Type /help for available commands"
                     )
 
-                    # Register handlers
-                    logger.info("[TELEGRAM] Registering command handlers...")
-                    self._register_handlers()
+                    # Process queued messages
+                    await self._process_message_queue()
+                else:
+                    logger.error("[TELEGRAM] ❌ Bot verification failed")
+                    raise Exception("Bot failed to become ready")
 
-                    logger.info("[TELEGRAM] Initializing application...")
-                    await self.application.initialize()
-
-                    logger.info("[TELEGRAM] Starting application...")
-                    await self.application.start()
-
-                    logger.info("[TELEGRAM] Starting update polling...")
-                    await self.application.updater.start_polling(
-                        poll_interval=1.0,
-                        timeout=30,
-                        drop_pending_updates=True,
-                        allowed_updates=Update.ALL_TYPES,
-                        bootstrap_retries=5,
-                    )
-
-                    # CRITICAL: Wait for polling to actually start
-                    await asyncio.sleep(2)
-
-                    # Verify bot is responsive
-                    if await self._verify_bot_ready():
-                        self._is_ready = True
-                        self.is_running = True
-                        logger.info("[TELEGRAM] ✅ Bot fully operational")
-
-                        # Send startup notification
-                        await self.send_notification(
-                            "🤖 *Trading Bot Started*\n\n"
-                            f"Bot initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            "Type /help for available commands"
-                        )
-
-                        # Process queued messages
-                        await self._process_message_queue()
-                    else:
-                        logger.error("[TELEGRAM] ❌ Bot verification failed")
-                        raise Exception("Bot failed to become ready")
-
-            except Exception as e:
-                logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
-                self._is_ready = False
-                raise
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
+            self._is_ready = False
+            raise
 
     async def _verify_bot_ready(self) -> bool:
-            """Verify bot can send messages"""
-            try:
-                # Try to get bot info
-                bot_info = await self.application.bot.get_me()
-                logger.info(f"[TELEGRAM] Bot verified: @{bot_info.username}")
-                return True
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Verification failed: {e}")
-                return False
+        """Verify bot can send messages"""
+        try:
+            # Try to get bot info
+            bot_info = await self.application.bot.get_me()
+            logger.info(f"[TELEGRAM] Bot verified: @{bot_info.username}")
+            return True
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Verification failed: {e}")
+            return False
 
     async def _process_message_queue(self):
-            """Send any queued messages from before initialization"""
-            if not self._message_queue:
-                return
+        """Send any queued messages from before initialization"""
+        if not self._message_queue:
+            return
 
-            logger.info(
-                f"[TELEGRAM] Processing {len(self._message_queue)} queued messages"
-            )
-            for msg in self._message_queue:
-                await self.send_notification(msg, disable_preview=True)
-            self._message_queue.clear()
+        logger.info(f"[TELEGRAM] Processing {len(self._message_queue)} queued messages")
+        for msg in self._message_queue:
+            await self.send_notification(msg, disable_preview=True)
+        self._message_queue.clear()
 
     def _register_handlers(self):
-            """Register all command handlers"""
-            self.application.add_handler(CommandHandler("start", self.cmd_start))
-            self.application.add_handler(CommandHandler("help", self.cmd_help))
-            self.application.add_handler(CommandHandler("status", self.cmd_status))
-            self.application.add_handler(
-                CommandHandler("positions", self.cmd_positions)
-            )
-            self.application.add_handler(CommandHandler("history", self.cmd_history))
-            self.application.add_handler(
-                CommandHandler("performance", self.cmd_performance)
-            )
-            self.application.add_handler(
-                CommandHandler("start_trading", self.cmd_start_trading)
-            )
-            self.application.add_handler(
-                CommandHandler("stop_trading", self.cmd_stop_trading)
-            )
-            self.application.add_handler(
-                CommandHandler("close_all", self.cmd_close_all)
-            )
-            self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
-            self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        """Register all command handlers"""
+        self.application.add_handler(CommandHandler("start", self.cmd_start))
+        self.application.add_handler(CommandHandler("help", self.cmd_help))
+        self.application.add_handler(CommandHandler("status", self.cmd_status))
+        self.application.add_handler(CommandHandler("positions", self.cmd_positions))
+        self.application.add_handler(CommandHandler("history", self.cmd_history))
+        self.application.add_handler(
+            CommandHandler("performance", self.cmd_performance)
+        )
+        self.application.add_handler(
+            CommandHandler("start_trading", self.cmd_start_trading)
+        )
+        self.application.add_handler(
+            CommandHandler("stop_trading", self.cmd_stop_trading)
+        )
+        self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
+        self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
     async def run_polling(self):
         """Keep the bot running with polling - FIXED VERSION"""
         try:
             logger.info("[TELEGRAM] Starting polling loop...")
-
-            # The bot will keep running as long as this doesn't exit
             while self.is_running:
-                await asyncio.sleep(1)
-
+                await asyncio.shield(asyncio.sleep(1))
         except asyncio.CancelledError:
             logger.info("[TELEGRAM] Polling cancelled")
         except Exception as e:
             logger.error(f"[TELEGRAM] Error in polling loop: {e}", exc_info=True)
 
     async def shutdown(self):
-        """Shutdown the bot gracefully"""
+        """Gracefully shutdown the Telegram bot with proper task cleanup"""
+        if not self.is_running:
+            logger.info("[TELEGRAM] Bot already stopped, skipping shutdown")
+            return
+        
+        logger.info("[TELEGRAM] Starting graceful shutdown...")
+        self.is_running = False
+        
         try:
-            self.is_running = False
-
-            await self.send_notification(
-                "🛑 *Trading Bot Stopped*\n\n"
-                f"Bot shutdown at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
+            # Try to send shutdown notification (but don't wait too long)
+            try:
+                await asyncio.wait_for(
+                    self.send_notification(
+                        "🛑 *Trading Bot Stopped*\n\n"
+                        f"Bot shutdown at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    ),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[TELEGRAM] Shutdown notification timed out")
+            except Exception as e:
+                logger.warning(f"[TELEGRAM] Could not send shutdown notification: {e}")
+            
             if self.application:
-                logger.info("[TELEGRAM] Stopping updater...")
-                if self.application.updater and self.application.updater.running:
-                    await self.application.updater.stop()
-
+                # Stop the updater (this stops polling)
+                if hasattr(self.application, "updater") and self.application.updater:
+                    logger.info("[TELEGRAM] Stopping updater...")
+                    try:
+                        if self.application.updater.running:
+                            await asyncio.wait_for(
+                                self.application.updater.stop(),
+                                timeout=4.0
+                            )
+                            logger.info("[TELEGRAM] Updater stopped")
+                        else:
+                            logger.info("[TELEGRAM] Updater already stopped")
+                    except asyncio.TimeoutError:
+                        logger.warning("[TELEGRAM] Updater stop timed out")
+                    except Exception as e:
+                        logger.warning(f"[TELEGRAM] Updater stop error: {e}")
+                
+                # Stop the application
                 logger.info("[TELEGRAM] Stopping application...")
-                await self.application.stop()
-
+                try:
+                    if self.application.running:
+                        await asyncio.wait_for(
+                            self.application.stop(),
+                            timeout=3.0
+                        )
+                        logger.info("[TELEGRAM] Application stopped")
+                    else:
+                        logger.info("[TELEGRAM] Application already stopped")
+                except asyncio.TimeoutError:
+                    logger.warning("[TELEGRAM] Application stop timed out")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Application stop error: {e}")
+                
+                # Shutdown the application (cleanup resources)
                 logger.info("[TELEGRAM] Shutting down application...")
-                await self.application.shutdown()
-
-            logger.info("[TELEGRAM] Shutdown complete")
+                try:
+                    await asyncio.wait_for(
+                        self.application.shutdown(),
+                        timeout=3.0
+                    )
+                    logger.info("[TELEGRAM] Application shutdown complete")
+                except asyncio.TimeoutError:
+                    logger.warning("[TELEGRAM] Application shutdown timed out")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Application shutdown error: {e}")
+            
+            # Brief pause to let everything settle
+            await asyncio.sleep(0.5)
+            
+            logger.info("[TELEGRAM] Shutdown sequence complete")
+            
         except Exception as e:
-            logger.error(f"Error during Telegram bot shutdown: {e}")
-
+            logger.error(f"[TELEGRAM] Error during shutdown: {e}", exc_info=True)
+        finally:
+            self._is_ready = False
+            logger.info("[TELEGRAM] Bot marked as not ready")
     # ==================== COMMAND HANDLERS ====================
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
