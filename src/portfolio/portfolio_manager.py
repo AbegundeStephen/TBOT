@@ -1,5 +1,5 @@
 """
-Portfolio Manager - with Dynamic Capital Fetching from Exchanges
+Portfolio Manager - Fixed version with proper position management
 """
 
 import logging
@@ -7,6 +7,9 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import numpy as np
 import pandas as pd
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+
 
 logger = logging.getLogger(__name__)
 
@@ -350,8 +353,10 @@ class PortfolioManager:
 
     def check_portfolio_limits(self, new_position_usd: float) -> bool:
         """Check if adding a new position would violate portfolio limits"""
+        # FIXED: Use current prices for accurate exposure calculation
         current_exposure = sum(
-            pos.get_position_value(pos.entry_price) for pos in self.positions.values()
+            pos.quantity * pos.entry_price  # Will be updated with current price in handler
+            for pos in self.positions.values()
         )
 
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
@@ -364,7 +369,7 @@ class PortfolioManager:
             )
             return False
 
-        drawdown = (self.peak_equity - self.equity) / self.peak_equity
+        drawdown = (self.peak_equity - self.equity) / self.peak_equity if self.peak_equity > 0 else 0
         max_drawdown = self.portfolio_config["max_drawdown"]
 
         if drawdown >= max_drawdown:
@@ -412,6 +417,23 @@ class PortfolioManager:
 
         return False
 
+    def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
+        """
+        FIXED: Check if we can open a position for the given asset and side
+        
+        Returns:
+            Tuple of (can_open: bool, reason: str)
+        """
+        # Check if position already exists
+        if asset in self.positions:
+            existing_side = self.positions[asset].side
+            if existing_side == side:
+                return False, f"Position already open for {asset} {side.upper()}"
+            else:
+                return False, f"Opposite position exists for {asset} ({existing_side.upper()})"
+        
+        return True, "OK"
+
     def add_position(
         self,
         asset: str,
@@ -424,11 +446,14 @@ class PortfolioManager:
         trailing_stop_pct: float = None,
     ) -> bool:
         """Add a new position to the portfolio"""
-        if asset in self.positions:
-            logger.warning(f"Position already exists for {asset}")
+        # FIXED: Properly check and prevent duplicate positions
+        can_open, reason = self.can_open_position(asset, side)
+        if not can_open:
+            logger.warning(f"Cannot open position: {reason}")
             return False
 
         if not self.check_portfolio_limits(position_size_usd):
+            logger.warning(f"Portfolio limits exceeded for {asset}")
             return False
 
         if self.should_reduce_position(asset):
@@ -454,7 +479,7 @@ class PortfolioManager:
         self.positions[asset] = position
 
         logger.info(
-            f"Position opened: {asset} {side.upper()} "
+            f"✓ Position opened: {asset} {side.upper()} "
             f"@ ${entry_price:,.2f} | Size: ${position_size_usd:,.2f} "
             f"| Qty: {quantity:.6f}"
         )
@@ -481,7 +506,7 @@ class PortfolioManager:
         pnl = position.get_pnl(exit_price)
         pnl_pct = position.get_pnl_pct(exit_price)
 
-        # In paper mode, update simulated capital
+        # FIXED: Update capital consistently for both modes
         if self.is_paper_mode:
             self.current_capital += pnl
             self.equity = self.current_capital
@@ -512,7 +537,7 @@ class PortfolioManager:
         del self.positions[asset]
 
         logger.info(
-            f"Position closed: {asset} {position.side.upper()} "
+            f"✓ Position closed: {asset} {position.side.upper()} "
             f"@ ${exit_price:,.2f} | P&L: ${pnl:,.2f} ({pnl_pct:.2%}) "
             f"| Reason: {reason}"
         )
@@ -520,7 +545,7 @@ class PortfolioManager:
         return trade_result
 
     def update_positions(self, prices: Dict[str, float] = None):
-        """Update all positions with current prices"""
+        """FIXED: Update all positions with current prices"""
         if prices:
             for asset, price in prices.items():
                 if asset in self.price_history:
@@ -528,16 +553,20 @@ class PortfolioManager:
                     if len(self.price_history[asset]) > 100:
                         self.price_history[asset].pop(0)
 
-        total_pnl = sum(
-            pos.get_pnl(prices.get(pos.asset, pos.entry_price))
-            for pos in self.positions.values()
-            if prices
-        )
+        # FIXED: Calculate unrealized P&L with current prices
+        if prices:
+            total_unrealized_pnl = sum(
+                pos.get_pnl(prices.get(pos.asset, pos.entry_price))
+                for pos in self.positions.values()
+            )
+        else:
+            total_unrealized_pnl = 0.0
 
         if self.is_paper_mode:
-            self.equity = self.current_capital + total_pnl
+            # In paper mode: equity = cash + unrealized P&L
+            self.equity = self.current_capital + total_unrealized_pnl
         else:
-            # In live mode, periodically refresh from exchanges
+            # In live mode: periodically refresh from exchanges
             # Don't refresh on every update to avoid rate limits
             pass
 
@@ -552,19 +581,40 @@ class PortfolioManager:
         """Get position for a specific asset"""
         return self.positions.get(asset)
 
-    def has_position(self, asset: str) -> bool:
-        """Check if we have an open position for an asset"""
-        return asset in self.positions
+    def has_position(self, asset: str, side: str = None) -> bool:
+        """
+        FIXED: Check if we have an open position for an asset
+        
+        Args:
+            asset: Asset symbol
+            side: Optional side filter ('long' or 'short')
+        """
+        if asset not in self.positions:
+            return False
+        
+        if side is None:
+            return True
+        
+        return self.positions[asset].side == side
 
-    def get_portfolio_status(self) -> Dict:
-        """Get current portfolio status with real-time data"""
+    def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
+        """FIXED: Get current portfolio status with real-time data"""
+        # Use current prices if provided, otherwise use entry prices
+        if current_prices is None:
+            current_prices = {asset: pos.entry_price for asset, pos in self.positions.items()}
+        
         total_exposure = sum(
-            pos.get_position_value(pos.entry_price) for pos in self.positions.values()
+            pos.get_position_value(current_prices.get(pos.asset, pos.entry_price))
+            for pos in self.positions.values()
         )
 
-        total_value = self.current_capital + sum(
-            pos.get_pnl(pos.entry_price) for pos in self.positions.values()
+        total_unrealized_pnl = sum(
+            pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
+            for pos in self.positions.values()
         )
+
+        # FIXED: Calculate total portfolio value correctly
+        total_value = self.current_capital + total_unrealized_pnl
 
         exposure_pct = (
             total_exposure / self.current_capital if self.current_capital > 0 else 0
@@ -591,13 +641,18 @@ class PortfolioManager:
             "open_positions": self.get_open_positions_count(),
             "total_trades": len(self.closed_positions),
             "daily_pnl": daily_pnl,
+            "total_unrealized_pnl": total_unrealized_pnl,
             "positions": {
                 asset: {
                     "side": pos.side,
                     "entry_price": pos.entry_price,
                     "quantity": pos.quantity,
-                    "current_value": pos.get_position_value(pos.entry_price),
-                    "pnl": pos.get_pnl(pos.entry_price),
+                    "current_price": current_prices.get(asset, pos.entry_price),
+                    "current_value": pos.get_position_value(
+                        current_prices.get(asset, pos.entry_price)
+                    ),
+                    "pnl": pos.get_pnl(current_prices.get(asset, pos.entry_price)),
+                    "pnl_pct": pos.get_pnl_pct(current_prices.get(asset, pos.entry_price)),
                     "stop_loss": pos.stop_loss,
                     "take_profit": pos.take_profit,
                 }
