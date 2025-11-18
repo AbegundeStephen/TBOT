@@ -316,7 +316,7 @@ def run_backtest(asset_key, aggregator_mode="adaptive_tiered", aggregator_preset
     test_df.columns = test_df.columns.str.lower()
 
     # Try to load training data for more context
-    train_path = f"data/train_data_{asset_key.lower()}.csv"
+    train_path = f"data/test_data_{asset_key.lower()}.csv"
     try:
         train_df = pd.read_csv(train_path, index_col=0, parse_dates=True)
         train_df.columns = train_df.columns.str.lower()
