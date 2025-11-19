@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Main Trading Bot - WITH TELEGRAM INTEGRATION
+FIXED: Proper EMA Strategy Integration
 """
 
 import json
@@ -29,7 +30,8 @@ if sys.platform == "win32":
 from src.data.data_manager import DataManager
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
-from src.execution.signal_aggregator import SignalAggregator
+from src.strategies.ema_strategy import EMAStrategy
+from src.execution.signal_aggregator import BullMarketFilteredAggregator
 from src.execution.binance_handler import BinanceExecutionHandler
 from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -87,6 +89,7 @@ class TradingBot:
         self.data_manager = DataManager(self.config)
         self.portfolio_manager = None
 
+        # FIXED: Use consistent strategy names
         self.strategies = {"BTC": {}, "GOLD": {}}
 
         self._initialize_strategies()
@@ -200,9 +203,12 @@ class TradingBot:
             self.telegram_bot = None
 
     def _initialize_strategies(self):
-        """Initialize strategies for each enabled asset"""
+        """
+        FIXED: Initialize all THREE strategies for each enabled asset
+        Properly handles exponential_moving_averages config key
+        """
         logger.info("\n" + "-" * 70)
-        logger.info("Initializing Strategies")
+        logger.info("Initializing Strategies (Mean Reversion + Trend Following + EMA)")
         logger.info("-" * 70)
 
         for asset_name, asset_config in self.config["assets"].items():
@@ -210,9 +216,10 @@ class TradingBot:
                 logger.info(f"[!] {asset_name}: Disabled in config")
                 continue
 
-            strategies = asset_config.get("strategies", {})
+            strategies_config = asset_config.get("strategies", {})
 
-            if strategies.get("mean_reversion", {}).get("enabled", False):
+            # 1. Mean Reversion
+            if strategies_config.get("mean_reversion", {}).get("enabled", False):
                 mr_config = self.config["strategy_configs"]["mean_reversion"][
                     asset_name
                 ]
@@ -221,7 +228,8 @@ class TradingBot:
                 )
                 logger.info(f"[OK] {asset_name}: Mean Reversion initialized")
 
-            if strategies.get("trend_following", {}).get("enabled", False):
+            # 2. Trend Following
+            if strategies_config.get("trend_following", {}).get("enabled", False):
                 tf_config = self.config["strategy_configs"]["trend_following"][
                     asset_name
                 ]
@@ -230,78 +238,91 @@ class TradingBot:
                 )
                 logger.info(f"[OK] {asset_name}: Trend Following initialized")
 
+            # 3. EMA Strategy (FIXED: Check correct config key)
+            # Config file uses "exponential_moving_averages" but we store as "ema_strategy"
+            if strategies_config.get("exponential_moving_averages", {}).get(
+                "enabled", False
+            ):
+                ema_config = self.config["strategy_configs"][
+                    "exponential_moving_averages"
+                ][asset_name]
+                self.strategies[asset_name]["ema_strategy"] = EMAStrategy(ema_config)
+                logger.info(f"[OK] {asset_name}: EMA Strategy initialized")
+
+            # Log what we have
+            enabled_count = len(self.strategies[asset_name])
+            if enabled_count == 0:
+                logger.warning(f"[!] {asset_name}: NO strategies enabled!")
+            else:
+                logger.info(
+                    f"[OK] {asset_name}: {enabled_count}/3 strategies active: {list(self.strategies[asset_name].keys())}"
+                )
+
     def _initialize_aggregators(self):
-        """Initialize ENHANCED signal aggregators for each asset"""
+        """
+        FIXED: Initialize signal aggregators with proper strategy checking
+        """
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Enhanced Signal Aggregators")
         logger.info("-" * 70)
 
-        AGGREGATOR_PRESETS = {
-            "conservative": {
-                "tier_1_threshold": 0.48,
-                "tier_2_threshold": 0.58,
-                "tier_3_threshold": 0.68,
-                "agreement_bonus": 0.08,
-                "require_agreement": True,
-            },
-            "balanced": {
-                "tier_1_threshold": 0.42,
-                "tier_2_threshold": 0.52,
-                "tier_3_threshold": 0.62,
-                "agreement_bonus": 0.12,
-                "require_agreement": False,
-            },
-            "aggressive": {
-                "tier_1_threshold": 0.38,
-                "tier_2_threshold": 0.48,
-                "tier_3_threshold": 0.58,
-                "agreement_bonus": 0.15,
-                "require_agreement": False,
-            },
-        }
-
+        
         aggregator_mode = self.config.get("aggregator_settings", {}).get(
-            "mode", "adaptive_tiered"
+            "mode", "weighted_voting"
         )
         aggregator_preset = self.config.get("aggregator_settings", {}).get(
-            "preset", "balanced"
+            "preset", "weighted_voting"
         )
 
         logger.info(f"Aggregator Mode: {aggregator_mode}")
         logger.info(f"Aggregator Preset: {aggregator_preset}")
 
         for asset_name, strategies in self.strategies.items():
+            # FIXED: Get strategies with correct keys
             mr_strategy = strategies.get("mean_reversion")
             tf_strategy = strategies.get("trend_following")
+            ema_strategy = strategies.get("ema_strategy")  # FIXED: Use consistent key
 
-            if mr_strategy and tf_strategy:
-                self.aggregators[asset_name] = SignalAggregator(
-                    mean_reversion_strategy=mr_strategy,
-                    trend_following_strategy=tf_strategy,
-                    mode=aggregator_mode,
-                    confidence_config=AGGREGATOR_PRESETS[aggregator_preset],
-                )
+            # Count available strategies
+            available = sum(
+                [
+                    mr_strategy is not None,
+                    tf_strategy is not None,
+                    ema_strategy is not None,
+                ]
+            )
 
-                logger.info(
-                    f"[OK] {asset_name}: Enhanced Aggregator initialized "
-                    f"({aggregator_mode}/{aggregator_preset})"
-                )
-            elif mr_strategy or tf_strategy:
+            if available == 0:
                 logger.warning(
-                    f"[!] {asset_name}: Only one strategy available, "
-                    f"will use single strategy mode"
+                    f"[!] {asset_name}: No strategies available for aggregator"
                 )
-                self.aggregators[asset_name] = SignalAggregator(
-                    mean_reversion_strategy=mr_strategy,
-                    trend_following_strategy=tf_strategy,
-                    mode=aggregator_mode,
-                    confidence_config=AGGREGATOR_PRESETS[aggregator_preset],
-                )
+                continue
+
+            # Use safe lookup for preset (fallback to balanced if missing)
+            
+
+            # Create aggregator (it will handle missing strategies gracefully)
+            self.aggregators[asset_name] = BullMarketFilteredAggregator(
+                mean_reversion_strategy=mr_strategy,
+                trend_following_strategy=tf_strategy,
+                ema_strategy=ema_strategy,
+                confidence_config=self.config['aggregator_settings']['confidence_config']['weighted_voting'],
+                asset_name=asset_name
+                  
+
+            )
+
+            logger.info(
+                f"[OK] {asset_name}: Aggregator initialized with {available}/3 strategies "
+                f"({aggregator_mode}/{aggregator_preset})"
+            )
 
     def load_models(self):
-        """Load trained ML models for each asset and strategy"""
+        """
+        FIXED: Load trained ML models for ALL strategies including EMA
+        """
         logger.info("\n" + "-" * 70)
-        logger.info("Loading Trained Models")
+        logger.info("Loading Trained Models (Including EMA)")
         logger.info("-" * 70)
 
         models_loaded = 0
@@ -310,7 +331,11 @@ class TradingBot:
         for asset_name, strategies in self.strategies.items():
             for strategy_name, strategy in strategies.items():
                 models_expected += 1
-                model_path = f"models/{strategy_name}_{asset_name.lower()}.pkl"
+
+                # FIXED: Map internal strategy name to model filename
+                # Internal: "ema_strategy" -> File: "ema_strategy_btc.pkl"
+                model_filename = f"{strategy_name}_{asset_name.lower()}.pkl"
+                model_path = f"models/{model_filename}"
 
                 if Path(model_path).exists():
                     if strategy.load_model(model_path):
@@ -443,7 +468,9 @@ class TradingBot:
         return True
 
     def trade_asset(self, asset_name: str):
-        """Execute trading logic with market hours checking"""
+        """
+        FIXED: Execute trading logic with proper signal logging for ALL 3 strategies
+        """
         asset_config = self.config["assets"][asset_name]
 
         if not asset_config.get("enabled", False):
@@ -512,7 +539,7 @@ class TradingBot:
 
             df = self.data_manager.clean_data(df)
 
-            min_bars_for_prediction = 100
+            min_bars_for_prediction = 250  # Increased for EMA 200
 
             if len(df) < min_bars_for_prediction:
                 logger.warning(
@@ -547,19 +574,25 @@ class TradingBot:
 
             signal, details = aggregator.get_aggregated_signal(df)
 
-            # Log signal details
-            logger.info(f"\n[SIGNAL] Analysis:")
+            # FIXED: Log ALL THREE strategy signals
+            logger.info(f"\n[SIGNAL] Analysis (3 Strategies):")
             logger.info(
-                f"  Mean Reversion: Signal={details['mean_reversion_signal']:>2}, Confidence={details['mean_reversion_confidence']:.3f}"
+                f"  Mean Reversion: Signal={details.get('mean_reversion_signal', 0):>2}, "
+                f"Confidence={details.get('mean_reversion_confidence', 0):.3f}"
             )
             logger.info(
-                f"  Trend Following: Signal={details['trend_following_signal']:>2}, Confidence={details['trend_following_confidence']:.3f}"
+                f"  Trend Following: Signal={details.get('trend_following_signal', 0):>2}, "
+                f"Confidence={details.get('trend_following_confidence', 0):.3f}"
+            )
+            logger.info(
+                f"  EMA Strategy:    Signal={details.get('ema_signal', 0):>2}, "
+                f"Confidence={details.get('ema_confidence', 0):.3f}"
             )
             logger.info(f"  >> Final Signal: {signal:>2}")
             logger.info(
-                f"  >> Combined Confidence: {details['combined_confidence']:.3f}"
+                f"  >> Combined Confidence: {details.get('combined_confidence', 0):.3f}"
             )
-            logger.info(f"  >> Reasoning: {details['reasoning']}")
+            logger.info(f"  >> Reasoning: {details.get('reasoning', 'N/A')}")
 
             # Check if we're opening a new position (for Telegram notification)
             was_new_position = False
@@ -584,50 +617,51 @@ class TradingBot:
 
             # Telegram notification for new position
             if was_new_position and success:
-                pos = new_position
-                self._send_telegram_notification(
-                    self.telegram_bot.notify_trade_opened(
-                        asset=asset_name,
-                        side=pos.side if hasattr(pos, "side") else pos.get("side"),
-                        price=current_price,
-                        size=(
-                            pos.quantity * current_price
-                            if hasattr(pos, "quantity")
-                            else pos.get("current_value", 0)
-                        ),
-                        sl=(
-                            pos.stop_loss
-                            if hasattr(pos, "stop_loss")
-                            else pos.get("stop_loss", 0)
-                        ),
-                        tp=(
-                            pos.take_profit
-                            if hasattr(pos, "take_profit")
-                            else pos.get("take_profit", 0)
-                        ),
+                try:
+                    pos = new_position
+                    self._send_telegram_notification(
+                        self.telegram_bot.notify_trade_opened(
+                            asset=asset_name,
+                            side=pos.side if hasattr(pos, "side") else pos.get("side"),
+                            price=current_price,
+                            size=(
+                                pos.quantity * current_price
+                                if hasattr(pos, "quantity")
+                                else pos.get("current_value", 0)
+                            ),
+                            sl=(
+                                pos.stop_loss
+                                if hasattr(pos, "stop_loss")
+                                else pos.get("stop_loss", 0)
+                            ),
+                            tp=(
+                                pos.take_profit
+                                if hasattr(pos, "take_profit")
+                                else pos.get("take_profit", 0)
+                            ),
+                        )
                     )
-                )
-        except Exception as e:
-            logger.error(f"Failed to send Telegram notification: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to send Telegram notification: {e}")
 
             # Check if position was closed
             if existing_position and not new_position:
-                closed = self.portfolio_manager.closed_positions
-                if closed:
-                    last_trade = closed[-1]
-                    if last_trade["asset"] == asset_name:
-                        self._send_telegram_notification(
-                            self.telegram_bot.notify_trade_closed(
-                                asset=asset_name,
-                                side=last_trade["side"],
-                                pnl=last_trade["pnl"],
-                                pnl_pct=last_trade["pnl_pct"] * 100,
-                                reason=last_trade["reason"],
+                try:
+                    closed = self.portfolio_manager.closed_positions
+                    if closed:
+                        last_trade = closed[-1]
+                        if last_trade["asset"] == asset_name:
+                            self._send_telegram_notification(
+                                self.telegram_bot.notify_trade_closed(
+                                    asset=asset_name,
+                                    side=last_trade["side"],
+                                    pnl=last_trade["pnl"],
+                                    pnl_pct=last_trade["pnl_pct"] * 100,
+                                    reason=last_trade["reason"],
+                                )
                             )
-                        )
-
-        except Exception as e:
-            logger.error(f"Failed to send close notification: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to send close notification: {e}")
 
             # Count trade if opened
             if signal != 0 and success:
@@ -637,21 +671,21 @@ class TradingBot:
                     )
                     return
 
-            if not self.check_min_time_between_trades(asset_name):
-                logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
-                return
+                if not self.check_min_time_between_trades(asset_name):
+                    logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
+                    return
 
-            self.trade_count_today += 1
-            self.last_trade_times[asset_name] = datetime.now()
+                self.trade_count_today += 1
+                self.last_trade_times[asset_name] = datetime.now()
 
-            signal_type = "BUY" if signal == 1 else "SELL"
-            logger.info(
-                f"[SUCCESS] {asset_name} {signal_type} executed "
-                f"(Daily count: {self.trade_count_today})"
-            )
+                signal_type = "BUY" if signal == 1 else "SELL"
+                logger.info(
+                    f"[SUCCESS] {asset_name} {signal_type} executed "
+                    f"(Daily count: {self.trade_count_today})"
+                )
 
-            if self.config.get("logging", {}).get("save_trades", True):
-                self._log_trade(asset_name, signal, details, current_price)
+                if self.config.get("logging", {}).get("save_trades", True):
+                    self._log_trade(asset_name, signal, details, current_price)
 
         except Exception as e:
             logger.error(f"[ERROR] Error in {asset_name} trading: {e}", exc_info=True)
@@ -677,7 +711,7 @@ class TradingBot:
             with open(trade_log_file, "a", encoding="utf-8") as f:
                 f.write(
                     f"{datetime.now().isoformat()},{asset_name},{signal},{price:.2f},"
-                    f"{details['combined_confidence']:.3f},{details['reasoning']}\n"
+                    f"{details.get('combined_confidence', 0):.3f},{details.get('reasoning', 'N/A')}\n"
                 )
         except Exception as e:
             logger.warning(f"Could not log trade: {e}")
@@ -749,52 +783,50 @@ class TradingBot:
             logger.info("[TELEGRAM] _start_telegram_bot() finished")
 
     def _run_telegram_loop(self):
-            """Run Telegram bot event loop with proper cleanup"""
-            self.telegram_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.telegram_loop)
+        """Run Telegram bot event loop with proper cleanup"""
+        self.telegram_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.telegram_loop)
+        try:
+            self.telegram_loop.run_until_complete(self._start_telegram_bot())
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
+        finally:
+            # Cancel all remaining tasks before closing loop
             try:
-                self.telegram_loop.run_until_complete(self._start_telegram_bot())
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
-            finally:
-                # Cancel all remaining tasks before closing loop
-                try:
-                    # Get all tasks from THIS loop
-                    pending = asyncio.all_tasks(self.telegram_loop)
+                # Get all tasks from THIS loop
+                pending = asyncio.all_tasks(self.telegram_loop)
 
-                    if pending:
-                        logger.info(
-                            f"[TELEGRAM] Cancelling {len(pending)} pending tasks..."
-                        )
-                        for task in pending:
-                            task.cancel()
+                if pending:
+                    logger.info(
+                        f"[TELEGRAM] Cancelling {len(pending)} pending tasks..."
+                    )
+                    for task in pending:
+                        task.cancel()
 
-                        # Wait for cancellations with timeout
-                        try:
-                            self.telegram_loop.run_until_complete(
-                                asyncio.wait_for(
-                                    asyncio.gather(*pending, return_exceptions=True),
-                                    timeout=3.0,
-                                )
-                            )
-                            logger.info("[TELEGRAM] All tasks cancelled successfully")
-                        except asyncio.TimeoutError:
-                            logger.warning("[TELEGRAM] Task cancellation timed out")
-                        except Exception as e:
-                            logger.error(
-                                f"[TELEGRAM] Error during task cancellation: {e}"
-                            )
-
-                except Exception as e:
-                    logger.error(f"[TELEGRAM] Error in cleanup: {e}")
-                finally:
-                    # Now safely close the loop
+                    # Wait for cancellations with timeout
                     try:
-                        if not self.telegram_loop.is_closed():
-                            self.telegram_loop.close()
-                            logger.info("[TELEGRAM] Event loop closed")
+                        self.telegram_loop.run_until_complete(
+                            asyncio.wait_for(
+                                asyncio.gather(*pending, return_exceptions=True),
+                                timeout=3.0,
+                            )
+                        )
+                        logger.info("[TELEGRAM] All tasks cancelled successfully")
+                    except asyncio.TimeoutError:
+                        logger.warning("[TELEGRAM] Task cancellation timed out")
                     except Exception as e:
-                        logger.error(f"[TELEGRAM] Error closing loop: {e}")
+                        logger.error(f"[TELEGRAM] Error during task cancellation: {e}")
+
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Error in cleanup: {e}")
+            finally:
+                # Now safely close the loop
+                try:
+                    if not self.telegram_loop.is_closed():
+                        self.telegram_loop.close()
+                        logger.info("[TELEGRAM] Event loop closed")
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Error closing loop: {e}")
 
     def _send_telegram_notification(self, coro):
         """
@@ -826,8 +858,11 @@ class TradingBot:
         logger.info("=" * 70)
         logger.info(f"Mode: {self.config['trading']['mode'].upper()}")
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("Strategies: Mean Reversion + Trend Following + EMA Crossover")
+
         self.initialize_exchanges()
         self.load_models()
+
         logger.info("\n[MARKET HOURS]")
         logger.info("  BTC (Crypto): 24/7 - Always trading")
         logger.info("  GOLD (Forex):  Sun 22:00 GMT - Fri 22:00 GMT")
@@ -944,6 +979,7 @@ class TradingBot:
         logger.info("[OK] Trading bot stopped successfully")
         logger.info("=" * 70)
 
+
 def main():
     """Main entry point"""
     Path("models").mkdir(exist_ok=True)
@@ -957,15 +993,27 @@ def main():
         print("[FAIL] config/config.json not found!")
         sys.exit(1)
 
-    # Check required models
+    # Check required models (FIXED: Include EMA models)
     required_models = []
     for asset_name, asset_config in config["assets"].items():
         if asset_config.get("enabled", False):
             strategies = asset_config.get("strategies", {})
-            for strategy_name, strategy_config in strategies.items():
-                if strategy_config.get("enabled", False):
-                    model_file = f"models/{strategy_name}_{asset_name.lower()}.pkl"
-                    required_models.append(model_file)
+
+            # Mean Reversion
+            if strategies.get("mean_reversion", {}).get("enabled", False):
+                required_models.append(
+                    f"models/mean_reversion_{asset_name.lower()}.pkl"
+                )
+
+            # Trend Following
+            if strategies.get("trend_following", {}).get("enabled", False):
+                required_models.append(
+                    f"models/trend_following_{asset_name.lower()}.pkl"
+                )
+
+            # EMA Strategy (FIXED: Check correct config key)
+            if strategies.get("exponential_moving_averages", {}).get("enabled", False):
+                required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
 
     missing_models = [m for m in required_models if not Path(m).exists()]
     if missing_models:
