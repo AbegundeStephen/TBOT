@@ -12,6 +12,9 @@ from typing import Dict, List, Optional
 from functools import wraps
 import matplotlib.pyplot as plt
 import matplotlib
+import numpy as np
+from collections import defaultdict
+
 
 matplotlib.use("Agg")  # Non-interactive backend
 
@@ -27,6 +30,153 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
+
+
+class SignalMonitoringIntegration:
+    """
+    Signal monitoring features for Telegram bot
+    Integrates with BullMarketFilteredAggregator to track signals in real-time
+    """
+
+    def __init__(self, max_history: int = 100):
+        """
+        Initialize signal monitoring
+        
+        Args:
+            max_history: Keep track of last N signals per asset
+        """
+        self.signal_history: Dict[str, List[Dict]] = defaultdict(list)
+        self.max_history = max_history
+        
+        # Regime tracking per asset
+        self.regime_tracking: Dict[str, Dict] = defaultdict(lambda: {
+            "current": None,
+            "changes": [],
+            "change_count": 0
+        })
+        
+        # Override tracking per asset
+        self.override_tracking: Dict[str, List[Dict]] = defaultdict(list)
+        
+        logger.info(f"SignalMonitoringIntegration initialized (max_history={max_history})")
+    
+    def record_signal(
+        self,
+        asset: str,
+        signal: int,
+        details: Dict,
+        price: float,
+        timestamp: datetime = None
+    ):
+        """
+        Record a signal for monitoring
+        
+        Args:
+            asset: Asset name (BTC, GOLD, etc.)
+            signal: -1 (SELL), 0 (HOLD), 1 (BUY)
+            details: Full signal details from aggregator
+            price: Current asset price
+            timestamp: Signal timestamp
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        entry = {
+            "timestamp": timestamp,
+            "signal": signal,
+            "price": price,
+            "regime": details.get("regime"),
+            "is_bull": details.get("is_bull_market"),
+            "quality": details.get("signal_quality", 0),
+            "reasoning": details.get("reasoning"),
+            "mr_signal": details.get("mean_reversion_signal"),
+            "mr_conf": details.get("mean_reversion_confidence", 0),
+            "tf_signal": details.get("trend_following_signal"),
+            "tf_conf": details.get("trend_following_confidence", 0),
+            "ema_signal": details.get("ema_signal"),
+            "ema_conf": details.get("ema_confidence", 0),
+            "regime_changed": details.get("regime_changed", False),
+        }
+        
+        self.signal_history[asset].append(entry)
+        
+        # Keep only recent history
+        if len(self.signal_history[asset]) > self.max_history:
+            self.signal_history[asset].pop(0)
+        
+        # Track regime changes
+        if entry["regime_changed"]:
+            self.regime_tracking[asset]["changes"].append({
+                "timestamp": timestamp,
+                "regime": entry["regime"],
+                "price": price,
+                "ema_conf": entry["ema_conf"]
+            })
+            self.regime_tracking[asset]["change_count"] += 1
+        
+        # Track overrides (sells blocked)
+        if "override" in entry["reasoning"].lower():
+            self.override_tracking[asset].append({
+                "timestamp": timestamp,
+                "price": price,
+                "ema_conf": entry["ema_conf"],
+                "quality": entry["quality"]
+            })
+    
+    def get_last_signals(self, asset: str, n: int = 5) -> List[Dict]:
+        """Get last N signals for an asset"""
+        return self.signal_history[asset][-n:] if asset in self.signal_history else []
+    
+    def get_signal_statistics(self, asset: str) -> Dict:
+        """Get signal statistics for an asset"""
+        if asset not in self.signal_history or not self.signal_history[asset]:
+            return {}
+        
+        signals = self.signal_history[asset]
+        buy_count = sum(1 for s in signals if s["signal"] == 1)
+        sell_count = sum(1 for s in signals if s["signal"] == -1)
+        hold_count = sum(1 for s in signals if s["signal"] == 0)
+        
+        qualities = [s["quality"] for s in signals if s["signal"] != 0]
+        
+        return {
+            "total_signals": len(signals),
+            "buy_signals": buy_count,
+            "sell_signals": sell_count,
+            "hold_signals": hold_count,
+            "buy_pct": (buy_count / len(signals) * 100) if signals else 0,
+            "sell_pct": (sell_count / len(signals) * 100) if signals else 0,
+            "hold_pct": (hold_count / len(signals) * 100) if signals else 0,
+            "avg_quality": np.mean(qualities) if qualities else 0,
+            "high_quality_count": sum(1 for q in qualities if q >= 0.65),
+        }
+    
+    def get_regime_info(self, asset: str) -> Dict:
+        """Get regime information for an asset"""
+        if asset not in self.regime_tracking:
+            return {}
+        
+        tracking = self.regime_tracking[asset]
+        
+        return {
+            "change_count": tracking["change_count"],
+            "last_changes": tracking["changes"][-5:],  # Last 5 changes
+        }
+    
+    def get_override_info(self, asset: str) -> Dict:
+        """Get override event information"""
+        if asset not in self.override_tracking:
+            return {"total": 0, "last_events": []}
+        
+        events = self.override_tracking[asset]
+        avg_quality = np.mean([e["quality"] for e in events]) if events else 0
+        
+        return {
+            "total": len(events),
+            "avg_quality": avg_quality,
+            "last_events": events[-5:],  # Last 5 overrides
+        }
+
 
 
 def admin_only(func):
@@ -68,6 +218,8 @@ class TradingTelegramBot:
         self.trading_bot = trading_bot
         self.application = None
         self.is_running = False
+        
+        self.signal_monitor = SignalMonitoringIntegration(max_history=100)
 
         self._is_ready = False
         self._init_lock = asyncio.Lock()
@@ -172,6 +324,11 @@ class TradingTelegramBot:
         self.application.add_handler(
             CommandHandler("performance", self.cmd_performance)
         )
+        
+        self.application.add_handler(CommandHandler("signals", self.cmd_signals))
+        self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
+        self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
+        self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
         self.application.add_handler(
             CommandHandler("start_trading", self.cmd_start_trading)
         )
@@ -316,6 +473,10 @@ class TradingTelegramBot:
             "/positions - View open positions with P&L\n"
             "/history - Recent trade history\n"
             "/performance - Performance metrics\n"
+            "/signals - Latest trading signals\n"           
+            "/stats - Signal statistics\n"                  
+            "/regimes - Market regime tracking\n"           
+            "/overrides - Golden Cross overrides\n"     
             "/help - Show this help message\n\n"
         )
 
@@ -950,3 +1111,231 @@ class TradingTelegramBot:
 
         except Exception as e:
             logger.error(f"Error in _send_history_message: {e}")
+            
+    async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /signals command - Show latest signals"""
+        try:
+            if not hasattr(self, 'signal_monitor'):
+                await update.message.reply_text(
+                    "❌ Signal monitoring not initialized"
+                )
+                return
+            
+            # Get signals for both assets
+            btc_signals = self.signal_monitor.get_last_signals("BTC", n=3)
+            gold_signals = self.signal_monitor.get_last_signals("GOLD", n=3)
+            
+            msg = "📡 *Latest Trading Signals*\n\n"
+            
+            # BTC Signals
+            msg += "*₿ BTC*\n"
+            if btc_signals:
+                for sig in reversed(btc_signals):
+                    msg += self._format_signal_entry(sig)
+            else:
+                msg += "No signals yet\n"
+            
+            msg += "\n*🥇 GOLD*\n"
+            if gold_signals:
+                for sig in reversed(gold_signals):
+                    msg += self._format_signal_entry(sig)
+            else:
+                msg += "No signals yet\n"
+            
+            msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 BTC Stats", callback_data="btc_stats"),
+                    InlineKeyboardButton("🥇 GOLD Stats", callback_data="gold_stats"),
+                ],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="signals")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        
+        except Exception as e:
+            logger.error(f"Error in cmd_signals: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching signals")
+
+
+    async def cmd_signal_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stats command - Show signal statistics"""
+        try:
+            if not hasattr(self, 'signal_monitor'):
+                await update.message.reply_text(
+                    "❌ Signal monitoring not initialized"
+                )
+                return
+            
+            btc_stats = self.signal_monitor.get_signal_statistics("BTC")
+            gold_stats = self.signal_monitor.get_signal_statistics("GOLD")
+            
+            msg = "📊 *Signal Statistics*\n\n"
+            
+            # BTC Stats
+            if btc_stats:
+                msg += "*₿ BTC*\n"
+                msg += f"Total: {btc_stats['total_signals']}\n"
+                msg += f"🟢 BUY: {btc_stats['buy_signals']} ({btc_stats['buy_pct']:.1f}%)\n"
+                msg += f"🔴 SELL: {btc_stats['sell_signals']} ({btc_stats['sell_pct']:.1f}%)\n"
+                msg += f"⚪ HOLD: {btc_stats['hold_signals']} ({btc_stats['hold_pct']:.1f}%)\n"
+                msg += f"⭐ Avg Quality: {btc_stats['avg_quality']:.2f}\n"
+                msg += f"✨ High Quality: {btc_stats['high_quality_count']}\n\n"
+            
+            # GOLD Stats
+            if gold_stats:
+                msg += "*🥇 GOLD*\n"
+                msg += f"Total: {gold_stats['total_signals']}\n"
+                msg += f"🟢 BUY: {gold_stats['buy_signals']} ({gold_stats['buy_pct']:.1f}%)\n"
+                msg += f"🔴 SELL: {gold_stats['sell_signals']} ({gold_stats['sell_pct']:.1f}%)\n"
+                msg += f"⚪ HOLD: {gold_stats['hold_signals']} ({gold_stats['hold_pct']:.1f}%)\n"
+                msg += f"⭐ Avg Quality: {gold_stats['avg_quality']:.2f}\n"
+                msg += f"✨ High Quality: {gold_stats['high_quality_count']}\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("📡 Recent Signals", callback_data="signals")],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="stats")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        
+        except Exception as e:
+            logger.error(f"Error in cmd_signal_stats: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching statistics")
+
+
+    async def cmd_regimes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /regimes command - Show regime information"""
+        try:
+            if not hasattr(self, 'signal_monitor'):
+                await update.message.reply_text(
+                    "❌ Signal monitoring not initialized"
+                )
+                return
+            
+            btc_regime = self.signal_monitor.get_regime_info("BTC")
+            gold_regime = self.signal_monitor.get_regime_info("GOLD")
+            
+            msg = "🔄 *Market Regimes*\n\n"
+            
+            # BTC Regime
+            msg += "*₿ BTC*\n"
+            msg += f"Regime Changes: {btc_regime.get('change_count', 0)}\n"
+            if btc_regime.get('last_changes'):
+                msg += "Recent Changes:\n"
+                for change in btc_regime['last_changes'][-3:]:
+                    timestamp = change['timestamp'].strftime('%H:%M')
+                    regime = "🚀 BULL" if "BULL" in change['regime'] else "⚖️ BEAR"
+                    msg += f"  {timestamp}: {regime} @ ${change['price']:,.2f}\n"
+            msg += "\n"
+            
+            # GOLD Regime
+            msg += "*🥇 GOLD*\n"
+            msg += f"Regime Changes: {gold_regime.get('change_count', 0)}\n"
+            if gold_regime.get('last_changes'):
+                msg += "Recent Changes:\n"
+                for change in gold_regime['last_changes'][-3:]:
+                    timestamp = change['timestamp'].strftime('%H:%M')
+                    regime = "🚀 BULL" if "BULL" in change['regime'] else "⚖️ BEAR"
+                    msg += f"  {timestamp}: {regime} @ ${change['price']:,.2f}\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data="regimes")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        
+        except Exception as e:
+            logger.error(f"Error in cmd_regimes: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching regime data")
+
+
+    async def cmd_overrides(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /overrides command - Show Golden Cross override events"""
+        try:
+            if not hasattr(self, 'signal_monitor'):
+                await update.message.reply_text(
+                    "❌ Signal monitoring not initialized"
+                )
+                return
+            
+            btc_overrides = self.signal_monitor.get_override_info("BTC")
+            gold_overrides = self.signal_monitor.get_override_info("GOLD")
+            
+            msg = "🔒 *Golden Cross Overrides*\n"
+            msg += "(Sells blocked during bull market)\n\n"
+            
+            # BTC Overrides
+            msg += "*₿ BTC*\n"
+            msg += f"Total Overrides: {btc_overrides['total']}\n"
+            if btc_overrides['total'] > 0:
+                msg += f"Avg Quality: {btc_overrides['avg_quality']:.2f}\n"
+                if btc_overrides['last_events']:
+                    msg += "Recent Blocks:\n"
+                    for event in btc_overrides['last_events'][-3:]:
+                        timestamp = event['timestamp'].strftime('%H:%M')
+                        msg += f"  {timestamp}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
+            msg += "\n"
+            
+            # GOLD Overrides
+            msg += "*🥇 GOLD*\n"
+            msg += f"Total Overrides: {gold_overrides['total']}\n"
+            if gold_overrides['total'] > 0:
+                msg += f"Avg Quality: {gold_overrides['avg_quality']:.2f}\n"
+                if gold_overrides['last_events']:
+                    msg += "Recent Blocks:\n"
+                    for event in gold_overrides['last_events'][-3:]:
+                        timestamp = event['timestamp'].strftime('%H:%M')
+                        msg += f"  {timestamp}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data="overrides")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        
+        except Exception as e:
+            logger.error(f"Error in cmd_overrides: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching override data")
+
+
+    def _format_signal_entry(self, signal_entry: Dict) -> str:
+        """Format a signal entry for display"""
+        timestamp = signal_entry['timestamp'].strftime('%H:%M:%S')
+        price = signal_entry['price']
+        signal = signal_entry['signal']
+        regime = signal_entry['regime']
+        quality = signal_entry['quality']
+        reasoning = signal_entry['reasoning'].replace('_', ' ').title()
+        
+        # Signal icon
+        if signal == 1:
+            signal_icon = "🟢 BUY"
+        elif signal == -1:
+            signal_icon = "🔴 SELL"
+        else:
+            signal_icon = "⚪ HOLD"
+        
+        # Quality indicator
+        quality_icon = "★" if quality >= 0.65 else "•"
+        
+        entry = (
+            f"  {timestamp} | {signal_icon} | ${price:,.2f}\n"
+            f"    {regime} | Quality: {quality_icon} {quality:.2f}\n"
+            f"    {reasoning}\n"
+        )
+        
+        return entry        

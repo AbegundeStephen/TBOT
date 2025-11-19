@@ -573,6 +573,13 @@ class TradingBot:
                 return
 
             signal, details = aggregator.get_aggregated_signal(df)
+            self.telegram_bot.signal_monitor.record_signal(
+            asset=asset_name,  # "BTC" or "GOLD"
+            signal=signal,
+            details=details,
+            price=current_price,
+            timestamp=datetime.now()
+)
 
             # FIXED: Log ALL THREE strategy signals
             logger.info(f"\n[SIGNAL] Analysis (3 Strategies):")
