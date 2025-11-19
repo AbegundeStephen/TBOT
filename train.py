@@ -2,6 +2,7 @@
 """
 Improved Training Script - Generates More Actionable Signals
 Properly loads config.json values
+NOW WITH EMA STRATEGY INTEGRATION
 """
 
 import json
@@ -24,6 +25,7 @@ import numpy as np
 from src.data.data_manager import DataManager
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
+from src.strategies.ema_strategy import EMAStrategy
 
 # Setup logging
 logging.basicConfig(
@@ -227,13 +229,14 @@ def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
 
 def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict) -> dict:
     """
-    Train both strategies for an asset using config.json values
+    Train ALL THREE strategies for an asset using config.json values
     """
     results = {
         'asset': asset_key,
         'train_bars': len(train_df),
         'mean_reversion': {},
-        'trend_following': {}
+        'trend_following': {},
+        'ema_strategy': {}
     }
     
     logger.info("\n" + "="*70)
@@ -243,6 +246,7 @@ def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict)
     # Get configs from config.json
     mr_config = config['strategy_configs']['mean_reversion'][asset_key]
     tf_config = config['strategy_configs']['trend_following'][asset_key]
+    ema_config = config['strategy_configs']['exponential_moving_averages'][asset_key]
     
     # Log the actual config being used
     logger.info(f"\n📋 Configuration for {asset_key}:")
@@ -256,8 +260,15 @@ def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict)
     logger.info(f"    ADX Threshold: {tf_config['adx_threshold']}")
     logger.info(f"    Min Return: {tf_config['min_return_threshold']:.3f}")
     logger.info(f"    Min Conditions: {tf_config['min_conditions']}")
+    logger.info(f"  EMA Strategy:")
+    logger.info(f"    EMA: {ema_config['ema_fast']}/{ema_config['ema_slow']}")
+    logger.info(f"    Min Distance: {ema_config['min_distance_pct']}%")
+    logger.info(f"    Min Return: {ema_config['min_return_threshold']:.3f}")
+    logger.info(f"    Min Conditions: {ema_config['min_conditions']}")
     
-    # Train Mean Reversion
+    # =====================================================
+    # 1. Train Mean Reversion
+    # =====================================================
     logger.info(f"\n{'─'*70}")
     logger.info("1. Mean Reversion Strategy")
     logger.info('─'*70)
@@ -285,7 +296,9 @@ def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict)
         logger.error(f"❌ Exception training Mean Reversion: {e}", exc_info=True)
         results['mean_reversion'] = {'success': False, 'error': str(e)}
     
-    # Train Trend Following
+    # =====================================================
+    # 2. Train Trend Following
+    # =====================================================
     logger.info(f"\n{'─'*70}")
     logger.info("2. Trend Following Strategy")
     logger.info('─'*70)
@@ -313,13 +326,43 @@ def train_asset_strategies(asset_key: str, train_df: pd.DataFrame, config: dict)
         logger.error(f"❌ Exception training Trend Following: {e}", exc_info=True)
         results['trend_following'] = {'success': False, 'error': str(e)}
     
+    # =====================================================
+    # 3. Train EMA Strategy (NEW!)
+    # =====================================================
+    logger.info(f"\n{'─'*70}")
+    logger.info("3. EMA Crossover Strategy")
+    logger.info('─'*70)
+    
+    try:
+        ema_strategy = EMAStrategy(ema_config)
+        ema_model_path = f'models/ema_strategy_{asset_key.lower()}.pkl'
+        
+        logger.info(f"Training on {len(train_df)} bars...")
+        ema_metrics = ema_strategy.train_model(train_df, ema_model_path)
+        
+        if ema_metrics.get('success'):
+            logger.info(f"\n✅ EMA Strategy - {asset_key} TRAINED")
+            logger.info(f"   CV Accuracy: {ema_metrics.get('cv_mean_accuracy', 0):.2%} ± {ema_metrics.get('cv_std_accuracy', 0):.2%}")
+            logger.info(f"   Train Samples: {ema_metrics.get('train_samples', 0)}")
+            logger.info(f"   Features: {ema_metrics.get('n_features', 0)}")
+            logger.info(f"   Model saved: {ema_model_path}")
+        else:
+            logger.error(f"\n❌ EMA Strategy - {asset_key} FAILED")
+            logger.error(f"   Error: {ema_metrics.get('error', 'Unknown')}")
+        
+        results['ema_strategy'] = ema_metrics
+        
+    except Exception as e:
+        logger.error(f"❌ Exception training EMA Strategy: {e}", exc_info=True)
+        results['ema_strategy'] = {'success': False, 'error': str(e)}
+    
     return results
 
 
 def calculate_data_correlation(btc_df: pd.DataFrame, gold_df: pd.DataFrame) -> dict:
     """
     Calculate correlation between BTC and Gold
-     Handles timezone-aware and timezone-naive dataframes
+    Handles timezone-aware and timezone-naive dataframes
     """
     try:
         # FIX: Normalize timezones before merging
@@ -378,6 +421,7 @@ def main():
     logger.info("="*70)
     logger.info("MULTI-SOURCE TRADING BOT TRAINING")
     logger.info("BTC: Binance | GOLD: MT5")
+    logger.info("Strategies: Mean Reversion + Trend Following + EMA Crossover")
     logger.info("="*70)
     
     # Load config from config.json
@@ -493,7 +537,7 @@ def main():
     
     # Train models using config.json
     logger.info("\n" + "="*70)
-    logger.info("STEP 5: Training Models")
+    logger.info("STEP 5: Training Models (ALL 3 STRATEGIES)")
     logger.info("="*70)
     
     training_results = {}
@@ -514,6 +558,7 @@ def main():
         
         mr = results['mean_reversion']
         tf = results['trend_following']
+        ema = results['ema_strategy']
         
         if mr.get('success'):
             logger.info(f"  ✅ Mean Reversion:   {mr.get('cv_mean_accuracy', 0):.2%} ± {mr.get('cv_std_accuracy', 0):.2%}")
@@ -524,6 +569,11 @@ def main():
             logger.info(f"  ✅ Trend Following:  {tf.get('cv_mean_accuracy', 0):.2%} ± {tf.get('cv_std_accuracy', 0):.2%}")
         else:
             logger.info(f"  ❌ Trend Following:  FAILED")
+        
+        if ema.get('success'):
+            logger.info(f"  ✅ EMA Strategy:     {ema.get('cv_mean_accuracy', 0):.2%} ± {ema.get('cv_std_accuracy', 0):.2%}")
+        else:
+            logger.info(f"  ❌ EMA Strategy:     FAILED")
     
     # Save metadata
     metadata = {
@@ -532,6 +582,11 @@ def main():
             'BTC': 'Binance',
             'GOLD': 'MT5'
         },
+        'strategies': [
+            'mean_reversion',
+            'trend_following',
+            'ema_strategy'
+        ],
         'training_results': training_results,
         'correlation': correlation_stats,
         'data_stats': {
@@ -555,6 +610,7 @@ def main():
     for asset_key in training_results.keys():
         logger.info(f"  • models/mean_reversion_{asset_key.lower()}.pkl")
         logger.info(f"  • models/trend_following_{asset_key.lower()}.pkl")
+        logger.info(f"  • models/ema_strategy_{asset_key.lower()}.pkl")
     
     logger.info("\n" + "="*70)
     logger.info("NEXT STEPS:")
@@ -564,6 +620,8 @@ def main():
     logger.info("  3. Run backtest: python backtest.py --asset BTC --preset balanced")
     logger.info("  4. If no trades: python backtest.py --asset BTC --preset aggressive")
     logger.info("  5. Paper trade: python main.py --mode paper")
+    logger.info("\n  Note: You now have 3 strategies generating signals!")
+    logger.info("        Mean Reversion + Trend Following + EMA Crossover")
     
     # Cleanup
     data_manager.shutdown()
