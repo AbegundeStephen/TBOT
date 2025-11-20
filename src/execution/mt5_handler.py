@@ -39,8 +39,10 @@ class MT5ExecutionHandler:
         logger.info("MT5ExecutionHandler initialized")
 
         # Respect configuration flags: only auto-sync if both flags are explicitly True
-        auto_sync_enabled = bool(self.trading_config.get("auto_sync_on_startup", False))
-        import_enabled = bool(
+        auto_sync_enabled = self.auto_sync_enabled = bool(
+            self.trading_config.get("auto_sync_on_startup", False)
+        )
+        import_enabled = self.import_enabled = bool(
             self.config.get("portfolio", {}).get("import_existing_positions", False)
         )
 
@@ -607,11 +609,14 @@ class MT5ExecutionHandler:
             # CASE A: MT5 has position(s) and portfolio has none -> DETECT but DO NOT IMPORT
             # Inside sync_positions_with_mt5, replace CASE A with:
             if mt5_positions and len(mt5_positions) > 0 and not portfolio_position:
-                import_enabled = bool(self.config.get("portfolio", {}).get("import_existing_positions", False))
-                if import_enabled:  # Only import if enabled in config
-                    logger.info(f"[SYNC] Importing {len(mt5_positions)} MT5 position(s) for {asset}...")
+                if self.import_enabled:  # Only import if enabled in config
+                    logger.info(
+                        f"[SYNC] Importing {len(mt5_positions)} MT5 position(s) for {asset}..."
+                    )
                     for pos in mt5_positions:
-                        pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+                        pos_type = (
+                            "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+                        )
                         logger.info(
                             f"  → Importing MT5 {pos_type}: entry={pos.price_open:.5f}, current={pos.price_current:.5f}, "
                             f"volume={pos.volume:.2f}, profit={pos.profit:.2f}"
@@ -622,15 +627,21 @@ class MT5ExecutionHandler:
                             symbol=symbol,
                             side=pos_type,
                             entry_price=pos.price_open,
-                            position_size_usd=pos.volume * pos.price_open * self.symbol_info.trade_contract_size,
+                            position_size_usd=pos.volume
+                            * pos.price_open
+                            * self.symbol_info.trade_contract_size,
                             stop_loss=None,  # Set as needed
                             take_profit=None,  # Set as needed
                             trailing_stop_pct=None,  # Set as needed
                         )
                         if success:
-                            logger.info(f"[SYNC] ✓ Imported {asset} {pos_type} position")
+                            logger.info(
+                                f"[SYNC] ✓ Imported {asset} {pos_type} position"
+                            )
                         else:
-                            logger.error(f"[SYNC] ✗ Failed to import {asset} {pos_type} position")
+                            logger.error(
+                                f"[SYNC] ✗ Failed to import {asset} {pos_type} position"
+                            )
                 else:
                     logger.info(
                         f"[SYNC] Detected MT5 positions for {asset} but auto-import is disabled.\n"
@@ -639,7 +650,9 @@ class MT5ExecutionHandler:
                         f"portfolio.import_existing_positions = true in config."
                     )
                     for pos in mt5_positions:
-                        pos_type = "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
+                        pos_type = (
+                            "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
+                        )
                         logger.info(
                             f"  → MT5 {pos_type}: entry={pos.price_open:.5f}, current={pos.price_current:.5f}, "
                             f"volume={pos.volume:.2f}, profit={pos.profit:.2f}"

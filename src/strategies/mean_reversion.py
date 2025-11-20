@@ -26,12 +26,13 @@ class MeanReversionStrategy(BaseStrategy):
         self.stoch_k = config.get('stoch_k', 14)
         self.stoch_d = config.get('stoch_d', 3)
         self.reversion_window = config.get('reversion_window', 5)
+        self.asset = config.get('asset', 'BTC')  # default BTC
         
         # Thresholds - VERY conservative
-        self.rsi_overbought = config.get('rsi_overbought', 70)
-        self.rsi_oversold = config.get('rsi_oversold', 30)
+        self.rsi_overbought = config.get('rsi_overbought', 64)
+        self.rsi_oversold = config.get('rsi_oversold', 25)
         self.bb_lower_threshold = config.get('bb_lower_threshold', 0.25)
-        self.bb_upper_threshold = config.get('bb_upper_threshold', 0.75)
+        self.bb_upper_threshold = config.get('bb_upper_threshold', 0.70)
         
         # Strict thresholds
         self.min_return_threshold = config.get('min_return_threshold', 0.003)  # 0.3%
@@ -139,6 +140,9 @@ class MeanReversionStrategy(BaseStrategy):
             # Adaptive threshold based on volatility
             vol_mult = max(0.7, min(1.5, atr_pct[i] / median_vol))
             adj_min_return = self.min_return_threshold * vol_mult
+            
+            if self.asset == "GOLD":
+                adj_min_return *= 0.7
             
             # === STRICT BUY SIGNAL ===
             buy_score = 0.0
