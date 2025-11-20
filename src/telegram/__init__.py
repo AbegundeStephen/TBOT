@@ -475,7 +475,7 @@ class TradingTelegramBot:
             "/performance - Performance metrics\n"
             "/signals - Latest trading signals\n"           
             "/stats - Signal statistics\n"                  
-            "/regimes - Market regime tracking\n"           
+            "/regimes - Market regime tracking\n"           # ← NEW
             "/overrides - Golden Cross overrides\n"     
             "/help - Show this help message\n\n"
         )
