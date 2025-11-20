@@ -1,6 +1,10 @@
 # src/strategies/trend_following.py
 """
-IMPROVED Trend Following Strategy with Better Label Generation
+IMPROVED Trend Following Strategy with Balanced Label Generation
+Key improvements:
+- Multi-tier signal strength (weak/medium/strong trends)
+- Adaptive thresholds based on volatility
+- Better balance between precision and signal generation
 """
 
 import pandas as pd
@@ -15,6 +19,7 @@ logger = logging.getLogger(__name__)
 class TrendFollowingStrategy(BaseStrategy):
     """
     Improved trend following with balanced label generation
+    Uses a scoring system with adaptive thresholds
     """
     
     def __init__(self, config: dict):
@@ -29,16 +34,16 @@ class TrendFollowingStrategy(BaseStrategy):
         self.macd_slow = config.get('macd_slow', 26)
         self.macd_signal = config.get('macd_signal', 9)
         
-        # ADX parameters
+        # ADX parameters - RELAXED
         self.adx_period = config.get('adx_period', 14)
-        self.adx_threshold = config.get('adx_threshold', 15)
+        self.adx_threshold = config.get('adx_threshold', 15)  # Lower threshold
         self.require_adx = config.get('require_adx', False)
         
-        #  More realistic thresholds
-        self.min_return_threshold = config.get('min_return_threshold', 0.002)  # 0.2%
+        # Return thresholds - MORE LENIENT
+        self.min_return_threshold = config.get('min_return_threshold', 0.001)  # 0.1% instead of 0.2%
         
-        #  Direct score threshold (not multiplier)
-        self.min_score_threshold = config.get('min_conditions', 2)
+        # Score threshold - REDUCED
+        self.min_score_threshold = config.get('min_conditions', 1.5)  # Lower from 2.0
         
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  Fast MA: {self.fast_ma}, Slow MA: {self.slow_ma}")
@@ -125,11 +130,12 @@ class TrendFollowingStrategy(BaseStrategy):
     
     def generate_labels(self, df: pd.DataFrame) -> pd.Series:
         """
-        IMPROVED: More balanced label generation with gradual scoring
+        IMPROVED label generation with adaptive scoring system
+        - Uses weighted scoring for different signal strengths
+        - Adaptive return thresholds based on recent volatility
+        - Multiple lookforward periods for different trend types
         """
-        df = df.copy()
         labels = pd.Series(0, index=df.index)
-        
         close = df['close'].values
         sma_fast = df['sma_fast'].values
         sma_slow = df['sma_slow'].values
@@ -138,165 +144,150 @@ class TrendFollowingStrategy(BaseStrategy):
         plus_di = df['plus_di'].values
         minus_di = df['minus_di'].values
         
-        continuation_bars = 5
+        # Calculate rolling volatility for adaptive thresholds
+        returns = pd.Series(close).pct_change()
+        rolling_vol = returns.rolling(20).std()
         
-        for i in range(len(df) - continuation_bars - 1):
-            # Skip if required ADX not met
-            if self.require_adx and (pd.isna(adx[i]) or adx[i] < self.adx_threshold):
+        # Multiple lookforward periods for different trend strengths
+        short_term = 3   # Quick reversals
+        medium_term = 7  # Standard trends
+        long_term = 12   # Strong trends
+        
+        for i in range(len(df) - long_term - 1):
+            # Skip if not enough data
+            if pd.isna(adx[i]) or pd.isna(rolling_vol.iloc[i]):
                 continue
             
+            # Adaptive return threshold (0.3x to 1.5x of recent volatility)
+            vol = rolling_vol.iloc[i]
+            min_return = max(self.min_return_threshold, 0.5 * vol)
+            
+            # === CALCULATE BULLISH SCORE ===
+            bullish_score = 0.0
+            
+            # 1. MA Alignment (0-2 points)
+            if sma_fast[i] > sma_slow[i]:
+                ma_separation = (sma_fast[i] - sma_slow[i]) / sma_slow[i]
+                if ma_separation > 0.002:  # >0.2% separation
+                    bullish_score += 2.0
+                else:
+                    bullish_score += 1.0
+            
+            # 2. MACD (0-1.5 points)
+            if macd_hist[i] > 0:
+                macd_strength = abs(macd_hist[i])
+                if macd_strength > macd_hist[max(0, i-5):i].std():  # Strong signal
+                    bullish_score += 1.5
+                else:
+                    bullish_score += 1.0
+            
+            # 3. Directional Indicators (0-1.5 points)
+            if plus_di[i] > minus_di[i]:
+                di_diff = plus_di[i] - minus_di[i]
+                if di_diff > 10:  # Strong directional move
+                    bullish_score += 1.5
+                else:
+                    bullish_score += 1.0
+            
+            # 4. Price Position (0-1 point)
+            if close[i] > sma_fast[i]:
+                bullish_score += 1.0
+            
+            # 5. ADX Bonus (0-1 point) - Only if strong trend
+            if adx[i] > 25:
+                bullish_score += 1.0
+            elif adx[i] > self.adx_threshold:
+                bullish_score += 0.5
+            
+            # === CALCULATE BEARISH SCORE ===
+            bearish_score = 0.0
+            
+            # 1. MA Alignment (0-2 points)
+            if sma_fast[i] < sma_slow[i]:
+                ma_separation = (sma_slow[i] - sma_fast[i]) / sma_slow[i]
+                if ma_separation > 0.002:
+                    bearish_score += 2.0
+                else:
+                    bearish_score += 1.0
+            
+            # 2. MACD (0-1.5 points)
+            if macd_hist[i] < 0:
+                macd_strength = abs(macd_hist[i])
+                if macd_strength > macd_hist[max(0, i-5):i].std():
+                    bearish_score += 1.5
+                else:
+                    bearish_score += 1.0
+            
+            # 3. Directional Indicators (0-1.5 points)
+            if minus_di[i] > plus_di[i]:
+                di_diff = minus_di[i] - plus_di[i]
+                if di_diff > 10:
+                    bearish_score += 1.5
+                else:
+                    bearish_score += 1.0
+            
+            # 4. Price Position (0-1 point)
+            if close[i] < sma_fast[i]:
+                bearish_score += 1.0
+            
+            # 5. ADX Bonus (0-1 point)
+            if adx[i] > 25:
+                bearish_score += 1.0
+            elif adx[i] > self.adx_threshold:
+                bearish_score += 0.5
+            
+            # === DETERMINE LABEL BASED ON SCORE + FORWARD RETURNS ===
+            
+            # Choose lookforward period based on trend strength
+            if adx[i] > 25:
+                lookforward = long_term
+            elif adx[i] > self.adx_threshold:
+                lookforward = medium_term
+            else:
+                lookforward = short_term
+            
             # Calculate future return
-            future_closes = close[i+1:i+1+continuation_bars]
+            end_idx = min(i + lookforward + 1, len(close))
+            future_closes = close[i+1:end_idx]
             if len(future_closes) == 0:
                 continue
                 
             future_return = (np.mean(future_closes) - close[i]) / close[i]
             
-            # === BULLISH SIGNALS ===
-            bullish_score = 0
-            
-            # 1. Fast MA vs Slow MA (stronger = more points)
-            if not pd.isna(sma_fast[i]) and not pd.isna(sma_slow[i]):
-                ma_gap_pct = (sma_fast[i] - sma_slow[i]) / sma_slow[i] * 100
-                
-                if sma_fast[i] > sma_slow[i]:
-                    if ma_gap_pct > 3:  # Strong uptrend
-                        bullish_score += 2
-                    elif ma_gap_pct > 1.5:
-                        bullish_score += 1.5
-                    elif ma_gap_pct > 0.5:
-                        bullish_score += 1
-                    else:
-                        bullish_score += 0.5  # Weak uptrend
-            
-            # 2. MACD histogram
-            if not pd.isna(macd_hist[i]):
-                if macd_hist[i] > 0:
-                    # Check if increasing
-                    if i > 0 and not pd.isna(macd_hist[i-1]):
-                        if macd_hist[i] > macd_hist[i-1] * 1.1:  # 10% increase
-                            bullish_score += 1.5
-                        elif macd_hist[i] > macd_hist[i-1]:
-                            bullish_score += 1
-                        else:
-                            bullish_score += 0.5
-                    else:
-                        bullish_score += 0.5
-            
-            # 3. Directional Movement
-            if not pd.isna(plus_di[i]) and not pd.isna(minus_di[i]):
-                di_gap = plus_di[i] - minus_di[i]
-                
-                if di_gap > 20:  # Very strong
-                    bullish_score += 2
-                elif di_gap > 10:
-                    bullish_score += 1.5
-                elif di_gap > 5:
-                    bullish_score += 1
-                elif di_gap > 0:
-                    bullish_score += 0.5
-            
-            # 4. Price vs MAs
-            if not pd.isna(sma_fast[i]) and close[i] > sma_fast[i]:
-                bullish_score += 0.5
-            if not pd.isna(sma_slow[i]) and close[i] > sma_slow[i]:
-                bullish_score += 0.5
-            
-            # 5. ADX strength (bonus)
-            if not pd.isna(adx[i]):
-                if adx[i] > 30:  # Very strong trend
-                    bullish_score += 1.5
-                elif adx[i] > 25:
-                    bullish_score += 1
-                elif adx[i] > self.adx_threshold:
-                    bullish_score += 0.5
-            
-            # Label as BUY if score meets threshold
-            if bullish_score >= self.min_score_threshold and future_return > self.min_return_threshold:
+            # BUY Signal: Strong bullish score + positive return
+            if bullish_score >= self.min_score_threshold and future_return > min_return:
                 labels.iloc[i] = 1
             
-            # === BEARISH SIGNALS ===
-            bearish_score = 0
-            
-            # 1. Fast MA vs Slow MA
-            if not pd.isna(sma_fast[i]) and not pd.isna(sma_slow[i]):
-                ma_gap_pct = (sma_slow[i] - sma_fast[i]) / sma_slow[i] * 100
-                
-                if sma_fast[i] < sma_slow[i]:
-                    if ma_gap_pct > 3:
-                        bearish_score += 2
-                    elif ma_gap_pct > 1.5:
-                        bearish_score += 1.5
-                    elif ma_gap_pct > 0.5:
-                        bearish_score += 1
-                    else:
-                        bearish_score += 0.5
-            
-            # 2. MACD histogram
-            if not pd.isna(macd_hist[i]):
-                if macd_hist[i] < 0:
-                    if i > 0 and not pd.isna(macd_hist[i-1]):
-                        if macd_hist[i] < macd_hist[i-1] * 0.9:  # Declining 10%
-                            bearish_score += 1.5
-                        elif macd_hist[i] < macd_hist[i-1]:
-                            bearish_score += 1
-                        else:
-                            bearish_score += 0.5
-                    else:
-                        bearish_score += 0.5
-            
-            # 3. Directional Movement
-            if not pd.isna(plus_di[i]) and not pd.isna(minus_di[i]):
-                di_gap = minus_di[i] - plus_di[i]
-                
-                if di_gap > 20:
-                    bearish_score += 2
-                elif di_gap > 10:
-                    bearish_score += 1.5
-                elif di_gap > 5:
-                    bearish_score += 1
-                elif di_gap > 0:
-                    bearish_score += 0.5
-            
-            # 4. Price vs MAs
-            if not pd.isna(sma_fast[i]) and close[i] < sma_fast[i]:
-                bearish_score += 0.5
-            if not pd.isna(sma_slow[i]) and close[i] < sma_slow[i]:
-                bearish_score += 0.5
-            
-            # 5. ADX strength
-            if not pd.isna(adx[i]):
-                if adx[i] > 30:
-                    bearish_score += 1.5
-                elif adx[i] > 25:
-                    bearish_score += 1
-                elif adx[i] > self.adx_threshold:
-                    bearish_score += 0.5
-            
-            # Label as SELL if score meets threshold
-            if bearish_score >= self.min_score_threshold and future_return < -self.min_return_threshold:
+            # SELL Signal: Strong bearish score + negative return
+            elif bearish_score >= self.min_score_threshold and future_return < -min_return:
                 labels.iloc[i] = -1
+            
+            # HOLD: Everything else stays 0
         
-        # Remove labels from last N bars
-        labels.iloc[-continuation_bars:] = 0
-        
-        # Log distribution
+        # === LOG DETAILED STATISTICS ===
         unique, counts = np.unique(labels, return_counts=True)
-        dist = dict(zip(unique, counts))
-        total = len(labels)
+        label_distribution = dict(zip(unique, counts))
+        total_labels = len(labels)
         
-        logger.info(f"[{self.name}] Label distribution:")
-        logger.info(f"  SELL: {dist.get(-1, 0):>5} ({dist.get(-1, 0)/total*100:>5.2f}%)")
-        logger.info(f"  HOLD: {dist.get(0, 0):>5} ({dist.get(0, 0)/total*100:>5.2f}%)")
-        logger.info(f"  BUY:  {dist.get(1, 0):>5} ({dist.get(1, 0)/total*100:>5.2f}%)")
+        sell_count = label_distribution.get(-1, 0)
+        hold_count = label_distribution.get(0, 0)
+        buy_count = label_distribution.get(1, 0)
         
-        # Warning if too imbalanced
-        buy_pct = dist.get(1, 0) / total * 100
-        sell_pct = dist.get(-1, 0) / total * 100
+        sell_pct = (sell_count / total_labels) * 100
+        hold_pct = (hold_count / total_labels) * 100
+        buy_pct = (buy_count / total_labels) * 100
         
-        if buy_pct < 8 or sell_pct < 8:
-            logger.warning(f"  ⚠ Class imbalance detected!")
-            logger.warning(f"  Current: min_return={self.min_return_threshold:.3%}, min_score={self.min_score_threshold}")
-            logger.warning(f"  Try lowering min_return_threshold or min_conditions in config")
+        logger.info(f"[{self.name}] Label Distribution:")
+        logger.info(f"  SELL: {sell_count:>5} ({sell_pct:>5.2f}%)")
+        logger.info(f"  HOLD: {hold_count:>5} ({hold_pct:>5.2f}%)")
+        logger.info(f"  BUY:  {buy_count:>5} ({buy_pct:>5.2f}%)")
+        
+        # Quality checks
+        if sell_pct < 5 or buy_pct < 5:
+            logger.warning(f"  ⚠ Severe class imbalance! Consider lowering min_score_threshold")
+        elif sell_pct < 10 or buy_pct < 10:
+            logger.warning(f"  ⚠ Class imbalance detected! Consider adjusting thresholds.")
+        else:
+            logger.info(f"  ✓ Reasonable signal distribution")
         
         return labels

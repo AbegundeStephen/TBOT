@@ -266,14 +266,115 @@ class TradingBot:
         logger.info("Initializing Enhanced Signal Aggregators")
         logger.info("-" * 70)
 
-        
+        AGGREGATOR_PRESETS = {
+    "conservative": {
+        "buy_score_threshold": 0.50,
+        "sell_score_threshold": 0.50,
+        "perfect_agreement_bonus": 0.15,
+        "mean_reversion_weight": 1.3,
+        "trend_following_weight": 0.4,
+        "allow_single_mr_signal": True,
+        "single_mr_threshold": 0.70,
+        "allow_single_tf_signal": False,
+        "min_confidence": 0.45,
+        "signal_quality_threshold": 0.55,
+        "high_confidence_threshold": 0.70,
+        "confidence_normalization": True,
+        "enable_bull_filter": True,
+        "block_sells_in_bull": True,
+        "boost_buys_in_bull": 0.05,
+        "regime_confirmation_bars": 3,
+        "verbose_logging": True,
+    },
+    "balanced": {
+        "buy_score_threshold": 0.40,
+        "sell_score_threshold": 0.40,
+        "perfect_agreement_bonus": 0.15,
+        "mean_reversion_weight": 1.2,
+        "trend_following_weight": 0.5,
+        "allow_single_mr_signal": True,
+        "single_mr_threshold": 0.60,
+        "allow_single_tf_signal": False,
+        "min_confidence": 0.35,
+        "signal_quality_threshold": 0.40,
+        "high_confidence_threshold": 0.65,
+        "confidence_normalization": True,
+        "enable_bull_filter": True,
+        "block_sells_in_bull": True,
+        "boost_buys_in_bull": 0.10,
+        "regime_confirmation_bars": 2,
+        "verbose_logging": True,
+    },
+    "aggressive": {
+        "buy_score_threshold": 0.35,
+        "sell_score_threshold": 0.35,
+        "perfect_agreement_bonus": 0.12,
+        "mean_reversion_weight": 1.2,
+        "trend_following_weight": 0.6,
+        "allow_single_mr_signal": True,
+        "single_mr_threshold": 0.55,
+        "allow_single_tf_signal": False,
+        "min_confidence": 0.30,
+        "signal_quality_threshold": 0.35,
+        "high_confidence_threshold": 0.60,
+        "confidence_normalization": True,
+        "enable_bull_filter": True,
+        "block_sells_in_bull": False,
+        "boost_buys_in_bull": 0.12,
+        "regime_confirmation_bars": 1,
+        "verbose_logging": True,
+    },
+    "scalper": {
+        "buy_score_threshold": 0.30,
+        "sell_score_threshold": 0.30,
+        "perfect_agreement_bonus": 0.10,
+        "mean_reversion_weight": 1.5,
+        "trend_following_weight": 0.4,
+        "allow_single_mr_signal": True,
+        "single_mr_threshold": 0.50,
+        "allow_single_tf_signal": False,
+        "min_confidence": 0.25,
+        "signal_quality_threshold": 0.30,
+        "high_confidence_threshold": 0.55,
+        "confidence_normalization": True,
+        "enable_bull_filter": True,
+        "block_sells_in_bull": False,
+        "boost_buys_in_bull": 0.08,
+        "regime_confirmation_bars": 1,
+        "verbose_logging": True,
+    },
+    "sniper": {
+        "buy_score_threshold": 0.60,
+        "sell_score_threshold": 0.60,
+        "perfect_agreement_bonus": 0.20,
+        "mean_reversion_weight": 1.5,
+        "trend_following_weight": 0.3,
+        "allow_single_mr_signal": True,
+        "single_mr_threshold": 0.75,
+        "allow_single_tf_signal": False,
+        "min_confidence": 0.50,
+        "signal_quality_threshold": 0.60,
+        "high_confidence_threshold": 0.75,
+        "confidence_normalization": True,
+        "enable_bull_filter": True,
+        "block_sells_in_bull": True,
+        "boost_buys_in_bull": 0.05,
+        "regime_confirmation_bars": 4,
+        "verbose_logging": True,
+    },
+}
+
         aggregator_mode = self.config.get("aggregator_settings", {}).get(
             "mode", "weighted_voting"
         )
         aggregator_preset = self.config.get("aggregator_settings", {}).get(
-            "preset", "weighted_voting"
+            "preset", "balanced"  # FIX: Changed from "weighted_voting" to "balanced"
         )
+        if aggregator_preset not in AGGREGATOR_PRESETS:
+            logger.warning(f"Unknown preset '{aggregator_preset}', using 'balanced'")
+            aggregator_preset = "balanced"
 
+        confidence_config = AGGREGATOR_PRESETS[aggregator_preset].copy()
         logger.info(f"Aggregator Mode: {aggregator_mode}")
         logger.info(f"Aggregator Preset: {aggregator_preset}")
 
@@ -299,19 +400,15 @@ class TradingBot:
                 continue
 
             # Use safe lookup for preset (fallback to balanced if missing)
-            
 
             # Create aggregator (it will handle missing strategies gracefully)
             self.aggregators[asset_name] = BullMarketFilteredAggregator(
                 mean_reversion_strategy=mr_strategy,
                 trend_following_strategy=tf_strategy,
                 ema_strategy=ema_strategy,
-                confidence_config=self.config['aggregator_settings']['confidence_config']['weighted_voting'],
-                asset_name=asset_name
-                  
-
+                confidence_config=confidence_config,  # Use the preset config we created above
+                asset_name=asset_name,
             )
-
             logger.info(
                 f"[OK] {asset_name}: Aggregator initialized with {available}/3 strategies "
                 f"({aggregator_mode}/{aggregator_preset})"
@@ -574,12 +671,12 @@ class TradingBot:
 
             signal, details = aggregator.get_aggregated_signal(df)
             self.telegram_bot.signal_monitor.record_signal(
-            asset=asset_name,  # "BTC" or "GOLD"
-            signal=signal,
-            details=details,
-            price=current_price,
-            timestamp=datetime.now()
-)
+                asset=asset_name,  # "BTC" or "GOLD"
+                signal=signal,
+                details=details,
+                price=current_price,
+                timestamp=datetime.now(),
+            )
 
             # FIXED: Log ALL THREE strategy signals
             logger.info(f"\n[SIGNAL] Analysis (3 Strategies):")
@@ -597,7 +694,7 @@ class TradingBot:
             )
             logger.info(f"  >> Final Signal: {signal:>2}")
             logger.info(
-                f"  >> Combined Confidence: {details.get('combined_confidence', 0):.3f}"
+                f"  >> Signal Quality: {details.get('signal_quality', 0):.3f}"
             )
             logger.info(f"  >> Reasoning: {details.get('reasoning', 'N/A')}")
 
