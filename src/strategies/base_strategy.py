@@ -72,37 +72,68 @@ class BaseStrategy(ABC):
     def remove_outliers(
         self, df: pd.DataFrame, std_threshold: float = 3.0
     ) -> pd.DataFrame:
-        """Remove statistical outliers using z-score method"""
+        """Remove statistical outliers using IQR method (more robust for financial data)"""
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         numeric_cols = [col for col in numeric_cols if col != "label"]
+        
+        if len(numeric_cols) == 0:
+            logger.info(f"[{self.name}] No numeric columns for outlier detection")
+            return df.copy()
 
-        z_scores = np.abs(
-            (df[numeric_cols] - df[numeric_cols].mean()) / df[numeric_cols].std()
-        )
-        outlier_mask = (z_scores < std_threshold).all(axis=1)
-
-        removed = len(df) - outlier_mask.sum()
+        df_clean = df.copy()
+        
+        # Use IQR method instead of z-score for financial data (more robust)
+        Q1 = df_clean[numeric_cols].quantile(0.25)
+        Q3 = df_clean[numeric_cols].quantile(0.75)
+        IQR = Q3 - Q1
+        
+        # Define bounds using IQR (less aggressive than z-score)
+        lower_bound = Q1 - 3 * IQR
+        upper_bound = Q3 + 3 * IQR
+        
+        # Create mask for rows within bounds
+        outlier_mask = ((df_clean[numeric_cols] >= lower_bound) & 
+                    (df_clean[numeric_cols] <= upper_bound)).all(axis=1)
+        
+        removed = len(df_clean) - outlier_mask.sum()
+        
+        # Safety check: don't remove too many samples
+        if removed > len(df_clean) * 0.5:  # If removing more than 50%
+            logger.warning(f"[{self.name}] Outlier removal would remove {removed}/{len(df_clean)} samples ({removed/len(df_clean)*100:.1f}%)")
+            logger.warning(f"[{self.name}] Using less aggressive bounds (5x IQR)")
+            
+            # Use less aggressive bounds
+            lower_bound = Q1 - 5 * IQR
+            upper_bound = Q3 + 5 * IQR
+            outlier_mask = ((df_clean[numeric_cols] >= lower_bound) & 
+                        (df_clean[numeric_cols] <= upper_bound)).all(axis=1)
+            removed = len(df_clean) - outlier_mask.sum()
+            
+            # If still too aggressive, disable outlier removal
+            if removed > len(df_clean) * 0.3:  # Still removing more than 30%
+                logger.warning(f"[{self.name}] Still removing {removed} samples, disabling outlier removal")
+                return df.copy()
+        
         logger.info(f"[{self.name}] Removed {removed} outlier rows")
-
-        return df[outlier_mask].copy()
+        
+        result = df_clean[outlier_mask].copy()
+        
+        # Final safety check
+        if len(result) < 100:
+            logger.warning(f"[{self.name}] Very few samples remaining ({len(result)}), disabling outlier removal")
+            return df.copy()
+            
+        return result
 
     def train_model(self, df: pd.DataFrame, model_path: str) -> Dict:
-        """Train ML model with proper time-series validation"""
         logger.info(f"[{self.name}] Starting model training...")
-
         df_features = self.generate_features(df)
         df_features["label"] = self.generate_labels(df_features)
-
         df_clean = self.remove_data_leakage(df_features)
-
         if self.config.get("remove_outliers", True):
-            df_clean = self.remove_outliers(
-                df_clean, self.config.get("outlier_std", 3.0)
-            )
+            df_clean = self.remove_outliers(df_clean, self.config.get("outlier_std", 3.0))
 
-        self.feature_columns = [
-            col for col in df_clean.columns if col not in ["label", "timestamp"]
-        ]
+        self.feature_columns = [col for col in df_clean.columns if col not in ["label", "timestamp"]]
         X = df_clean[self.feature_columns].values
         y = df_clean["label"].values
 
@@ -119,22 +150,28 @@ class BaseStrategy(ABC):
         tscv = TimeSeriesSplit(n_splits=5)
         cv_scores = []
 
+        model_params = self.config.get("model_params", {})
+
+        # Ensure class_weight is correctly defined
+        if "class_weight" not in model_params:
+            model_params["class_weight"] = "balanced"
+        else:
+            # Convert string keys to integers if necessary
+            class_weight = model_params["class_weight"]
+            if isinstance(class_weight, dict):
+                class_weight = {int(k): v for k, v in class_weight.items()}
+                model_params["class_weight"] = class_weight
+
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X_scaled)):
             X_train, X_val = X_scaled[train_idx], X_scaled[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
-            model_params = self.config.get("model_params", {})
-            if "class_weight" not in model_params:
-                model_params["class_weight"] = "balanced"
             temp_model = RandomForestClassifier(**model_params)
             temp_model.fit(X_train, y_train)
             score = temp_model.score(X_val, y_val)
             cv_scores.append(score)
             logger.info(f"[{self.name}] Fold {fold+1} accuracy: {score:.4f}")
 
-        model_params = self.config.get("model_params", {})
-        if "class_weight" not in model_params:
-            model_params["class_weight"] = "balanced"
         self.model = RandomForestClassifier(**model_params)
         self.model.fit(X_scaled, y)
 
@@ -154,9 +191,9 @@ class BaseStrategy(ABC):
             "train_samples": len(X),
             "n_features": len(self.feature_columns),
         }
-
         logger.info(f"[{self.name}] Training complete: {metrics}")
         return metrics
+
 
     def load_model(self, model_path: str) -> bool:
         """Load trained model from disk"""
