@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Main Trading Bot - WITH TELEGRAM INTEGRATION
-FIXED: Proper EMA Strategy Integration
+Main Trading Bot - CORRECTED HANDLER INTEGRATION
+Fixes: Proper initialization order, configuration structure, and async handling
 """
 
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import schedule
 import io
+import signal
 from threading import Thread
 
 # FIX Windows encoding BEFORE any imports that use logging
@@ -42,7 +43,6 @@ from src.telegram import TradingTelegramBot
 from telegram_config import TELEGRAM_CONFIG
 
 
-# Setup logging with UTF-8 encoding
 def setup_logging(config):
     """Setup logging with proper encoding"""
     log_config = config.get("logging", {})
@@ -73,32 +73,30 @@ logger = logging.getLogger(__name__)
 
 
 class TradingBot:
-    """
-    Main trading bot - WITH TELEGRAM INTEGRATION
-    """
+    """Main trading bot with CORRECTED handler integration"""
 
     def __init__(self, config_path: str = "config/config.json"):
         logger.info("=" * 70)
-        logger.info("INITIALIZING TRADING BOT WITH TELEGRAM")
+        logger.info("INITIALIZING TRADING BOT WITH HANDLER INTEGRATION")
         logger.info("=" * 70)
 
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
 
         setup_logging(self.config)
+
+        # Initialize core components
         self.data_manager = DataManager(self.config)
         self.portfolio_manager = None
 
-        # FIXED: Use consistent strategy names
-        self.strategies = {"BTC": {}, "GOLD": {}}
-
-        self._initialize_strategies()
-        self.aggregators = {}
-        self._initialize_aggregators()
-
+        # Handler instances (initialized later)
         self.binance_handler = None
         self.mt5_handler = None
 
+        # Strategy storage
+        self.strategies = {"BTC": {}, "GOLD": {}}
+
+        # Trading state
         self.is_running = False
         self.trade_count_today = 0
         self.daily_loss = 0.0
@@ -106,73 +104,130 @@ class TradingBot:
         self.last_trade_times = {}
         self.last_market_status_log = None
 
-        # TELEGRAM INTEGRATION
+        # Signal aggregators
+        self.aggregators = {}
+
+        # Telegram integration
         self.telegram_bot = None
         self.telegram_loop = None
         self.telegram_thread = None
-        self.telegram_ready = asyncio.Event()
+        self._shutdown_requested = False
+
+        # Initialize in correct order
         self._initialize_telegram()
+        self._initialize_strategies()
 
     def initialize_exchanges(self):
         """
-        Initialize exchange connections and portfolio manager
-        Portfolio manager MUST be initialized AFTER exchanges to fetch actual capital
+        Initialize exchange connections and handlers
+
+        CORRECT ORDER:
+        1. Connect to data sources (MT5, Binance)
+        2. Initialize portfolio manager with connections
+        3. Initialize execution handlers with portfolio manager
         """
         logger.info("\n" + "-" * 70)
-        logger.info("Initializing Exchange Connections")
+        logger.info("STEP 1: Initializing Exchange Connections")
         logger.info("-" * 70)
 
-        # Track MT5 initialization status
         mt5_initialized = False
 
-        # Initialize MT5 first (for GOLD)
+        # Connect to MT5 (for GOLD)
         if self.config["assets"]["GOLD"].get("enabled", False):
-            if self.data_manager.initialize_mt5():
-                logger.info("[OK] MT5 connection established")
-                mt5_initialized = True
-            else:
-                logger.error("[FAIL] Failed to initialize MT5 - GOLD trading disabled")
+            try:
+                if self.data_manager.initialize_mt5():
+                    logger.info("[OK] MT5 connection established")
+                    mt5_initialized = True
+                else:
+                    logger.error(
+                        "[FAIL] Failed to initialize MT5 - GOLD trading disabled"
+                    )
+                    self.config["assets"]["GOLD"]["enabled"] = False
+            except Exception as e:
+                logger.error(f"[FAIL] MT5 initialization error: {e}")
+                self.config["assets"]["GOLD"]["enabled"] = False
 
-        # Initialize Binance (for BTC)
+        # Connect to Binance (for BTC)
         if self.config["assets"]["BTC"].get("enabled", False):
-            if self.data_manager.initialize_binance():
-                logger.info("[OK] Binance connection established")
-            else:
-                logger.error(
-                    "[FAIL] Failed to initialize Binance - BTC trading disabled"
-                )
+            try:
+                if self.data_manager.initialize_binance():
+                    logger.info("[OK] Binance connection established")
+                else:
+                    logger.error(
+                        "[FAIL] Failed to initialize Binance - BTC trading disabled"
+                    )
+                    self.config["assets"]["BTC"]["enabled"] = False
+            except Exception as e:
+                logger.error(f"[FAIL] Binance initialization error: {e}")
+                self.config["assets"]["BTC"]["enabled"] = False
 
-        # NOW initialize portfolio manager with exchange connections
+        # Initialize portfolio manager with exchange clients
         logger.info("\n" + "-" * 70)
-        logger.info("Initializing Portfolio Manager with Exchange Capital")
+        logger.info("STEP 2: Initializing Portfolio Manager")
         logger.info("-" * 70)
 
-        # Pass MT5 handler and Binance client to portfolio manager
-        import MetaTrader5 as mt5
+        try:
+            import MetaTrader5 as mt5
 
-        mt5_handler = mt5 if mt5_initialized else None
+            mt5_handler = mt5 if mt5_initialized else None
+        except ImportError:
+            mt5_handler = None
+            logger.warning("[WARN] MetaTrader5 not available")
 
-        self.portfolio_manager = PortfolioManager(
-            self.config,
-            mt5_handler=mt5_handler,
-            binance_client=self.data_manager.binance_client,
-        )
+        try:
+            self.portfolio_manager = PortfolioManager(
+                config=self.config,
+                mt5_handler=mt5_handler,
+                binance_client=self.data_manager.binance_client,
+            )
+            logger.info(
+                f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
+            )
+            logger.info(f"     Capital: ${self.portfolio_manager.current_capital:,.2f}")
+        except Exception as e:
+            logger.error(f"[FAIL] Portfolio Manager initialization failed: {e}")
+            raise
 
-        # Initialize execution handlers AFTER portfolio manager
+        # Initialize execution handlers with portfolio manager
+        logger.info("\n" + "-" * 70)
+        logger.info("STEP 3: Initializing Execution Handlers")
+        logger.info("-" * 70)
+
+        # Initialize Binance handler if both BTC is enabled AND we have a Binance client
         if (
             self.config["assets"]["BTC"].get("enabled", False)
-            and self.data_manager.binance_client
+            and self.data_manager.binance_client is not None
         ):
-            self.binance_handler = BinanceExecutionHandler(
-                self.config,
-                self.data_manager.binance_client,
-                self.portfolio_manager,
-            )
-            logger.info("[OK] Binance handler initialized")
+            try:
+                self.binance_handler = BinanceExecutionHandler(
+                    config=self.config,
+                    client=self.data_manager.binance_client,
+                    portfolio_manager=self.portfolio_manager,
+                )
+                logger.info("[OK] Binance Execution Handler initialized")
+            except Exception as e:
+                logger.error(f"[FAIL] Binance handler initialization: {e}")
+                self.binance_handler = None
+                self.config["assets"]["BTC"]["enabled"] = False
 
+        # Initialize MT5 handler if both GOLD is enabled AND MT5 is initialized
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
-            self.mt5_handler = MT5ExecutionHandler(self.config, self.portfolio_manager)
-            logger.info("[OK] MT5 handler initialized")
+            try:
+                self.mt5_handler = MT5ExecutionHandler(
+                    config=self.config,
+                    portfolio_manager=self.portfolio_manager,
+                )
+                logger.info("[OK] MT5 Execution Handler initialized")
+            except Exception as e:
+                logger.error(f"[FAIL] MT5 handler initialization: {e}")
+                self.mt5_handler = None
+                self.config["assets"]["GOLD"]["enabled"] = False
+
+        # Verify at least one handler is available
+        if not self.binance_handler and not self.mt5_handler:
+            raise RuntimeError(
+                "No execution handlers available! Check configuration and API credentials."
+            )
 
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
@@ -184,239 +239,194 @@ class TradingBot:
             token = TELEGRAM_CONFIG.get("bot_token")
             admin_ids = TELEGRAM_CONFIG.get("admin_ids", [])
 
-            if not token:
-                logger.warning("[TELEGRAM] No bot token provided, skipping")
-                return
-
-            if not admin_ids:
-                logger.warning("[TELEGRAM] No admin IDs provided, skipping")
+            if not token or not admin_ids:
+                logger.warning(
+                    f"[TELEGRAM] Missing config: token={bool(token)}, admins={bool(admin_ids)}"
+                )
                 return
 
             self.telegram_bot = TradingTelegramBot(
                 token=token, admin_ids=admin_ids, trading_bot=self
             )
-
-            logger.info(f"[TELEGRAM] Bot initialized for {len(admin_ids)} admin(s)")
+            logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s)")
 
         except Exception as e:
-            logger.error(f"[TELEGRAM] Failed to initialize: {e}")
-            self.telegram_bot = None
+            logger.warning(f"[TELEGRAM] Initialization failed: {e}")
 
     def _initialize_strategies(self):
-        """
-        FIXED: Initialize all THREE strategies for each enabled asset
-        Properly handles exponential_moving_averages config key
-        """
+        """Initialize all three strategies for enabled assets"""
         logger.info("\n" + "-" * 70)
-        logger.info("Initializing Strategies (Mean Reversion + Trend Following + EMA)")
+        logger.info("Initializing Strategies (MR + TF + EMA)")
         logger.info("-" * 70)
 
         for asset_name, asset_config in self.config["assets"].items():
             if not asset_config.get("enabled", False):
-                logger.info(f"[!] {asset_name}: Disabled in config")
+                logger.debug(f"[SKIP] {asset_name}: Disabled")
                 continue
 
-            strategies_config = asset_config.get("strategies", {})
+            strategies_cfg = asset_config.get("strategies", {})
+            strategy_cfgs = self.config.get("strategy_configs", {})
 
-            # 1. Mean Reversion
-            if strategies_config.get("mean_reversion", {}).get("enabled", False):
-                mr_config = self.config["strategy_configs"]["mean_reversion"][
-                    asset_name
-                ]
-                self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(
-                    mr_config
-                )
-                logger.info(f"[OK] {asset_name}: Mean Reversion initialized")
+            # Mean Reversion
+            if strategies_cfg.get("mean_reversion", {}).get("enabled", False):
+                try:
+                    cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
+                    self.strategies[asset_name]["mean_reversion"] = (
+                        MeanReversionStrategy(cfg)
+                    )
+                    logger.info(f"[OK] {asset_name}: Mean Reversion")
+                except Exception as e:
+                    logger.error(f"[FAIL] {asset_name} Mean Reversion: {e}")
 
-            # 2. Trend Following
-            if strategies_config.get("trend_following", {}).get("enabled", False):
-                tf_config = self.config["strategy_configs"]["trend_following"][
-                    asset_name
-                ]
-                self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(
-                    tf_config
-                )
-                logger.info(f"[OK] {asset_name}: Trend Following initialized")
+            # Trend Following
+            if strategies_cfg.get("trend_following", {}).get("enabled", False):
+                try:
+                    cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
+                    self.strategies[asset_name]["trend_following"] = (
+                        TrendFollowingStrategy(cfg)
+                    )
+                    logger.info(f"[OK] {asset_name}: Trend Following")
+                except Exception as e:
+                    logger.error(f"[FAIL] {asset_name} Trend Following: {e}")
 
-            # 3. EMA Strategy (FIXED: Check correct config key)
-            # Config file uses "exponential_moving_averages" but we store as "ema_strategy"
-            if strategies_config.get("exponential_moving_averages", {}).get(
+            # EMA Strategy (note: config key is "exponential_moving_averages")
+            if strategies_cfg.get("exponential_moving_averages", {}).get(
                 "enabled", False
             ):
-                ema_config = self.config["strategy_configs"][
-                    "exponential_moving_averages"
-                ][asset_name]
-                self.strategies[asset_name]["ema_strategy"] = EMAStrategy(ema_config)
-                logger.info(f"[OK] {asset_name}: EMA Strategy initialized")
+                try:
+                    cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(
+                        asset_name, {}
+                    )
+                    self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
+                    logger.info(f"[OK] {asset_name}: EMA Strategy")
+                except Exception as e:
+                    logger.error(f"[FAIL] {asset_name} EMA Strategy: {e}")
 
-            # Log what we have
-            enabled_count = len(self.strategies[asset_name])
-            if enabled_count == 0:
-                logger.warning(f"[!] {asset_name}: NO strategies enabled!")
+            enabled = len(self.strategies[asset_name])
+            if enabled == 0:
+                logger.warning(f"[!] {asset_name}: NO strategies enabled")
             else:
+                strat_names = ", ".join(self.strategies[asset_name].keys())
                 logger.info(
-                    f"[OK] {asset_name}: {enabled_count}/3 strategies active: {list(self.strategies[asset_name].keys())}"
+                    f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}"
                 )
 
+        # Initialize aggregators after strategies are ready
+        self._initialize_aggregators()
+
     def _initialize_aggregators(self):
-        """
-        FIXED: Initialize signal aggregators with proper strategy checking
-        """
+        """Initialize signal aggregators"""
         logger.info("\n" + "-" * 70)
-        logger.info("Initializing Enhanced Signal Aggregators")
+        logger.info("Initializing Signal Aggregators")
         logger.info("-" * 70)
 
         AGGREGATOR_PRESETS = {
             "conservative": {
-                "mean_reversion_weight": 0.6,
-                "trend_following_weight": 1.2,
-                "ema_weight": 1.2,
-                "buy_score_threshold": 0.45,
-                "sell_score_threshold": 0.50,
+                "buy_score_threshold": 0.65,
+                "sell_score_threshold": 0.65,
                 "perfect_agreement_bonus": 0.15,
-                "allow_single_mr_signal": False,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_tf_threshold": 0.65,
-                "single_ema_threshold": 0.65,
+                "mean_reversion_weight": 1.0,
+                "trend_following_weight": 0.9,
+                "min_confidence": 0.50,
+                "signal_quality_threshold": 0.55,
+                "high_confidence_threshold": 0.70,
+                "enable_bull_filter": True,
+                "block_sells_in_bull": True,
+                "boost_buys_in_bull": 0.05,
+                "regime_confirmation_bars": 3,
+                "confidence_normalization": True,
+            },
+            "balanced": {
+                "buy_score_threshold": 0.40,
+                "sell_score_threshold": 0.40,
+                "mean_reversion_weight": 1.2,
+                "trend_following_weight": 0.5,
+                "allow_single_mr_signal": True,
+                "single_mr_threshold": 0.60,
+                "boost_buys_in_bull": 0.10,
+            },
+            "aggressive": {
+                "buy_score_threshold": 0.45,
+                "sell_score_threshold": 0.45,
+                "perfect_agreement_bonus": 0.08,
+                "mean_reversion_weight": 1.0,
+                "trend_following_weight": 0.7,
+                "min_confidence": 0.35,
+                "signal_quality_threshold": 0.40,
+                "high_confidence_threshold": 0.60,
                 "enable_bull_filter": True,
                 "block_sells_in_bull": False,
                 "boost_buys_in_bull": 0.10,
-                "sell_penalty_in_bull": 0.15,
-                "regime_confirmation_bars": 3,
-                "regime_cooldown_hours": 6,
-                "verbose_logging": True,
-            },
-            "balanced": {
-                "mean_reversion_weight": 0.7,
-                "trend_following_weight": 1.1,
-                "ema_weight": 1.2,
-                "buy_score_threshold": 0.35,
-                "sell_score_threshold": 0.40,
-                "perfect_agreement_bonus": 0.15,
-                "allow_single_mr_signal": False,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_tf_threshold": 0.60,
-                "single_ema_threshold": 0.60,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": False,
-                "boost_buys_in_bull": 0.15,
-                "sell_penalty_in_bull": 0.20,
-                "regime_confirmation_bars": 2,
-                "regime_cooldown_hours": 6,
-                "verbose_logging": True,
-            },
-            "aggressive": {
-                "mean_reversion_weight": 0.8,
-                "trend_following_weight": 1.0,
-                "ema_weight": 1.1,
-                "buy_score_threshold": 0.30,
-                "sell_score_threshold": 0.35,
-                "perfect_agreement_bonus": 0.12,
-                "allow_single_mr_signal": False,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_tf_threshold": 0.55,
-                "single_ema_threshold": 0.55,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": False,
-                "boost_buys_in_bull": 0.15,
-                "sell_penalty_in_bull": 0.15,
                 "regime_confirmation_bars": 1,
-                "regime_cooldown_hours": 3,
-                "verbose_logging": True,
+                "confidence_normalization": True,
             },
         }
-        aggregator_mode = self.config.get("aggregator_settings", {}).get(
-            "mode", "weighted_voting"
-        )
-        aggregator_preset = self.config.get("aggregator_settings", {}).get(
-            "preset", "balanced"  # FIX: Changed from "weighted_voting" to "balanced"
-        )
-        if aggregator_preset not in AGGREGATOR_PRESETS:
-            logger.warning(f"Unknown preset '{aggregator_preset}', using 'balanced'")
-            aggregator_preset = "balanced"
 
-        confidence_config = AGGREGATOR_PRESETS[aggregator_preset].copy()
-        logger.info(f"Aggregator Mode: {aggregator_mode}")
-        logger.info(f"Aggregator Preset: {aggregator_preset}")
+        preset = self.config.get("aggregator_settings", {}).get("preset", "balanced")
+        if preset not in AGGREGATOR_PRESETS:
+            logger.warning(f"Unknown preset '{preset}', using 'balanced'")
+            preset = "balanced"
+
+        config_for_aggregators = AGGREGATOR_PRESETS[preset]
 
         for asset_name, strategies in self.strategies.items():
-            # FIXED: Get strategies with correct keys
-            mr_strategy = strategies.get("mean_reversion")
-            tf_strategy = strategies.get("trend_following")
-            ema_strategy = strategies.get("ema_strategy")  # FIXED: Use consistent key
-
-            # Count available strategies
-            available = sum(
-                [
-                    mr_strategy is not None,
-                    tf_strategy is not None,
-                    ema_strategy is not None,
-                ]
-            )
-
-            if available == 0:
-                logger.warning(
-                    f"[!] {asset_name}: No strategies available for aggregator"
-                )
+            if not self.config["assets"][asset_name].get("enabled", False):
                 continue
 
-            # Use safe lookup for preset (fallback to balanced if missing)
+            strategy_count = len(strategies)
+            if strategy_count == 0:
+                logger.warning(f"[!] {asset_name}: No strategies, skipping aggregator")
+                continue
 
-            # Create aggregator (it will handle missing strategies gracefully)
-            self.aggregators[asset_name] = BullMarketFilteredAggregator(
-                mean_reversion_strategy=mr_strategy,
-                trend_following_strategy=tf_strategy,
-                ema_strategy=ema_strategy,
-                confidence_config=confidence_config,  # Use the preset config we created above
-                asset_name=asset_name,
-            )
-            logger.info(
-                f"[OK] {asset_name}: Aggregator initialized with {available}/3 strategies "
-                f"({aggregator_mode}/{aggregator_preset})"
-            )
+            try:
+                self.aggregators[asset_name] = BullMarketFilteredAggregator(
+                    mean_reversion_strategy=strategies.get("mean_reversion"),
+                    trend_following_strategy=strategies.get("trend_following"),
+                    ema_strategy=strategies.get("ema_strategy"),
+                    confidence_config=config_for_aggregators,
+                    asset_name=asset_name,
+                )
+                logger.info(
+                    f"[OK] {asset_name}: Aggregator ({strategy_count} strategies, {preset})"
+                )
+            except Exception as e:
+                logger.error(f"[FAIL] {asset_name} aggregator: {e}")
 
     def load_models(self):
-        """
-        FIXED: Load trained ML models for ALL strategies including EMA
-        """
+        """Load trained ML models for all strategies"""
         logger.info("\n" + "-" * 70)
-        logger.info("Loading Trained Models (Including EMA)")
+        logger.info("Loading Trained Models")
         logger.info("-" * 70)
 
-        models_loaded = 0
-        models_expected = 0
+        loaded = 0
+        expected = 0
 
         for asset_name, strategies in self.strategies.items():
             for strategy_name, strategy in strategies.items():
-                models_expected += 1
+                expected += 1
 
-                # FIXED: Map internal strategy name to model filename
-                # Internal: "ema_strategy" -> File: "ema_strategy_btc.pkl"
                 model_filename = f"{strategy_name}_{asset_name.lower()}.pkl"
                 model_path = f"models/{model_filename}"
 
                 if Path(model_path).exists():
-                    if strategy.load_model(model_path):
-                        logger.info(f"[OK] Loaded: {model_path}")
-                        models_loaded += 1
-                    else:
-                        logger.error(f"[FAIL] Failed to load: {model_path}")
+                    try:
+                        if strategy.load_model(model_path):
+                            logger.info(f"[OK] {model_path}")
+                            loaded += 1
+                        else:
+                            logger.error(f"[FAIL] {model_path} (load returned False)")
+                    except Exception as e:
+                        logger.error(f"[FAIL] {model_path}: {e}")
                 else:
                     logger.error(f"[FAIL] Not found: {model_path}")
 
-        if models_loaded == 0:
+        if loaded == 0:
             logger.error("=" * 70)
-            logger.error("NO MODELS LOADED!")
-            logger.error("Please run: python train.py")
+            logger.error("NO MODELS LOADED! Run: python train.py")
             logger.error("=" * 70)
             sys.exit(1)
 
-        logger.info(
-            f"\n[OK] Successfully loaded {models_loaded}/{models_expected} models"
-        )
+        logger.info(f"\n[OK] Loaded {loaded}/{expected} models")
 
     def reset_daily_counters(self):
         """Reset daily trading counters"""
@@ -427,81 +437,80 @@ class TradingBot:
             self.last_trade_date = current_date
             logger.info(f"[RESET] Daily counters reset for {current_date}")
 
-            # Refresh capital from exchanges at start of new day
             if not self.portfolio_manager.is_paper_mode:
-                logger.info("[REFRESH] Fetching updated capital for new trading day...")
+                logger.info("[REFRESH] Fetching updated capital...")
                 self.portfolio_manager.refresh_capital()
 
+            # Send daily summary via Telegram
             if self.telegram_bot and self.telegram_loop:
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self.telegram_bot.send_daily_summary(), self.telegram_loop
                     )
                 except Exception as e:
-                    logger.error(f"Failed to send daily summary: {e}")
+                    logger.debug(f"[TELEGRAM] Daily summary error: {e}")
 
     def check_trading_limits(self) -> bool:
         """Check if trading limits are reached"""
-        risk_config = self.config["risk_management"]
+        risk_cfg = self.config.get("risk_management", {})
 
-        max_daily_trades = risk_config.get("max_daily_trades", 10)
+        max_daily_trades = risk_cfg.get("max_daily_trades", 10)
         if self.trade_count_today >= max_daily_trades:
-            logger.warning(f"[LIMIT] Daily trade limit reached ({max_daily_trades})")
+            logger.warning(
+                f"[LIMIT] Daily trades ({self.trade_count_today}/{max_daily_trades})"
+            )
             return False
 
-        max_daily_loss = risk_config.get("max_daily_loss_pct", 0.05)
+        max_daily_loss = risk_cfg.get("max_daily_loss_pct", 0.05)
         if self.daily_loss >= max_daily_loss:
-            logger.warning(f"[LIMIT] Daily loss limit reached ({max_daily_loss:.2%})")
+            logger.warning(f"[LIMIT] Daily loss ({self.daily_loss:.2%})")
             return False
 
-        circuit_breaker = risk_config.get("circuit_breaker_loss_pct", 0.10)
-        total_loss_pct = self.daily_loss / self.portfolio_manager.initial_capital
-        if total_loss_pct >= circuit_breaker:
-            logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {total_loss_pct:.2%}")
-
-            # Notify via Telegram
+        circuit_breaker = risk_cfg.get("circuit_breaker_loss_pct", 0.10)
+        loss_pct = (
+            self.daily_loss / self.portfolio_manager.initial_capital
+            if self.portfolio_manager.initial_capital > 0
+            else 0
+        )
+        if loss_pct >= circuit_breaker:
+            logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
             if self.telegram_bot and self.telegram_loop:
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self.telegram_bot.notify_error(
-                            f"🚨 CIRCUIT BREAKER ACTIVATED!\n"
-                            f"Loss: {total_loss_pct:.2%}\n"
-                            f"Trading halted."
+                            f"🚨 CIRCUIT BREAKER!\nLoss: {loss_pct:.2%}"
                         ),
                         self.telegram_loop,
                     )
                 except:
                     pass
-
             return False
 
-        trading_config = self.config["trading"]
-        if trading_config.get("allow_simultaneous_positions", True):
-            max_positions = trading_config.get("max_simultaneous_positions", 2)
-            current_positions = self.portfolio_manager.get_open_positions_count()
-            if current_positions >= max_positions:
-                logger.warning(f"[LIMIT] Max positions reached ({max_positions})")
+        trading_cfg = self.config.get("trading", {})
+        if trading_cfg.get("allow_simultaneous_positions", True):
+            max_positions = trading_cfg.get("max_simultaneous_positions", 2)
+            current = self.portfolio_manager.get_open_positions_count()
+            if current >= max_positions:
+                logger.info(f"[LIMIT] Max positions ({current}/{max_positions})")
                 return False
 
         return True
 
     def check_min_time_between_trades(self, asset_name: str) -> bool:
-        """Check minimum time between trades for an asset"""
-        min_time_minutes = self.config["trading"].get(
-            "min_time_between_trades_minutes", 60
-        )
+        """Check minimum time between trades"""
+        min_minutes = self.config["trading"].get("min_time_between_trades_minutes", 60)
 
         if asset_name in self.last_trade_times:
-            time_since_last = datetime.now() - self.last_trade_times[asset_name]
-            if time_since_last.total_seconds() < min_time_minutes * 60:
-                remaining = min_time_minutes - (time_since_last.total_seconds() / 60)
-                logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f} min remaining")
+            elapsed = datetime.now() - self.last_trade_times[asset_name]
+            if elapsed.total_seconds() < min_minutes * 60:
+                remaining = min_minutes - (elapsed.total_seconds() / 60)
+                logger.debug(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining")
                 return False
 
         return True
 
     def check_market_hours(self, asset_name: str) -> bool:
-        """Check if market is open for the given asset"""
+        """Check if market is open for the asset"""
         if asset_name == "BTC":
             return True
 
@@ -514,14 +523,6 @@ class TradingBot:
                 current_hour = datetime.now().hour
                 if self.last_market_status_log != current_hour:
                     logger.info(f"[MARKET] {asset_name}: {message}")
-
-                    seconds_until = MarketHours.time_until_market_open("gold")
-                    if seconds_until > 0:
-                        hours_until = seconds_until / 3600
-                        logger.info(
-                            f"[MARKET] {asset_name}: Market opens in {hours_until:.1f} hours"
-                        )
-
                     self.last_market_status_log = current_hour
 
             return is_open
@@ -529,105 +530,86 @@ class TradingBot:
         return True
 
     def trade_asset(self, asset_name: str):
-        """
-        FIXED: Execute trading logic with proper signal logging for ALL 3 strategies
-        """
-        asset_config = self.config["assets"][asset_name]
+        """Execute trading logic for a single asset"""
+        asset_cfg = self.config["assets"][asset_name]
 
-        if not asset_config.get("enabled", False):
+        if not asset_cfg.get("enabled", False):
             return
 
         if not self.check_market_hours(asset_name):
-            logger.debug(f"[SKIP] {asset_name}: Market is closed")
+            logger.debug(f"[SKIP] {asset_name}: Market closed")
             return
 
-        exchange = asset_config.get("exchange")
-        symbol = asset_config.get("symbol")
+        exchange = asset_cfg.get("exchange", "binance")
+        symbol = asset_cfg.get("symbol", "BTCUSDT")
 
-        if exchange == "binance" and not self.binance_handler:
-            logger.warning(f"[!] {asset_name}: Binance handler not available")
-            return
-        elif exchange == "mt5" and not self.mt5_handler:
-            logger.warning(f"[!] {asset_name}: MT5 handler not available")
+        # Verify handler is available
+        handler = self.binance_handler if exchange == "binance" else self.mt5_handler
+        if not handler:
+            logger.warning(f"[!] {asset_name}: {exchange.upper()} handler unavailable")
             return
 
         try:
             logger.info(f"\n{'-' * 70}")
-            logger.info(f"Processing {asset_name}")
+            logger.info(f"Trading {asset_name}")
             logger.info(f"{'-' * 70}")
 
-            # Show market status
+            # Show market info
             if asset_name == "GOLD":
-                status, message = MarketHours.get_market_status("gold")
-                logger.info(f"[MARKET] {message}")
-            elif asset_name == "BTC":
-                logger.info(f"[MARKET] BTC market is always open (24/7)")
+                status, msg = MarketHours.get_market_status("gold")
+                logger.info(f"[MARKET] {msg}")
+            else:
+                logger.info(f"[MARKET] {asset_name}: 24/7 (Cryptocurrency)")
 
-            # Get data
+            # Fetch data
             end_time = datetime.now(timezone.utc)
 
             if exchange == "binance":
-                interval = asset_config.get("interval", "1h")
-                lookback_days = (
-                    15 if interval == "1h" else (60 if interval == "4h" else 365)
-                )
+                interval = asset_cfg.get("interval", "1h")
+                lookback = 15 if interval == "1h" else 60
             else:
-                timeframe = asset_config.get("timeframe", "H1")
-                lookback_days = 25 if timeframe in ["H1", "TIMEFRAME_H1"] else 75
+                timeframe = asset_cfg.get("timeframe", "H1")
+                lookback = 25 if timeframe == "H1" else 75
 
-            start_time = end_time - timedelta(days=lookback_days)
+            start_time = end_time - timedelta(days=lookback)
 
-            logger.info(f"[DATA] Fetching {lookback_days} days up to NOW...")
-            logger.info(
-                f"[TIME] Range: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')} UTC"
-            )
+            logger.info(f"[DATA] Fetching {lookback} days...")
 
-            # Fetch data
             if exchange == "binance":
                 df = self.data_manager.fetch_binance_data(
                     symbol=symbol,
-                    interval=interval,
+                    interval=asset_cfg.get("interval", "1h"),
                     start_date=start_time.strftime("%Y-%m-%d"),
                     end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
             else:
                 df = self.data_manager.fetch_mt5_data(
                     symbol=symbol,
-                    timeframe=timeframe,
+                    timeframe=asset_cfg.get("timeframe", "H1"),
                     start_date=start_time.strftime("%Y-%m-%d"),
                     end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
 
             df = self.data_manager.clean_data(df)
 
-            min_bars_for_prediction = 250  # Increased for EMA 200
-
-            if len(df) < min_bars_for_prediction:
+            min_bars = 250
+            if len(df) < min_bars:
                 logger.warning(
-                    f"[!] {asset_name}: Insufficient data ({len(df)} bars, need {min_bars_for_prediction})"
+                    f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})"
                 )
                 return
 
-            logger.info(
-                f"[OK] Fetched {len(df)} bars "
-                f"({df.index[0].strftime('%Y-%m-%d %H:%M')} to "
-                f"{df.index[-1].strftime('%Y-%m-%d %H:%M')} UTC)"
-            )
+            logger.info(f"[OK] {len(df)} bars fetched")
 
             # Get current price
-            if exchange == "binance":
-                current_price = self.binance_handler.get_current_price(symbol)
-                if current_price is None:
-                    logger.warning(
-                        f"[!] Could not get live price, using last candle: ${df['close'].iloc[-1]:,.2f}"
-                    )
-                    current_price = df["close"].iloc[-1]
-            else:
-                current_price = df["close"].iloc[-1]
+            current_price = (
+                handler.get_current_price(symbol)
+                if hasattr(handler, "get_current_price")
+                else df["close"].iloc[-1]
+            )
+            logger.info(f"[PRICE] {asset_name}: ${current_price:,.2f}")
 
-            logger.info(f"[PRICE] Current {asset_name} Price: ${current_price:,.2f}")
-
-            # Get signal
+            # Get aggregated signal
             aggregator = self.aggregators.get(asset_name)
             if not aggregator:
                 logger.warning(f"[!] {asset_name}: No aggregator configured")
@@ -641,52 +623,63 @@ class TradingBot:
                 price=current_price,
                 timestamp=datetime.now(),
             )
+            # Log all three strategy signals
+            logger.info(f"\n[SIGNAL] Strategy Analysis:")
+            logger.info(
+                f"  Mean Reversion:   {details.get('mean_reversion_signal', 0):>2} "
+                f"(confidence: {details.get('mean_reversion_confidence', 0):.3f})"
+            )
+            logger.info(
+                f"  Trend Following:  {details.get('trend_following_signal', 0):>2} "
+                f"(confidence: {details.get('trend_following_confidence', 0):.3f})"
+            )
+            logger.info(
+                f"  EMA Strategy:     {details.get('ema_signal', 0):>2} "
+                f"(confidence: {details.get('ema_confidence', 0):.3f})"
+            )
+            logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
+            logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
+            logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
 
-            # FIXED: Log ALL THREE strategy signals
-            logger.info(f"\n[SIGNAL] Analysis (3 Strategies):")
-            logger.info(
-                f"  Mean Reversion: Signal={details.get('mean_reversion_signal', 0):>2}, "
-                f"Confidence={details.get('mean_reversion_confidence', 0):.3f}"
-            )
-            logger.info(
-                f"  Trend Following: Signal={details.get('trend_following_signal', 0):>2}, "
-                f"Confidence={details.get('trend_following_confidence', 0):.3f}"
-            )
-            logger.info(
-                f"  EMA Strategy:    Signal={details.get('ema_signal', 0):>2}, "
-                f"Confidence={details.get('ema_confidence', 0):.3f}"
-            )
-            logger.info(f"  >> Final Signal: {signal:>2}")
-            logger.info(
-                f"  >> Signal Quality: {details.get('signal_quality', 0):.3f}"
-            )
-            logger.info(f"  >> Reasoning: {details.get('reasoning', 'N/A')}")
-
-            # Check if we're opening a new position (for Telegram notification)
+            # Track position before execution
             was_new_position = False
-            existing_position = self.portfolio_manager.get_position(asset_name)
+            existing_pos = self.portfolio_manager.get_position(asset_name)
 
-            # Execute signal
+            # Execute signal with appropriate handler
             success = False
-
             if exchange == "binance":
                 success = self.binance_handler.execute_signal(
-                    signal, current_price, asset_name
+                    signal=signal,
+                    current_price=current_price,
+                    asset_name=asset_name,
+                    confidence_score=details.get("combined_confidence", 0.5),
+                    market_condition=details.get("market_condition", "neutral"),
                 )
                 self.binance_handler.check_and_update_positions(asset_name)
             else:
-                success = self.mt5_handler.execute_signal(signal, symbol, asset_name)
+                success = self.mt5_handler.execute_signal(
+                    signal=signal,
+                    symbol=symbol,
+                    asset=asset_name,
+                    confidence_score=details.get("combined_confidence", 0.5),
+                    market_condition=details.get("market_condition", "neutral"),
+                )
                 self.mt5_handler.check_and_update_positions(asset_name)
 
-            # Check if a new position was opened
-            new_position = self.portfolio_manager.get_position(asset_name)
-            if new_position and not existing_position and signal != 0:
+            # Check if new position was opened
+            new_pos = self.portfolio_manager.get_position(asset_name)
+            if new_pos and not existing_pos and signal != 0:
                 was_new_position = True
+                self.trade_count_today += 1
+                self.last_trade_times[asset_name] = datetime.now()
+                logger.info(
+                    f"[SUCCESS] {asset_name} trade executed (count: {self.trade_count_today})"
+                )
 
-            # Telegram notification for new position
+                # Telegram notification for new position
             if was_new_position and success:
                 try:
-                    pos = new_position
+                    pos = new_pos
                     self._send_telegram_notification(
                         self.telegram_bot.notify_trade_opened(
                             asset=asset_name,
@@ -711,9 +704,8 @@ class TradingBot:
                     )
                 except Exception as e:
                     logger.error(f"Failed to send Telegram notification: {e}")
-
             # Check if position was closed
-            if existing_position and not new_position:
+            if existing_pos and not new_pos:
                 try:
                     closed = self.portfolio_manager.closed_positions
                     if closed:
@@ -730,7 +722,6 @@ class TradingBot:
                             )
                 except Exception as e:
                     logger.error(f"Failed to send close notification: {e}")
-
             # Count trade if opened
             if signal != 0 and success:
                 if not self.check_trading_limits():
@@ -751,127 +742,107 @@ class TradingBot:
                     f"[SUCCESS] {asset_name} {signal_type} executed "
                     f"(Daily count: {self.trade_count_today})"
                 )
-
+                # Log trade
                 if self.config.get("logging", {}).get("save_trades", True):
                     self._log_trade(asset_name, signal, details, current_price)
 
         except Exception as e:
-            logger.error(f"[ERROR] Error in {asset_name} trading: {e}", exc_info=True)
-
-            # Telegram error notification
+            logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
             if self.telegram_bot and self.telegram_loop:
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self.telegram_bot.notify_error(
-                            f"Error in {asset_name} trading:\n{str(e)[:200]}"
+                            f"Error in {asset_name}:\n{str(e)[:200]}"
                         ),
                         self.telegram_loop,
                     )
                 except:
                     pass
 
-    def _log_trade(self, asset_name: str, signal: int, details: dict, price: float):
-        """Log trade details to separate file"""
+    def _log_trade(self, asset: str, signal: int, details: dict, price: float):
+        """Log trade to file"""
         try:
-            trade_log_file = Path("logs/trades.log")
-            trade_log_file.parent.mkdir(exist_ok=True)
+            trade_log = Path("logs/trades.log")
+            trade_log.parent.mkdir(exist_ok=True)
 
-            with open(trade_log_file, "a", encoding="utf-8") as f:
+            with open(trade_log, "a", encoding="utf-8") as f:
                 f.write(
-                    f"{datetime.now().isoformat()},{asset_name},{signal},{price:.2f},"
-                    f"{details.get('combined_confidence', 0):.3f},{details.get('reasoning', 'N/A')}\n"
+                    f"{datetime.now().isoformat()},{asset},{signal},{price:.2f},"
+                    f"{details.get('combined_confidence', 0):.3f},"
+                    f"{details.get('reasoning', 'N/A')}\n"
                 )
         except Exception as e:
-            logger.warning(f"Could not log trade: {e}")
+            logger.debug(f"Trade log error: {e}")
 
     def run_trading_cycle(self):
         """Execute one complete trading cycle"""
         logger.info("\n" + "=" * 70)
-        logger.info(
-            f"[CYCLE] TRADING CYCLE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+        logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 70)
 
-        # Refresh capital periodically (every cycle in live mode)
+        # Refresh capital if live
         if not self.portfolio_manager.is_paper_mode:
             self.portfolio_manager.refresh_capital()
 
         self.reset_daily_counters()
         self.portfolio_manager.update_positions()
 
-        enabled_assets = [
+        enabled = [
             name
-            for name, config in self.config["assets"].items()
-            if config.get("enabled", False)
+            for name, cfg in self.config["assets"].items()
+            if cfg.get("enabled", False)
         ]
+        logger.info(f"[ASSETS] Enabled: {', '.join(enabled)}")
 
-        logger.info(f"\n[ASSETS] Enabled: {', '.join(enabled_assets)}")
-
-        for asset_name in enabled_assets:
+        for asset_name in enabled:
             self.trade_asset(asset_name)
             time.sleep(2)
 
-        portfolio_status = self.portfolio_manager.get_portfolio_status()
-
+        status = self.portfolio_manager.get_portfolio_status()
         logger.info(f"\n{'-' * 70}")
-        logger.info("[PORTFOLIO] Status")
+        logger.info("[PORTFOLIO]")
         logger.info(f"{'-' * 70}")
-        logger.info(f"Mode: {portfolio_status['mode'].upper()}")
-        logger.info(f"Total Value: ${portfolio_status.get('total_value', 0):,.2f}")
-        logger.info(f"Cash: ${portfolio_status.get('cash', 0):,.2f}")
-        logger.info(f"Open Positions: {portfolio_status.get('open_positions', 0)}")
-        logger.info(f"Daily P&L: ${portfolio_status.get('daily_pnl', 0):,.2f}")
+        logger.info(f"Mode: {status.get('mode', 'N/A').upper()}")
+        logger.info(f"Total Value: ${status.get('total_value', 0):,.2f}")
+        logger.info(f"Cash: ${status.get('cash', 0):,.2f}")
+        logger.info(f"Open Positions: {status.get('open_positions', 0)}")
+        logger.info(f"Daily P&L: ${status.get('daily_pnl', 0):,.2f}")
 
         logger.info("\n[OK] Trading cycle complete")
         logger.info("=" * 70)
 
     async def _start_telegram_bot(self):
-        """Start Telegram bot with proper error handling and clean exit"""
+        """Start Telegram bot"""
         try:
-            logger.info("[TELEGRAM] Initializing bot...")
+            logger.info("[TELEGRAM] Initializing...")
             await self.telegram_bot.initialize()
-
-            # Signal that bot is ready
-            logger.info("[TELEGRAM] Bot ready, signaling main thread")
-
-            # Keep the bot running until shutdown signal
-            while self.is_running:
-                await asyncio.sleep(1)
-
-            # When is_running becomes False, exit gracefully
-            logger.info("[TELEGRAM] Bot loop exiting due to shutdown signal...")
-
+            logger.info("[TELEGRAM] Ready")
+            await self.telegram_bot.run_polling()
         except asyncio.CancelledError:
-            logger.info("[TELEGRAM] Bot task cancelled")
-            raise  # Re-raise to allow proper cleanup
+            logger.info("[TELEGRAM] Cancelled")
         except Exception as e:
-            logger.error(f"[TELEGRAM] Fatal error: {e}", exc_info=True)
-        finally:
-            # Final cleanup will happen in _run_telegram_loop's finally block
-            logger.info("[TELEGRAM] _start_telegram_bot() finished")
+            logger.error(f"[TELEGRAM] Error: {e}", exc_info=True)
 
     def _run_telegram_loop(self):
-        """Run Telegram bot event loop with proper cleanup"""
+        """Run Telegram event loop"""
         self.telegram_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.telegram_loop)
+
         try:
+            logger.info("[TELEGRAM] Event loop starting...")
             self.telegram_loop.run_until_complete(self._start_telegram_bot())
         except Exception as e:
             logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
         finally:
-            # Cancel all remaining tasks before closing loop
-            try:
-                # Get all tasks from THIS loop
-                pending = asyncio.all_tasks(self.telegram_loop)
+            logger.info("[TELEGRAM] Cleaning up event loop...")
 
+            try:
+                pending = asyncio.all_tasks(self.telegram_loop)
                 if pending:
-                    logger.info(
-                        f"[TELEGRAM] Cancelling {len(pending)} pending tasks..."
-                    )
+                    logger.info(f"[TELEGRAM] Cancelling {len(pending)} tasks...")
                     for task in pending:
                         task.cancel()
 
-                    # Wait for cancellations with timeout
                     try:
                         self.telegram_loop.run_until_complete(
                             asyncio.wait_for(
@@ -879,172 +850,179 @@ class TradingBot:
                                 timeout=3.0,
                             )
                         )
-                        logger.info("[TELEGRAM] All tasks cancelled successfully")
-                    except asyncio.TimeoutError:
-                        logger.warning("[TELEGRAM] Task cancellation timed out")
-                    except Exception as e:
-                        logger.error(f"[TELEGRAM] Error during task cancellation: {e}")
-
+                    except (asyncio.TimeoutError, Exception):
+                        pass
             except Exception as e:
-                logger.error(f"[TELEGRAM] Error in cleanup: {e}")
+                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
             finally:
-                # Now safely close the loop
-                try:
-                    if not self.telegram_loop.is_closed():
-                        self.telegram_loop.close()
-                        logger.info("[TELEGRAM] Event loop closed")
-                except Exception as e:
-                    logger.error(f"[TELEGRAM] Error closing loop: {e}")
+                if not self.telegram_loop.is_closed():
+                    self.telegram_loop.close()
+                    logger.info("[TELEGRAM] Event loop closed")
 
     def _send_telegram_notification(self, coro):
-        """
-        Helper to safely send Telegram notifications from main thread
-
-        Args:
-            coro: Coroutine to run (e.g., self.telegram_bot.notify_trade_opened(...))
-        """
+        """Send Telegram notification from main thread"""
         if not self.telegram_bot or not self.telegram_loop:
             return
 
         if not self.telegram_bot._is_ready:
-            logger.warning("[TELEGRAM] Bot not ready for notifications yet")
+            logger.debug("[TELEGRAM] Bot not ready")
             return
 
         try:
             future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
-            # Wait briefly for completion (non-blocking)
             future.result(timeout=5)
         except TimeoutError:
-            logger.warning("[TELEGRAM] Notification timed out")
+            logger.debug("[TELEGRAM] Notification timeout")
         except Exception as e:
-            logger.error(f"[TELEGRAM] Notification error: {e}")
+            logger.debug(f"[TELEGRAM] Notification error: {e}")
 
     def start(self):
         """Start the trading bot"""
         logger.info("\n" + "=" * 70)
-        logger.info("[START] TRADING BOT STARTING")
+        logger.info("[START] TRADING BOT INITIALIZING")
         logger.info("=" * 70)
-        logger.info(f"Mode: {self.config['trading']['mode'].upper()}")
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Mode: {self.config['trading']['mode'].upper()}")
         logger.info("Strategies: Mean Reversion + Trend Following + EMA Crossover")
 
-        self.initialize_exchanges()
-        self.load_models()
-
-        logger.info("\n[MARKET HOURS]")
-        logger.info("  BTC (Crypto): 24/7 - Always trading")
-        logger.info("  GOLD (Forex):  Sun 22:00 GMT - Fri 22:00 GMT")
-        logger.info("=" * 70)
-
-        if not self.binance_handler and not self.mt5_handler:
-            logger.error("=" * 70)
-            logger.error("[FAIL] NO EXCHANGE HANDLERS AVAILABLE!")
-            logger.error("Cannot proceed with trading.")
-            logger.error("=" * 70)
-            sys.exit(1)
-
-        # Start Telegram bot in separate thread
-        if self.telegram_bot:
-            logger.info("\n[TELEGRAM] Starting Telegram bot...")
-            self.telegram_thread = Thread(target=self._run_telegram_loop, daemon=True)
-            self.telegram_thread.start()
-
-            # CRITICAL: Wait for bot to be fully ready
-            logger.info("[TELEGRAM] Waiting for bot to be ready...")
-            timeout = 30
-            start_wait = time.time()
-
-            while (
-                not self.telegram_bot._is_ready and (time.time() - start_wait) < timeout
-            ):
-                time.sleep(0.5)
-
-            if self.telegram_bot._is_ready:
-                logger.info("[TELEGRAM] ✅ Bot is ready for notifications")
-            else:
-                logger.error("[TELEGRAM] ❌ Bot failed to become ready within timeout")
-
-        # Now start trading
-        check_interval = self.config["trading"].get("check_interval_seconds", 300)
-        schedule.every(check_interval).seconds.do(self.run_trading_cycle)
-
-        self.is_running = True
-        logger.info(f"\n[OK] Trading bot is now running")
-        logger.info(
-            f"[TIME] Checking market every {check_interval}s ({check_interval/60:.1f} minutes)"
-        )
-        logger.info(f"Press Ctrl+C to stop\n")
-
         try:
+            # Initialize exchanges and handlers
+            self.initialize_exchanges()
+
+            # Load trained models
+            self.load_models()
+
+            logger.info("\n[MARKET HOURS]")
+            logger.info("  BTC (Crypto):  24/7 - Always open")
+            logger.info("  GOLD (Forex):  Sun 22:00 UTC - Fri 22:00 UTC")
+            logger.info("=" * 70)
+
+            # Verify handlers
+            if not self.binance_handler and not self.mt5_handler:
+                raise RuntimeError("No execution handlers available!")
+
+            # Start Telegram bot if enabled
+            if self.telegram_bot:
+                logger.info("\n[TELEGRAM] Starting bot in background thread...")
+                self.telegram_thread = Thread(
+                    target=self._run_telegram_loop, daemon=True
+                )
+                self.telegram_thread.start()
+
+                # Wait for bot ready
+                logger.info("[TELEGRAM] Waiting for bot to be ready...")
+                timeout = 30
+                start = time.time()
+
+                while (
+                    not self.telegram_bot._is_ready and (time.time() - start) < timeout
+                ):
+                    time.sleep(0.5)
+
+                if self.telegram_bot._is_ready:
+                    logger.info("[TELEGRAM] ✅ Bot ready for notifications")
+                else:
+                    logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout")
+
+            # Setup signal handlers
+            def signal_handler(signum, frame):
+                logger.info(f"\n[!] Signal {signum} received, shutting down...")
+                self.stop()
+                sys.exit(0)
+
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+
+            # Schedule trading cycles
+            check_interval = self.config["trading"].get("check_interval_seconds", 300)
+            schedule.every(check_interval).seconds.do(self.run_trading_cycle)
+
+            self.is_running = True
+            logger.info(f"\n[OK] Trading bot running")
+            logger.info(
+                f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
+            )
+            logger.info(f"Press Ctrl+C to stop\n")
+
+            # Run initial cycle
             self.run_trading_cycle()
 
-            while self.is_running:
+            # Main loop
+            while self.is_running and not self._shutdown_requested:
                 schedule.run_pending()
                 time.sleep(1)
 
         except KeyboardInterrupt:
-            logger.info("\n[!] Shutdown signal received...")
+            logger.info("\n[!] KeyboardInterrupt received")
             self.stop()
+        except Exception as e:
+            logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
+            self.stop()
+            sys.exit(1)
 
     def stop(self):
-        """Stop the trading bot with improved Telegram shutdown"""
+        """Stop the trading bot gracefully"""
+        if self._shutdown_requested:
+            logger.info("[STOP] Shutdown already in progress")
+            return
+
         logger.info("\n" + "=" * 70)
-        logger.info("[STOP] STOPPING TRADING BOT")
+        logger.info("[STOP] SHUTTING DOWN TRADING BOT")
         logger.info("=" * 70)
 
-        # Signal bot to stop FIRST - this will exit the _start_telegram_bot loop
+        self._shutdown_requested = True
         self.is_running = False
 
-        # Close positions if required
+        # Close positions if configured
         if self.config["trading"].get("close_positions_on_shutdown", False):
-            logger.info("Closing all open positions...")
-            self.portfolio_manager.close_all_positions()
+            logger.info("[STOP] Closing open positions...")
+            try:
+                self.portfolio_manager.close_all_positions()
+                logger.info("[STOP] ✅ Positions closed")
+            except Exception as e:
+                logger.error(f"[STOP] Error closing positions: {e}")
 
-        # Shutdown Telegram bot gracefully
-        if (
-            self.telegram_bot
-            and self.telegram_loop
-            and not self.telegram_loop.is_closed()
-        ):
+        # Shutdown Telegram bot
+        if self.telegram_bot and self.telegram_loop:
             try:
                 logger.info("[TELEGRAM] Initiating bot shutdown...")
 
                 if self.telegram_bot.is_running:
-                    # Schedule shutdown in the bot's event loop
                     future = asyncio.run_coroutine_threadsafe(
                         self.telegram_bot.shutdown(), self.telegram_loop
                     )
 
-                    # Wait for shutdown with timeout
                     try:
-                        future.result(timeout=8)
-                        logger.info("[TELEGRAM] Bot shutdown completed")
+                        future.result(timeout=10)
+                        logger.info("[TELEGRAM] ✅ Bot shutdown complete")
                     except TimeoutError:
-                        logger.warning("[TELEGRAM] Shutdown timed out after 8s")
+                        logger.warning("[TELEGRAM] ⚠️ Shutdown timeout")
                         future.cancel()
                     except Exception as e:
                         logger.error(f"[TELEGRAM] Shutdown error: {e}")
-                else:
-                    logger.info("[TELEGRAM] Bot already stopped")
 
             except Exception as e:
-                logger.error(f"[TELEGRAM] Error initiating shutdown: {e}")
+                logger.error(f"[TELEGRAM] Error during shutdown: {e}")
 
-        # Wait for event loop thread to finish its cleanup
+        # Wait for event loop thread
         if self.telegram_thread and self.telegram_thread.is_alive():
             logger.info("[TELEGRAM] Waiting for event loop thread...")
-            self.telegram_thread.join(timeout=7)
+            self.telegram_thread.join(timeout=5)
 
             if self.telegram_thread.is_alive():
-                logger.warning("[TELEGRAM] Thread still alive after 7s timeout")
+                logger.warning("[TELEGRAM] ⚠️ Thread still alive")
             else:
-                logger.info("[TELEGRAM] Thread terminated successfully")
+                logger.info("[TELEGRAM] ✅ Thread terminated")
 
         # Shutdown data manager
-        self.data_manager.shutdown()
+        try:
+            self.data_manager.shutdown()
+            logger.info("[STOP] ✅ Data manager shutdown")
+        except Exception as e:
+            logger.error(f"[STOP] Data manager error: {e}")
 
         logger.info("=" * 70)
-        logger.info("[OK] Trading bot stopped successfully")
+        logger.info("[OK] Trading bot stopped")
         logger.info("=" * 70)
 
 
@@ -1061,44 +1039,43 @@ def main():
         print("[FAIL] config/config.json not found!")
         sys.exit(1)
 
-    # Check required models (FIXED: Include EMA models)
+    # Check required models exist
     required_models = []
-    for asset_name, asset_config in config["assets"].items():
-        if asset_config.get("enabled", False):
-            strategies = asset_config.get("strategies", {})
+    for asset_name, asset_cfg in config["assets"].items():
+        if asset_cfg.get("enabled", False):
+            strategies = asset_cfg.get("strategies", {})
 
-            # Mean Reversion
             if strategies.get("mean_reversion", {}).get("enabled", False):
                 required_models.append(
                     f"models/mean_reversion_{asset_name.lower()}.pkl"
                 )
 
-            # Trend Following
             if strategies.get("trend_following", {}).get("enabled", False):
                 required_models.append(
                     f"models/trend_following_{asset_name.lower()}.pkl"
                 )
 
-            # EMA Strategy (FIXED: Check correct config key)
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
                 required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
 
-    missing_models = [m for m in required_models if not Path(m).exists()]
-    if missing_models:
+    missing = [m for m in required_models if not Path(m).exists()]
+    if missing:
         print("=" * 70)
         print("[FAIL] REQUIRED MODELS NOT FOUND")
         print("=" * 70)
-        for model in missing_models:
+        for model in missing:
             print(f"  [X] {model}")
-        print("\nPlease run: python train.py")
+        print("\nRun: python train.py")
         print("=" * 70)
         sys.exit(1)
 
     try:
         bot = TradingBot()
         bot.start()
+    except KeyboardInterrupt:
+        logger.info("\n[!] KeyboardInterrupt")
     except Exception as e:
-        logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
+        logger.error(f"[FATAL] {e}", exc_info=True)
         sys.exit(1)
 
 

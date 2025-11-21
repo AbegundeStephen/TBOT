@@ -2,7 +2,7 @@
 # integration, allowing for the generation of features, training of models, and generation of trade
 # signals with raw confidence scores.
 """
-Fixed Base Strategy - Returns raw confidence scores without filtering
+ Base Strategy - Returns raw confidence scores without filtering
 Lets the aggregator make the final decision
 """
 
@@ -75,54 +75,64 @@ class BaseStrategy(ABC):
         """Remove statistical outliers using IQR method (more robust for financial data)"""
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         numeric_cols = [col for col in numeric_cols if col != "label"]
-        
+
         if len(numeric_cols) == 0:
             logger.info(f"[{self.name}] No numeric columns for outlier detection")
             return df.copy()
 
         df_clean = df.copy()
-        
+
         # Use IQR method instead of z-score for financial data (more robust)
         Q1 = df_clean[numeric_cols].quantile(0.25)
         Q3 = df_clean[numeric_cols].quantile(0.75)
         IQR = Q3 - Q1
-        
+
         # Define bounds using IQR (less aggressive than z-score)
         lower_bound = Q1 - 3 * IQR
         upper_bound = Q3 + 3 * IQR
-        
+
         # Create mask for rows within bounds
-        outlier_mask = ((df_clean[numeric_cols] >= lower_bound) & 
-                    (df_clean[numeric_cols] <= upper_bound)).all(axis=1)
-        
+        outlier_mask = (
+            (df_clean[numeric_cols] >= lower_bound)
+            & (df_clean[numeric_cols] <= upper_bound)
+        ).all(axis=1)
+
         removed = len(df_clean) - outlier_mask.sum()
-        
+
         # Safety check: don't remove too many samples
         if removed > len(df_clean) * 0.5:  # If removing more than 50%
-            logger.warning(f"[{self.name}] Outlier removal would remove {removed}/{len(df_clean)} samples ({removed/len(df_clean)*100:.1f}%)")
+            logger.warning(
+                f"[{self.name}] Outlier removal would remove {removed}/{len(df_clean)} samples ({removed/len(df_clean)*100:.1f}%)"
+            )
             logger.warning(f"[{self.name}] Using less aggressive bounds (5x IQR)")
-            
+
             # Use less aggressive bounds
             lower_bound = Q1 - 5 * IQR
             upper_bound = Q3 + 5 * IQR
-            outlier_mask = ((df_clean[numeric_cols] >= lower_bound) & 
-                        (df_clean[numeric_cols] <= upper_bound)).all(axis=1)
+            outlier_mask = (
+                (df_clean[numeric_cols] >= lower_bound)
+                & (df_clean[numeric_cols] <= upper_bound)
+            ).all(axis=1)
             removed = len(df_clean) - outlier_mask.sum()
-            
+
             # If still too aggressive, disable outlier removal
             if removed > len(df_clean) * 0.3:  # Still removing more than 30%
-                logger.warning(f"[{self.name}] Still removing {removed} samples, disabling outlier removal")
+                logger.warning(
+                    f"[{self.name}] Still removing {removed} samples, disabling outlier removal"
+                )
                 return df.copy()
-        
+
         logger.info(f"[{self.name}] Removed {removed} outlier rows")
-        
+
         result = df_clean[outlier_mask].copy()
-        
+
         # Final safety check
         if len(result) < 100:
-            logger.warning(f"[{self.name}] Very few samples remaining ({len(result)}), disabling outlier removal")
+            logger.warning(
+                f"[{self.name}] Very few samples remaining ({len(result)}), disabling outlier removal"
+            )
             return df.copy()
-            
+
         return result
 
     def train_model(self, df: pd.DataFrame, model_path: str) -> Dict:
@@ -131,9 +141,13 @@ class BaseStrategy(ABC):
         df_features["label"] = self.generate_labels(df_features)
         df_clean = self.remove_data_leakage(df_features)
         if self.config.get("remove_outliers", True):
-            df_clean = self.remove_outliers(df_clean, self.config.get("outlier_std", 3.0))
+            df_clean = self.remove_outliers(
+                df_clean, self.config.get("outlier_std", 3.0)
+            )
 
-        self.feature_columns = [col for col in df_clean.columns if col not in ["label", "timestamp"]]
+        self.feature_columns = [
+            col for col in df_clean.columns if col not in ["label", "timestamp"]
+        ]
         X = df_clean[self.feature_columns].values
         y = df_clean["label"].values
 
@@ -193,7 +207,6 @@ class BaseStrategy(ABC):
         }
         logger.info(f"[{self.name}] Training complete: {metrics}")
         return metrics
-
 
     def load_model(self, model_path: str) -> bool:
         """Load trained model from disk"""

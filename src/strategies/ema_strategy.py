@@ -1,5 +1,5 @@
 """
-EMA Crossover Strategy - FIXED Signal Generation
+EMA Crossover Strategy -  Signal Generation
 Now generates realistic buy/sell signals based on multiple conditions
 """
 
@@ -44,9 +44,17 @@ class EMAStrategy(BaseStrategy):
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate EMA-based features, ensuring all data is numeric."""
         if len(df) < self.get_warmup_period():
-            logger.debug(f"[{self.name}] Insufficient data: {len(df)} < {self.get_warmup_period()}")
+            logger.debug(
+                f"[{self.name}] Insufficient data: {len(df)} < {self.get_warmup_period()}"
+            )
             empty_df = df.copy()
-            for col in ['ema_fast', 'ema_slow', 'ema_diff', 'ema_diff_pct', 'ema_cross']:
+            for col in [
+                "ema_fast",
+                "ema_slow",
+                "ema_diff",
+                "ema_diff_pct",
+                "ema_cross",
+            ]:
                 empty_df[col] = 0
             return empty_df
 
@@ -60,10 +68,14 @@ class EMAStrategy(BaseStrategy):
         if "volume" not in df.columns:
             df["volume"] = 1.0
 
-        # FIXED: Replace deprecated fillna(method='ffill') with ffill()
+        # : Replace deprecated fillna(method='ffill') with ffill()
         df["close"] = pd.to_numeric(df["close"], errors="coerce").ffill().fillna(0)
-        df["high"] = pd.to_numeric(df["high"], errors="coerce").ffill().fillna(df["close"])
-        df["low"] = pd.to_numeric(df["low"], errors="coerce").ffill().fillna(df["close"])
+        df["high"] = (
+            pd.to_numeric(df["high"], errors="coerce").ffill().fillna(df["close"])
+        )
+        df["low"] = (
+            pd.to_numeric(df["low"], errors="coerce").ffill().fillna(df["close"])
+        )
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce").ffill().fillna(1.0)
 
         # Now extract the processed values
@@ -74,12 +86,14 @@ class EMAStrategy(BaseStrategy):
 
         # Check for all NaN
         if np.all(np.isnan(close)) or len(close) == 0:
-            logger.warning(f"[{self.name}] All close prices are NaN, returning zero features")
-            df['ema_fast'] = 0
-            df['ema_slow'] = 0
-            df['ema_diff'] = 0
-            df['ema_diff_pct'] = 0
-            df['ema_cross'] = 0
+            logger.warning(
+                f"[{self.name}] All close prices are NaN, returning zero features"
+            )
+            df["ema_fast"] = 0
+            df["ema_slow"] = 0
+            df["ema_diff"] = 0
+            df["ema_diff_pct"] = 0
+            df["ema_cross"] = 0
             return df
 
         # Fill NaN values with forward fill then backward fill
@@ -96,7 +110,7 @@ class EMAStrategy(BaseStrategy):
             df["ema_fast"] = ema_fast_values
             df["ema_slow"] = ema_slow_values
 
-            # FIXED: Use proper forward fill and backfill for NaN values
+            # : Use proper forward fill and backfill for NaN values
             df["ema_fast"] = df["ema_fast"].ffill().bfill()
             df["ema_slow"] = df["ema_slow"].ffill().bfill()
 
@@ -112,11 +126,17 @@ class EMAStrategy(BaseStrategy):
 
         # EMA relationships
         df["ema_diff"] = df["ema_fast"] - df["ema_slow"]
-        df["ema_diff_pct"] = np.where(df["ema_slow"] != 0, (df["ema_diff"] / df["ema_slow"]) * 100, 0)
+        df["ema_diff_pct"] = np.where(
+            df["ema_slow"] != 0, (df["ema_diff"] / df["ema_slow"]) * 100, 0
+        )
 
         # Price vs EMAs
-        df["price_vs_fast"] = np.where(df["ema_fast"] != 0, (close - df["ema_fast"]) / df["ema_fast"], 0)
-        df["price_vs_slow"] = np.where(df["ema_slow"] != 0, (close - df["ema_slow"]) / df["ema_slow"], 0)
+        df["price_vs_fast"] = np.where(
+            df["ema_fast"] != 0, (close - df["ema_fast"]) / df["ema_fast"], 0
+        )
+        df["price_vs_slow"] = np.where(
+            df["ema_slow"] != 0, (close - df["ema_slow"]) / df["ema_slow"], 0
+        )
         df["price_above_fast"] = (close > df["ema_fast"]).astype(int)
         df["price_above_slow"] = (close > df["ema_slow"]).astype(int)
 
@@ -137,7 +157,9 @@ class EMAStrategy(BaseStrategy):
             for i in range(len(df)):
                 recent_crosses = cross_indices[cross_indices <= i]
                 if len(recent_crosses) > 0:
-                    df.iloc[i, df.columns.get_loc("bars_since_cross")] = i - recent_crosses[-1]
+                    df.iloc[i, df.columns.get_loc("bars_since_cross")] = (
+                        i - recent_crosses[-1]
+                    )
 
         # === TREND STRENGTH ===
         df["ema_trend"] = np.where(df["ema_fast"] > df["ema_slow"], 1, -1)
@@ -145,14 +167,18 @@ class EMAStrategy(BaseStrategy):
 
         # EMA slopes (rate of change)
         df["ema_fast_slope"] = df["ema_fast"].diff(5)
-        df["ema_fast_slope"] = np.where(df["ema_fast"] != 0, df["ema_fast_slope"] / df["ema_fast"], 0)
+        df["ema_fast_slope"] = np.where(
+            df["ema_fast"] != 0, df["ema_fast_slope"] / df["ema_fast"], 0
+        )
 
         df["ema_slow_slope"] = df["ema_slow"].diff(10)
-        df["ema_slow_slope"] = np.where(df["ema_slow"] != 0, df["ema_slow_slope"] / df["ema_slow"], 0)
+        df["ema_slow_slope"] = np.where(
+            df["ema_slow"] != 0, df["ema_slow_slope"] / df["ema_slow"], 0
+        )
 
         # === ADDITIONAL CONFIRMATION INDICATORS ===
         try:
-            # FIXED: Calculate volume MA directly on numpy array, then properly fill NaN
+            # : Calculate volume MA directly on numpy array, then properly fill NaN
             volume_ma_values = ta.SMA(volume, timeperiod=20)
             df["volume_ma"] = volume_ma_values
             df["volume_ma"] = df["volume_ma"].ffill().bfill()
@@ -161,8 +187,12 @@ class EMAStrategy(BaseStrategy):
             if df["volume_ma"].isna().any():
                 df["volume_ma"] = df["volume_ma"].fillna(df["volume"])
 
-            df["volume_ratio"] = np.where(df["volume_ma"] != 0, df["volume"] / df["volume_ma"], 1.0)
-            df["high_volume"] = (df["volume_ratio"] > self.volume_multiplier).astype(int)
+            df["volume_ratio"] = np.where(
+                df["volume_ma"] != 0, df["volume"] / df["volume_ma"], 1.0
+            )
+            df["high_volume"] = (df["volume_ratio"] > self.volume_multiplier).astype(
+                int
+            )
         except Exception as e:
             logger.warning(f"[{self.name}] Error calculating volume indicators: {e}")
             df["volume_ma"] = df["volume"]
@@ -184,8 +214,8 @@ class EMAStrategy(BaseStrategy):
             df["macd_hist"] = df["macd_hist"].fillna(0)
 
             df["macd_aligned"] = np.where(
-                ((df["ema_trend"] == 1) & (macd_hist > 0)) |
-                ((df["ema_trend"] == -1) & (macd_hist < 0)),
+                ((df["ema_trend"] == 1) & (macd_hist > 0))
+                | ((df["ema_trend"] == -1) & (macd_hist < 0)),
                 1,
                 0,
             )
@@ -236,7 +266,9 @@ class EMAStrategy(BaseStrategy):
             return 0, 0.0
 
         try:
-            features_df = self.generate_features(df.tail(max(self.fast_period, self.slow_period) + 50))
+            features_df = self.generate_features(
+                df.tail(max(self.fast_period, self.slow_period) + 50)
+            )
 
             if features_df.empty or len(features_df) == 0:
                 return 0, 0.0
@@ -244,17 +276,26 @@ class EMAStrategy(BaseStrategy):
             latest = features_df.iloc[-1]
 
             # Check for NaN in critical features
-            critical_features = ['ema_fast', 'ema_slow', 'ema_diff', 'ema_cross', 'macd_hist', 'rsi']
+            critical_features = [
+                "ema_fast",
+                "ema_slow",
+                "ema_diff",
+                "ema_cross",
+                "macd_hist",
+                "rsi",
+            ]
             for feat in critical_features:
                 if pd.isna(latest[feat]) or np.isnan(latest[feat]):
-                    logger.debug(f"[{self.name}] NaN detected in {feat}, returning HOLD")
+                    logger.debug(
+                        f"[{self.name}] NaN detected in {feat}, returning HOLD"
+                    )
                     return 0, 0.0
 
-            ema_cross = latest['ema_cross']
-            trend_strength = latest['trend_strength']
-            macd_aligned = latest['macd_aligned']
-            rsi = latest['rsi']
-            high_volume = latest['high_volume']
+            ema_cross = latest["ema_cross"]
+            trend_strength = latest["trend_strength"]
+            macd_aligned = latest["macd_aligned"]
+            rsi = latest["rsi"]
+            high_volume = latest["high_volume"]
 
             # Calculate confidence score
             confidence = min(1.0, trend_strength / 5.0)
@@ -264,7 +305,9 @@ class EMAStrategy(BaseStrategy):
                 confidence += 0.15
 
             # Add RSI confirmation to confidence
-            if (ema_cross == 1 and 40 < rsi < 70) or (ema_cross == -1 and 30 < rsi < 60):
+            if (ema_cross == 1 and 40 < rsi < 70) or (
+                ema_cross == -1 and 30 < rsi < 60
+            ):
                 confidence += 0.10
 
             # Add volume confirmation to confidence
@@ -280,7 +323,7 @@ class EMAStrategy(BaseStrategy):
                 return -1, confidence
             else:
                 if trend_strength > 1.0:
-                    if latest['ema_fast'] > latest['ema_slow']:
+                    if latest["ema_fast"] > latest["ema_slow"]:
                         return 1, confidence * 0.7
                     else:
                         return -1, confidence * 0.7
@@ -299,35 +342,48 @@ class EMAStrategy(BaseStrategy):
         df = df.copy()
         logger.info(f"[{self.name}] Starting label generation with {len(df)} rows")
 
-        required_cols = ['close', 'ema_fast', 'ema_slow', 'ema_diff_pct', 'ema_cross', 'rsi', 'macd_hist', 'high_volume']
+        required_cols = [
+            "close",
+            "ema_fast",
+            "ema_slow",
+            "ema_diff_pct",
+            "ema_cross",
+            "rsi",
+            "macd_hist",
+            "high_volume",
+        ]
         df = df.dropna(subset=required_cols)
 
-        logger.info(f"[{self.name}] After filtering NaN in required columns: {len(df)} rows")
+        logger.info(
+            f"[{self.name}] After filtering NaN in required columns: {len(df)} rows"
+        )
 
         if len(df) == 0:
             logger.error(f"[{self.name}] No valid rows after filtering NaN!")
             return pd.Series(0, index=pd.Index([]))
 
         # Extract values
-        close = df['close'].values
-        ema_fast = df['ema_fast'].values
-        ema_slow = df['ema_slow'].values
-        ema_diff_pct = df['ema_diff_pct'].values
-        ema_cross = df['ema_cross'].values.astype(int)
-        rsi = df['rsi'].values
-        macd_hist = df['macd_hist'].values
-        high_volume = df['high_volume'].values
+        close = df["close"].values
+        ema_fast = df["ema_fast"].values
+        ema_slow = df["ema_slow"].values
+        ema_diff_pct = df["ema_diff_pct"].values
+        ema_cross = df["ema_cross"].values.astype(int)
+        rsi = df["rsi"].values
+        macd_hist = df["macd_hist"].values
+        high_volume = df["high_volume"].values
 
         labels = pd.Series(0, index=df.index)
         lookforward = 3
 
-        logger.info(f"[{self.name}] Analyzing {len(df) - lookforward} bars for signals...")
+        logger.info(
+            f"[{self.name}] Analyzing {len(df) - lookforward} bars for signals..."
+        )
 
         for i in range(len(df) - lookforward):
             if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(close[i]):
                 continue
 
-            future_closes = close[i+1:i+1+lookforward]
+            future_closes = close[i + 1 : i + 1 + lookforward]
             if len(future_closes) == 0:
                 continue
 
@@ -382,9 +438,15 @@ class EMAStrategy(BaseStrategy):
                 bearish_score += 2
 
             # === ASSIGN LABELS ===
-            if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
+            if (
+                bullish_score >= self.min_score_threshold
+                and bullish_score > bearish_score
+            ):
                 labels.iloc[i] = 1
-            elif bearish_score >= self.min_score_threshold and bearish_score > bullish_score:
+            elif (
+                bearish_score >= self.min_score_threshold
+                and bearish_score > bullish_score
+            ):
                 labels.iloc[i] = -1
             else:
                 labels.iloc[i] = 0
@@ -393,24 +455,38 @@ class EMAStrategy(BaseStrategy):
         labels.iloc[-lookforward:] = 0
 
         signals_generated = (labels != 0).sum()
-        logger.info(f"[{self.name}] Generated {signals_generated} total signals from {len(df)} bars")
+        logger.info(
+            f"[{self.name}] Generated {signals_generated} total signals from {len(df)} bars"
+        )
 
         # Log distribution
         unique, counts = np.unique(labels, return_counts=True)
         dist = dict(zip(unique, counts))
         total = len(labels)
         logger.info(f"[{self.name}] Label distribution:")
-        logger.info(f"  SELL: {dist.get(-1, 0):>5} ({dist.get(-1, 0)/total*100 if total > 0 else 0:>5.2f}%)")
-        logger.info(f"  HOLD: {dist.get(0, 0):>5} ({dist.get(0, 0)/total*100 if total > 0 else 0:>5.2f}%)")
-        logger.info(f"  BUY:  {dist.get(1, 0):>5} ({dist.get(1, 0)/total*100 if total > 0 else 0:>5.2f}%)")
+        logger.info(
+            f"  SELL: {dist.get(-1, 0):>5} ({dist.get(-1, 0)/total*100 if total > 0 else 0:>5.2f}%)"
+        )
+        logger.info(
+            f"  HOLD: {dist.get(0, 0):>5} ({dist.get(0, 0)/total*100 if total > 0 else 0:>5.2f}%)"
+        )
+        logger.info(
+            f"  BUY:  {dist.get(1, 0):>5} ({dist.get(1, 0)/total*100 if total > 0 else 0:>5.2f}%)"
+        )
 
         buy_pct = dist.get(1, 0) / total * 100 if total > 0 else 0
         sell_pct = dist.get(-1, 0) / total * 100 if total > 0 else 0
 
         if total > 0 and (buy_pct < 2 or sell_pct < 2):
-            logger.warning(f"  ⚠ Low signal rate detected (BUY: {buy_pct:.1f}%, SELL: {sell_pct:.1f}%)")
-            logger.warning(f"  This is still trainable, but consider lowering min_return_threshold")
+            logger.warning(
+                f"  ⚠ Low signal rate detected (BUY: {buy_pct:.1f}%, SELL: {sell_pct:.1f}%)"
+            )
+            logger.warning(
+                f"  This is still trainable, but consider lowering min_return_threshold"
+            )
         elif total > 0:
-            logger.info(f"  ✓ Healthy signal distribution (BUY: {buy_pct:.1f}%, SELL: {sell_pct:.1f}%)")
+            logger.info(
+                f"  ✓ Healthy signal distribution (BUY: {buy_pct:.1f}%, SELL: {sell_pct:.1f}%)"
+            )
 
         return labels
