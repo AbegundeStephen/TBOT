@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed Telegram Bot Interface for Trading Bot
+ Telegram Bot Interface for Trading Bot
 Provides notifications and remote control capabilities
 """
 
@@ -41,36 +41,36 @@ class SignalMonitoringIntegration:
     def __init__(self, max_history: int = 100):
         """
         Initialize signal monitoring
-        
+
         Args:
             max_history: Keep track of last N signals per asset
         """
         self.signal_history: Dict[str, List[Dict]] = defaultdict(list)
         self.max_history = max_history
-        
+
         # Regime tracking per asset
-        self.regime_tracking: Dict[str, Dict] = defaultdict(lambda: {
-            "current": None,
-            "changes": [],
-            "change_count": 0
-        })
-        
+        self.regime_tracking: Dict[str, Dict] = defaultdict(
+            lambda: {"current": None, "changes": [], "change_count": 0}
+        )
+
         # Override tracking per asset
         self.override_tracking: Dict[str, List[Dict]] = defaultdict(list)
-        
-        logger.info(f"SignalMonitoringIntegration initialized (max_history={max_history})")
-    
+
+        logger.info(
+            f"SignalMonitoringIntegration initialized (max_history={max_history})"
+        )
+
     def record_signal(
         self,
         asset: str,
         signal: int,
         details: Dict,
         price: float,
-        timestamp: datetime = None
+        timestamp: datetime = None,
     ):
         """
         Record a signal for monitoring
-        
+
         Args:
             asset: Asset name (BTC, GOLD, etc.)
             signal: -1 (SELL), 0 (HOLD), 1 (BUY)
@@ -80,7 +80,7 @@ class SignalMonitoringIntegration:
         """
         if timestamp is None:
             timestamp = datetime.now()
-        
+
         entry = {
             "timestamp": timestamp,
             "signal": signal,
@@ -97,48 +97,52 @@ class SignalMonitoringIntegration:
             "ema_conf": details.get("ema_confidence", 0),
             "regime_changed": details.get("regime_changed", False),
         }
-        
+
         self.signal_history[asset].append(entry)
-        
+
         # Keep only recent history
         if len(self.signal_history[asset]) > self.max_history:
             self.signal_history[asset].pop(0)
-        
+
         # Track regime changes
         if entry["regime_changed"]:
-            self.regime_tracking[asset]["changes"].append({
-                "timestamp": timestamp,
-                "regime": entry["regime"],
-                "price": price,
-                "ema_conf": entry["ema_conf"]
-            })
+            self.regime_tracking[asset]["changes"].append(
+                {
+                    "timestamp": timestamp,
+                    "regime": entry["regime"],
+                    "price": price,
+                    "ema_conf": entry["ema_conf"],
+                }
+            )
             self.regime_tracking[asset]["change_count"] += 1
-        
+
         # Track overrides (sells blocked)
         if "override" in entry["reasoning"].lower():
-            self.override_tracking[asset].append({
-                "timestamp": timestamp,
-                "price": price,
-                "ema_conf": entry["ema_conf"],
-                "quality": entry["quality"]
-            })
-    
+            self.override_tracking[asset].append(
+                {
+                    "timestamp": timestamp,
+                    "price": price,
+                    "ema_conf": entry["ema_conf"],
+                    "quality": entry["quality"],
+                }
+            )
+
     def get_last_signals(self, asset: str, n: int = 5) -> List[Dict]:
         """Get last N signals for an asset"""
         return self.signal_history[asset][-n:] if asset in self.signal_history else []
-    
+
     def get_signal_statistics(self, asset: str) -> Dict:
         """Get signal statistics for an asset"""
         if asset not in self.signal_history or not self.signal_history[asset]:
             return {}
-        
+
         signals = self.signal_history[asset]
         buy_count = sum(1 for s in signals if s["signal"] == 1)
         sell_count = sum(1 for s in signals if s["signal"] == -1)
         hold_count = sum(1 for s in signals if s["signal"] == 0)
-        
+
         qualities = [s["quality"] for s in signals if s["signal"] != 0]
-        
+
         return {
             "total_signals": len(signals),
             "buy_signals": buy_count,
@@ -150,33 +154,32 @@ class SignalMonitoringIntegration:
             "avg_quality": np.mean(qualities) if qualities else 0,
             "high_quality_count": sum(1 for q in qualities if q >= 0.65),
         }
-    
+
     def get_regime_info(self, asset: str) -> Dict:
         """Get regime information for an asset"""
         if asset not in self.regime_tracking:
             return {}
-        
+
         tracking = self.regime_tracking[asset]
-        
+
         return {
             "change_count": tracking["change_count"],
             "last_changes": tracking["changes"][-5:],  # Last 5 changes
         }
-    
+
     def get_override_info(self, asset: str) -> Dict:
         """Get override event information"""
         if asset not in self.override_tracking:
             return {"total": 0, "last_events": []}
-        
+
         events = self.override_tracking[asset]
         avg_quality = np.mean([e["quality"] for e in events]) if events else 0
-        
+
         return {
             "total": len(events),
             "avg_quality": avg_quality,
             "last_events": events[-5:],  # Last 5 overrides
         }
-
 
 
 def admin_only(func):
@@ -218,12 +221,16 @@ class TradingTelegramBot:
         self.trading_bot = trading_bot
         self.application = None
         self.is_running = False
-        
+
         self.signal_monitor = SignalMonitoringIntegration(max_history=100)
 
         self._is_ready = False
         self._init_lock = asyncio.Lock()
         self._message_queue = []  # Queue for messages during init
+
+        # Track shutdown state
+        self._shutdown_event = asyncio.Event()
+        self._shutdown_complete = False
 
         # Track notification counts to avoid spam
         self.notification_counts = {}
@@ -235,6 +242,10 @@ class TradingTelegramBot:
         """Initialize with proper error handling and verification"""
         try:
             async with self._init_lock:
+                # Reset shutdown state
+                self._shutdown_event.clear()
+                self._shutdown_complete = False
+
                 logger.info("[TELEGRAM] Building application...")
                 self.application = (
                     Application.builder()
@@ -324,7 +335,7 @@ class TradingTelegramBot:
         self.application.add_handler(
             CommandHandler("performance", self.cmd_performance)
         )
-        
+
         self.application.add_handler(CommandHandler("signals", self.cmd_signals))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
@@ -340,97 +351,102 @@ class TradingTelegramBot:
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
     async def run_polling(self):
-        """Keep the bot running with polling - FIXED VERSION"""
+        """Keep the bot running with polling -  VERSION"""
         try:
             logger.info("[TELEGRAM] Starting polling loop...")
-            while self.is_running:
-                await asyncio.shield(asyncio.sleep(1))
+            while self.is_running and not self._shutdown_event.is_set():
+                await asyncio.sleep(1)
+            logger.info("[TELEGRAM] Polling loop ended")
         except asyncio.CancelledError:
             logger.info("[TELEGRAM] Polling cancelled")
+            raise
         except Exception as e:
             logger.error(f"[TELEGRAM] Error in polling loop: {e}", exc_info=True)
 
     async def shutdown(self):
         """Gracefully shutdown the Telegram bot with proper task cleanup"""
-        if not self.is_running:
-            logger.info("[TELEGRAM] Bot already stopped, skipping shutdown")
+        if self._shutdown_complete:
+            logger.info("[TELEGRAM] Already shut down, skipping")
             return
-        
-        logger.info("[TELEGRAM] Starting graceful shutdown...")
+
+        logger.info(
+            "[TELEGRAM] ==================== SHUTDOWN STARTED ===================="
+        )
+
+        # Signal shutdown immediately
+        self._shutdown_event.set()
         self.is_running = False
-        
+        self._is_ready = False
+
         try:
             # Try to send shutdown notification (but don't wait too long)
-            try:
-                await asyncio.wait_for(
-                    self.send_notification(
-                        "🛑 *Trading Bot Stopped*\n\n"
-                        f"Bot shutdown at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    ),
-                    timeout=3.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("[TELEGRAM] Shutdown notification timed out")
-            except Exception as e:
-                logger.warning(f"[TELEGRAM] Could not send shutdown notification: {e}")
-            
+            if self.application and self._is_ready:
+                try:
+                    await asyncio.wait_for(
+                        self.send_notification(
+                            "🛑 *Trading Bot Stopped*\n\n"
+                            f"Bot shutdown at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        ),
+                        timeout=2.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[TELEGRAM] Shutdown notification timed out")
+                except Exception as e:
+                    logger.warning(
+                        f"[TELEGRAM] Could not send shutdown notification: {e}"
+                    )
+
             if self.application:
-                # Stop the updater (this stops polling)
+                # Stop the updater first
                 if hasattr(self.application, "updater") and self.application.updater:
                     logger.info("[TELEGRAM] Stopping updater...")
                     try:
                         if self.application.updater.running:
                             await asyncio.wait_for(
-                                self.application.updater.stop(),
-                                timeout=4.0
+                                self.application.updater.stop(), timeout=3.0
                             )
-                            logger.info("[TELEGRAM] Updater stopped")
-                        else:
-                            logger.info("[TELEGRAM] Updater already stopped")
+                            logger.info("[TELEGRAM] ✅ Updater stopped")
                     except asyncio.TimeoutError:
-                        logger.warning("[TELEGRAM] Updater stop timed out")
+                        logger.warning("[TELEGRAM] ⚠️ Updater stop timed out - forcing")
                     except Exception as e:
-                        logger.warning(f"[TELEGRAM] Updater stop error: {e}")
-                
+                        logger.warning(f"[TELEGRAM] ⚠️ Updater stop error: {e}")
+
                 # Stop the application
                 logger.info("[TELEGRAM] Stopping application...")
                 try:
                     if self.application.running:
-                        await asyncio.wait_for(
-                            self.application.stop(),
-                            timeout=3.0
-                        )
-                        logger.info("[TELEGRAM] Application stopped")
-                    else:
-                        logger.info("[TELEGRAM] Application already stopped")
+                        await asyncio.wait_for(self.application.stop(), timeout=3.0)
+                        logger.info("[TELEGRAM] ✅ Application stopped")
                 except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] Application stop timed out")
+                    logger.warning("[TELEGRAM] ⚠️ Application stop timed out - forcing")
                 except Exception as e:
-                    logger.warning(f"[TELEGRAM] Application stop error: {e}")
-                
+                    logger.warning(f"[TELEGRAM] ⚠️ Application stop error: {e}")
+
                 # Shutdown the application (cleanup resources)
                 logger.info("[TELEGRAM] Shutting down application...")
                 try:
-                    await asyncio.wait_for(
-                        self.application.shutdown(),
-                        timeout=3.0
-                    )
-                    logger.info("[TELEGRAM] Application shutdown complete")
+                    await asyncio.wait_for(self.application.shutdown(), timeout=3.0)
+                    logger.info("[TELEGRAM] ✅ Application shutdown complete")
                 except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] Application shutdown timed out")
+                    logger.warning(
+                        "[TELEGRAM] ⚠️ Application shutdown timed out - forcing"
+                    )
                 except Exception as e:
-                    logger.warning(f"[TELEGRAM] Application shutdown error: {e}")
-            
-            # Brief pause to let everything settle
-            await asyncio.sleep(0.5)
-            
-            logger.info("[TELEGRAM] Shutdown sequence complete")
-            
+                    logger.warning(f"[TELEGRAM] ⚠️ Application shutdown error: {e}")
+
+                # Clear reference
+                self.application = None
+
+            # Mark as complete
+            self._shutdown_complete = True
+            logger.info(
+                "[TELEGRAM] ==================== SHUTDOWN COMPLETE ===================="
+            )
+
         except Exception as e:
-            logger.error(f"[TELEGRAM] Error during shutdown: {e}", exc_info=True)
-        finally:
-            self._is_ready = False
-            logger.info("[TELEGRAM] Bot marked as not ready")
+            logger.error(f"[TELEGRAM] ❌ Error during shutdown: {e}", exc_info=True)
+            self._shutdown_complete = True
+
     # ==================== COMMAND HANDLERS ====================
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,10 +489,10 @@ class TradingTelegramBot:
             "/positions - View open positions with P&L\n"
             "/history - Recent trade history\n"
             "/performance - Performance metrics\n"
-            "/signals - Latest trading signals\n"           
-            "/stats - Signal statistics\n"                  
-            "/regimes - Market regime tracking\n"           # ← NEW
-            "/overrides - Golden Cross overrides\n"     
+            "/signals - Latest trading signals\n"
+            "/stats - Signal statistics\n"
+            "/regimes - Market regime tracking\n"
+            "/overrides - Golden Cross overrides\n"
             "/help - Show this help message\n\n"
         )
 
@@ -924,7 +940,7 @@ class TradingTelegramBot:
         await self.send_notification(msg)
 
     async def send_daily_summary(self):
-        """Send end-of-day performance summary"""
+        """Send end-of-day performance summary - PROPERLY ASYNC"""
         try:
             portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
 
@@ -957,6 +973,7 @@ class TradingTelegramBot:
 
             await self.send_notification(msg)
             self.last_daily_summary = datetime.now()
+            logger.info("[TELEGRAM] Daily summary sent successfully")
 
         except Exception as e:
             logger.error(f"Error sending daily summary: {e}", exc_info=True)
@@ -1111,22 +1128,20 @@ class TradingTelegramBot:
 
         except Exception as e:
             logger.error(f"Error in _send_history_message: {e}")
-            
+
     async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /signals command - Show latest signals"""
         try:
-            if not hasattr(self, 'signal_monitor'):
-                await update.message.reply_text(
-                    "❌ Signal monitoring not initialized"
-                )
+            if not hasattr(self, "signal_monitor"):
+                await update.message.reply_text("❌ Signal monitoring not initialized")
                 return
-            
+
             # Get signals for both assets
             btc_signals = self.signal_monitor.get_last_signals("BTC", n=3)
             gold_signals = self.signal_monitor.get_last_signals("GOLD", n=3)
-            
+
             msg = "📡 *Latest Trading Signals*\n\n"
-            
+
             # BTC Signals
             msg += "*₿ BTC*\n"
             if btc_signals:
@@ -1134,16 +1149,16 @@ class TradingTelegramBot:
                     msg += self._format_signal_entry(sig)
             else:
                 msg += "No signals yet\n"
-            
+
             msg += "\n*🥇 GOLD*\n"
             if gold_signals:
                 for sig in reversed(gold_signals):
                     msg += self._format_signal_entry(sig)
             else:
                 msg += "No signals yet\n"
-            
+
             msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
-            
+
             keyboard = [
                 [
                     InlineKeyboardButton("📊 BTC Stats", callback_data="btc_stats"),
@@ -1152,30 +1167,29 @@ class TradingTelegramBot:
                 [InlineKeyboardButton("🔄 Refresh", callback_data="signals")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await update.message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
-        
+
         except Exception as e:
             logger.error(f"Error in cmd_signals: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching signals")
 
-
-    async def cmd_signal_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def cmd_signal_stats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
         """Handle /stats command - Show signal statistics"""
         try:
-            if not hasattr(self, 'signal_monitor'):
-                await update.message.reply_text(
-                    "❌ Signal monitoring not initialized"
-                )
+            if not hasattr(self, "signal_monitor"):
+                await update.message.reply_text("❌ Signal monitoring not initialized")
                 return
-            
+
             btc_stats = self.signal_monitor.get_signal_statistics("BTC")
             gold_stats = self.signal_monitor.get_signal_statistics("GOLD")
-            
+
             msg = "📊 *Signal Statistics*\n\n"
-            
+
             # BTC Stats
             if btc_stats:
                 msg += "*₿ BTC*\n"
@@ -1185,7 +1199,7 @@ class TradingTelegramBot:
                 msg += f"⚪ HOLD: {btc_stats['hold_signals']} ({btc_stats['hold_pct']:.1f}%)\n"
                 msg += f"⭐ Avg Quality: {btc_stats['avg_quality']:.2f}\n"
                 msg += f"✨ High Quality: {btc_stats['high_quality_count']}\n\n"
-            
+
             # GOLD Stats
             if gold_stats:
                 msg += "*🥇 GOLD*\n"
@@ -1195,132 +1209,125 @@ class TradingTelegramBot:
                 msg += f"⚪ HOLD: {gold_stats['hold_signals']} ({gold_stats['hold_pct']:.1f}%)\n"
                 msg += f"⭐ Avg Quality: {gold_stats['avg_quality']:.2f}\n"
                 msg += f"✨ High Quality: {gold_stats['high_quality_count']}\n"
-            
+
             keyboard = [
                 [InlineKeyboardButton("📡 Recent Signals", callback_data="signals")],
                 [InlineKeyboardButton("🔄 Refresh", callback_data="stats")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await update.message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
-        
+
         except Exception as e:
             logger.error(f"Error in cmd_signal_stats: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching statistics")
 
-
     async def cmd_regimes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /regimes command - Show regime information"""
         try:
-            if not hasattr(self, 'signal_monitor'):
-                await update.message.reply_text(
-                    "❌ Signal monitoring not initialized"
-                )
+            if not hasattr(self, "signal_monitor"):
+                await update.message.reply_text("❌ Signal monitoring not initialized")
                 return
-            
+
             btc_regime = self.signal_monitor.get_regime_info("BTC")
             gold_regime = self.signal_monitor.get_regime_info("GOLD")
-            
+
             msg = "🔄 *Market Regimes*\n\n"
-            
+
             # BTC Regime
             msg += "*₿ BTC*\n"
             msg += f"Regime Changes: {btc_regime.get('change_count', 0)}\n"
-            if btc_regime.get('last_changes'):
+            if btc_regime.get("last_changes"):
                 msg += "Recent Changes:\n"
-                for change in btc_regime['last_changes'][-3:]:
-                    timestamp = change['timestamp'].strftime('%H:%M')
-                    regime = "🚀 BULL" if "BULL" in change['regime'] else "⚖️ BEAR"
+                for change in btc_regime["last_changes"][-3:]:
+                    timestamp = change["timestamp"].strftime("%H:%M")
+                    regime = "🚀 BULL" if "BULL" in change["regime"] else "⚖️ BEAR"
                     msg += f"  {timestamp}: {regime} @ ${change['price']:,.2f}\n"
             msg += "\n"
-            
+
             # GOLD Regime
             msg += "*🥇 GOLD*\n"
             msg += f"Regime Changes: {gold_regime.get('change_count', 0)}\n"
-            if gold_regime.get('last_changes'):
+            if gold_regime.get("last_changes"):
                 msg += "Recent Changes:\n"
-                for change in gold_regime['last_changes'][-3:]:
-                    timestamp = change['timestamp'].strftime('%H:%M')
-                    regime = "🚀 BULL" if "BULL" in change['regime'] else "⚖️ BEAR"
+                for change in gold_regime["last_changes"][-3:]:
+                    timestamp = change["timestamp"].strftime("%H:%M")
+                    regime = "🚀 BULL" if "BULL" in change["regime"] else "⚖️ BEAR"
                     msg += f"  {timestamp}: {regime} @ ${change['price']:,.2f}\n"
-            
+
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh", callback_data="regimes")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await update.message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
-        
+
         except Exception as e:
             logger.error(f"Error in cmd_regimes: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching regime data")
 
-
     async def cmd_overrides(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /overrides command - Show Golden Cross override events"""
         try:
-            if not hasattr(self, 'signal_monitor'):
-                await update.message.reply_text(
-                    "❌ Signal monitoring not initialized"
-                )
+            if not hasattr(self, "signal_monitor"):
+                await update.message.reply_text("❌ Signal monitoring not initialized")
                 return
-            
+
             btc_overrides = self.signal_monitor.get_override_info("BTC")
             gold_overrides = self.signal_monitor.get_override_info("GOLD")
-            
+
             msg = "🔒 *Golden Cross Overrides*\n"
             msg += "(Sells blocked during bull market)\n\n"
-            
+
             # BTC Overrides
             msg += "*₿ BTC*\n"
             msg += f"Total Overrides: {btc_overrides['total']}\n"
-            if btc_overrides['total'] > 0:
+            if btc_overrides["total"] > 0:
                 msg += f"Avg Quality: {btc_overrides['avg_quality']:.2f}\n"
-                if btc_overrides['last_events']:
+                if btc_overrides["last_events"]:
                     msg += "Recent Blocks:\n"
-                    for event in btc_overrides['last_events'][-3:]:
-                        timestamp = event['timestamp'].strftime('%H:%M')
+                    for event in btc_overrides["last_events"][-3:]:
+                        timestamp = event["timestamp"].strftime("%H:%M")
                         msg += f"  {timestamp}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
             msg += "\n"
-            
+
             # GOLD Overrides
             msg += "*🥇 GOLD*\n"
             msg += f"Total Overrides: {gold_overrides['total']}\n"
-            if gold_overrides['total'] > 0:
+            if gold_overrides["total"] > 0:
                 msg += f"Avg Quality: {gold_overrides['avg_quality']:.2f}\n"
-                if gold_overrides['last_events']:
+                if gold_overrides["last_events"]:
                     msg += "Recent Blocks:\n"
-                    for event in gold_overrides['last_events'][-3:]:
-                        timestamp = event['timestamp'].strftime('%H:%M')
+                    for event in gold_overrides["last_events"][-3:]:
+                        timestamp = event["timestamp"].strftime("%H:%M")
                         msg += f"  {timestamp}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
-            
+
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh", callback_data="overrides")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await update.message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
-        
+
         except Exception as e:
             logger.error(f"Error in cmd_overrides: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching override data")
 
-
     def _format_signal_entry(self, signal_entry: Dict) -> str:
         """Format a signal entry for display"""
-        timestamp = signal_entry['timestamp'].strftime('%H:%M:%S')
-        price = signal_entry['price']
-        signal = signal_entry['signal']
-        regime = signal_entry['regime']
-        quality = signal_entry['quality']
-        reasoning = signal_entry['reasoning'].replace('_', ' ').title()
-        
+        timestamp = signal_entry["timestamp"].strftime("%H:%M:%S")
+        price = signal_entry["price"]
+        signal = signal_entry["signal"]
+        regime = signal_entry["regime"]
+        quality = signal_entry["quality"]
+        reasoning = signal_entry["reasoning"].replace("_", " ").title()
+
         # Signal icon
         if signal == 1:
             signal_icon = "🟢 BUY"
@@ -1328,14 +1335,14 @@ class TradingTelegramBot:
             signal_icon = "🔴 SELL"
         else:
             signal_icon = "⚪ HOLD"
-        
+
         # Quality indicator
         quality_icon = "★" if quality >= 0.65 else "•"
-        
+
         entry = (
             f"  {timestamp} | {signal_icon} | ${price:,.2f}\n"
             f"    {regime} | Quality: {quality_icon} {quality:.2f}\n"
             f"    {reasoning}\n"
         )
-        
-        return entry        
+
+        return entry

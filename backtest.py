@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed Backtesting Script - Properly integrates BullMarketFilteredAggregator with risk management
+Backtesting Script - Properly integrates BullMarketFilteredAggregator with risk management
 """
 import json
 import logging
@@ -174,10 +174,10 @@ class MLStrategy(bt.Strategy):
         self.take_profit = None
 
         logger.info(f"=" * 70)
-        logger.info(f"FIXED Strategy Configuration for {self.asset_key.upper()}")
+        logger.info(f" Strategy Configuration for {self.asset_key.upper()}")
         logger.info(f"=" * 70)
         logger.info(f"Risk Management:")
-        logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}% (FIXED: was 1%)")
+        logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}% (: was 1%)")
         logger.info(f"  Take-Profit: {self.params.take_profit_pct * 100}%")
         logger.info(
             f"  Reward/Risk: {self.params.take_profit_pct/self.params.stop_loss_pct:.1f}:1"
@@ -396,7 +396,7 @@ class MLStrategy(bt.Strategy):
                 f"Size={size:.8f}"
             )
         else:
-            # Fixed percentage stop
+            #  percentage stop
             risk_amount = cash * self.params.risk_per_trade
             position_value = risk_amount / self.params.stop_loss_pct
             size = position_value / current_price
