@@ -1,6 +1,6 @@
 """
-EMA Crossover Strategy -  Signal Generation
-Now generates realistic buy/sell signals based on multiple conditions
+EMA Crossover Strategy - FIXED: No Data Leakage
+Realistic signal generation with proper label validation
 """
 
 import pandas as pd
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class EMAStrategy(BaseStrategy):
     """
     EMA Crossover Strategy with ML-based signal generation
-    OPTIMIZED: Now generates higher-quality signals with regime detection
+    FIXED: Removed data leakage, uses future returns only for validation
     """
 
     def __init__(self, config: dict):
@@ -23,18 +23,21 @@ class EMAStrategy(BaseStrategy):
         # EMA periods
         self.fast_period = config.get("ema_fast", 50)
         self.slow_period = config.get("ema_slow", 200)
+        
         # Signal thresholds from config
-        self.min_distance_pct = config.get("min_distance_pct", 0.05)
-        self.min_return_threshold = config.get("min_return_threshold", 0.0001)
-        self.min_score_threshold = config.get("min_conditions", 1)
+        self.min_distance_pct = config.get("min_distance_pct", 0.5)  # 0.5% default
+        self.min_return_threshold = config.get("min_return_threshold", 0.003)  # 0.3%
+        self.min_score_threshold = config.get("min_conditions", 4)  # Require 4+ conditions
+        
         # Filters
         self.use_price_confirmation = config.get("use_price_confirmation", False)
         self.use_volume_filter = config.get("use_volume_filter", False)
         self.volume_multiplier = config.get("volume_multiplier", 1.2)
+        
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  EMA Fast: {self.fast_period}, Slow: {self.slow_period}")
         logger.info(f"  Min Distance: {self.min_distance_pct}%")
-        logger.info(f"  Price Confirmation: {self.use_price_confirmation}")
+        logger.info(f"  Min Score Threshold: {self.min_score_threshold}")
         logger.info(f"  Min Return: {self.min_return_threshold:.4%}")
 
     def get_warmup_period(self) -> int:
@@ -59,6 +62,7 @@ class EMAStrategy(BaseStrategy):
             return empty_df
 
         df = df.copy()
+        
         # Ensure all columns are numeric first
         for col in df.columns:
             if df[col].dtype not in ["float64", "int64"]:
@@ -68,7 +72,7 @@ class EMAStrategy(BaseStrategy):
         if "volume" not in df.columns:
             df["volume"] = 1.0
 
-        # : Replace deprecated fillna(method='ffill') with ffill()
+        # Clean price data
         df["close"] = pd.to_numeric(df["close"], errors="coerce").ffill().fillna(0)
         df["high"] = (
             pd.to_numeric(df["high"], errors="coerce").ffill().fillna(df["close"])
@@ -78,7 +82,7 @@ class EMAStrategy(BaseStrategy):
         )
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce").ffill().fillna(1.0)
 
-        # Now extract the processed values
+        # Extract values
         close = df["close"].values.astype("float64")
         high = df["high"].values.astype("float64")
         low = df["low"].values.astype("float64")
@@ -96,7 +100,7 @@ class EMAStrategy(BaseStrategy):
             df["ema_cross"] = 0
             return df
 
-        # Fill NaN values with forward fill then backward fill
+        # Fill NaN values
         close = np.nan_to_num(close, nan=np.nanmean(close))
         high = np.nan_to_num(high, nan=np.nanmean(high))
         low = np.nan_to_num(low, nan=np.nanmean(low))
@@ -110,11 +114,9 @@ class EMAStrategy(BaseStrategy):
             df["ema_fast"] = ema_fast_values
             df["ema_slow"] = ema_slow_values
 
-            # : Use proper forward fill and backfill for NaN values
             df["ema_fast"] = df["ema_fast"].ffill().bfill()
             df["ema_slow"] = df["ema_slow"].ffill().bfill()
 
-            # If still NaN after ffill/bfill, use close prices
             if df["ema_fast"].isna().any():
                 df["ema_fast"] = df["ema_fast"].fillna(df["close"])
             if df["ema_slow"].isna().any():
@@ -178,12 +180,10 @@ class EMAStrategy(BaseStrategy):
 
         # === ADDITIONAL CONFIRMATION INDICATORS ===
         try:
-            # : Calculate volume MA directly on numpy array, then properly fill NaN
             volume_ma_values = ta.SMA(volume, timeperiod=20)
             df["volume_ma"] = volume_ma_values
             df["volume_ma"] = df["volume_ma"].ffill().bfill()
 
-            # If still NaN, use current volume
             if df["volume_ma"].isna().any():
                 df["volume_ma"] = df["volume_ma"].fillna(df["volume"])
 
@@ -208,7 +208,6 @@ class EMAStrategy(BaseStrategy):
             df["macd_signal"] = macd_signal
             df["macd_hist"] = macd_hist
 
-            # Fill NaN values
             df["macd"] = df["macd"].fillna(0)
             df["macd_signal"] = df["macd_signal"].fillna(0)
             df["macd_hist"] = df["macd_hist"].fillna(0)
@@ -248,7 +247,6 @@ class EMAStrategy(BaseStrategy):
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         df[numeric_columns] = df[numeric_columns].fillna(0)
 
-        # Log if any NaN still exists
         nan_columns = df.columns[df.isna().any()].tolist()
         if nan_columns:
             logger.warning(f"[{self.name}] Still has NaN in columns: {nan_columns}")
@@ -259,7 +257,6 @@ class EMAStrategy(BaseStrategy):
     def generate_signal(self, df: pd.DataFrame) -> tuple:
         """
         Generate real-time signal based on current EMA conditions
-        OPTIMIZED: Now includes MACD, RSI, and volume confirmation
         Returns: (signal, confidence)
         """
         if len(df) < self.get_warmup_period():
@@ -300,21 +297,17 @@ class EMAStrategy(BaseStrategy):
             # Calculate confidence score
             confidence = min(1.0, trend_strength / 5.0)
 
-            # Add MACD alignment to confidence
             if macd_aligned == 1:
                 confidence += 0.15
 
-            # Add RSI confirmation to confidence
             if (ema_cross == 1 and 40 < rsi < 70) or (
                 ema_cross == -1 and 30 < rsi < 60
             ):
                 confidence += 0.10
 
-            # Add volume confirmation to confidence
             if high_volume == 1:
                 confidence += 0.10
 
-            # Cap confidence at 1.0
             confidence = min(1.0, confidence)
 
             if ema_cross == 1:  # Golden Cross
@@ -336,8 +329,8 @@ class EMAStrategy(BaseStrategy):
 
     def generate_labels(self, df: pd.DataFrame) -> pd.Series:
         """
-        IMPROVED: Generate more realistic trading signals
-        Uses multiple conditions instead of just crossovers
+        FIXED: Generate labels without data leakage
+        Future returns used ONLY for validation, NOT for scoring
         """
         df = df.copy()
         logger.info(f"[{self.name}] Starting label generation with {len(df)} rows")
@@ -351,6 +344,7 @@ class EMAStrategy(BaseStrategy):
             "rsi",
             "macd_hist",
             "high_volume",
+            "adx",
         ]
         df = df.dropna(subset=required_cols)
 
@@ -371,9 +365,10 @@ class EMAStrategy(BaseStrategy):
         rsi = df["rsi"].values
         macd_hist = df["macd_hist"].values
         high_volume = df["high_volume"].values
+        adx = df["adx"].values
 
         labels = pd.Series(0, index=df.index)
-        lookforward = 3
+        lookforward = 5  # Look 5 bars ahead for validation
 
         logger.info(
             f"[{self.name}] Analyzing {len(df) - lookforward} bars for signals..."
@@ -383,75 +378,101 @@ class EMAStrategy(BaseStrategy):
             if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(close[i]):
                 continue
 
+            # Calculate future return for VALIDATION ONLY
             future_closes = close[i + 1 : i + 1 + lookforward]
             if len(future_closes) == 0:
                 continue
 
             future_return = (np.mean(future_closes) - close[i]) / close[i]
 
-            # === BULLISH CONDITIONS ===
+            # === BULLISH CONDITIONS (NO FUTURE DATA IN SCORING) ===
             bullish_score = 0
 
+            # Strong signal: Actual crossover
             if ema_cross[i] == 1:
                 bullish_score += 3
 
+            # EMA separation (trend strength)
             if ema_fast[i] > ema_slow[i] and ema_diff_pct[i] > self.min_distance_pct:
                 bullish_score += 2
 
+            # Price confirmation
             if close[i] > ema_fast[i] and close[i] > ema_slow[i]:
                 bullish_score += 1
 
+            # MACD alignment
             if not np.isnan(macd_hist[i]) and macd_hist[i] > 0:
                 bullish_score += 1
 
+            # RSI not overbought
             if not np.isnan(rsi[i]) and 40 < rsi[i] < 70:
                 bullish_score += 1
 
+            # Volume confirmation
             if high_volume[i] == 1:
                 bullish_score += 1
 
-            if future_return > self.min_return_threshold:
-                bullish_score += 2
+            # Strong trend (ADX)
+            if not np.isnan(adx[i]) and adx[i] > 25:
+                bullish_score += 1
 
-            # === BEARISH CONDITIONS ===
+            # === BEARISH CONDITIONS (NO FUTURE DATA IN SCORING) ===
             bearish_score = 0
 
+            # Strong signal: Actual crossover
             if ema_cross[i] == -1:
                 bearish_score += 3
 
+            # EMA separation (trend strength)
             if ema_fast[i] < ema_slow[i] and ema_diff_pct[i] < -self.min_distance_pct:
                 bearish_score += 2
 
+            # Price confirmation
             if close[i] < ema_fast[i] and close[i] < ema_slow[i]:
                 bearish_score += 1
 
+            # MACD alignment
             if not np.isnan(macd_hist[i]) and macd_hist[i] < 0:
                 bearish_score += 1
 
+            # RSI not oversold
             if not np.isnan(rsi[i]) and 30 < rsi[i] < 60:
                 bearish_score += 1
 
+            # Volume confirmation
             if high_volume[i] == 1:
                 bearish_score += 1
 
-            if future_return < -self.min_return_threshold:
-                bearish_score += 2
+            # Strong trend (ADX)
+            if not np.isnan(adx[i]) and adx[i] > 25:
+                bearish_score += 1
 
-            # === ASSIGN LABELS ===
+            # === ASSIGN LABELS (Future return used ONLY for validation) ===
+            # Only label as BUY if:
+            # 1. Score is high enough
+            # 2. Bullish score > Bearish score
+            # 3. Future actually went up (validation)
             if (
                 bullish_score >= self.min_score_threshold
                 and bullish_score > bearish_score
+                and future_return > self.min_return_threshold
             ):
                 labels.iloc[i] = 1
+
+            # Only label as SELL if:
+            # 1. Score is high enough
+            # 2. Bearish score > Bullish score
+            # 3. Future actually went down (validation)
             elif (
                 bearish_score >= self.min_score_threshold
                 and bearish_score > bullish_score
+                and future_return < -self.min_return_threshold
             ):
                 labels.iloc[i] = -1
             else:
                 labels.iloc[i] = 0
 
-        # Remove labels from last N bars
+        # Remove labels from last N bars (can't validate future)
         labels.iloc[-lookforward:] = 0
 
         signals_generated = (labels != 0).sum()
@@ -477,12 +498,12 @@ class EMAStrategy(BaseStrategy):
         buy_pct = dist.get(1, 0) / total * 100 if total > 0 else 0
         sell_pct = dist.get(-1, 0) / total * 100 if total > 0 else 0
 
-        if total > 0 and (buy_pct < 2 or sell_pct < 2):
+        if total > 0 and (buy_pct < 5 or sell_pct < 5):
             logger.warning(
                 f"  ⚠ Low signal rate detected (BUY: {buy_pct:.1f}%, SELL: {sell_pct:.1f}%)"
             )
             logger.warning(
-                f"  This is still trainable, but consider lowering min_return_threshold"
+                f"  Consider lowering min_score_threshold or min_return_threshold"
             )
         elif total > 0:
             logger.info(

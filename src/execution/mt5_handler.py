@@ -365,7 +365,6 @@ class MT5ExecutionHandler:
     ) -> bool:
         """
         Execute trading signal with hybrid position sizing
-
         Args:
             signal: 1 (BUY), -1 (SELL), 0 (HOLD)
             symbol: Trading symbol
@@ -375,13 +374,11 @@ class MT5ExecutionHandler:
             sizing_mode: AUTOMATED, MANUAL_OVERRIDE, REDUCED_RISK, ELEVATED_RISK
             manual_size_usd: Manual position size (only if sizing_mode=MANUAL_OVERRIDE)
             override_reason: Reason for override
-
         Returns:
             True if execution successful, False otherwise
         """
         if symbol is None:
             symbol = self.symbol
-
         try:
             # Get current price
             current_price = self.get_current_price(symbol)
@@ -399,13 +396,11 @@ class MT5ExecutionHandler:
                     if hasattr(existing_position, "side")
                     else existing_position.get("side")
                 )
-
                 logger.debug(
                     f"{asset}: Existing {position_side.upper()} position found, signal={signal}"
                 )
 
                 # === CLOSE POSITION SCENARIOS ===
-
                 # Close long position on SELL signal
                 if signal == -1 and position_side == "long":
                     logger.info(
@@ -430,6 +425,7 @@ class MT5ExecutionHandler:
                     if not success:
                         logger.error(f"[FAIL] Failed to close {asset} SHORT position")
                         return False
+                    return True
 
                 # HOLD signal - check SL/TP
                 elif signal == 0:
@@ -446,22 +442,23 @@ class MT5ExecutionHandler:
                                 f"[FAIL] Failed to close {asset} position on {close_reason}"
                             )
                             return False
+                        return True
                     else:
                         logger.debug(f"{asset}: Holding position, no action needed")
-                    return True
+                        return False  # Return False for HOLD signals with no action
 
                 # Prevent duplicate positions
                 elif signal == 1 and position_side == "long":
                     logger.info(
                         f"[SKIP] {asset}: BUY signal ignored - Already have LONG position"
                     )
-                    return True
+                    return False  # No trade executed
 
                 elif signal == -1 and position_side == "short":
                     logger.info(
                         f"[SKIP] {asset}: SELL signal ignored - Already have SHORT position"
                     )
-                    return True
+                    return False  # No trade executed
 
             # STEP 3: Open new position with HYBRID SIZING
             if signal == 1:  # BUY signal
@@ -469,7 +466,7 @@ class MT5ExecutionHandler:
                     logger.warning(
                         f"[SKIP] {asset}: BUY signal - Position already exists"
                     )
-                    return True
+                    return False  # No trade executed
 
                 logger.info(f"[SIGNAL] {asset}: BUY signal - Opening LONG position")
                 return self._open_mt5_position(
@@ -486,13 +483,14 @@ class MT5ExecutionHandler:
 
             elif signal == -1:  # SELL signal
                 logger.debug(f"{asset}: SELL signal - No position to close, no action")
-                return True
+                return False  # No trade executed
 
-            return True
+            return False  # Default return for any other case
 
         except Exception as e:
             logger.error(f"Error executing {asset} signal: {e}", exc_info=True)
             return False
+
 
     def _check_stop_loss_take_profit(
         self, position, current_price: float

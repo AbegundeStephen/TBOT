@@ -83,11 +83,8 @@ class MeanReversionStrategy(BaseStrategy):
         
         # Simple momentum
         df['roc_5'] = ta.ROC(close, timeperiod=5)
-        
-        # REMOVED: All redundant features
-        # NO volume features (not always available)
-        # NO derived calculations
-        # NO multiple timeframe features
+        # Simple momentum
+        df['adx'] = ta.ADX(high, low, close, timeperiod=14)
         
         return df
     

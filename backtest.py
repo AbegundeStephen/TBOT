@@ -23,17 +23,19 @@ logger = logging.getLogger(__name__)
 # Preset configurations for different trading styles
 AGGREGATOR_PRESETS = {
     "conservative": {
-        "mean_reversion_weight": 0.6,
-        "trend_following_weight": 1.2,
-        "ema_weight": 1.2,
+        "mean_reversion_weight": 1.0,      
+        "trend_following_weight": 1.0,     
+        "ema_weight": 1.1,                 
         "buy_score_threshold": 0.45,
         "sell_score_threshold": 0.50,
         "perfect_agreement_bonus": 0.15,
-        "allow_single_mr_signal": False,
+        "allow_single_mr_signal": True,  
         "allow_single_tf_signal": True,
         "allow_single_ema_signal": True,
+        "single_mr_threshold": 0.65,   
         "single_tf_threshold": 0.65,
         "single_ema_threshold": 0.65,
+        
         "enable_bull_filter": True,
         "block_sells_in_bull": False,
         "boost_buys_in_bull": 0.10,
@@ -42,18 +44,21 @@ AGGREGATOR_PRESETS = {
         "regime_cooldown_hours": 6,
         "verbose_logging": True,
     },
+    
     "balanced": {
-        "mean_reversion_weight": 0.7,
-        "trend_following_weight": 1.1,
-        "ema_weight": 1.2,
+        "mean_reversion_weight": 1.0,      
+        "trend_following_weight": 1.0,    
+        "ema_weight": 1.1,                   
         "buy_score_threshold": 0.35,
         "sell_score_threshold": 0.40,
         "perfect_agreement_bonus": 0.15,
-        "allow_single_mr_signal": False,
+        "allow_single_mr_signal": True, 
         "allow_single_tf_signal": True,
         "allow_single_ema_signal": True,
+        "single_mr_threshold": 0.60,       
         "single_tf_threshold": 0.60,
         "single_ema_threshold": 0.60,
+        
         "enable_bull_filter": True,
         "block_sells_in_bull": False,
         "boost_buys_in_bull": 0.15,
@@ -62,18 +67,21 @@ AGGREGATOR_PRESETS = {
         "regime_cooldown_hours": 6,
         "verbose_logging": True,
     },
+    
     "aggressive": {
-        "mean_reversion_weight": 0.8,
-        "trend_following_weight": 1.0,
-        "ema_weight": 1.1,
+        "mean_reversion_weight": 1.0,     
+        "trend_following_weight": 1.0,    
+        "ema_weight": 1.1,                
         "buy_score_threshold": 0.30,
         "sell_score_threshold": 0.35,
         "perfect_agreement_bonus": 0.12,
-        "allow_single_mr_signal": False,
+        "allow_single_mr_signal": True, 
         "allow_single_tf_signal": True,
         "allow_single_ema_signal": True,
+        "single_mr_threshold": 0.55,  
         "single_tf_threshold": 0.55,
         "single_ema_threshold": 0.55,
+        
         "enable_bull_filter": True,
         "block_sells_in_bull": False,
         "boost_buys_in_bull": 0.15,
@@ -84,22 +92,21 @@ AGGREGATOR_PRESETS = {
     },
 }
 
-
 class MLStrategy(bt.Strategy):
     """
     Backtrader strategy wrapper using BullMarketFilteredAggregator with risk management
     """
 
     params = (
-        ("stop_loss_pct", 0.03),  # 3% stop (was 1% - too tight!)
-        ("take_profit_pct", 0.06),  # 6% target (2:1 reward/risk)
-        ("trailing_stop_pct", 0.02),  # 2% trailing stop
-        ("risk_per_trade", 0.02),  # 2% account risk per trade
+        ("stop_loss_pct", 0.03),
+        ("take_profit_pct", 0.06),
+        ("trailing_stop_pct", 0.02),  
+        ("risk_per_trade", 0.02),  
         # Position sizing
-        ("max_position_pct", 0.95),  # Max 95% of capital
-        ("use_atr_sizing", True),  # Volatility-adjusted sizing
+        ("max_position_pct", 0.95),  
+        ("use_atr_sizing", True),  
         ("atr_period", 14),
-        ("atr_multiplier", 1.5),  # ATR-based stop distance
+        ("atr_multiplier", 1.5),  
         # Strategy config
         ("lookback", 100),
         ("aggregator_mode", "weighted_voting"),

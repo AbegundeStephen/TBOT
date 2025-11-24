@@ -322,43 +322,67 @@ class TradingBot:
 
         AGGREGATOR_PRESETS = {
             "conservative": {
-                "buy_score_threshold": 0.65,
-                "sell_score_threshold": 0.65,
-                "perfect_agreement_bonus": 0.15,
                 "mean_reversion_weight": 1.0,
-                "trend_following_weight": 0.9,
-                "min_confidence": 0.50,
-                "signal_quality_threshold": 0.55,
-                "high_confidence_threshold": 0.70,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": True,
-                "boost_buys_in_bull": 0.05,
-                "regime_confirmation_bars": 3,
-                "confidence_normalization": True,
-            },
-            "balanced": {
-                "buy_score_threshold": 0.40,
-                "sell_score_threshold": 0.40,
-                "mean_reversion_weight": 1.2,
-                "trend_following_weight": 0.5,
-                "allow_single_mr_signal": True,
-                "single_mr_threshold": 0.60,
-                "boost_buys_in_bull": 0.10,
-            },
-            "aggressive": {
+                "trend_following_weight": 1.0,
+                "ema_weight": 1.1,
                 "buy_score_threshold": 0.45,
-                "sell_score_threshold": 0.45,
-                "perfect_agreement_bonus": 0.08,
-                "mean_reversion_weight": 1.0,
-                "trend_following_weight": 0.7,
-                "min_confidence": 0.35,
-                "signal_quality_threshold": 0.40,
-                "high_confidence_threshold": 0.60,
+                "sell_score_threshold": 0.50,
+                "perfect_agreement_bonus": 0.15,
+                "allow_single_mr_signal": True,
+                "allow_single_tf_signal": True,
+                "allow_single_ema_signal": True,
+                "single_mr_threshold": 0.65,
+                "single_tf_threshold": 0.65,
+                "single_ema_threshold": 0.65,
                 "enable_bull_filter": True,
                 "block_sells_in_bull": False,
                 "boost_buys_in_bull": 0.10,
+                "sell_penalty_in_bull": 0.15,
+                "regime_confirmation_bars": 3,
+                "regime_cooldown_hours": 6,
+                "verbose_logging": True,
+            },
+            "balanced": {
+                "mean_reversion_weight": 1.0,
+                "trend_following_weight": 1.0,
+                "ema_weight": 1.1,
+                "buy_score_threshold": 0.35,
+                "sell_score_threshold": 0.40,
+                "perfect_agreement_bonus": 0.15,
+                "allow_single_mr_signal": True,
+                "allow_single_tf_signal": True,
+                "allow_single_ema_signal": True,
+                "single_mr_threshold": 0.60,
+                "single_tf_threshold": 0.60,
+                "single_ema_threshold": 0.60,
+                "enable_bull_filter": True,
+                "block_sells_in_bull": False,
+                "boost_buys_in_bull": 0.15,
+                "sell_penalty_in_bull": 0.20,
+                "regime_confirmation_bars": 2,
+                "regime_cooldown_hours": 6,
+                "verbose_logging": True,
+            },
+            "aggressive": {
+                "mean_reversion_weight": 1.0,
+                "trend_following_weight": 1.0,
+                "ema_weight": 1.1,
+                "buy_score_threshold": 0.30,
+                "sell_score_threshold": 0.35,
+                "perfect_agreement_bonus": 0.12,
+                "allow_single_mr_signal": True,
+                "allow_single_tf_signal": True,
+                "allow_single_ema_signal": True,
+                "single_mr_threshold": 0.55,
+                "single_tf_threshold": 0.55,
+                "single_ema_threshold": 0.55,
+                "enable_bull_filter": True,
+                "block_sells_in_bull": False,
+                "boost_buys_in_bull": 0.15,
+                "sell_penalty_in_bull": 0.15,
                 "regime_confirmation_bars": 1,
-                "confidence_normalization": True,
+                "regime_cooldown_hours": 3,
+                "verbose_logging": True,
             },
         }
 
@@ -436,10 +460,13 @@ class TradingBot:
             self.daily_loss = 0.0
             self.last_trade_date = current_date
             logger.info(f"[RESET] Daily counters reset for {current_date}")
-
+            self.portfolio_manager.start_trading_session()
+            logger.info(f"[SESSION] Trading session started")
             if not self.portfolio_manager.is_paper_mode:
                 logger.info("[REFRESH] Fetching updated capital...")
                 self.portfolio_manager.refresh_capital()
+                self.portfolio_manager.reset_daily_pnl()
+
 
             # Send daily summary via Telegram
             if self.telegram_bot and self.telegram_loop:
@@ -532,7 +559,6 @@ class TradingBot:
     def trade_asset(self, asset_name: str):
         """Execute trading logic for a single asset"""
         asset_cfg = self.config["assets"][asset_name]
-
         if not asset_cfg.get("enabled", False):
             return
 
@@ -563,7 +589,6 @@ class TradingBot:
 
             # Fetch data
             end_time = datetime.now(timezone.utc)
-
             if exchange == "binance":
                 interval = asset_cfg.get("interval", "1h")
                 lookback = 15 if interval == "1h" else 60
@@ -572,7 +597,6 @@ class TradingBot:
                 lookback = 25 if timeframe == "H1" else 75
 
             start_time = end_time - timedelta(days=lookback)
-
             logger.info(f"[DATA] Fetching {lookback} days...")
 
             if exchange == "binance":
@@ -591,12 +615,9 @@ class TradingBot:
                 )
 
             df = self.data_manager.clean_data(df)
-
             min_bars = 250
             if len(df) < min_bars:
-                logger.warning(
-                    f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})"
-                )
+                logger.warning(f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})")
                 return
 
             logger.info(f"[OK] {len(df)} bars fetched")
@@ -617,12 +638,13 @@ class TradingBot:
 
             signal, details = aggregator.get_aggregated_signal(df)
             self.telegram_bot.signal_monitor.record_signal(
-                asset=asset_name,  # "BTC" or "GOLD"
+                asset=asset_name,
                 signal=signal,
                 details=details,
                 price=current_price,
                 timestamp=datetime.now(),
             )
+
             # Log all three strategy signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
@@ -641,9 +663,25 @@ class TradingBot:
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
             logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
 
-            # Track position before execution
-            was_new_position = False
+            # Skip if signal is HOLD (0)
+            if signal == 0:
+                logger.info(f"[HOLD] {asset_name}: No action (HOLD signal)")
+                return
+
+            # Check for open position before selling
             existing_pos = self.portfolio_manager.get_position(asset_name)
+            if signal == -1 and not existing_pos:
+                logger.warning(f"[SKIP] {asset_name}: No open position to sell")
+                return
+
+            # Check trading limits and cooldowns before proceeding
+            if not self.check_trading_limits():
+                logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
+                return
+
+            if not self.check_min_time_between_trades(asset_name):
+                logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
+                return
 
             # Execute signal with appropriate handler
             success = False
@@ -666,85 +704,68 @@ class TradingBot:
                 )
                 self.mt5_handler.check_and_update_positions(asset_name)
 
-            # Check if new position was opened
-            new_pos = self.portfolio_manager.get_position(asset_name)
-            if new_pos and not existing_pos and signal != 0:
-                was_new_position = True
+            # Only log success if the trade was actually executed
+            if success:
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
-                logger.info(
-                    f"[SUCCESS] {asset_name} trade executed (count: {self.trade_count_today})"
-                )
-
-                # Telegram notification for new position
-            if was_new_position and success:
-                try:
-                    pos = new_pos
-                    self._send_telegram_notification(
-                        self.telegram_bot.notify_trade_opened(
-                            asset=asset_name,
-                            side=pos.side if hasattr(pos, "side") else pos.get("side"),
-                            price=current_price,
-                            size=(
-                                pos.quantity * current_price
-                                if hasattr(pos, "quantity")
-                                else pos.get("current_value", 0)
-                            ),
-                            sl=(
-                                pos.stop_loss
-                                if hasattr(pos, "stop_loss")
-                                else pos.get("stop_loss", 0)
-                            ),
-                            tp=(
-                                pos.take_profit
-                                if hasattr(pos, "take_profit")
-                                else pos.get("take_profit", 0)
-                            ),
-                        )
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send Telegram notification: {e}")
-            # Check if position was closed
-            if existing_pos and not new_pos:
-                try:
-                    closed = self.portfolio_manager.closed_positions
-                    if closed:
-                        last_trade = closed[-1]
-                        if last_trade["asset"] == asset_name:
-                            self._send_telegram_notification(
-                                self.telegram_bot.notify_trade_closed(
-                                    asset=asset_name,
-                                    side=last_trade["side"],
-                                    pnl=last_trade["pnl"],
-                                    pnl_pct=last_trade["pnl_pct"] * 100,
-                                    reason=last_trade["reason"],
-                                )
-                            )
-                except Exception as e:
-                    logger.error(f"Failed to send close notification: {e}")
-            # Count trade if opened
-            if signal != 0 and success:
-                if not self.check_trading_limits():
-                    logger.info(
-                        f"[LIMIT] {asset_name}: Trading limits prevent new position"
-                    )
-                    return
-
-                if not self.check_min_time_between_trades(asset_name):
-                    logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
-                    return
-
-                self.trade_count_today += 1
-                self.last_trade_times[asset_name] = datetime.now()
-
                 signal_type = "BUY" if signal == 1 else "SELL"
-                logger.info(
-                    f"[SUCCESS] {asset_name} {signal_type} executed "
-                    f"(Daily count: {self.trade_count_today})"
-                )
+                logger.info(f"[SUCCESS] {asset_name} {signal_type} executed (Daily count: {self.trade_count_today})")
+
+                # Check if new position was opened
+                new_pos = self.portfolio_manager.get_position(asset_name)
+                if new_pos and not existing_pos and signal != 0:
+                    try:
+                        pos = new_pos
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_trade_opened(
+                                asset=asset_name,
+                                side=pos.side if hasattr(pos, "side") else pos.get("side"),
+                                price=current_price,
+                                size=(
+                                    pos.quantity * current_price
+                                    if hasattr(pos, "quantity")
+                                    else pos.get("current_value", 0)
+                                ),
+                                sl=(
+                                    pos.stop_loss
+                                    if hasattr(pos, "stop_loss")
+                                    else pos.get("stop_loss", 0)
+                                ),
+                                tp=(
+                                    pos.take_profit
+                                    if hasattr(pos, "take_profit")
+                                    else pos.get("take_profit", 0)
+                                ),
+                            )
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send Telegram notification: {e}")
+
+                # Check if position was closed
+                if existing_pos and not new_pos:
+                    try:
+                        closed = self.portfolio_manager.closed_positions
+                        if closed:
+                            last_trade = closed[-1]
+                            if last_trade["asset"] == asset_name:
+                                self._send_telegram_notification(
+                                    self.telegram_bot.notify_trade_closed(
+                                        asset=asset_name,
+                                        side=last_trade["side"],
+                                        pnl=last_trade["pnl"],
+                                        pnl_pct=last_trade["pnl_pct"] * 100,
+                                        reason=last_trade["reason"],
+                                    )
+                                )
+                    except Exception as e:
+                        logger.error(f"Failed to send close notification: {e}")
+
                 # Log trade
                 if self.config.get("logging", {}).get("save_trades", True):
                     self._log_trade(asset_name, signal, details, current_price)
+
+            else:
+                logger.warning(f"[SKIP] {asset_name}: Trade not executed (limits/cooldowns/handler failure)")
 
         except Exception as e:
             logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
@@ -758,6 +779,7 @@ class TradingBot:
                     )
                 except:
                     pass
+
 
     def _log_trade(self, asset: str, signal: int, details: dict, price: float):
         """Log trade to file"""
@@ -786,7 +808,7 @@ class TradingBot:
 
         self.reset_daily_counters()
         self.portfolio_manager.update_positions()
-
+        
         enabled = [
             name
             for name, cfg in self.config["assets"].items()

@@ -1,5 +1,5 @@
 """
-: Strategy weights aligned with actual performance
+Signal Aggregator with Bull/Bear Regime Detection and Logging
 """
 
 import pandas as pd
@@ -13,10 +13,18 @@ logger = logging.getLogger(__name__)
 
 class BullMarketFilteredAggregator:
     """
-     VERSION - Weights match actual accuracy:
-    - TF: 72% accuracy → Weight 1.0-1.2
-    - EMA: 72% accuracy → Weight 1.0-1.2
-    - MR: 62-68% accuracy → Weight 0.6-0.8
+    Multi-Layer Signal Processing with Regime Detection:
+    
+    Architecture:
+    - EMA 50/200: Regime Filter (Golden Cross = Bull, Death Cross = Bear)
+    - Mean Reversion: Tactical reversals (RSI + Bollinger Bands)
+    - Trend Following: Momentum entries (MA + ADX)
+    - Aggregator: Weighted voting with regime-aware filtering
+    
+    VERSION - Weights match actual accuracy:
+    - MR: 72-75% accuracy → Weight 1.1
+    - TF: 72% accuracy → Weight 1.1
+    - EMA: 72% accuracy (regime detection) → Weight 1.1
     """
 
     def __init__(
@@ -33,31 +41,31 @@ class BullMarketFilteredAggregator:
         self.asset_name = asset_name
 
         default_config = {
-            # WEIGHTS : Match actual performance
-            "mean_reversion_weight": 0.7,  # 62-68% - REDUCED from 1.3!
-            "trend_following_weight": 1.1,  # 72% - INCREASED from 0.4!
-            "ema_weight": 1.2,  # 72% - NEW (was missing)
+            # WEIGHTS: Match actual performance
+            "mean_reversion_weight": 1.1,
+            "trend_following_weight": 1.1,
+            "ema_weight": 1.1,
             # Thresholds
             "buy_score_threshold": 0.35,
             "sell_score_threshold": 0.40,
             "perfect_agreement_bonus": 0.15,
-            # Single strategy -  logic
-            "allow_single_mr_signal": False,  # Low accuracy - disabled
-            "allow_single_tf_signal": True,  # High accuracy - enabled
-            "allow_single_ema_signal": True,  # High accuracy - enabled
-            "single_mr_threshold": 0.75,
-            "single_tf_threshold": 0.60,  # Lower threshold (it's accurate)
-            "single_ema_threshold": 0.60,  # Lower threshold (it's accurate)
+            # Single strategy logic
+            "allow_single_mr_signal": False,
+            "allow_single_tf_signal": True,
+            "allow_single_ema_signal": True,
+            "single_mr_threshold": 0.65,
+            "single_tf_threshold": 0.60,
+            "single_ema_threshold": 0.60,
             # Confidence filtering
             "min_confidence": 0.35,
             "signal_quality_threshold": 0.40,
             "high_confidence_threshold": 0.65,
             "confidence_normalization": True,
-            # Bull market -  to allow exits
+            # Bull market filtering to allow exits
             "enable_bull_filter": True,
-            "block_sells_in_bull": False,  # CHANGED: Allow exits in bull
+            "block_sells_in_bull": False,
             "boost_buys_in_bull": 0.15,
-            "sell_penalty_in_bull": 0.20,  # Penalty, not block
+            "sell_penalty_in_bull": 0.20,
             "regime_confirmation_bars": 2,
             "regime_cooldown_hours": 6,
             "verbose_logging": True,
@@ -67,13 +75,16 @@ class BullMarketFilteredAggregator:
         for key, value in default_config.items():
             self.config.setdefault(key, value)
 
-        # State tracking
+        # State tracking for regime
         self.previous_regime = None
         self.regime_change_count = 0
         self.last_regime_change_time = None
         self.signal_history = []
         self.max_history = 10
 
+        # Regime statistics
+        self.bull_count = 0
+        self.bear_count = 0
         self.total_evaluations = 0
         self.signals_generated = 0
         self.holds_generated = 0
@@ -83,20 +94,27 @@ class BullMarketFilteredAggregator:
     def _log_initialization(self):
         """Log corrected configuration"""
         logger.info("=" * 80)
-        logger.info(f"🔧  BullMarketFilteredAggregator for {self.asset_name}")
+        logger.info(f"🔧 BullMarketFilteredAggregator for {self.asset_name}")
         logger.info("=" * 80)
-        logger.info("CORRECTED WEIGHTS (aligned with actual accuracy):")
+        logger.info("")
+        logger.info("ARCHITECTURE:")
+        logger.info("  Layer 1: EMA 50/200 → Regime Filter (Bull/Bear Detection)")
+        logger.info("  Layer 2: Mean Reversion → Tactical Reversals (RSI + BB)")
+        logger.info("  Layer 3: Trend Following → Momentum Entries (MA + ADX)")
+        logger.info("  Layer 4: Aggregator → Weighted Voting with Regime Context")
+        logger.info("")
+        logger.info("STRATEGY WEIGHTS (aligned with actual accuracy):")
         logger.info(
-            f"  📊 Mean Reversion:   {self.config['mean_reversion_weight']:.1f} (62-68% acc) ⬇ REDUCED"
+            f"  📊 Mean Reversion:   {self.config['mean_reversion_weight']:.1f} (72-75% acc)"
         )
         logger.info(
-            f"  📊 Trend Following:  {self.config['trend_following_weight']:.1f} (72% acc)   ⬆ INCREASED"
+            f"  📊 Trend Following:  {self.config['trend_following_weight']:.1f} (72% acc)"
         )
         logger.info(
-            f"  📊 EMA Strategy:     {self.config['ema_weight']:.1f} (72% acc)   ⬆ NEW WEIGHT"
+            f"  📊 EMA Strategy:     {self.config['ema_weight']:.1f} (72% acc - Regime Filter)"
         )
         logger.info("")
-        logger.info("SINGLE STRATEGY PERMISSIONS ():")
+        logger.info("SINGLE STRATEGY PERMISSIONS (prefer high-confidence signals):")
         logger.info(
             f"  MR alone:  {'✅ YES' if self.config['allow_single_mr_signal'] else '❌ NO'} (threshold: {self.config.get('single_mr_threshold', 0):.2f})"
         )
@@ -107,19 +125,63 @@ class BullMarketFilteredAggregator:
             f"  EMA alone: {'✅ YES' if self.config['allow_single_ema_signal'] else '❌ NO'} (threshold: {self.config['single_ema_threshold']:.2f})"
         )
         logger.info("")
-        logger.info("BULL MARKET BEHAVIOR ():")
+        logger.info("BULL MARKET BEHAVIOR (regime-aware filtering):")
         logger.info(
             f"  Block sells: {'❌ NO' if not self.config['block_sells_in_bull'] else '✅ YES'} (allow exits for risk mgmt)"
         )
         logger.info(f"  Sell penalty: -{self.config['sell_penalty_in_bull']:.2f}")
         logger.info(f"  Buy boost: +{self.config['boost_buys_in_bull']:.2f}")
         logger.info("=" * 80)
+        logger.info("")
 
     def _normalize_confidence(self, confidence: float) -> float:
         """Normalize confidence to 0-1"""
         if not self.config["confidence_normalization"]:
             return confidence
         return np.clip(confidence, 0, 1)
+
+    def _log_regime_change(self, is_bull: bool, ema_signal: int, ema_conf: float, timestamp: str):
+        """Log when market regime changes"""
+        regime_name = "🚀 BULL MARKET" if is_bull else "🐻 BEAR MARKET"
+        
+        if self.previous_regime != is_bull:
+            self.regime_change_count += 1
+            self.last_regime_change_time = datetime.now()
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info(f"⚡ REGIME CHANGE #{self.regime_change_count}")
+            logger.info("=" * 80)
+            logger.info(f"Timestamp: {timestamp}")
+            logger.info(f"New Regime: {regime_name}")
+            
+            if is_bull:
+                logger.info("📈 Golden Cross Detected (EMA50 > EMA200)")
+                logger.info("   → Favoring BUY signals")
+                logger.info("   → Penalizing SELL signals")
+                logger.info("   → Expect trend-following opportunities")
+            else:
+                logger.info("📉 Death Cross Detected (EMA50 < EMA200)")
+                logger.info("   → Favoring SELL signals")
+                logger.info("   → Penalizing BUY signals")
+                logger.info("   → Expect mean-reversion opportunities")
+            
+            logger.info(f"EMA Confidence: {ema_conf:.2f}")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            self.previous_regime = is_bull
+
+    def _log_regime_context(self, is_bull: bool, timestamp: str):
+        """Log current regime on each signal (non-change bars)"""
+        regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
+        regime_emoji = "📈" if is_bull else "📉"
+        
+        if is_bull:
+            self.bull_count += 1
+        else:
+            self.bear_count += 1
+        
+        logger.debug(f"[{timestamp}] {regime_emoji} Regime: {regime_name}")
 
     def _calculate_weighted_buy_score(
         self, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull
@@ -135,7 +197,7 @@ class BullMarketFilteredAggregator:
 
         explanation = []
 
-        # Weighted average with  weights
+        # Weighted average with correct weights
         total_weight = (
             self.config["mean_reversion_weight"]
             + self.config["trend_following_weight"]
@@ -174,7 +236,7 @@ class BullMarketFilteredAggregator:
                 1.0, weighted_score + self.config["boost_buys_in_bull"]
             )
             explanation.append(
-                f"→ +{self.config['boost_buys_in_bull']:.2f} (bull) "
+                f"→ +{self.config['boost_buys_in_bull']:.2f} (bull boost) "
                 f"{old_score:.3f}→{weighted_score:.3f}"
             )
 
@@ -194,7 +256,7 @@ class BullMarketFilteredAggregator:
 
         explanation = []
 
-        # Weighted average with  weights
+        # Weighted average with correct weights
         total_weight = (
             self.config["mean_reversion_weight"]
             + self.config["trend_following_weight"]
@@ -242,9 +304,9 @@ class BullMarketFilteredAggregator:
     def _check_single_strategy_signal(
         self, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull
     ) -> Tuple[Optional[int], Optional[str]]:
-        """Check single strategy signals -  to prefer TF/EMA"""
+        """Check single strategy signals - prefer TF/EMA"""
 
-        # EMA alone (72% accuracy - now allowed)
+        # EMA alone (72% accuracy - regime filter)
         if self.config.get("allow_single_ema_signal", False):
             ema_threshold = self.config["single_ema_threshold"]
             if ema_signal == 1 and ema_conf >= ema_threshold:
@@ -253,7 +315,7 @@ class BullMarketFilteredAggregator:
                 if not is_bull or ema_conf >= 0.70:
                     return -1, f"single_ema_sell (conf={ema_conf:.2f})"
 
-        # TF alone (72% accuracy - now allowed)
+        # TF alone (72% accuracy - momentum)
         if self.config.get("allow_single_tf_signal", False):
             tf_threshold = self.config["single_tf_threshold"]
             if tf_signal == 1 and tf_conf >= tf_threshold:
@@ -262,7 +324,7 @@ class BullMarketFilteredAggregator:
                 if not is_bull or tf_conf >= 0.70:
                     return -1, f"single_tf_sell (conf={tf_conf:.2f})"
 
-        # MR alone (62-68% accuracy - disabled by default)
+        # MR alone (72-75% accuracy - reversals)
         if self.config.get("allow_single_mr_signal", False):
             mr_threshold = self.config.get("single_mr_threshold", 0.75)
             if mr_signal == 1 and mr_conf >= mr_threshold:
@@ -274,14 +336,25 @@ class BullMarketFilteredAggregator:
         return None, None
 
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
-        """Main aggregation with  weights"""
+        """Main aggregation with regime-aware filtering"""
         self.total_evaluations += 1
 
         try:
+            # Get timestamp
+            timestamp = (
+                df.index[-1].isoformat()
+                if hasattr(df.index[-1], "isoformat")
+                else str(df.index[-1])
+            )
+
             # Get all signals
             ema_signal, ema_conf = self.s_ema.generate_signal(df)
             ema_conf = self._normalize_confidence(ema_conf)
             is_bull_market = ema_signal == 1
+
+            # Log regime context
+            self._log_regime_change(is_bull_market, ema_signal, ema_conf, timestamp)
+            self._log_regime_context(is_bull_market, timestamp)
 
             mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
             mr_conf = self._normalize_confidence(mr_conf)
@@ -322,6 +395,7 @@ class BullMarketFilteredAggregator:
                     0.0,
                     f"Single: {single_reasoning}",
                     df,
+                    timestamp,
                 )
                 return single_signal, details
 
@@ -380,6 +454,7 @@ class BullMarketFilteredAggregator:
                 sell_score,
                 decision_path,
                 df,
+                timestamp,
             )
 
             return final_signal, details
@@ -404,11 +479,18 @@ class BullMarketFilteredAggregator:
         sell_score,
         decision_path,
         df,
+        timestamp,
     ) -> Dict:
-        """Build detail dictionary"""
+        """Build detail dictionary with regime information"""
+        regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
+        
         return {
-            "regime": "🚀 BULL" if is_bull else "⚖️ BEAR",
+            "timestamp": timestamp,
+            "regime": regime_name,
             "is_bull_market": is_bull,
+            "regime_count_bull": self.bull_count,
+            "regime_count_bear": self.bear_count,
+            "regime_changes": self.regime_change_count,
             "mean_reversion_signal": mr_sig,
             "mean_reversion_confidence": mr_conf,
             "trend_following_signal": tf_sig,
@@ -421,9 +503,17 @@ class BullMarketFilteredAggregator:
             "reasoning": reasoning,
             "decision_path": decision_path,
             "signal_quality": quality,
-            "timestamp": (
-                df.index[-1].isoformat()
-                if hasattr(df.index[-1], "isoformat")
-                else str(df.index[-1])
-            ),
+        }
+
+    def get_regime_stats(self) -> Dict:
+        """Return regime statistics"""
+        return {
+            "total_evaluations": self.total_evaluations,
+            "bull_bars": self.bull_count,
+            "bear_bars": self.bear_count,
+            "bull_percentage": (self.bull_count / max(self.total_evaluations, 1)) * 100,
+            "bear_percentage": (self.bear_count / max(self.total_evaluations, 1)) * 100,
+            "regime_changes": self.regime_change_count,
+            "signals_generated": self.signals_generated,
+            "holds_generated": self.holds_generated,
         }

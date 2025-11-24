@@ -1,5 +1,5 @@
 """
-Portfolio Manager -  version with proper position management
+Portfolio Manager - Fixed daily_pnl calculation
 """
 
 import logging
@@ -40,6 +40,10 @@ class Position:
         self.trailing_stop_pct = trailing_stop_pct
         self.highest_price = entry_price if side == "long" else entry_price
         self.lowest_price = entry_price if side == "short" else entry_price
+
+        self.session_start_time = None
+        self.session_start_equity = None
+        self.session_start_capital = None
 
     def get_position_value(self, current_price: float) -> float:
         """Get current position value in USD"""
@@ -130,6 +134,9 @@ class PortfolioManager:
 
         # Historical data for correlation calculation
         self.price_history: Dict[str, List[float]] = {"BTC": [], "GOLD": []}
+
+        # Track realized P&L for accurate daily calculations
+        self.realized_pnl_today = 0.0  # Track closed position P&L
 
         logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
@@ -353,11 +360,8 @@ class PortfolioManager:
 
     def check_portfolio_limits(self, new_position_usd: float) -> bool:
         """Check if adding a new position would violate portfolio limits"""
-        # : Use current prices for accurate exposure calculation
         current_exposure = sum(
-            pos.quantity
-            * pos.entry_price  # Will be updated with current price in handler
-            for pos in self.positions.values()
+            pos.quantity * pos.entry_price for pos in self.positions.values()
         )
 
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
@@ -424,7 +428,7 @@ class PortfolioManager:
 
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """
-        : Check if we can open a position for the given asset and side
+        Check if we can open a position for the given asset and side
 
         Returns:
             Tuple of (can_open: bool, reason: str)
@@ -454,7 +458,6 @@ class PortfolioManager:
         trailing_stop_pct: float = None,
     ) -> bool:
         """Add a new position to the portfolio"""
-        # : Properly check and prevent duplicate positions
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
             logger.warning(f"Cannot open position: {reason}")
@@ -514,7 +517,10 @@ class PortfolioManager:
         pnl = position.get_pnl(exit_price)
         pnl_pct = position.get_pnl_pct(exit_price)
 
-        # : Update capital consistently for both modes
+        # Track realized P&L from this closed position
+        self.realized_pnl_today += pnl
+
+        # Update capital consistently for both modes
         if self.is_paper_mode:
             self.current_capital += pnl
             self.equity = self.current_capital
@@ -553,7 +559,7 @@ class PortfolioManager:
         return trade_result
 
     def update_positions(self, prices: Dict[str, float] = None):
-        """: Update all positions with current prices"""
+        """Update all positions with current prices"""
         if prices:
             for asset, price in prices.items():
                 if asset in self.price_history:
@@ -561,7 +567,7 @@ class PortfolioManager:
                     if len(self.price_history[asset]) > 100:
                         self.price_history[asset].pop(0)
 
-        # : Calculate unrealized P&L with current prices
+        # Calculate unrealized P&L with current prices
         if prices:
             total_unrealized_pnl = sum(
                 pos.get_pnl(prices.get(pos.asset, pos.entry_price))
@@ -575,7 +581,6 @@ class PortfolioManager:
             self.equity = self.current_capital + total_unrealized_pnl
         else:
             # In live mode: periodically refresh from exchanges
-            # Don't refresh on every update to avoid rate limits
             pass
 
         if self.equity > self.peak_equity:
@@ -591,7 +596,7 @@ class PortfolioManager:
 
     def has_position(self, asset: str, side: str = None) -> bool:
         """
-        : Check if we have an open position for an asset
+        Check if we have an open position for an asset
 
         Args:
             asset: Asset symbol
@@ -605,8 +610,26 @@ class PortfolioManager:
 
         return self.positions[asset].side == side
 
+    def reset_daily_pnl(self):
+        """Reset realized P&L tracker (call this at start of each trading day)"""
+        self.realized_pnl_today = 0.0
+        logger.info("Daily P&L tracker reset")
+
+    def start_trading_session(self):
+        """
+        Call this at the START of each trading day
+        Captures the baseline equity/capital for daily P&L calculation
+        """
+        self.session_start_time = datetime.now()
+        self.session_start_equity = self.equity
+        self.session_start_capital = self.current_capital
+        self.realized_pnl_today = 0.0
+
+        logger.info(f"Trading session started at {self.session_start_time}")
+        logger.info(f"Session starting equity: ${self.session_start_equity:,.2f}")
+
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
-        """: Get current portfolio status with real-time data"""
+        """Get current portfolio status with real-time data"""
         # Use current prices if provided, otherwise use entry prices
         if current_prices is None:
             current_prices = {
@@ -618,13 +641,23 @@ class PortfolioManager:
             for pos in self.positions.values()
         )
 
+        # Calculate unrealized P&L from open positions
         total_unrealized_pnl = sum(
             pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
             for pos in self.positions.values()
         )
 
-        # : Calculate total portfolio value correctly
+        # Calculate total portfolio value
         total_value = self.current_capital + total_unrealized_pnl
+
+        # FIX: Calculate daily_pnl relative to session start
+        if self.session_start_equity is not None:
+            # Daily P&L = current_equity - starting_equity
+            current_equity = self.current_capital + total_unrealized_pnl
+            daily_pnl = current_equity - self.session_start_equity
+        else:
+            # Fallback if session not started
+            daily_pnl = self.realized_pnl_today + total_unrealized_pnl
 
         exposure_pct = (
             total_exposure / self.current_capital if self.current_capital > 0 else 0
@@ -634,8 +667,6 @@ class PortfolioManager:
             if self.peak_equity > 0
             else 0
         )
-
-        daily_pnl = self.equity - self.initial_capital
 
         return {
             "mode": self.mode,
@@ -650,7 +681,8 @@ class PortfolioManager:
             "drawdown": drawdown,
             "open_positions": self.get_open_positions_count(),
             "total_trades": len(self.closed_positions),
-            "daily_pnl": daily_pnl,
+            "daily_pnl": daily_pnl,  # NOW CORRECTLY SHOWS SESSION P&L
+            "realized_pnl_today": self.realized_pnl_today,
             "total_unrealized_pnl": total_unrealized_pnl,
             "positions": {
                 asset: {
