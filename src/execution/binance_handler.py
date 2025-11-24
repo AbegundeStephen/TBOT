@@ -341,7 +341,6 @@ class BinanceExecutionHandler:
     ) -> bool:
         """
         Execute trading signal with hybrid position sizing
-
         Args:
             signal: 1 (BUY), -1 (SELL), 0 (HOLD)
             current_price: Current market price
@@ -351,7 +350,6 @@ class BinanceExecutionHandler:
             sizing_mode: AUTOMATED, MANUAL_OVERRIDE, REDUCED_RISK, ELEVATED_RISK
             manual_size_usd: Manual position size (only if sizing_mode=MANUAL_OVERRIDE)
             override_reason: Reason for override
-
         Returns:
             True if execution successful, False otherwise
         """
@@ -368,13 +366,11 @@ class BinanceExecutionHandler:
                     if hasattr(existing_position, "side")
                     else existing_position.get("side")
                 )
-
                 logger.debug(
                     f"{asset_name}: Existing {position_side.upper()} position found, signal={signal}"
                 )
 
                 # === CLOSE POSITION SCENARIOS ===
-
                 if signal == -1 and position_side == "long":
                     logger.info(
                         f"[SIGNAL] {asset_name}: SELL signal received - Closing LONG position"
@@ -397,6 +393,7 @@ class BinanceExecutionHandler:
                     if not success:
                         logger.error(f"[FAIL] Failed to close {asset_name} SHORT position")
                         return False
+                    return True
 
                 elif signal == 0:
                     should_close, close_reason = self._check_stop_loss_take_profit(
@@ -412,29 +409,30 @@ class BinanceExecutionHandler:
                                 f"[FAIL] Failed to close {asset_name} position on {close_reason}"
                             )
                             return False
+                        return True
                     else:
                         logger.debug(f"{asset_name}: Holding position, no action needed")
-                    return True
+                        return False  # Return False for HOLD signals with no action
 
                 elif signal == 1 and position_side == "long":
                     logger.info(
                         f"[SKIP] {asset_name}: BUY signal ignored - Already have LONG position"
                     )
-                    return True
+                    return False  # No trade executed
 
                 elif signal == -1 and position_side == "short":
                     logger.info(
                         f"[SKIP] {asset_name}: SELL signal ignored - Already have SHORT position"
                     )
-                    return True
+                    return False  # No trade executed
 
-            # STEP 3: Open new position with HYBRID SIZING
+            # === OPEN NEW POSITION ===
             if signal == 1:
                 if self.portfolio_manager.has_position(asset_name, side="long"):
                     logger.warning(
                         f"[SKIP] {asset_name}: BUY signal - Position already exists"
                     )
-                    return True
+                    return False  # No trade executed
 
                 logger.info(f"[SIGNAL] {asset_name}: BUY signal - Opening LONG position")
                 return self._open_position(
@@ -450,13 +448,14 @@ class BinanceExecutionHandler:
 
             elif signal == -1:
                 logger.debug(f"{asset_name}: SELL signal - No position to close, no action")
-                return True
+                return False  # No trade executed
 
-            return True
+            return False  # Default return for any other case
 
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
             return False
+
 
     def _check_stop_loss_take_profit(
         self, position, current_price: float
