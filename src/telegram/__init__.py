@@ -539,7 +539,7 @@ class TradingTelegramBot:
                 f"💰 Portfolio Value: ${total_value:,.2f}\n"
                 f"💵 Cash: ${cash:,.2f}\n"
                 f"📈 Open Positions: {open_positions}\n"
-                f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
+                #f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
                 f"*Market Status:*\n"
                 f"₿ BTC: {btc_status}\n"
                 f"🥇 GOLD: {gold_status}\n\n"
@@ -963,7 +963,7 @@ class TradingTelegramBot:
 
             msg = (
                 f"📊 *Daily Summary - {today.strftime('%Y-%m-%d')}*\n\n"
-                f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n"
+                #f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n"
                 f"💰 Portfolio Value: ${total_value:,.2f}\n"
                 f"📈 Open Positions: {open_positions}\n\n"
                 f"📊 Today's Trades: {len(today_trades)}\n"
@@ -1019,7 +1019,7 @@ class TradingTelegramBot:
                 f"💰 Portfolio Value: ${total_value:,.2f}\n"
                 f"💵 Cash: ${cash:,.2f}\n"
                 f"📈 Open Positions: {open_positions}\n"
-                f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
+                #f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
                 f"*Market Status:*\n"
                 f"₿ BTC: {btc_status}\n"
                 f"🥇 GOLD: {gold_status}\n\n"
