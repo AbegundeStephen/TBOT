@@ -828,7 +828,7 @@ class TradingBot:
         logger.info(f"Total Value: ${status.get('total_value', 0):,.2f}")
         logger.info(f"Cash: ${status.get('cash', 0):,.2f}")
         logger.info(f"Open Positions: {status.get('open_positions', 0)}")
-        logger.info(f"Daily P&L: ${status.get('daily_pnl', 0):,.2f}")
+        #logger.info(f"Daily P&L: ${status.get('daily_pnl', 0):,.2f}")
 
         logger.info("\n[OK] Trading cycle complete")
         logger.info("=" * 70)

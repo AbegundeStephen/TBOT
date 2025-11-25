@@ -90,6 +90,27 @@ AGGREGATOR_PRESETS = {
         "regime_cooldown_hours": 3,
         "verbose_logging": True,
     },
+    "scalper": {
+    "mean_reversion_weight": 1.0,
+    "trend_following_weight": 1.0,
+    "ema_weight": 1.0,
+    "buy_score_threshold": 0.15,
+    "sell_score_threshold": 0.20,
+    "perfect_agreement_bonus": 0.25,
+    "allow_single_mr_signal": True,
+    "allow_single_tf_signal": True,
+    "allow_single_ema_signal": True,
+    "single_mr_threshold": 0.35,
+    "single_tf_threshold": 0.35,
+    "single_ema_threshold": 0.35,
+    "enable_bull_filter": False,  # Disable bull filter for scalping
+    "block_sells_in_bull": False,
+    "boost_buys_in_bull": 0.0,
+    "sell_penalty_in_bull": 0.0,
+    "regime_confirmation_bars": 1,
+    "regime_cooldown_hours": 0,
+    "verbose_logging": True,
+},
 }
 
 class MLStrategy(bt.Strategy):
@@ -98,19 +119,19 @@ class MLStrategy(bt.Strategy):
     """
 
     params = (
-        ("stop_loss_pct", 0.03),
-        ("take_profit_pct", 0.06),
-        ("trailing_stop_pct", 0.02),  
-        ("risk_per_trade", 0.02),  
+        ("stop_loss_pct", 0.02),
+        ("take_profit_pct", 0.04),
+        ("trailing_stop_pct", 0.015),  
+        ("risk_per_trade", 0.03),  
         # Position sizing
         ("max_position_pct", 0.95),  
         ("use_atr_sizing", True),  
         ("atr_period", 14),
-        ("atr_multiplier", 1.5),  
+        ("atr_multiplier", 1.2),  
         # Strategy config
         ("lookback", 100),
         ("aggregator_mode", "weighted_voting"),
-        ("aggregator_preset", "balanced"),
+        ("aggregator_preset", "scalper"),
         # Exit management
         ("use_trailing_stop", True),
         ("exit_on_opposite_signal", True),

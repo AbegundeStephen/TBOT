@@ -250,7 +250,7 @@ class MeanReversionStrategy(BaseStrategy):
         # Ideal range: 8-15% total signals
         if total_signals < 5:
             logger.warning(f"  ⚠ Very few signals ({total_signals:.1f}%) - consider loosening")
-        elif total_signals > 20:
+        elif total_signals > 30:
             logger.warning(f"  ⚠ Too many signals ({total_signals:.1f}%) - tighten thresholds")
         else:
             logger.info(f"  ✓ Good signal rate: {total_signals:.1f}%")
