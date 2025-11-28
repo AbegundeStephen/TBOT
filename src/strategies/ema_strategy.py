@@ -1,6 +1,6 @@
 """
-EMA Crossover Strategy - FIXED: No Data Leakage
-Realistic signal generation with proper label validation
+MULTI-TIMEFRAME EMA Crossover Strategy with Optional 4H Context
+Realistic signal generation with proper label validation and no data leakage
 """
 
 import pandas as pd
@@ -14,31 +14,39 @@ logger = logging.getLogger(__name__)
 
 class EMAStrategy(BaseStrategy):
     """
-    EMA Crossover Strategy with ML-based signal generation
-    FIXED: Removed data leakage, uses future returns only for validation
+    EMA Crossover Strategy (50/200) with optional 4H trend confirmation
+    Uses 4H to filter false crossovers and confirm trend strength
     """
 
     def __init__(self, config: dict):
         super().__init__(config, "EMA")
+        
         # EMA periods
         self.fast_period = config.get("ema_fast", 50)
         self.slow_period = config.get("ema_slow", 200)
         
-        # Signal thresholds from config
-        self.min_distance_pct = config.get("min_distance_pct", 0.5)  # 0.5% default
-        self.min_return_threshold = config.get("min_return_threshold", 0.003)  # 0.3%
-        self.min_score_threshold = config.get("min_conditions", 4)  # Require 4+ conditions
+        # Signal thresholds
+        self.min_distance_pct = config.get("min_distance_pct", 0.5)
+        self.min_return_threshold = config.get("min_return_threshold", 0.003)
+        self.min_score_threshold = config.get("min_conditions", 4)
         
         # Filters
         self.use_price_confirmation = config.get("use_price_confirmation", False)
         self.use_volume_filter = config.get("use_volume_filter", False)
         self.volume_multiplier = config.get("volume_multiplier", 1.2)
         
+        # 4H context parameters (optional enhancement)
+        self.use_4h_context = config.get("use_4h_context", False)
+        self.require_4h_alignment = config.get("require_4h_alignment", False)
+        self.h4_trend_weight = config.get("h4_trend_weight", 1.0)  # Moderate boost
+        self.h4_counter_penalty = config.get("h4_counter_penalty", 1.5)  # Moderate penalty
+        
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  EMA Fast: {self.fast_period}, Slow: {self.slow_period}")
         logger.info(f"  Min Distance: {self.min_distance_pct}%")
         logger.info(f"  Min Score Threshold: {self.min_score_threshold}")
         logger.info(f"  Min Return: {self.min_return_threshold:.4%}")
+        logger.info(f"  4H Context: {self.use_4h_context} (Required: {self.require_4h_alignment})")
 
     def get_warmup_period(self) -> int:
         """Need enough data for slow EMA + other indicators"""
@@ -254,6 +262,76 @@ class EMAStrategy(BaseStrategy):
 
         return df
 
+    def _align_4h_to_1h(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
+        """Align 4H data to 1H timeframe using forward-fill"""
+        if df_4h is None or df_4h.empty:
+            return None
+        
+        # Ensure both have datetime index
+        if not isinstance(df_1h.index, pd.DatetimeIndex):
+            df_1h = df_1h.set_index('timestamp')
+        if not isinstance(df_4h.index, pd.DatetimeIndex):
+            df_4h = df_4h.set_index('timestamp')
+        
+        # Select 4H features to align
+        h4_features = ['ema_fast', 'ema_slow', 'ema_diff_pct', 'ema_trend', 
+                       'adx', 'macd_hist', 'trend_strength']
+        
+        df_4h_aligned = pd.DataFrame(index=df_1h.index)
+        
+        for feature in h4_features:
+            if feature in df_4h.columns:
+                df_4h_aligned[f'h4_{feature}'] = df_4h[feature].reindex(
+                    df_1h.index, 
+                    method='ffill'
+                )
+        
+        return df_4h_aligned
+
+    def _calculate_4h_trend_context(self, df_4h_aligned: pd.DataFrame, idx: int) -> dict:
+        """
+        Calculate 4H trend context for crossover confirmation
+        Returns: {'trend_direction': int, 'trend_strength': float, 'alignment_score': float}
+        """
+        if df_4h_aligned is None or idx >= len(df_4h_aligned):
+            return {'trend_direction': 0, 'trend_strength': 0.0, 'alignment_score': 0.0}
+        
+        row = df_4h_aligned.iloc[idx]
+        
+        # Check for valid data
+        if pd.isna(row.get('h4_ema_trend')) or pd.isna(row.get('h4_trend_strength')):
+            return {'trend_direction': 0, 'trend_strength': 0.0, 'alignment_score': 0.0}
+        
+        context = {
+            'trend_direction': int(row['h4_ema_trend']),  # 1 or -1
+            'trend_strength': float(row.get('h4_trend_strength', 0.0)),
+            'alignment_score': 0.0
+        }
+        
+        # Calculate alignment score (0-3 points)
+        ema_diff = row.get('h4_ema_diff_pct', 0)
+        adx = row.get('h4_adx', 0)
+        macd_hist = row.get('h4_macd_hist', 0)
+        
+        # Strong EMA separation
+        if abs(ema_diff) > 1.0:  # >1% separation
+            context['alignment_score'] += 1.5
+        elif abs(ema_diff) > 0.5:
+            context['alignment_score'] += 1.0
+        
+        # Strong trend (ADX)
+        if adx > 25:
+            context['alignment_score'] += 1.0
+        elif adx > 20:
+            context['alignment_score'] += 0.5
+        
+        # MACD confirmation
+        if (context['trend_direction'] == 1 and macd_hist > 0) or \
+           (context['trend_direction'] == -1 and macd_hist < 0):
+            context['alignment_score'] += 0.5
+        
+        return context
+
     def generate_signal(self, df: pd.DataFrame) -> tuple:
         """
         Generate real-time signal based on current EMA conditions
@@ -327,10 +405,26 @@ class EMAStrategy(BaseStrategy):
             logger.error(f"[{self.name}] Error in generate_signal: {e}")
             return 0, 0.0
 
-    def generate_labels(self, df: pd.DataFrame) -> pd.Series:
+    def generate_labels(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> pd.Series:
         """
-        FIXED: Generate labels without data leakage
-        Future returns used ONLY for validation, NOT for scoring
+        MULTI-TIMEFRAME label generation with optional 4H context
+        
+        4H Context Usage:
+        - Confirms trend direction before crossovers
+        - Filters weak/false crossovers in choppy markets
+        - Boosts high-conviction crossovers aligned with 4H
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Primary timeframe data (1H) with features
+        df_4h : pd.DataFrame, optional
+            Higher timeframe data (4H) for trend confirmation
+        
+        Returns:
+        --------
+        pd.Series
+            Labels: -1 (SELL), 0 (HOLD), 1 (BUY)
         """
         df = df.copy()
         logger.info(f"[{self.name}] Starting label generation with {len(df)} rows")
@@ -356,6 +450,14 @@ class EMAStrategy(BaseStrategy):
             logger.error(f"[{self.name}] No valid rows after filtering NaN!")
             return pd.Series(0, index=pd.Index([]))
 
+        # Align 4H data if provided
+        df_4h_aligned = None
+        if self.use_4h_context and df_4h is not None:
+            if 'ema_fast' not in df_4h.columns:
+                df_4h = self.generate_features(df_4h)
+            df_4h_aligned = self._align_4h_to_1h(df, df_4h)
+            logger.info(f"[{self.name}] 4H context aligned successfully")
+
         # Extract values
         close = df["close"].values
         ema_fast = df["ema_fast"].values
@@ -368,7 +470,10 @@ class EMAStrategy(BaseStrategy):
         adx = df["adx"].values
 
         labels = pd.Series(0, index=df.index)
-        lookforward = 5  # Look 5 bars ahead for validation
+        lookforward = 5
+
+        filtered_by_4h = 0
+        boosted_by_4h = 0
 
         logger.info(
             f"[{self.name}] Analyzing {len(df) - lookforward} bars for signals..."
@@ -447,11 +552,33 @@ class EMAStrategy(BaseStrategy):
             if not np.isnan(adx[i]) and adx[i] > 25:
                 bearish_score += 1
 
+            # === APPLY 4H CONTEXT ===
+            if df_4h_aligned is not None:
+                h4_context = self._calculate_4h_trend_context(df_4h_aligned, i)
+                
+                # BUY signal with 4H context
+                if bullish_score > 0:
+                    if h4_context['trend_direction'] == 1:  # 4H also bullish
+                        bullish_score += self.h4_trend_weight * h4_context['alignment_score'] / 3.0
+                        boosted_by_4h += 1
+                    elif h4_context['trend_direction'] == -1:  # 4H bearish (counter-trend)
+                        bullish_score -= self.h4_counter_penalty
+                        if self.require_4h_alignment and h4_context['alignment_score'] > 1.5:
+                            filtered_by_4h += 1
+                            continue  # Skip strong counter-trend signals
+                
+                # SELL signal with 4H context
+                if bearish_score > 0:
+                    if h4_context['trend_direction'] == -1:  # 4H also bearish
+                        bearish_score += self.h4_trend_weight * h4_context['alignment_score'] / 3.0
+                        boosted_by_4h += 1
+                    elif h4_context['trend_direction'] == 1:  # 4H bullish (counter-trend)
+                        bearish_score -= self.h4_counter_penalty
+                        if self.require_4h_alignment and h4_context['alignment_score'] > 1.5:
+                            filtered_by_4h += 1
+                            continue  # Skip strong counter-trend signals
+
             # === ASSIGN LABELS (Future return used ONLY for validation) ===
-            # Only label as BUY if:
-            # 1. Score is high enough
-            # 2. Bullish score > Bearish score
-            # 3. Future actually went up (validation)
             if (
                 bullish_score >= self.min_score_threshold
                 and bullish_score > bearish_score
@@ -459,10 +586,6 @@ class EMAStrategy(BaseStrategy):
             ):
                 labels.iloc[i] = 1
 
-            # Only label as SELL if:
-            # 1. Score is high enough
-            # 2. Bearish score > Bullish score
-            # 3. Future actually went down (validation)
             elif (
                 bearish_score >= self.min_score_threshold
                 and bearish_score > bullish_score
@@ -472,13 +595,19 @@ class EMAStrategy(BaseStrategy):
             else:
                 labels.iloc[i] = 0
 
-        # Remove labels from last N bars (can't validate future)
+        # Remove labels from last N bars
         labels.iloc[-lookforward:] = 0
 
         signals_generated = (labels != 0).sum()
         logger.info(
             f"[{self.name}] Generated {signals_generated} total signals from {len(df)} bars"
         )
+
+        # Log 4H impact
+        if df_4h_aligned is not None:
+            logger.info(f"[{self.name}] 4H Context Impact:")
+            logger.info(f"  Filtered: {filtered_by_4h} signals")
+            logger.info(f"  Boosted: {boosted_by_4h} signals")
 
         # Log distribution
         unique, counts = np.unique(labels, return_counts=True)

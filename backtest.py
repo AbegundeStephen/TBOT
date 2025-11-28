@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backtesting Script - Properly integrates BullMarketFilteredAggregator with risk management
+Backtesting Script - Properly integrates PerformanceWeightedAggregator
 """
 import json
 import logging
@@ -13,156 +13,178 @@ from datetime import datetime, timedelta
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
-from src.execution.signal_aggregator import BullMarketFilteredAggregator
+from src.execution.signal_aggregator import PerformanceWeightedAggregator
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Preset configurations for different trading styles
+# Asset-specific presets based on actual training performance
 AGGREGATOR_PRESETS = {
-    "conservative": {
-        "mean_reversion_weight": 1.0,      
-        "trend_following_weight": 1.0,     
-        "ema_weight": 1.1,                 
-        "buy_score_threshold": 0.45,
-        "sell_score_threshold": 0.50,
-        "perfect_agreement_bonus": 0.15,
-        "allow_single_mr_signal": True,  
-        "allow_single_tf_signal": True,
-        "allow_single_ema_signal": True,
-        "single_mr_threshold": 0.65,   
-        "single_tf_threshold": 0.65,
-        "single_ema_threshold": 0.65,
-        
-        "enable_bull_filter": True,
-        "block_sells_in_bull": False,
-        "boost_buys_in_bull": 0.10,
-        "sell_penalty_in_bull": 0.15,
-        "regime_confirmation_bars": 3,
-        "regime_cooldown_hours": 6,
-        "verbose_logging": True,
+    "BTC": {
+        "conservative": {
+            "buy_threshold": 0.50,
+            "sell_threshold": 0.52,
+            "two_strategy_bonus": 0.12,
+            "three_strategy_bonus": 0.25,
+            "bull_buy_boost": 0.10,
+            "bull_sell_penalty": 0.15,
+            "bear_sell_boost": 0.10,
+            "bear_buy_penalty": 0.15,
+            "min_signal_quality": 0.45,
+            "allow_single_override": True,
+            "single_override_threshold": 0.78,
+            "verbose": False,
+        },
+        "balanced": {
+            "buy_threshold": 0.42,
+            "sell_threshold": 0.44,
+            "two_strategy_bonus": 0.10,
+            "three_strategy_bonus": 0.20,
+            "bull_buy_boost": 0.08,
+            "bull_sell_penalty": 0.12,
+            "bear_sell_boost": 0.08,
+            "bear_buy_penalty": 0.12,
+            "min_signal_quality": 0.38,
+            "allow_single_override": True,
+            "single_override_threshold": 0.75,
+            "verbose": False,
+        },
+        "aggressive": {
+            "buy_threshold": 0.35,
+            "sell_threshold": 0.37,
+            "two_strategy_bonus": 0.08,
+            "three_strategy_bonus": 0.15,
+            "bull_buy_boost": 0.06,
+            "bull_sell_penalty": 0.10,
+            "bear_sell_boost": 0.06,
+            "bear_buy_penalty": 0.10,
+            "min_signal_quality": 0.32,
+            "allow_single_override": True,
+            "single_override_threshold": 0.72,
+            "verbose": False,
+        },
+        "scalper": {
+            "buy_threshold": 0.28,
+            "sell_threshold": 0.30,
+            "two_strategy_bonus": 0.06,
+            "three_strategy_bonus": 0.12,
+            "bull_buy_boost": 0.04,
+            "bull_sell_penalty": 0.08,
+            "bear_sell_boost": 0.04,
+            "bear_buy_penalty": 0.08,
+            "min_signal_quality": 0.25,
+            "allow_single_override": True,
+            "single_override_threshold": 0.68,
+            "verbose": False,
+        },
     },
-    
-    "balanced": {
-        "mean_reversion_weight": 1.0,      
-        "trend_following_weight": 1.0,    
-        "ema_weight": 1.1,                   
-        "buy_score_threshold": 0.35,
-        "sell_score_threshold": 0.40,
-        "perfect_agreement_bonus": 0.15,
-        "allow_single_mr_signal": True, 
-        "allow_single_tf_signal": True,
-        "allow_single_ema_signal": True,
-        "single_mr_threshold": 0.60,       
-        "single_tf_threshold": 0.60,
-        "single_ema_threshold": 0.60,
-        
-        "enable_bull_filter": True,
-        "block_sells_in_bull": False,
-        "boost_buys_in_bull": 0.15,
-        "sell_penalty_in_bull": 0.20,
-        "regime_confirmation_bars": 2,
-        "regime_cooldown_hours": 6,
-        "verbose_logging": True,
+    "GOLD": {
+        "conservative": {
+            "buy_threshold": 0.48,
+            "sell_threshold": 0.50,
+            "two_strategy_bonus": 0.12,
+            "three_strategy_bonus": 0.25,
+            "bull_buy_boost": 0.08,
+            "bull_sell_penalty": 0.12,
+            "bear_sell_boost": 0.08,
+            "bear_buy_penalty": 0.12,
+            "min_signal_quality": 0.42,
+            "allow_single_override": True,
+            "single_override_threshold": 0.80,  # Higher for GOLD (more variance)
+            "verbose": False,
+        },
+        "balanced": {
+            "buy_threshold": 0.40,
+            "sell_threshold": 0.42,
+            "two_strategy_bonus": 0.10,
+            "three_strategy_bonus": 0.20,
+            "bull_buy_boost": 0.06,
+            "bull_sell_penalty": 0.10,
+            "bear_sell_boost": 0.06,
+            "bear_buy_penalty": 0.10,
+            "min_signal_quality": 0.35,
+            "allow_single_override": True,
+            "single_override_threshold": 0.76,
+            "verbose": False,
+        },
+        "aggressive": {
+            "buy_threshold": 0.33,
+            "sell_threshold": 0.35,
+            "two_strategy_bonus": 0.08,
+            "three_strategy_bonus": 0.15,
+            "bull_buy_boost": 0.05,
+            "bull_sell_penalty": 0.08,
+            "bear_sell_boost": 0.05,
+            "bear_buy_penalty": 0.08,
+            "min_signal_quality": 0.28,
+            "allow_single_override": True,
+            "single_override_threshold": 0.73,
+            "verbose": False,
+        },
+        "scalper": {
+            "buy_threshold": 0.26,
+            "sell_threshold": 0.28,
+            "two_strategy_bonus": 0.06,
+            "three_strategy_bonus": 0.12,
+            "bull_buy_boost": 0.03,
+            "bull_sell_penalty": 0.06,
+            "bear_sell_boost": 0.03,
+            "bear_buy_penalty": 0.06,
+            "min_signal_quality": 0.22,
+            "allow_single_override": True,
+            "single_override_threshold": 0.70,
+            "verbose": False,
+        },
     },
-    
-    "aggressive": {
-        "mean_reversion_weight": 1.0,     
-        "trend_following_weight": 1.0,    
-        "ema_weight": 1.1,                
-        "buy_score_threshold": 0.30,
-        "sell_score_threshold": 0.35,
-        "perfect_agreement_bonus": 0.12,
-        "allow_single_mr_signal": True, 
-        "allow_single_tf_signal": True,
-        "allow_single_ema_signal": True,
-        "single_mr_threshold": 0.55,  
-        "single_tf_threshold": 0.55,
-        "single_ema_threshold": 0.55,
-        
-        "enable_bull_filter": True,
-        "block_sells_in_bull": False,
-        "boost_buys_in_bull": 0.15,
-        "sell_penalty_in_bull": 0.15,
-        "regime_confirmation_bars": 1,
-        "regime_cooldown_hours": 3,
-        "verbose_logging": True,
-    },
-    "scalper": {
-    "mean_reversion_weight": 1.0,
-    "trend_following_weight": 1.0,
-    "ema_weight": 1.0,
-    "buy_score_threshold": 0.15,
-    "sell_score_threshold": 0.20,
-    "perfect_agreement_bonus": 0.25,
-    "allow_single_mr_signal": True,
-    "allow_single_tf_signal": True,
-    "allow_single_ema_signal": True,
-    "single_mr_threshold": 0.35,
-    "single_tf_threshold": 0.35,
-    "single_ema_threshold": 0.35,
-    "enable_bull_filter": False,  # Disable bull filter for scalping
-    "block_sells_in_bull": False,
-    "boost_buys_in_bull": 0.0,
-    "sell_penalty_in_bull": 0.0,
-    "regime_confirmation_bars": 1,
-    "regime_cooldown_hours": 0,
-    "verbose_logging": True,
-},
 }
+
 
 class MLStrategy(bt.Strategy):
     """
-    Backtrader strategy wrapper using BullMarketFilteredAggregator with risk management
+    Backtrader strategy wrapper using PerformanceWeightedAggregator
     """
 
     params = (
-        ("stop_loss_pct", 0.02),
-        ("take_profit_pct", 0.04),
-        ("trailing_stop_pct", 0.015),  
-        ("risk_per_trade", 0.03),  
-        # Position sizing
-        ("max_position_pct", 0.95),  
-        ("use_atr_sizing", True),  
+        ("stop_loss_pct", 0.004),
+        ("take_profit_pct", 0.08),
+        ("trailing_stop_pct", 0.015),
+        ("risk_per_trade", 0.10),
+        ("max_position_pct", 0.95),
+        ("use_atr_sizing", True),
         ("atr_period", 14),
-        ("atr_multiplier", 1.2),  
-        # Strategy config
+        ("atr_multiplier", 1.2),
         ("lookback", 100),
-        ("aggregator_mode", "weighted_voting"),
-        ("aggregator_preset", "scalper"),
-        # Exit management
+        ("aggregator_preset", "balanced"),
         ("use_trailing_stop", True),
         ("exit_on_opposite_signal", True),
     )
 
     def __init__(self):
         # Set asset key from class attribute
-        self.asset_key = getattr(self.__class__, "asset_key", "btc").lower()
+        self.asset_key = getattr(self.__class__, "asset_key", "btc").upper()
 
         # Load config
         with open("config/config.json") as f:
             config = json.load(f)
 
         self.config = config
+        
         # Set model paths dynamically based on asset
-        mean_rev_model_path = f"models/mean_reversion_{self.asset_key}.pkl"
-        trend_model_path = f"models/trend_following_{self.asset_key}.pkl"
-        ema_model_path = f"models/ema_strategy_{self.asset_key}.pkl"
+        mean_rev_model_path = f"models/mean_reversion_{self.asset_key.lower()}.pkl"
+        trend_model_path = f"models/trend_following_{self.asset_key.lower()}.pkl"
+        ema_model_path = f"models/ema_strategy_{self.asset_key.lower()}.pkl"
 
         # Load strategy configs from config.json
-        mr_config = config["strategy_configs"]["mean_reversion"][self.asset_key.upper()]
-        tf_config = config["strategy_configs"]["trend_following"][
-            self.asset_key.upper()
-        ]
-        ema_config = config["strategy_configs"]["exponential_moving_averages"][
-            self.asset_key.upper()
-        ]
+        mr_config = config["strategy_configs"]["mean_reversion"][self.asset_key]
+        tf_config = config["strategy_configs"]["trend_following"][self.asset_key]
+        ema_config = config["strategy_configs"]["exponential_moving_averages"][self.asset_key]
 
         self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
         self.trailing_stop_price = None
         self.highest_price_since_entry = None
+        
         # Initialize strategies
         self.mean_reversion = MeanReversionStrategy(mr_config)
         self.trend_following = TrendFollowingStrategy(tf_config)
@@ -176,21 +198,20 @@ class MLStrategy(bt.Strategy):
         if not (mr_loaded and tf_loaded and ema_loaded):
             raise RuntimeError("Failed to load one or more strategy models")
 
-        # Get aggregator configuration from preset
+        # Get asset-specific preset configuration
         preset_name = self.params.aggregator_preset
-        if preset_name not in AGGREGATOR_PRESETS:
+        if preset_name not in AGGREGATOR_PRESETS[self.asset_key]:
             logger.warning(f"Unknown preset '{preset_name}', using 'balanced'")
             preset_name = "balanced"
 
-        confidence_config = AGGREGATOR_PRESETS[preset_name].copy()
+        confidence_config = AGGREGATOR_PRESETS[self.asset_key][preset_name].copy()
 
-        # Initialize BullMarketFilteredAggregator with weighted voting
-        self.aggregator = BullMarketFilteredAggregator(
+        # Initialize PerformanceWeightedAggregator
+        self.aggregator = PerformanceWeightedAggregator(
             mean_reversion_strategy=self.mean_reversion,
             trend_following_strategy=self.trend_following,
             ema_strategy=self.ema_strategy,
-            confidence_config=confidence_config,
-            asset_name=self.asset_key.upper(),
+            asset_type=self.asset_key,
         )
 
         self.order = None
@@ -202,10 +223,11 @@ class MLStrategy(bt.Strategy):
         self.take_profit = None
 
         logger.info(f"=" * 70)
-        logger.info(f" Strategy Configuration for {self.asset_key.upper()}")
+        logger.info(f" Strategy Configuration for {self.asset_key}")
         logger.info(f"=" * 70)
+        logger.info(f"Preset: {preset_name}")
         logger.info(f"Risk Management:")
-        logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}% (: was 1%)")
+        logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}%")
         logger.info(f"  Take-Profit: {self.params.take_profit_pct * 100}%")
         logger.info(
             f"  Reward/Risk: {self.params.take_profit_pct/self.params.stop_loss_pct:.1f}:1"
@@ -214,6 +236,7 @@ class MLStrategy(bt.Strategy):
 
         if self.params.use_trailing_stop:
             logger.info(f"  Trailing Stop: {self.params.trailing_stop_pct * 100}%")
+        
         logger.info(f"Position Sizing:")
         logger.info(f"  ATR-based: {self.params.use_atr_sizing}")
         if self.params.use_atr_sizing:
@@ -327,11 +350,11 @@ class MLStrategy(bt.Strategy):
             if len(df) < self.params.lookback:
                 return
 
-            # Get signal
+            # Get signal from PerformanceWeightedAggregator
             signal, details = self.aggregator.get_aggregated_signal(df)
 
             # Log periodically
-            if self.next_call_count % 5 == 0:
+            if self.next_call_count % 10 == 0:
                 self.signal_log.append(
                     {
                         "date": self.data.datetime.date(0),
@@ -344,13 +367,13 @@ class MLStrategy(bt.Strategy):
                 buy_score = details.get("buy_score", 0)
                 sell_score = details.get("sell_score", 0)
                 regime = details.get("regime", "UNKNOWN")
+                quality = details.get("signal_quality", 0)
 
                 logger.info(
                     f"📍 {self.data.datetime.date(0)} | "
                     f"${current_price:.2f} | {regime} | "
-                    f"Score B/S: {buy_score:.2f}/{sell_score:.2f} | "
-                    f"Signal: {signal:>2} | "
-                    f"Quality: {details.get('signal_quality', 0):.2f}"
+                    f"B/S: {buy_score:.2f}/{sell_score:.2f} | "
+                    f"Sig: {signal:>2} | Q: {quality:.2f}"
                 )
 
             # Execute trades
@@ -365,9 +388,7 @@ class MLStrategy(bt.Strategy):
                             atr_value = self.atr[0]
                             stop_distance = atr_value * self.params.atr_multiplier
                             self.stop_loss = current_price - stop_distance
-                            self.take_profit = current_price + (
-                                stop_distance * 2
-                            )  # 2:1 R/R
+                            self.take_profit = current_price + (stop_distance * 2)
                         else:
                             self.stop_loss = current_price * (
                                 1 - self.params.stop_loss_pct
@@ -382,7 +403,7 @@ class MLStrategy(bt.Strategy):
                         logger.info(
                             f"🟢 BUY at ${current_price:.2f} | Size: {size:.8f} | "
                             f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f} | "
-                            f"Reason: {details['reasoning']}"
+                            f"Reason: {details.get('reasoning', 'N/A')}"
                         )
             else:
                 # Exit on opposite signal
@@ -390,7 +411,7 @@ class MLStrategy(bt.Strategy):
                     self.order = self.close()
                     logger.info(
                         f"🔵 EXIT on opposite signal at ${current_price:.2f} | "
-                        f"Reason: {details['reasoning']}"
+                        f"Reason: {details.get('reasoning', 'N/A')}"
                     )
 
         except Exception as e:
@@ -402,29 +423,18 @@ class MLStrategy(bt.Strategy):
         cash = self.broker.getcash()
 
         if self.params.use_atr_sizing:
-            # ATR-based stop distance
             atr_value = self.atr[0]
             stop_distance = atr_value * self.params.atr_multiplier
             stop_distance_pct = stop_distance / current_price
 
-            # Position size based on risk and ATR stop
             risk_amount = cash * self.params.risk_per_trade
             position_value = risk_amount / stop_distance_pct
             size = position_value / current_price
 
-            # Cap at max position percentage
             max_position_value = cash * self.params.max_position_pct
             max_size = max_position_value / current_price
             size = min(size, max_size)
-
-            logger.debug(
-                f"ATR Position Sizing: "
-                f"ATR={atr_value:.2f}, "
-                f"Stop Distance={stop_distance_pct*100:.2f}%, "
-                f"Size={size:.8f}"
-            )
         else:
-            #  percentage stop
             risk_amount = cash * self.params.risk_per_trade
             position_value = risk_amount / self.params.stop_loss_pct
             size = position_value / current_price
@@ -442,7 +452,6 @@ class MLStrategy(bt.Strategy):
 
         current_price = self.data.close[0]
 
-        # Track highest price since entry
         if self.highest_price_since_entry is None:
             self.highest_price_since_entry = current_price
         else:
@@ -450,37 +459,33 @@ class MLStrategy(bt.Strategy):
                 self.highest_price_since_entry, current_price
             )
 
-        # Calculate trailing stop
         new_trailing_stop = self.highest_price_since_entry * (
             1 - self.params.trailing_stop_pct
         )
 
-        # Update if higher than current trailing stop
         if (
             self.trailing_stop_price is None
             or new_trailing_stop > self.trailing_stop_price
         ):
             self.trailing_stop_price = new_trailing_stop
-            logger.debug(
-                f"Trailing stop updated: ${self.trailing_stop_price:.2f} "
-                f"(High: ${self.highest_price_since_entry:.2f})"
-            )
 
     def stop(self):
         logger.info(f"=" * 70)
-        logger.info(f"🛑 Strategy stopped")
+        logger.info(f"🛑 Strategy stopped - {self.asset_key}")
         logger.info(f"=" * 70)
         logger.info(f"Total bars processed: {self.next_call_count}")
         logger.info(f"Total signals logged: {len(self.signal_log)}")
+        
         if self.signal_log:
-            # Analyze signal distribution
             signal_counts = {-1: 0, 0: 0, 1: 0}
             reasoning_counts = {}
+            
             for log in self.signal_log:
                 sig = log["signal"]
                 signal_counts[sig] = signal_counts.get(sig, 0) + 1
                 reason = log["details"].get("reasoning", "unknown")
                 reasoning_counts[reason] = reasoning_counts.get(reason, 0) + 1
+            
             total_signals = len(self.signal_log)
             logger.info(f"Signal distribution:")
             logger.info(
@@ -492,50 +497,41 @@ class MLStrategy(bt.Strategy):
             logger.info(
                 f"  BUY  ( 1): {signal_counts[1]:>4} ({signal_counts[1]/total_signals*100:>5.1f}%)"
             )
+            
             logger.info(f"\nTop signal reasoning:")
             sorted_reasons = sorted(
                 reasoning_counts.items(), key=lambda x: x[1], reverse=True
             )
             for reason, count in sorted_reasons[:5]:
                 logger.info(f"  {reason}: {count} ({count/total_signals*100:.1f}%)")
-            logger.info(f"\nSample signals (first 5):")
-            for i, log in enumerate(self.signal_log[:5]):
-                logger.info(
-                    f"  {log['date']}: Signal={log['signal']:>2}, "
-                    f"Price=${log['price']:.2f}, "
-                    f"Reason={log['details']['reasoning']}"
-                )
         else:
             logger.warning("⚠️ NO SIGNALS WERE GENERATED!")
-            logger.warning(
-                "This is unexpected - check model loading and feature generation"
-            )
+        
+        # Print aggregator statistics
+        stats = self.aggregator.get_statistics()
+        logger.info(f"\n📊 Aggregator Statistics:")
+        logger.info(f"  Signal Rate: {stats['signal_rate']:.2f}%")
+        logger.info(f"  Buy Rate: {stats['buy_rate']:.2f}%")
+        logger.info(f"  Sell Rate: {stats['sell_rate']:.2f}%")
+        logger.info(f"  Bull Regime: {stats['bull_regime_pct']:.2f}%")
+        logger.info(f"  Bear Regime: {stats['bear_regime_pct']:.2f}%")
+        logger.info(f"  Regime Changes: {stats['regime_changes']}")
+        logger.info(f"  Consensus Signals: {stats['consensus_rate']:.2f}%")
 
 
-def run_backtest(
-    asset_key, aggregator_mode="weighted_voting", aggregator_preset="balanced"
-):
-    """
-    Run backtest with configurable aggregator settings
-    Args:
-        asset_key: 'BTC' or 'GOLD'
-        aggregator_mode: 'weighted_voting' (only supported mode currently)
-        aggregator_preset: 'conservative', 'balanced', or 'aggressive'
-    """
+def run_backtest(asset_key, aggregator_preset="balanced"):
+    """Run backtest with PerformanceWeightedAggregator"""
     logger.info("=" * 70)
     logger.info(f"🚀 STARTING BACKTEST FOR {asset_key.upper()}")
     logger.info("=" * 70)
-    logger.info(f"Aggregator Mode: {aggregator_mode}")
     logger.info(f"Aggregator Preset: {aggregator_preset}")
     logger.info("=" * 70)
+    
     try:
         with open("config/config.json") as f:
             config = json.load(f)
     except FileNotFoundError:
         logger.error("❌ config/config.json not found")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ Invalid JSON in config/config.json: {e}")
         sys.exit(1)
 
     cerebro = bt.Cerebro()
@@ -554,7 +550,6 @@ def run_backtest(
     try:
         train_df = pd.read_csv(train_path, index_col=0, parse_dates=True)
         train_df.columns = train_df.columns.str.lower()
-        # Combine train and test data
         df = pd.concat([train_df, test_df]).drop_duplicates().sort_index()
         logger.info(f"✅ Combined train + test data: {len(df)} bars")
     except FileNotFoundError:
@@ -565,7 +560,6 @@ def run_backtest(
     logger.info(f"  Total bars: {len(df)}")
     logger.info(f"  Date range: {df.index[0]} → {df.index[-1]}")
     logger.info(f"  Price range: ${df['close'].min():.2f} → ${df['close'].max():.2f}")
-    logger.info(f"  Mean price: ${df['close'].mean():.2f}")
 
     # Create Backtrader data feed
     data = bt.feeds.PandasData(
@@ -579,11 +573,9 @@ def run_backtest(
     )
     cerebro.adddata(data)
 
-    # Add strategy with custom parameters
-    MLStrategy.asset_key = asset_key.lower()
-    cerebro.addstrategy(
-        MLStrategy, aggregator_mode=aggregator_mode, aggregator_preset=aggregator_preset
-    )
+    # Add strategy
+    MLStrategy.asset_key = asset_key.upper()
+    cerebro.addstrategy(MLStrategy, aggregator_preset=aggregator_preset)
 
     # Broker settings
     initial_capital = config["backtesting"]["initial_capital"]
@@ -619,7 +611,7 @@ def run_backtest(
     if sharpe:
         logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     else:
-        logger.info("Sharpe Ratio: N/A (insufficient trades)")
+        logger.info("Sharpe Ratio: N/A")
 
     # Drawdown
     drawdown = strat.analyzers.drawdown.get_analysis()
@@ -631,6 +623,7 @@ def run_backtest(
         closed = trades.total.closed if hasattr(trades, "total") else 0
         won = trades.won.total if hasattr(trades, "won") else 0
         lost = trades.lost.total if hasattr(trades, "lost") else 0
+        
         if closed > 0:
             win_rate = won / closed * 100
             logger.info(f"─" * 70)
@@ -639,49 +632,40 @@ def run_backtest(
             logger.info(f"  Winning Trades: {won}")
             logger.info(f"  Losing Trades: {lost}")
             logger.info(f"  Win Rate: {win_rate:.2f}%")
+            
             if hasattr(trades, "pnl") and hasattr(trades.pnl, "net"):
                 logger.info(f"  Total Net PnL: ${trades.pnl.net.total:.2f}")
                 if hasattr(trades.pnl.net, "average"):
-                    logger.info(
-                        f"  Average PnL per Trade: ${trades.pnl.net.average:.2f}"
-                    )
+                    logger.info(f"  Avg PnL/Trade: ${trades.pnl.net.average:.2f}")
         else:
             logger.warning("=" * 70)
             logger.warning("⚠️ NO TRADES EXECUTED!")
             logger.warning("=" * 70)
-            logger.warning("Possible reasons:")
-            logger.warning("  1. All signals below confidence thresholds")
-            logger.warning("  2. Strategies not agreeing on direction")
-            logger.warning("  3. Model predictions too uncertain")
-            logger.warning("")
-            logger.warning("Recommendations:")
-            logger.warning("  1. Try 'aggressive' preset: --preset aggressive")
-            logger.warning("  2. Check model training logs for accuracy")
-            logger.warning("  3. Review signal logs above for reasoning patterns")
-            logger.warning("=" * 70)
+            logger.warning("Try: python backtest.py --asset " + asset_key + " --preset aggressive")
+            logger.warning("Or:  python backtest.py --asset " + asset_key + " --preset scalper")
     except Exception as e:
         logger.error(f"❌ Error extracting trade statistics: {e}")
-        logger.warning("⚠️ Could not extract trade statistics (likely no trades)")
 
-    logger.info("=" * 70)
-    logger.info(f"✅ BACKTEST FOR {asset_key.upper()} COMPLETED")
     logger.info("=" * 70)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run backtest with BullMarketFilteredAggregator",
+        description="Run backtest with PerformanceWeightedAggregator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Balanced approach (default)
   python backtest.py --asset BTC
 
-  # More trades (aggressive)
+  # More trades
   python backtest.py --asset GOLD --preset aggressive
 
-  # Fewer but higher quality trades
-  python backtest.py --asset BTC --preset conservative
+  # High frequency
+  python backtest.py --asset BTC --preset scalper
+
+  # Quality over quantity
+  python backtest.py --asset GOLD --preset conservative
         """,
     )
     parser.add_argument(
@@ -689,23 +673,15 @@ Examples:
         type=str,
         default="BTC",
         choices=["BTC", "GOLD"],
-        help="Asset to backtest (BTC or GOLD)",
-    )
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default="weighted_voting",
-        choices=["weighted_voting"],
-        help="Signal aggregation mode (currently only weighted_voting supported)",
+        help="Asset to backtest",
     )
     parser.add_argument(
         "--preset",
         type=str,
         default="balanced",
-        choices=["conservative", "balanced", "aggressive", "scalper", "sniper"],
-        help="Confidence threshold preset",
+        choices=["conservative", "balanced", "aggressive", "scalper"],
+        help="Signal threshold preset",
     )
+    
     args = parser.parse_args()
-    run_backtest(
-        asset_key=args.asset, aggregator_mode=args.mode, aggregator_preset=args.preset
-    )
+    run_backtest(asset_key=args.asset, aggregator_preset=args.preset)

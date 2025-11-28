@@ -31,7 +31,7 @@ from src.data.data_manager import DataManager
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
-from src.execution.signal_aggregator import BullMarketFilteredAggregator
+from src.execution.signal_aggregator import PerformanceWeightedAggregator
 from src.execution.binance_handler import BinanceExecutionHandler
 from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -366,7 +366,7 @@ class TradingBot:
             # Use safe lookup for preset (fallback to balanced if missing)
 
             # Create aggregator (it will handle missing strategies gracefully)
-            self.aggregators[asset_name] = BullMarketFilteredAggregator(
+            self.aggregators[asset_name] = PerformanceWeightedAggregator(
                 mean_reversion_strategy=mr_strategy,
                 trend_following_strategy=tf_strategy,
                 ema_strategy=ema_strategy,
@@ -657,9 +657,7 @@ class TradingBot:
                 f"Confidence={details.get('ema_confidence', 0):.3f}"
             )
             logger.info(f"  >> Final Signal: {signal:>2}")
-            logger.info(
-                f"  >> Signal Quality: {details.get('signal_quality', 0):.3f}"
-            )
+            logger.info(f"  >> Signal Quality: {details.get('signal_quality', 0):.3f}")
             logger.info(f"  >> Reasoning: {details.get('reasoning', 'N/A')}")
 
             # Check if we're opening a new position (for Telegram notification)
@@ -820,7 +818,7 @@ class TradingBot:
         logger.info(f"Total Value: ${portfolio_status.get('total_value', 0):,.2f}")
         logger.info(f"Cash: ${portfolio_status.get('cash', 0):,.2f}")
         logger.info(f"Open Positions: {portfolio_status.get('open_positions', 0)}")
-        #logger.info(f"Daily P&L: ${portfolio_status.get('daily_pnl', 0):,.2f}")
+        # logger.info(f"Daily P&L: ${portfolio_status.get('daily_pnl', 0):,.2f}")
 
         logger.info("\n[OK] Trading cycle complete")
         logger.info("=" * 70)
