@@ -32,7 +32,7 @@ from src.data.data_manager import DataManager
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
-from src.execution.signal_aggregator import BullMarketFilteredAggregator
+from src.execution.signal_aggregator import PerformanceWeightedAggregator
 from src.execution.binance_handler import BinanceExecutionHandler
 from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -403,12 +403,11 @@ class TradingBot:
                 continue
 
             try:
-                self.aggregators[asset_name] = BullMarketFilteredAggregator(
+                self.aggregators[asset_name] = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
                     ema_strategy=strategies.get("ema_strategy"),
-                    confidence_config=config_for_aggregators,
-                    asset_name=asset_name,
+                    asset_type=asset_name,
                 )
                 logger.info(
                     f"[OK] {asset_name}: Aggregator ({strategy_count} strategies, {preset})"
@@ -466,7 +465,6 @@ class TradingBot:
                 logger.info("[REFRESH] Fetching updated capital...")
                 self.portfolio_manager.refresh_capital()
                 self.portfolio_manager.reset_daily_pnl()
-
 
             # Send daily summary via Telegram
             if self.telegram_bot and self.telegram_loop:
@@ -617,7 +615,9 @@ class TradingBot:
             df = self.data_manager.clean_data(df)
             min_bars = 250
             if len(df) < min_bars:
-                logger.warning(f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})")
+                logger.warning(
+                    f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})"
+                )
                 return
 
             logger.info(f"[OK] {len(df)} bars fetched")
@@ -632,6 +632,7 @@ class TradingBot:
 
             # Get aggregated signal
             aggregator = self.aggregators.get(asset_name)
+            logger.info(f"[AGGREGATOR] {aggregator}")
             if not aggregator:
                 logger.warning(f"[!] {asset_name}: No aggregator configured")
                 return
@@ -676,7 +677,9 @@ class TradingBot:
 
             # Check trading limits and cooldowns before proceeding
             if not self.check_trading_limits():
-                logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
+                logger.info(
+                    f"[LIMIT] {asset_name}: Trading limits prevent new position"
+                )
                 return
 
             if not self.check_min_time_between_trades(asset_name):
@@ -709,7 +712,9 @@ class TradingBot:
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
                 signal_type = "BUY" if signal == 1 else "SELL"
-                logger.info(f"[SUCCESS] {asset_name} {signal_type} executed (Daily count: {self.trade_count_today})")
+                logger.info(
+                    f"[SUCCESS] {asset_name} {signal_type} executed (Daily count: {self.trade_count_today})"
+                )
 
                 # Check if new position was opened
                 new_pos = self.portfolio_manager.get_position(asset_name)
@@ -719,7 +724,11 @@ class TradingBot:
                         self._send_telegram_notification(
                             self.telegram_bot.notify_trade_opened(
                                 asset=asset_name,
-                                side=pos.side if hasattr(pos, "side") else pos.get("side"),
+                                side=(
+                                    pos.side
+                                    if hasattr(pos, "side")
+                                    else pos.get("side")
+                                ),
                                 price=current_price,
                                 size=(
                                     pos.quantity * current_price
@@ -765,7 +774,9 @@ class TradingBot:
                     self._log_trade(asset_name, signal, details, current_price)
 
             else:
-                logger.warning(f"[SKIP] {asset_name}: Trade not executed (limits/cooldowns/handler failure)")
+                logger.warning(
+                    f"[SKIP] {asset_name}: Trade not executed (limits/cooldowns/handler failure)"
+                )
 
         except Exception as e:
             logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
@@ -779,7 +790,6 @@ class TradingBot:
                     )
                 except:
                     pass
-
 
     def _log_trade(self, asset: str, signal: int, details: dict, price: float):
         """Log trade to file"""
@@ -808,7 +818,7 @@ class TradingBot:
 
         self.reset_daily_counters()
         self.portfolio_manager.update_positions()
-        
+
         enabled = [
             name
             for name, cfg in self.config["assets"].items()
@@ -828,7 +838,7 @@ class TradingBot:
         logger.info(f"Total Value: ${status.get('total_value', 0):,.2f}")
         logger.info(f"Cash: ${status.get('cash', 0):,.2f}")
         logger.info(f"Open Positions: {status.get('open_positions', 0)}")
-        #logger.info(f"Daily P&L: ${status.get('daily_pnl', 0):,.2f}")
+        # logger.info(f"Daily P&L: ${status.get('daily_pnl', 0):,.2f}")
 
         logger.info("\n[OK] Trading cycle complete")
         logger.info("=" * 70)
