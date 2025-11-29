@@ -46,8 +46,8 @@ class MeanReversionStrategy(BaseStrategy):
         # 4H context parameters
         self.use_4h_context = config.get('use_4h_context', True)
         self.h4_reversion_mode = config.get('h4_reversion_mode', 'smart')  # 'smart', 'counter', 'aligned'
-        self.h4_extreme_weight = config.get('h4_extreme_weight', 1.5)  # Boost for 4H extremes
-        self.h4_trend_penalty = config.get('h4_trend_penalty', 2.0)  # Penalty for trending 4H
+        self.h4_extreme_weight = config.get('h4_extreme_weight', 1.2)  # Boost for 4H extremes
+        self.h4_trend_penalty = config.get('h4_trend_penalty', 0.5)  # Penalty for trending 4H
         
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  RSI: {self.rsi_oversold}/{self.rsi_overbought}")
