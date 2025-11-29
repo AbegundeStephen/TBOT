@@ -328,7 +328,7 @@ class TradingBot:
                 "buy_score_threshold": 0.45,
                 "sell_score_threshold": 0.50,
                 "perfect_agreement_bonus": 0.15,
-                "allow_single_mr_signal": True,
+                "allow_single_mr_signaal": True,
                 "allow_single_tf_signal": True,
                 "allow_single_ema_signal": True,
                 "single_mr_threshold": 0.65,
@@ -647,18 +647,19 @@ class TradingBot:
             )
 
             # Log all three strategy signals
+# Log all three strategy signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
-                f"  Mean Reversion:   {details.get('mean_reversion_signal', 0):>2} "
-                f"(confidence: {details.get('mean_reversion_confidence', 0):.3f})"
+                f"  Mean Reversion:   {details.get('mr_signal', 0):>2} "
+                f"(confidence: {details.get('mr_confidence', 0):.3f})"
             )
             logger.info(
-                f"  Trend Following:  {details.get('trend_following_signal', 0):>2} "
-                f"(confidence: {details.get('trend_following_confidence', 0):.3f})"
+                f"  Trend Following:  {details.get('tf_signal', 0):>2} "
+                f"(confidence: {details.get('tf_confidence', 0):.3f})"
             )
             logger.info(
-                f"  EMA Strategy:     {details.get('ema_signal', 0):>2} "
-                f"(confidence: {details.get('ema_confidence', 0):.3f})"
+                f"  EMA Regime:       {details.get('ema_regime_signal', 0):>2} "
+                f"(confidence: {details.get('ema_regime_confidence', 0):.3f})"
             )
             logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
@@ -693,8 +694,8 @@ class TradingBot:
                     signal=signal,
                     current_price=current_price,
                     asset_name=asset_name,
-                    confidence_score=details.get("combined_confidence", 0.5),
-                    market_condition=details.get("market_condition", "neutral"),
+                    confidence_score=details.get('signal_quality', 0.5),
+                    market_condition='bull' if details.get('regime') == '🚀 BULL' else 'bear',
                 )
                 self.binance_handler.check_and_update_positions(asset_name)
             else:
@@ -702,8 +703,8 @@ class TradingBot:
                     signal=signal,
                     symbol=symbol,
                     asset=asset_name,
-                    confidence_score=details.get("combined_confidence", 0.5),
-                    market_condition=details.get("market_condition", "neutral"),
+                    confidence_score=details.get('signal_quality', 0.5),
+                    market_condition='bull' if details.get('regime') == '🚀 BULL' else 'bear',
                 )
                 self.mt5_handler.check_and_update_positions(asset_name)
 
@@ -771,7 +772,7 @@ class TradingBot:
 
                 # Log trade
                 if self.config.get("logging", {}).get("save_trades", True):
-                    self._log_trade(asset_name, signal, details, current_price)
+                 self._log_trade(asset_name, signal, details, current_price)
 
             else:
                 logger.warning(
@@ -800,7 +801,7 @@ class TradingBot:
             with open(trade_log, "a", encoding="utf-8") as f:
                 f.write(
                     f"{datetime.now().isoformat()},{asset},{signal},{price:.2f},"
-                    f"{details.get('combined_confidence', 0):.3f},"
+                    f"{details.get('signal_quality', 0):.3f},"
                     f"{details.get('reasoning', 'N/A')}\n"
                 )
         except Exception as e:
