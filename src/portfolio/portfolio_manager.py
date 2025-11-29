@@ -1,5 +1,5 @@
 """
-Portfolio Manager - Fixed daily_pnl calculation
+Portfolio Manager -  daily_pnl calculation
 """
 
 import logging
@@ -650,7 +650,7 @@ class PortfolioManager:
         # Calculate total portfolio value
         total_value = self.current_capital + total_unrealized_pnl
 
-        # FIX: Calculate daily_pnl relative to session start
+        # : Calculate daily_pnl relative to session start
         if self.session_start_equity is not None:
             # Daily P&L = current_equity - starting_equity
             current_equity = self.current_capital + total_unrealized_pnl

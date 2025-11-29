@@ -251,7 +251,7 @@ class BaseStrategy(ABC):
             # Get predicted class and its probability
             predicted_class = self.model.predict(X_scaled)[0]
 
-            # CRITICAL FIX: Map class index to confidence correctly
+            # CRITICAL : Map class index to confidence correctly
             # RandomForest classes_ attribute tells us the order
             class_to_idx = {cls: idx for idx, cls in enumerate(self.model.classes_)}
 
