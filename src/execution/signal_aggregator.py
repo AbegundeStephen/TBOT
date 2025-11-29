@@ -45,28 +45,35 @@ class PerformanceWeightedAggregator:
                 "trend_following": 0.50,
             }
 
-        # FIXED CONFIGURATION
-        self.config = {
-            # LOWER thresholds - easier to trigger signals
-            "buy_threshold": 0.25,   # Was 0.35
-            "sell_threshold": 0.25,  # Was 0.35
-            
-            # Agreement bonuses (unchanged)
-            "two_strategy_bonus": 0.15,
-            "three_strategy_bonus": 0.25,
-            
-            # Regime modifiers (reduced impact)
-            "bull_buy_boost": 0.03,
-            "bull_sell_penalty": 0.03,
-            "bear_sell_boost": 0.03,
-            "bear_buy_penalty": 0.03,
-            
-            # LOWER confidence floor - use more signals
-            "min_confidence_to_use": 0.10,  # Was 0.15
-            
-            # LOWER quality gate
-            "min_signal_quality": 0.20,  # Was 0.25
-        }
+        # ASSET-SPECIFIC CONFIGURATION
+        if self.asset_type == "BTC":
+            self.config = {
+                "buy_threshold": 0.30,
+                "sell_threshold": 0.36,
+                "two_strategy_bonus": 0.22,
+                "three_strategy_bonus": 0.25,
+                "bull_buy_boost": 0.04,
+                "bull_sell_penalty": 0.04,
+                "bear_sell_boost": 0.04,
+                "bear_buy_penalty": 0.04,
+                "min_confidence_to_use": 0.10,
+                "min_signal_quality": 0.27,
+                "hold_contribution_pct": 0.18,  # 18% for BTC
+            }
+        else:  # GOLD - More conservative
+            self.config = {
+                "buy_threshold": 0.32,   # Higher threshold
+                "sell_threshold": 0.32,  # Higher threshold
+                "two_strategy_bonus": 0.20,  # Bigger bonus for agreement
+                "three_strategy_bonus": 0.30,
+                "bull_buy_boost": 0.02,   # Smaller regime impact
+                "bull_sell_penalty": 0.02,
+                "bear_sell_boost": 0.02,
+                "bear_buy_penalty": 0.02,
+                "min_confidence_to_use": 0.15,  # Higher confidence needed
+                "min_signal_quality": 0.25,     # Higher quality gate
+                "hold_contribution_pct": 0.15,  # 15% for GOLD (was 30%)
+            }
 
         self.stats = {
             "total_evaluations": 0,
@@ -92,8 +99,9 @@ class PerformanceWeightedAggregator:
         logger.info("")
         logger.info("🔧 KEY FIXES:")
         logger.info("   ✓ HOLD signals now contribute directional context")
-        logger.info("   ✓ Lower thresholds (0.25 instead of 0.35)")
-        logger.info("   ✓ Strategies always participate in scoring")
+        logger.info(f"   ✓ HOLD contribution: {self.config['hold_contribution_pct']*100:.0f}%")
+        logger.info(f"   ✓ Thresholds: {self.config['buy_threshold']:.2f}")
+        logger.info("   ✓ Asset-specific tuning applied")
         logger.info("")
         logger.info("📊 STRATEGY ROLES:")
         logger.info("   Mean Reversion:   DECISION MAKER (weight: 0.50)")
@@ -105,6 +113,7 @@ class PerformanceWeightedAggregator:
         logger.info(f"   Sell Signal:      score >= {self.config['sell_threshold']:.2f}")
         logger.info(f"   Min Confidence:   {self.config['min_confidence_to_use']:.2f}")
         logger.info(f"   Min Quality:      {self.config['min_signal_quality']:.2f}")
+        logger.info(f"   HOLD Contribution: {self.config['hold_contribution_pct']*100:.0f}%")
         logger.info("=" * 80)
         logger.info("")
 
@@ -149,6 +158,9 @@ class PerformanceWeightedAggregator:
         agreement_count = 0
         min_conf = self.config["min_confidence_to_use"]
 
+        # Get hold contribution percentage from config
+        hold_contrib = self.config["hold_contribution_pct"]
+        
         # ============================================================
         # MEAN REVERSION CONTRIBUTION
         # ============================================================
@@ -161,10 +173,9 @@ class PerformanceWeightedAggregator:
             agreement_count += 1
             
         elif mr_signal == 0:
-            # HOLD - Partial contribution based on confidence
-            # High confidence HOLD = some directional lean
+            # HOLD - Partial contribution (asset-specific)
             effective_conf = max(mr_conf, min_conf)
-            contribution = (effective_conf * 0.3) * self.weights["mean_reversion"]
+            contribution = (effective_conf * hold_contrib) * self.weights["mean_reversion"]
             total_score += contribution
             components.append(f"MR_hold:{contribution:.3f}")
             
@@ -187,9 +198,9 @@ class PerformanceWeightedAggregator:
             agreement_count += 1
             
         elif tf_signal == 0:
-            # HOLD - Partial contribution
+            # HOLD - Partial contribution (asset-specific)
             effective_conf = max(tf_conf, min_conf)
-            contribution = (effective_conf * 0.3) * self.weights["trend_following"]
+            contribution = (effective_conf * hold_contrib) * self.weights["trend_following"]
             total_score += contribution
             components.append(f"TF_hold:{contribution:.3f}")
             
@@ -256,7 +267,10 @@ class PerformanceWeightedAggregator:
             tf_signal, tf_conf = self.s_trend_following.generate_signal(df)
             ema_signal, ema_conf = self.s_ema.generate_signal(df)
             
-            
+            logger.info(f"[DEBUG] Raw MR: signal={mr_signal}, conf={mr_conf:.3f}")
+            logger.info(f"[DEBUG] Raw TF: signal={tf_signal}, conf={tf_conf:.3f}")
+            logger.info(f"[DEBUG] Raw EMA: signal={ema_signal}, conf={ema_conf:.3f}")
+
             # STEP 3: Calculate BUY and SELL scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
                 target_signal=1,
@@ -353,4 +367,11 @@ class PerformanceWeightedAggregator:
             "buy_rate": (self.stats["buy_signals"] / total) * 100,
             "sell_rate": (self.stats["sell_signals"] / total) * 100,
             "hold_rate": (self.stats["hold_signals"] / total) * 100,
+              "bull_regime_pct": (self.stats["bull_regime_count"] / total) * 100,
+            "bear_regime_pct": (self.stats["bear_regime_count"] / total) * 100,
+            "consensus_rate": (
+                self.stats["consensus_signals"]
+                / max(self.stats["signals_generated"], 1)
+            )
+            * 100,
         }

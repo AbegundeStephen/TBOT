@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Main Trading Bot - WITH TELEGRAM INTEGRATION
-FIXED: Proper EMA Strategy Integration
+: Proper EMA Strategy Integration
 """
 
 import json
@@ -15,7 +15,7 @@ import schedule
 import io
 from threading import Thread
 
-# FIX Windows encoding BEFORE any imports that use logging
+#  Windows encoding BEFORE any imports that use logging
 if sys.platform == "win32":
     try:
         sys.stdout = io.TextIOWrapper(
@@ -89,7 +89,7 @@ class TradingBot:
         self.data_manager = DataManager(self.config)
         self.portfolio_manager = None
 
-        # FIXED: Use consistent strategy names
+        # : Use consistent strategy names
         self.strategies = {"BTC": {}, "GOLD": {}}
 
         self._initialize_strategies()
@@ -204,7 +204,7 @@ class TradingBot:
 
     def _initialize_strategies(self):
         """
-        FIXED: Initialize all THREE strategies for each enabled asset
+        : Initialize all THREE strategies for each enabled asset
         Properly handles exponential_moving_averages config key
         """
         logger.info("\n" + "-" * 70)
@@ -238,7 +238,7 @@ class TradingBot:
                 )
                 logger.info(f"[OK] {asset_name}: Trend Following initialized")
 
-            # 3. EMA Strategy (FIXED: Check correct config key)
+            # 3. EMA Strategy (: Check correct config key)
             # Config file uses "exponential_moving_averages" but we store as "ema_strategy"
             if strategies_config.get("exponential_moving_averages", {}).get(
                 "enabled", False
@@ -260,7 +260,7 @@ class TradingBot:
 
     def _initialize_aggregators(self):
         """
-        FIXED: Initialize signal aggregators with proper strategy checking
+        : Initialize signal aggregators with proper strategy checking
         """
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Enhanced Signal Aggregators")
@@ -332,7 +332,7 @@ class TradingBot:
             "mode", "weighted_voting"
         )
         aggregator_preset = self.config.get("aggregator_settings", {}).get(
-            "preset", "balanced"  # FIX: Changed from "weighted_voting" to "balanced"
+            "preset", "balanced"  # : Changed from "weighted_voting" to "balanced"
         )
         if aggregator_preset not in AGGREGATOR_PRESETS:
             logger.warning(f"Unknown preset '{aggregator_preset}', using 'balanced'")
@@ -343,10 +343,10 @@ class TradingBot:
         logger.info(f"Aggregator Preset: {aggregator_preset}")
 
         for asset_name, strategies in self.strategies.items():
-            # FIXED: Get strategies with correct keys
+            # : Get strategies with correct keys
             mr_strategy = strategies.get("mean_reversion")
             tf_strategy = strategies.get("trend_following")
-            ema_strategy = strategies.get("ema_strategy")  # FIXED: Use consistent key
+            ema_strategy = strategies.get("ema_strategy")  # : Use consistent key
 
             # Count available strategies
             available = sum(
@@ -380,7 +380,7 @@ class TradingBot:
 
     def load_models(self):
         """
-        FIXED: Load trained ML models for ALL strategies including EMA
+        : Load trained ML models for ALL strategies including EMA
         """
         logger.info("\n" + "-" * 70)
         logger.info("Loading Trained Models (Including EMA)")
@@ -393,7 +393,7 @@ class TradingBot:
             for strategy_name, strategy in strategies.items():
                 models_expected += 1
 
-                # FIXED: Map internal strategy name to model filename
+                # : Map internal strategy name to model filename
                 # Internal: "ema_strategy" -> File: "ema_strategy_btc.pkl"
                 model_filename = f"{strategy_name}_{asset_name.lower()}.pkl"
                 model_path = f"models/{model_filename}"
@@ -530,7 +530,7 @@ class TradingBot:
 
     def trade_asset(self, asset_name: str):
         """
-        FIXED: Execute trading logic with proper signal logging for ALL 3 strategies
+        : Execute trading logic with proper signal logging for ALL 3 strategies
         """
         asset_config = self.config["assets"][asset_name]
 
@@ -642,7 +642,7 @@ class TradingBot:
                 timestamp=datetime.now(),
             )
 
-            # FIXED: Log ALL THREE strategy signals
+            # : Log ALL THREE strategy signals
             logger.info(f"\n[SIGNAL] Analysis (3 Strategies):")
             logger.info(
                 f"  Mean Reversion: Signal={details.get('mean_reversion_signal', 0):>2}, "
@@ -1059,7 +1059,7 @@ def main():
         print("[FAIL] config/config.json not found!")
         sys.exit(1)
 
-    # Check required models (FIXED: Include EMA models)
+    # Check required models (: Include EMA models)
     required_models = []
     for asset_name, asset_config in config["assets"].items():
         if asset_config.get("enabled", False):
@@ -1077,7 +1077,7 @@ def main():
                     f"models/trend_following_{asset_name.lower()}.pkl"
                 )
 
-            # EMA Strategy (FIXED: Check correct config key)
+            # EMA Strategy (: Check correct config key)
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
                 required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Main Trading Bot - CORRECTED HANDLER INTEGRATION
-Fixes: Proper initialization order, configuration structure, and async handling
+: Proper initialization order, configuration structure, and async handling
 """
 
 import json
@@ -16,7 +16,7 @@ import io
 import signal
 from threading import Thread
 
-# FIX Windows encoding BEFORE any imports that use logging
+#  Windows encoding BEFORE any imports that use logging
 if sys.platform == "win32":
     try:
         sys.stdout = io.TextIOWrapper(
@@ -647,7 +647,7 @@ class TradingBot:
             )
 
             # Log all three strategy signals
-# Log all three strategy signals
+            # Log all three strategy signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
                 f"  Mean Reversion:   {details.get('mr_signal', 0):>2} "
@@ -694,8 +694,10 @@ class TradingBot:
                     signal=signal,
                     current_price=current_price,
                     asset_name=asset_name,
-                    confidence_score=details.get('signal_quality', 0.5),
-                    market_condition='bull' if details.get('regime') == '🚀 BULL' else 'bear',
+                    confidence_score=details.get("signal_quality", 0.5),
+                    market_condition=(
+                        "bull" if details.get("regime") == "🚀 BULL" else "bear"
+                    ),
                 )
                 self.binance_handler.check_and_update_positions(asset_name)
             else:
@@ -703,8 +705,10 @@ class TradingBot:
                     signal=signal,
                     symbol=symbol,
                     asset=asset_name,
-                    confidence_score=details.get('signal_quality', 0.5),
-                    market_condition='bull' if details.get('regime') == '🚀 BULL' else 'bear',
+                    confidence_score=details.get("signal_quality", 0.5),
+                    market_condition=(
+                        "bull" if details.get("regime") == "🚀 BULL" else "bear"
+                    ),
                 )
                 self.mt5_handler.check_and_update_positions(asset_name)
 
@@ -772,7 +776,7 @@ class TradingBot:
 
                 # Log trade
                 if self.config.get("logging", {}).get("save_trades", True):
-                 self._log_trade(asset_name, signal, details, current_price)
+                    self._log_trade(asset_name, signal, details, current_price)
 
             else:
                 logger.warning(
