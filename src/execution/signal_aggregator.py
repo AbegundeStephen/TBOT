@@ -462,6 +462,7 @@ class PerformanceWeightedAggregator:
             # STEP 2: Get strategy signals
             mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
             tf_signal, tf_conf = self.s_trend_following.generate_signal(df)
+            ema_signal, ema_conf = self.s_ema.generate_signal(df)
 
             # STEP 3: Calculate scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
@@ -531,6 +532,9 @@ class PerformanceWeightedAggregator:
                 "mr_confidence": mr_conf,
                 "tf_signal": tf_signal,
                 "tf_confidence": tf_conf,
+                "ema_regime_signal": ema_signal,
+                "ema_regime_confidence": ema_conf,
+               
             }
 
             return final_signal, details
