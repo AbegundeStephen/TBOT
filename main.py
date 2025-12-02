@@ -37,6 +37,7 @@ from src.execution.binance_handler import BinanceExecutionHandler
 from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.utils.market_hours import MarketHours, should_trade_btc, should_trade_gold
+from src.execution.auto_preset_selector import AutoPresetSelector
 
 # Import Telegram bot
 from src.telegram import TradingTelegramBot
@@ -104,8 +105,9 @@ class TradingBot:
         self.last_trade_times = {}
         self.last_market_status_log = None
 
-        # Signal aggregators
+        # Signal aggregators (initialized AFTER strategies AND exchanges)
         self.aggregators = {}
+        self.selected_presets = {}
 
         # Telegram integration
         self.telegram_bot = None
@@ -113,9 +115,9 @@ class TradingBot:
         self.telegram_thread = None
         self._shutdown_requested = False
 
-        # Initialize in correct order
+        # Initialize in correct order (but NOT aggregators yet)
         self._initialize_telegram()
-        self._initialize_strategies()
+        self._initialize_strategies()  # 
 
     def initialize_exchanges(self):
         """
@@ -254,7 +256,7 @@ class TradingBot:
             logger.warning(f"[TELEGRAM] Initialization failed: {e}")
 
     def _initialize_strategies(self):
-        """Initialize all three strategies for enabled assets"""
+        """Initialize all three strategies for enabled assets (WITHOUT aggregators)"""
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Strategies (MR + TF + EMA)")
         logger.info("-" * 70)
@@ -289,7 +291,7 @@ class TradingBot:
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} Trend Following: {e}")
 
-            # EMA Strategy (note: config key is "exponential_moving_averages")
+            # EMA Strategy
             if strategies_cfg.get("exponential_moving_averages", {}).get(
                 "enabled", False
             ):
@@ -311,88 +313,209 @@ class TradingBot:
                     f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}"
                 )
 
-        # Initialize aggregators after strategies are ready
-        self._initialize_aggregators()
-
     def _initialize_aggregators(self):
-        """Initialize signal aggregators"""
+        """Initialize signal aggregators with AUTO-PRESET support"""
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Signal Aggregators")
         logger.info("-" * 70)
 
         AGGREGATOR_PRESETS = {
+        "BTC": {
             "conservative": {
-                "mean_reversion_weight": 1.0,
-                "trend_following_weight": 1.0,
-                "ema_weight": 1.1,
-                "buy_score_threshold": 0.45,
-                "sell_score_threshold": 0.50,
-                "perfect_agreement_bonus": 0.15,
-                "allow_single_mr_signaal": True,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_mr_threshold": 0.65,
-                "single_tf_threshold": 0.65,
-                "single_ema_threshold": 0.65,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": False,
-                "boost_buys_in_bull": 0.10,
-                "sell_penalty_in_bull": 0.15,
-                "regime_confirmation_bars": 3,
-                "regime_cooldown_hours": 6,
-                "verbose_logging": True,
+                "buy_threshold": 0.35,
+                "sell_threshold": 0.40,
+                "two_strategy_bonus": 0.18,
+                "three_strategy_bonus": 0.20,
+                
+                # UPDATED: Stronger regime bias (was 0.03-0.05)
+                "bull_buy_boost": 0.10,        # Increased from 0.03
+                "bull_sell_penalty": 0.12,     # Increased from 0.05
+                "bear_sell_boost": 0.10,       # Increased from 0.03
+                "bear_buy_penalty": 0.12,      # Increased from 0.05
+                
+                "min_confidence_to_use": 0.12,
+                "min_signal_quality": 0.32,
+                "hold_contribution_pct": 0.15,
+                "allow_single_override": True,
+                "single_override_threshold": 0.75,
+                "verbose": False,
             },
             "balanced": {
-                "mean_reversion_weight": 1.0,
-                "trend_following_weight": 1.0,
-                "ema_weight": 1.1,
-                "buy_score_threshold": 0.35,
-                "sell_score_threshold": 0.40,
-                "perfect_agreement_bonus": 0.15,
-                "allow_single_mr_signal": True,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_mr_threshold": 0.60,
-                "single_tf_threshold": 0.60,
-                "single_ema_threshold": 0.60,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": False,
-                "boost_buys_in_bull": 0.15,
-                "sell_penalty_in_bull": 0.20,
-                "regime_confirmation_bars": 2,
-                "regime_cooldown_hours": 6,
-                "verbose_logging": True,
+                "buy_threshold": 0.30,
+                "sell_threshold": 0.36,
+                "two_strategy_bonus": 0.20,
+                "three_strategy_bonus": 0.22,
+                
+                # UPDATED: Stronger regime bias (was 0.035-0.04)
+                "bull_buy_boost": 0.11,        # Increased from 0.035
+                "bull_sell_penalty": 0.11,     # Increased from 0.04
+                "bear_sell_boost": 0.11,       # Increased from 0.035
+                "bear_buy_penalty": 0.11,      # Increased from 0.04
+                
+                "min_confidence_to_use": 0.10,
+                "min_signal_quality": 0.28,
+                "hold_contribution_pct": 0.17,
+                "allow_single_override": True,
+                "single_override_threshold": 0.72,
+                "verbose": False,
             },
             "aggressive": {
-                "mean_reversion_weight": 1.0,
-                "trend_following_weight": 1.0,
-                "ema_weight": 1.1,
-                "buy_score_threshold": 0.30,
-                "sell_score_threshold": 0.35,
-                "perfect_agreement_bonus": 0.12,
-                "allow_single_mr_signal": True,
-                "allow_single_tf_signal": True,
-                "allow_single_ema_signal": True,
-                "single_mr_threshold": 0.55,
-                "single_tf_threshold": 0.55,
-                "single_ema_threshold": 0.55,
-                "enable_bull_filter": True,
-                "block_sells_in_bull": False,
-                "boost_buys_in_bull": 0.15,
-                "sell_penalty_in_bull": 0.15,
-                "regime_confirmation_bars": 1,
-                "regime_cooldown_hours": 3,
-                "verbose_logging": True,
+                "buy_threshold": 0.25,
+                "sell_threshold": 0.30,
+                "two_strategy_bonus": 0.22,
+                "three_strategy_bonus": 0.25,
+                
+                # UPDATED: Stronger regime bias (was 0.03-0.04)
+                "bull_buy_boost": 0.12,        # Increased from 0.04
+                "bull_sell_penalty": 0.12,     # Increased from 0.03
+                "bear_sell_boost": 0.12,       # Increased from 0.04
+                "bear_buy_penalty": 0.12,      # Increased from 0.03
+                
+                "min_confidence_to_use": 0.09,
+                "min_signal_quality": 0.25,
+                "hold_contribution_pct": 0.18,
+                "allow_single_override": True,
+                "single_override_threshold": 0.70,
+                "verbose": False,
             },
-        }
+            "scalper": {
+                "buy_threshold": 0.20,
+                "sell_threshold": 0.25,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.30,
+                
+                # UPDATED: Strongest regime bias for scalping (was 0.02-0.05)
+                "bull_buy_boost": 0.15,        # Increased from 0.05
+                "bull_sell_penalty": 0.10,     # Increased from 0.02
+                "bear_sell_boost": 0.15,       # Increased from 0.05
+                "bear_buy_penalty": 0.10,      # Increased from 0.02
+                
+                "min_confidence_to_use": 0.08,
+                "min_signal_quality": 0.20,
+                "hold_contribution_pct": 0.20,
+                "allow_single_override": True,
+                "single_override_threshold": 0.65,
+                "verbose": False,
+            },
+        },
+        "GOLD": {
+            "conservative": {
+                "buy_threshold": 0.38,
+                "sell_threshold": 0.42,
+                "two_strategy_bonus": 0.18,
+                "three_strategy_bonus": 0.25,
+                
+                # UPDATED: Stronger regime bias (was 0.02-0.03)
+                "bull_buy_boost": 0.07,        # Increased from 0.02
+                "bull_sell_penalty": 0.09,     # Increased from 0.03
+                "bear_sell_boost": 0.07,       # Increased from 0.02
+                "bear_buy_penalty": 0.09,      # Increased from 0.03
+                
+                "min_confidence_to_use": 0.12,
+                "min_signal_quality": 0.30,
+                "hold_contribution_pct": 0.12,
+                "allow_single_override": True,
+                "single_override_threshold": 0.75,
+                "verbose": False,
+            },
+            "balanced": {
+                "buy_threshold": 0.33,
+                "sell_threshold": 0.36,
+                "two_strategy_bonus": 0.20,
+                "three_strategy_bonus": 0.25,
+                
+                # UPDATED: Stronger regime bias (was 0.02)
+                "bull_buy_boost": 0.08,        # Increased from 0.02
+                "bull_sell_penalty": 0.08,     # Increased from 0.02
+                "bear_sell_boost": 0.08,       # Increased from 0.02
+                "bear_buy_penalty": 0.08,      # Increased from 0.02
+                
+                "min_confidence_to_use": 0.10,
+                "min_signal_quality": 0.28,
+                "hold_contribution_pct": 0.14,
+                "allow_single_override": True,
+                "single_override_threshold": 0.72,
+                "verbose": False,
+            },
+            "aggressive": {
+                "buy_threshold": 0.28,
+                "sell_threshold": 0.30,
+                "two_strategy_bonus": 0.22,
+                "three_strategy_bonus": 0.30,
+                
+                # UPDATED: Stronger regime bias (was 0.01-0.03)
+                "bull_buy_boost": 0.09,        # Increased from 0.03
+                "bull_sell_penalty": 0.09,     # Increased from 0.01
+                "bear_sell_boost": 0.09,       # Increased from 0.03
+                "bear_buy_penalty": 0.09,      # Increased from 0.01
+                
+                "min_confidence_to_use": 0.08,
+                "min_signal_quality": 0.22,
+                "hold_contribution_pct": 0.15,
+                "allow_single_override": True,
+                "single_override_threshold": 0.70,
+                "verbose": False,
+            },
+            "scalper": {
+                "buy_threshold": 0.22,
+                "sell_threshold": 0.24,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.35,
+                
+                # UPDATED: Strongest regime bias for scalping (was 0.01-0.04)
+                "bull_buy_boost": 0.12,        # Increased from 0.04
+                "bull_sell_penalty": 0.08,     # Increased from 0.01
+                "bear_sell_boost": 0.12,       # Increased from 0.04
+                "bear_buy_penalty": 0.08,      # Increased from 0.01
+                
+                "min_confidence_to_use": 0.06,
+                "min_signal_quality": 0.18,
+                "hold_contribution_pct": 0.18,
+                "allow_single_override": True,
+                "single_override_threshold": 0.65,
+                "verbose": False,
+            },
+        },
+    }
 
-        preset = self.config.get("aggregator_settings", {}).get("preset", "balanced")
-        if preset not in AGGREGATOR_PRESETS:
+        # ============================================================
+        # AUTO-PRESET SELECTION LOGIC
+        # ============================================================
+        aggregator_cfg = self.config.get("aggregator_settings", {})
+        preset = aggregator_cfg.get("preset", "auto")
+        
+        if preset == "auto":
+            logger.info("\n" + "=" * 70)
+            logger.info("🤖 AUTO-PRESET MODE ENABLED")
+            logger.info("=" * 70)
+            logger.info("Analyzing market conditions to select optimal presets...")
+            logger.info("")
+            
+            # Initialize auto-selector
+            selector = AutoPresetSelector(self.data_manager, self.config)
+            
+            # Get optimal preset for each enabled asset
+            asset_presets = selector.get_preset_for_all_assets()
+            
+            logger.info("\n" + "=" * 70)
+            logger.info("📊 AUTO-PRESET RESULTS")
+            logger.info("=" * 70)
+            for asset, selected_preset in asset_presets.items():
+                logger.info(f"  {asset:6} → {selected_preset.upper()}")
+            logger.info("=" * 70 + "\n")
+            
+        elif preset not in ["conservative", "balanced", "aggressive", "scalper"]:
             logger.warning(f"Unknown preset '{preset}', using 'balanced'")
-            preset = "balanced"
-
-        config_for_aggregators = AGGREGATOR_PRESETS[preset]
-
+            asset_presets = {name: "balanced" for name in self.strategies.keys()}
+        else:
+            # Manual preset specified - use for all assets
+            logger.info(f"Using manual preset: {preset.upper()}")
+            asset_presets = {name: preset for name in self.strategies.keys()}
+            
+        self.selected_presets = asset_presets.copy()
+        # ============================================================
+        # CREATE AGGREGATORS WITH SELECTED PRESETS
+        # ============================================================
         for asset_name, strategies in self.strategies.items():
             if not self.config["assets"][asset_name].get("enabled", False):
                 continue
@@ -402,19 +525,26 @@ class TradingBot:
                 logger.warning(f"[!] {asset_name}: No strategies, skipping aggregator")
                 continue
 
+            # Get the preset for this specific asset
+            selected_preset = asset_presets.get(asset_name, "balanced")
+            
+            # Get configuration for the selected preset
+            config_for_aggregator = AGGREGATOR_PRESETS[asset_name][selected_preset]
+
             try:
                 self.aggregators[asset_name] = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
                     ema_strategy=strategies.get("ema_strategy"),
                     asset_type=asset_name,
+                    config=config_for_aggregator
                 )
                 logger.info(
-                    f"[OK] {asset_name}: Aggregator ({strategy_count} strategies, {preset})"
+                    f"[OK] {asset_name}: Aggregator ({strategy_count} strategies, {selected_preset})"
                 )
             except Exception as e:
                 logger.error(f"[FAIL] {asset_name} aggregator: {e}")
-
+            
     def load_models(self):
         """Load trained ML models for all strategies"""
         logger.info("\n" + "-" * 70)
@@ -450,6 +580,9 @@ class TradingBot:
             sys.exit(1)
 
         logger.info(f"\n[OK] Loaded {loaded}/{expected} models")
+        
+        # NOW initialize aggregators after models are loaded and exchanges connected
+        self._initialize_aggregators()
 
     def reset_daily_counters(self):
         """Reset daily trading counters"""

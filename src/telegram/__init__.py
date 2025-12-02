@@ -346,6 +346,8 @@ class TradingTelegramBot:
         self.application.add_handler(
             CommandHandler("stop_trading", self.cmd_stop_trading)
         )
+        self.application.add_handler(CommandHandler("presets", self.cmd_presets))
+    
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
@@ -489,6 +491,7 @@ class TradingTelegramBot:
             "/positions - View open positions with P&L\n"
             "/history - Recent trade history\n"
             "/performance - Performance metrics\n"
+            "/presets - View current aggregator presets\n"
             "/signals - Latest trading signals\n"
             "/stats - Signal statistics\n"
             "/regimes - Market regime tracking\n"
@@ -538,19 +541,31 @@ class TradingTelegramBot:
                 f"🤖 Trading: {'Running' if self.trading_bot.is_running else 'Stopped'}\n"
                 f"💰 Portfolio Value: ${total_value:,.2f}\n"
                 f"💵 Cash: ${cash:,.2f}\n"
-                f"📈 Open Positions: {open_positions}\n"
-                # f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
+                f"📈 Open Positions: {open_positions}\n\n"
                 f"*Market Status:*\n"
                 f"₿ BTC: {btc_status}\n"
                 f"🥇 GOLD: {gold_status}\n\n"
-                f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
             )
+
+            # ✨ NEW: Add preset info
+            if hasattr(self.trading_bot, 'selected_presets') and self.trading_bot.selected_presets:
+                status_msg += "*Current Presets:*\n"
+                for asset, preset in self.trading_bot.selected_presets.items():
+                    emoji = "₿" if asset == "BTC" else "🥇"
+                    status_msg += f"{emoji} {asset}: `{preset.upper()}`\n"
+                status_msg += "\n"
+
+            status_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
 
             # Add inline keyboard for quick actions
             keyboard = [
                 [
                     InlineKeyboardButton("📊 Positions", callback_data="positions"),
                     InlineKeyboardButton("📜 History", callback_data="history"),
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Presets", callback_data="presets"),
+                    InlineKeyboardButton("📡 Signals", callback_data="signals"),
                 ],
                 [InlineKeyboardButton("🔄 Refresh", callback_data="status")],
             ]
@@ -565,6 +580,66 @@ class TradingTelegramBot:
             await update.message.reply_text(
                 "❌ Error fetching status. Please try again."
             )
+
+
+    async def _send_status_message(self, query):
+        """Send status message (for callback)"""
+        try:
+            portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
+
+            status_icon = "🟢" if self.trading_bot.is_running else "🔴"
+
+            total_value = portfolio_status.get("total_value", 0)
+            cash = portfolio_status.get("cash", 0)
+            open_positions = portfolio_status.get("open_positions", 0)
+            daily_pnl = portfolio_status.get("daily_pnl", 0)
+
+            pnl_icon = "🟢" if daily_pnl >= 0 else "🔴"
+            pnl_sign = "+" if daily_pnl >= 0 else ""
+
+            btc_status = "✅ 24/7 Open"
+            gold_status = self._get_gold_market_status()
+
+            status_msg = (
+                f"{status_icon} *Bot Status*\n\n"
+                f"🤖 Trading: {'Running' if self.trading_bot.is_running else 'Stopped'}\n"
+                f"💰 Portfolio Value: ${total_value:,.2f}\n"
+                f"💵 Cash: ${cash:,.2f}\n"
+                f"📈 Open Positions: {open_positions}\n\n"
+                f"*Market Status:*\n"
+                f"₿ BTC: {btc_status}\n"
+                f"🥇 GOLD: {gold_status}\n\n"
+            )
+
+            # ✨ NEW: Add preset info
+            if hasattr(self.trading_bot, 'selected_presets') and self.trading_bot.selected_presets:
+                status_msg += "*Current Presets:*\n"
+                for asset, preset in self.trading_bot.selected_presets.items():
+                    emoji = "₿" if asset == "BTC" else "🥇"
+                    status_msg += f"{emoji} {asset}: `{preset.upper()}`\n"
+                status_msg += "\n"
+
+            status_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Positions", callback_data="positions"),
+                    InlineKeyboardButton("📜 History", callback_data="history"),
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Presets", callback_data="presets"),
+                    InlineKeyboardButton("📡 Signals", callback_data="signals"),
+                ],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="status")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                status_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error in _send_status_message: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /positions command"""
@@ -842,6 +917,85 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Error closing asset: {e}", exc_info=True)
             await update.message.reply_text("❌ Error closing position.")
+            
+    async def cmd_presets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /presets command - Show current aggregator presets"""
+        try:
+            if not hasattr(self.trading_bot, 'selected_presets'):
+                await update.message.reply_text(
+                    "❌ Preset information not available.\n"
+                    "Presets are determined during bot startup."
+                )
+                return
+
+            presets = self.trading_bot.selected_presets
+            
+            if not presets:
+                await update.message.reply_text(
+                    "ℹ️ No presets configured yet.\n"
+                    "Bot may still be initializing."
+                )
+                return
+
+            # Check if auto-mode was used
+            aggregator_cfg = self.trading_bot.config.get("aggregator_settings", {})
+            preset_mode = aggregator_cfg.get("preset", "auto")
+            
+            msg = "⚙️ *Aggregator Preset Configuration*\n\n"
+            
+            if preset_mode == "auto":
+                msg += "🤖 *Mode:* AUTO-SELECT\n"
+                msg += "Presets are automatically selected based on current market conditions.\n\n"
+            else:
+                msg += f"🔧 *Mode:* MANUAL ({preset_mode.upper()})\n"
+                msg += "All assets use the same preset.\n\n"
+            
+            msg += "*Current Presets:*\n"
+            
+            # BTC Preset
+            if "BTC" in presets:
+                preset = presets["BTC"]
+                msg += f"\n₿ *BTC:* `{preset.upper()}`\n"
+                msg += self._get_preset_description(preset)
+            
+            # GOLD Preset
+            if "GOLD" in presets:
+                preset = presets["GOLD"]
+                msg += f"\n🥇 *GOLD:* `{preset.upper()}`\n"
+                msg += self._get_preset_description(preset)
+            
+            msg += f"\n\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+            
+            # Add inline keyboard
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Status", callback_data="status"),
+                    InlineKeyboardButton("📡 Signals", callback_data="signals"),
+                ],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="presets")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                msg, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error in cmd_presets: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching preset information")
+
+
+    def _get_preset_description(self, preset: str) -> str:
+        """Get description for a preset"""
+        descriptions = {
+            "conservative": "  • Low risk, high thresholds\n  • Best for stable markets",
+            "balanced": "  • Moderate risk/reward\n  • Default for most conditions",
+            "aggressive": "  • Higher frequency trading\n  • Best for trending markets",
+            "scalper": "  • Maximum activity\n  • Best for high volatility"
+        }
+        return descriptions.get(preset, "  • Unknown preset")
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks"""
@@ -856,42 +1010,152 @@ class TradingTelegramBot:
             await self._send_positions_message(query)
         elif callback_data == "history":
             await self._send_history_message(query)
+        elif callback_data == "presets":  # ✨ NEW
+            await self._send_presets_message(query)
+        elif callback_data == "signals":
+            await self._send_signals_message(query)
+        # ==================== NOTIFICATION METHODS ====================
 
-    # ==================== NOTIFICATION METHODS ====================
-
-    async def send_notification(self, message: str, disable_preview: bool = True):
-        """Send notification with queuing support"""
-        # If not ready, queue the message
-        if not self._is_ready:
-            logger.warning("[TELEGRAM] Bot not ready, queuing message")
-            self._message_queue.append(message)
-            return
-
-        if not self.is_running or not self.application:
-            logger.warning("[TELEGRAM] Bot not running, cannot send notification")
-            return
-
-        success_count = 0
-        for admin_id in self.admin_ids:
-            try:
-                await self.application.bot.send_message(
-                    chat_id=admin_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=disable_preview,
+    async def _send_presets_message(self, query):
+        """Send presets message (for callback)"""
+        try:
+            if not hasattr(self.trading_bot, 'selected_presets'):
+                await query.edit_message_text(
+                    "❌ Preset information not available.",
+                    parse_mode=ParseMode.MARKDOWN
                 )
-                success_count += 1
-                logger.debug(f"[TELEGRAM] Notification sent to {admin_id}")
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Failed to send to {admin_id}: {e}")
+                return
 
-        if success_count == 0:
-            logger.error("[TELEGRAM] Failed to send notification to any admin")
-        else:
-            logger.info(
-                f"[TELEGRAM] Notification sent to {success_count}/{len(self.admin_ids)} admins"
+            presets = self.trading_bot.selected_presets
+            
+            if not presets:
+                await query.edit_message_text(
+                    "ℹ️ No presets configured yet.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+
+            aggregator_cfg = self.trading_bot.config.get("aggregator_settings", {})
+            preset_mode = aggregator_cfg.get("preset", "auto")
+            
+            msg = "⚙️ *Aggregator Preset Configuration*\n\n"
+            
+            if preset_mode == "auto":
+                msg += "🤖 *Mode:* AUTO-SELECT\n\n"
+            else:
+                msg += f"🔧 *Mode:* MANUAL ({preset_mode.upper()})\n\n"
+            
+            msg += "*Current Presets:*\n"
+            
+            if "BTC" in presets:
+                preset = presets["BTC"]
+                msg += f"\n₿ *BTC:* `{preset.upper()}`\n"
+                msg += self._get_preset_description(preset)
+            
+            if "GOLD" in presets:
+                preset = presets["GOLD"]
+                msg += f"\n🥇 *GOLD:* `{preset.upper()}`\n"
+                msg += self._get_preset_description(preset)
+            
+            msg += f"\n\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Status", callback_data="status"),
+                    InlineKeyboardButton("📡 Signals", callback_data="signals"),
+                ],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="presets")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                msg,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
             )
 
+        except Exception as e:
+            logger.error(f"Error in _send_presets_message: {e}")
+            
+    async def _send_signals_message(self, query):
+        """Send signals message (for callback)"""
+        try:
+            if not hasattr(self, "signal_monitor"):
+                await query.edit_message_text("❌ Signal monitoring not initialized")
+                return
+
+            btc_signals = self.signal_monitor.get_last_signals("BTC", n=3)
+            gold_signals = self.signal_monitor.get_last_signals("GOLD", n=3)
+
+            msg = "📡 *Latest Trading Signals*\n\n"
+
+            msg += "*₿ BTC*\n"
+            if btc_signals:
+                for sig in reversed(btc_signals):
+                    msg += self._format_signal_entry(sig)
+            else:
+                msg += "No signals yet\n"
+
+            msg += "\n*🥇 GOLD*\n"
+            if gold_signals:
+                for sig in reversed(gold_signals):
+                    msg += self._format_signal_entry(sig)
+            else:
+                msg += "No signals yet\n"
+
+            msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Stats", callback_data="stats"),
+                    InlineKeyboardButton("⚙️ Presets", callback_data="presets"),
+                ],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="signals")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                msg, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error in _send_signals_message: {e}")
+    async def send_notification(self, message: str, disable_preview: bool = True):
+            """Send notification with queuing support"""
+            # If not ready, queue the message
+            if not self._is_ready:
+                logger.warning("[TELEGRAM] Bot not ready, queuing message")
+                self._message_queue.append(message)
+                return
+
+            if not self.is_running or not self.application:
+                logger.warning("[TELEGRAM] Bot not running, cannot send notification")
+                return
+
+            success_count = 0
+            for admin_id in self.admin_ids:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=admin_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_web_page_preview=disable_preview,
+                    )
+                    success_count += 1
+                    logger.debug(f"[TELEGRAM] Notification sent to {admin_id}")
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Failed to send to {admin_id}: {e}")
+
+            if success_count == 0:
+                logger.error("[TELEGRAM] Failed to send notification to any admin")
+            else:
+                logger.info(
+                    f"[TELEGRAM] Notification sent to {success_count}/{len(self.admin_ids)} admins"
+                )    
+
+        
     async def notify_trade_opened(
         self, asset: str, side: str, price: float, size: float, sl: float, tp: float
     ):
