@@ -22,25 +22,26 @@ class EMAStrategy(BaseStrategy):
         super().__init__(config, "EMA")
         
         # EMA periods
+    # EMA periods (use 100 for GOLD instead of 200)
         self.fast_period = config.get("ema_fast", 50)
-        self.slow_period = config.get("ema_slow", 200)
-        
-        # Signal thresholds
-        self.min_distance_pct = config.get("min_distance_pct", 0.5)
-        self.min_return_threshold = config.get("min_return_threshold", 0.003)
-        self.min_score_threshold = config.get("min_conditions", 4)
-        
+        self.slow_period = config.get("ema_slow", 100)  # Default to 100 for GOLD
+
+        # Signal thresholds (relaxed for GOLD)
+        self.min_distance_pct = config.get("min_distance_pct", 0.0002)  # 0.0002% for GOLD
+        self.min_return_threshold = config.get("min_return_threshold", 0.0005)  # 0.05% for GOLD
+        self.min_score_threshold = config.get("min_conditions", 3)  # Lowered for GOLD
+
         # Filters
-        self.use_price_confirmation = config.get("use_price_confirmation", False)
-        self.use_volume_filter = config.get("use_volume_filter", False)
+        self.use_price_confirmation = config.get("use_price_confirmation", True)  # Enable for GOLD
+        self.use_volume_filter = config.get("use_volume_filter", True)  # Enable for GOLD
         self.volume_multiplier = config.get("volume_multiplier", 1.2)
-        
-        # 4H context parameters (optional enhancement)
-        self.use_4h_context = config.get("use_4h_context", False)
+
+        # 4H context parameters (reduced penalty for GOLD)
+        self.use_4h_context = config.get("use_4h_context", True)
         self.require_4h_alignment = config.get("require_4h_alignment", False)
-        self.h4_trend_weight = config.get("h4_trend_weight", 1.0)  # Moderate boost
-        self.h4_counter_penalty = config.get("h4_counter_penalty", 1.5)  # Moderate penalty
-        
+        self.h4_trend_weight = config.get("h4_trend_weight", 1.5)
+        self.h4_counter_penalty = config.get("h4_counter_penalty", 0.75)  # Reduced from 1.5
+
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  EMA Fast: {self.fast_period}, Slow: {self.slow_period}")
         logger.info(f"  Min Distance: {self.min_distance_pct}%")
@@ -334,8 +335,8 @@ class EMAStrategy(BaseStrategy):
 
     def generate_signal(self, df: pd.DataFrame) -> tuple:
         """
-        Generate real-time signal based on current EMA conditions
-        Returns: (signal, confidence)
+        Generate real-time signal based on current EMA conditions.
+        Now detects uptrends/downtrends even without crossovers.
         """
         if len(df) < self.get_warmup_period():
             return 0, 0.0
@@ -344,7 +345,6 @@ class EMAStrategy(BaseStrategy):
             features_df = self.generate_features(
                 df.tail(max(self.fast_period, self.slow_period) + 50)
             )
-
             if features_df.empty or len(features_df) == 0:
                 return 0, 0.0
 
@@ -352,58 +352,55 @@ class EMAStrategy(BaseStrategy):
 
             # Check for NaN in critical features
             critical_features = [
-                "ema_fast",
-                "ema_slow",
-                "ema_diff",
-                "ema_cross",
-                "macd_hist",
-                "rsi",
+                "ema_fast", "ema_slow", "ema_diff", "ema_cross",
+                "macd_hist", "rsi", "price_above_fast", "ema_fast_slope"
             ]
             for feat in critical_features:
                 if pd.isna(latest[feat]) or np.isnan(latest[feat]):
-                    logger.debug(
-                        f"[{self.name}] NaN detected in {feat}, returning HOLD"
-                    )
+                    logger.debug(f"[{self.name}] NaN detected in {feat}, returning HOLD")
                     return 0, 0.0
 
             ema_cross = latest["ema_cross"]
             trend_strength = latest["trend_strength"]
+            price_above_fast = latest["price_above_fast"]
+            ema_fast_slope = latest["ema_fast_slope"]
             macd_aligned = latest["macd_aligned"]
             rsi = latest["rsi"]
             high_volume = latest["high_volume"]
 
             # Calculate confidence score
             confidence = min(1.0, trend_strength / 5.0)
-
             if macd_aligned == 1:
                 confidence += 0.15
-
-            if (ema_cross == 1 and 40 < rsi < 70) or (
-                ema_cross == -1 and 30 < rsi < 60
-            ):
+            if (ema_cross == 1 and 40 < rsi < 70) or (ema_cross == -1 and 30 < rsi < 60):
                 confidence += 0.10
-
             if high_volume == 1:
                 confidence += 0.10
-
             confidence = min(1.0, confidence)
 
-            if ema_cross == 1:  # Golden Cross
+            # Golden Cross (strong BULL)
+            if ema_cross == 1:
                 return 1, confidence
-            elif ema_cross == -1:  # Death Cross
-                return -1, confidence
-            else:
-                if trend_strength > 1.0:
-                    if latest["ema_fast"] > latest["ema_slow"]:
-                        return 1, confidence * 0.7
-                    else:
-                        return -1, confidence * 0.7
 
-            return 0, 0.0
+            # Death Cross (strong BEAR)
+            elif ema_cross == -1:
+                return -1, confidence
+
+            # Uptrend without crossover (new logic)
+            elif (ema_fast_slope > 0) and (price_above_fast == 1):
+                return 1, confidence * 0.7  # Weaker but valid BULL signal
+
+            # Downtrend without crossover (new logic)
+            elif (ema_fast_slope < 0) and (price_above_fast == 0):
+                return -1, confidence * 0.7  # Weaker but valid BEAR signal
+
+            else:
+                return 0, 0.0
 
         except Exception as e:
             logger.error(f"[{self.name}] Error in generate_signal: {e}")
             return 0, 0.0
+
 
     def generate_labels(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> pd.Series:
         """
@@ -520,6 +517,16 @@ class EMAStrategy(BaseStrategy):
             # Strong trend (ADX)
             if not np.isnan(adx[i]) and adx[i] > 25:
                 bullish_score += 1
+                
+            # For LIVE TRADING (no future data):
+            if (
+                (close[i] > ema_fast[i]) and  # Price above 50 EMA
+                (ema_fast[i] > ema_fast[i-1]) and  # 50 EMA rising
+                (rsi[i] < 70) and  # Not overbought
+                (macd_hist[i] > 0) and  # MACD confirms momentum
+                (adx[i] > 20)  # Strong trend
+            ):
+                bullish_score += 2  # Trend continuation
 
             # === BEARISH CONDITIONS (NO FUTURE DATA IN SCORING) ===
             bearish_score = 0
@@ -555,28 +562,29 @@ class EMAStrategy(BaseStrategy):
             # === APPLY 4H CONTEXT ===
             if df_4h_aligned is not None:
                 h4_context = self._calculate_4h_trend_context(df_4h_aligned, i)
-                
-                # BUY signal with 4H context
+
+                # BUY signal with 4H context (reduced penalty)
                 if bullish_score > 0:
                     if h4_context['trend_direction'] == 1:  # 4H also bullish
                         bullish_score += self.h4_trend_weight * h4_context['alignment_score'] / 3.0
                         boosted_by_4h += 1
                     elif h4_context['trend_direction'] == -1:  # 4H bearish (counter-trend)
-                        bullish_score -= self.h4_counter_penalty
-                        if self.require_4h_alignment and h4_context['alignment_score'] > 1.5:
+                        bullish_score -= self.h4_counter_penalty * 0.5  # Reduced penalty by 50%
+                        if self.require_4h_alignment and h4_context['alignment_score'] > 2.5:  # Only skip if 4H is STRONGLY bearish
                             filtered_by_4h += 1
-                            continue  # Skip strong counter-trend signals
-                
-                # SELL signal with 4H context
+                            continue  # Skip signal entirely
+
+                # SELL signal with 4H context (reduced penalty)
                 if bearish_score > 0:
                     if h4_context['trend_direction'] == -1:  # 4H also bearish
                         bearish_score += self.h4_trend_weight * h4_context['alignment_score'] / 3.0
                         boosted_by_4h += 1
                     elif h4_context['trend_direction'] == 1:  # 4H bullish (counter-trend)
-                        bearish_score -= self.h4_counter_penalty
-                        if self.require_4h_alignment and h4_context['alignment_score'] > 1.5:
+                        bearish_score -= self.h4_counter_penalty * 0.5  # Reduced penalty by 50%
+                        if self.require_4h_alignment and h4_context['alignment_score'] > 2.5:  # Only skip if 4H is STRONGLY bullish
                             filtered_by_4h += 1
-                            continue  # Skip strong counter-trend signals
+                            continue  # Skip signal entirely
+# Skip strong counter-trend signals
 
             # === ASSIGN LABELS (Future return used ONLY for validation) ===
             if (
