@@ -791,8 +791,8 @@ class TradingBot:
                 f"(confidence: {details.get('tf_confidence', 0):.3f})"
             )
             logger.info(
-                f"  EMA Regime:       {details.get('ema_regime_signal', 0):>2} "
-                f"(confidence: {details.get('ema_regime_confidence', 0):.3f})"
+                f"  EMA Regime:       {details.get('regime_name', 'N/A'):>2} "
+                f"(confidence: {details.get('regime_confidence', 0):.3f})"
             )
             logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
