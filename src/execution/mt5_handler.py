@@ -769,6 +769,7 @@ class MT5ExecutionHandler:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 trailing_stop_pct=trailing_stop_pct,
+                mt5_ticket=result.order,
             )
 
             if not success:

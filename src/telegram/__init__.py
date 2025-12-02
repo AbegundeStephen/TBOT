@@ -642,14 +642,33 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_status_message: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /positions command"""
+        """Handle /positions command - Show open positions with P&L, entry price, and current price"""
         try:
+            # Fetch the latest prices for all assets
+            current_prices = {}
+            for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
+                if not asset_cfg.get("enabled", False):
+                    continue
+                exchange = asset_cfg.get("exchange", "binance")
+                handler = (
+                    self.trading_bot.binance_handler if exchange == "binance" else self.trading_bot.mt5_handler
+                )
+                if handler:
+                    try:
+                        current_prices[asset_name] = handler.get_current_price()
+                    except Exception as e:
+                        logger.error(f"Failed to get {asset_name} price: {e}")
+
+            # Update positions with the latest prices
+            self.trading_bot.portfolio_manager.update_positions(current_prices)
+
+            # Get the updated portfolio status
             portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
             positions = portfolio_status.get("positions", {})
 
             if not positions:
                 await update.message.reply_text(
-                    "📭 *No Open Positions*\n\n" "Currently no active trades.",
+                    "📭 *No Open Positions*\n\nCurrently no active trades.",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 return
@@ -659,34 +678,33 @@ class TradingTelegramBot:
             for asset, pos in positions.items():
                 side = pos["side"].upper()
                 side_icon = "🟢" if side == "LONG" else "🔴"
-
-                entry_price = pos["entry_price"]
-                current_value = pos["current_value"]
-                pnl = pos["pnl"]
-                pnl_pct = (pnl / current_value * 100) if current_value > 0 else 0
-
+                entry_price = pos.get("entry_price", 0)
+                current_price = pos.get("current_price", 0)
+                quantity = pos.get("quantity", 0)
+                current_value = pos.get("current_value", 0)
+                pnl = portfolio_status.get("daily_pnl", 0)
+                pnl_pct = pos.get("pnl_pct", 0) * 100
                 pnl_icon = "🟢" if pnl >= 0 else "🔴"
                 pnl_sign = "+" if pnl >= 0 else ""
 
                 positions_msg += (
                     f"{side_icon} *{asset} - {side}*\n"
-                    f"Entry: ${entry_price:,.2f}\n"
-                    f"Size: ${current_value:,.2f}\n"
+                    f"Entry Price: ${entry_price:,.2f}\n"
+                    f"Current Price: ${current_price:,.2f}\n"
+                    f"Quantity: {quantity:.6f}\n"
+                    f"Current Value: ${current_value:,.2f}\n"
                     f"{pnl_icon} P&L: {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
                 )
 
                 if pos.get("stop_loss"):
-                    positions_msg += f"🛑 SL: ${pos['stop_loss']:,.2f}\n"
+                    positions_msg += f"🛑 Stop Loss: ${pos['stop_loss']:,.2f}\n"
                 if pos.get("take_profit"):
-                    positions_msg += f"🎯 TP: ${pos['take_profit']:,.2f}\n"
+                    positions_msg += f"🎯 Take Profit: ${pos['take_profit']:,.2f}\n"
 
                 positions_msg += "\n"
 
             positions_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
-
-            await update.message.reply_text(
-                positions_msg, parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(positions_msg, parse_mode=ParseMode.MARKDOWN)
 
         except Exception as e:
             logger.error(f"Error in cmd_positions: {e}", exc_info=True)
