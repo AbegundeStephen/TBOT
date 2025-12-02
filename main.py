@@ -457,13 +457,13 @@ class TradingBot:
                 "verbose": False,
             },
             "scalper": {
-                "buy_threshold": 0.22,
+                "buy_threshold": 0.20,
                 "sell_threshold": 0.24,
                 "two_strategy_bonus": 0.25,
                 "three_strategy_bonus": 0.35,
                 
                 # UPDATED: Strongest regime bias for scalping (was 0.01-0.04)
-                "bull_buy_boost": 0.12,        # Increased from 0.04
+                "bull_buy_boost": 0.20,        # Increased from 0.04
                 "bull_sell_penalty": 0.08,     # Increased from 0.01
                 "bear_sell_boost": 0.12,       # Increased from 0.04
                 "bear_buy_penalty": 0.08,      # Increased from 0.01
