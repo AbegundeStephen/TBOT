@@ -1,5 +1,5 @@
 """
-Portfolio Manager -  daily_pnl calculation
+Portfolio Manager - Enhanced with MT5 real-time profit tracking
 """
 
 import logging
@@ -28,6 +28,7 @@ class Position:
         stop_loss: float = None,
         take_profit: float = None,
         trailing_stop_pct: float = None,
+        mt5_ticket: int = None,  # NEW: Track MT5 ticket number
     ):
         self.asset = asset
         self.symbol = symbol
@@ -40,6 +41,11 @@ class Position:
         self.trailing_stop_pct = trailing_stop_pct
         self.highest_price = entry_price if side == "long" else entry_price
         self.lowest_price = entry_price if side == "short" else entry_price
+        
+        # NEW: MT5 specific tracking
+        self.mt5_ticket = mt5_ticket
+        self.mt5_profit = 0.0  # Real-time profit from MT5
+        self.mt5_last_update = None
 
         self.session_start_time = None
         self.session_start_equity = None
@@ -55,6 +61,10 @@ class Position:
             return (current_price - self.entry_price) * self.quantity
         else:
             return (self.entry_price - current_price) * self.quantity
+    
+    def get_mt5_pnl(self) -> float:
+        """Get real-time P&L from MT5 position"""
+        return self.mt5_profit
 
     def get_pnl_pct(self, current_price: float) -> float:
         """Get current profit/loss percentage"""
@@ -105,6 +115,7 @@ class PortfolioManager:
     """
     Manages portfolio-level risk and position sizing
     Fetches actual capital from exchanges (MT5 and Binance)
+    Tracks real-time MT5 profit for accurate P&L
     """
 
     def __init__(self, config: Dict, mt5_handler=None, binance_client=None):
@@ -266,7 +277,6 @@ class PortfolioManager:
                             )
                         except Exception as e:
                             logger.error(f"[BINANCE] Failed to fetch BTC price: {e}")
-                    # Add other assets (e.g., ETH, BNB) if needed
 
             logger.info(f"[BINANCE] Total Balance: ${total_balance:,.2f} USDT")
             return total_balance
@@ -315,6 +325,39 @@ class PortfolioManager:
         else:
             logger.error("[REFRESH] Failed to fetch capital")
             return False
+    
+    def update_mt5_positions_profit(self):
+        """
+        Update all MT5 positions with real-time profit from MT5
+        Call this periodically to sync P&L
+        """
+        try:
+            import MetaTrader5 as mt5
+            
+            # Get all open MT5 positions
+            mt5_positions = mt5.positions_get()
+            
+            if mt5_positions is None or len(mt5_positions) == 0:
+                return
+            
+            # Update profit for each tracked position
+            for asset, position in self.positions.items():
+                if position.mt5_ticket is None:
+                    continue  # Skip non-MT5 positions (e.g., Binance)
+                
+                # Find matching MT5 position
+                for mt5_pos in mt5_positions:
+                    if mt5_pos.ticket == position.mt5_ticket:
+                        position.mt5_profit = mt5_pos.profit
+                        position.mt5_last_update = datetime.now()
+                        
+                        logger.debug(
+                            f"[MT5] Updated {asset} profit: ${mt5_pos.profit:,.2f}"
+                        )
+                        break
+        
+        except Exception as e:
+            logger.error(f"Error updating MT5 positions profit: {e}", exc_info=True)
 
     def calculate_position_size(
         self, asset: str, current_price: float, volatility: float = None
@@ -456,6 +499,7 @@ class PortfolioManager:
         stop_loss: float = None,
         take_profit: float = None,
         trailing_stop_pct: float = None,
+        mt5_ticket: int = None,  # NEW: Accept MT5 ticket number
     ) -> bool:
         """Add a new position to the portfolio"""
         can_open, reason = self.can_open_position(asset, side)
@@ -485,6 +529,7 @@ class PortfolioManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop_pct=trailing_stop_pct,
+            mt5_ticket=mt5_ticket,  # NEW: Store MT5 ticket
         )
 
         self.positions[asset] = position
@@ -494,6 +539,9 @@ class PortfolioManager:
             f"@ ${entry_price:,.2f} | Size: ${position_size_usd:,.2f} "
             f"| Qty: {quantity:.6f}"
         )
+        
+        if mt5_ticket:
+            logger.info(f"  └─ MT5 Ticket: {mt5_ticket}")
 
         if stop_loss:
             logger.info(f"  └─ Stop Loss: ${stop_loss:,.2f}")
@@ -514,7 +562,13 @@ class PortfolioManager:
 
         position = self.positions[asset]
 
-        pnl = position.get_pnl(exit_price)
+        # Use MT5 profit if available, otherwise calculate
+        if position.mt5_ticket and position.mt5_profit != 0.0:
+            pnl = position.mt5_profit
+            logger.info(f"Using MT5 profit: ${pnl:,.2f}")
+        else:
+            pnl = position.get_pnl(exit_price)
+        
         pnl_pct = position.get_pnl_pct(exit_price)
 
         # Track realized P&L from this closed position
@@ -545,6 +599,7 @@ class PortfolioManager:
             "holding_time": (datetime.now() - position.entry_time).total_seconds()
             / 3600,
             "reason": reason,
+            "mt5_ticket": position.mt5_ticket,
         }
 
         self.closed_positions.append(trade_result)
@@ -559,7 +614,11 @@ class PortfolioManager:
         return trade_result
 
     def update_positions(self, prices: Dict[str, float] = None):
-        """Update all positions with current prices"""
+        """Update all positions with current prices and MT5 profit"""
+        # Update MT5 positions with real-time profit
+        if not self.is_paper_mode:
+            self.update_mt5_positions_profit()
+        
         if prices:
             for asset, price in prices.items():
                 if asset in self.price_history:
@@ -567,14 +626,15 @@ class PortfolioManager:
                     if len(self.price_history[asset]) > 100:
                         self.price_history[asset].pop(0)
 
-        # Calculate unrealized P&L with current prices
-        if prices:
-            total_unrealized_pnl = sum(
-                pos.get_pnl(prices.get(pos.asset, pos.entry_price))
-                for pos in self.positions.values()
-            )
-        else:
-            total_unrealized_pnl = 0.0
+        # Calculate unrealized P&L
+        total_unrealized_pnl = 0.0
+        for pos in self.positions.values():
+            if pos.mt5_ticket and pos.mt5_profit != 0.0:
+                # Use MT5 profit for MT5 positions
+                total_unrealized_pnl += pos.mt5_profit
+            elif prices and pos.asset in prices:
+                # Calculate for Binance positions
+                total_unrealized_pnl += pos.get_pnl(prices[pos.asset])
 
         if self.is_paper_mode:
             # In paper mode: equity = cash + unrealized P&L
@@ -630,33 +690,37 @@ class PortfolioManager:
 
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
         """Get current portfolio status with real-time data"""
+        # Update MT5 positions first
+        if not self.is_paper_mode:
+            self.update_mt5_positions_profit()
+        
         # Use current prices if provided, otherwise use entry prices
         if current_prices is None:
             current_prices = {
                 asset: pos.entry_price for asset, pos in self.positions.items()
             }
 
-        total_exposure = sum(
-            pos.get_position_value(current_prices.get(pos.asset, pos.entry_price))
-            for pos in self.positions.values()
-        )
-
-        # Calculate unrealized P&L from open positions
-        total_unrealized_pnl = sum(
-            pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
-            for pos in self.positions.values()
-        )
+        total_exposure = 0.0
+        total_unrealized_pnl = 0.0
+        
+        for pos in self.positions.values():
+            current_price = current_prices.get(pos.asset, pos.entry_price)
+            total_exposure += pos.get_position_value(current_price)
+            
+            # Use MT5 profit if available
+            if pos.mt5_ticket and pos.mt5_profit != 0.0:
+                total_unrealized_pnl += pos.mt5_profit
+            else:
+                total_unrealized_pnl += pos.get_pnl(current_price)
 
         # Calculate total portfolio value
         total_value = self.current_capital + total_unrealized_pnl
 
-        # : Calculate daily_pnl relative to session start
+        # Calculate daily_pnl relative to session start
         if self.session_start_equity is not None:
-            # Daily P&L = current_equity - starting_equity
             current_equity = self.current_capital + total_unrealized_pnl
             daily_pnl = current_equity - self.session_start_equity
         else:
-            # Fallback if session not started
             daily_pnl = self.realized_pnl_today + total_unrealized_pnl
 
         exposure_pct = (
@@ -681,7 +745,7 @@ class PortfolioManager:
             "drawdown": drawdown,
             "open_positions": self.get_open_positions_count(),
             "total_trades": len(self.closed_positions),
-            "daily_pnl": daily_pnl,  # NOW CORRECTLY SHOWS SESSION P&L
+            "daily_pnl": daily_pnl,
             "realized_pnl_today": self.realized_pnl_today,
             "total_unrealized_pnl": total_unrealized_pnl,
             "positions": {
@@ -693,12 +757,16 @@ class PortfolioManager:
                     "current_value": pos.get_position_value(
                         current_prices.get(asset, pos.entry_price)
                     ),
-                    "pnl": pos.get_pnl(current_prices.get(asset, pos.entry_price)),
+                    "pnl": pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0) else pos.get_pnl(
+                        current_prices.get(asset, pos.entry_price)
+                    ),
                     "pnl_pct": pos.get_pnl_pct(
                         current_prices.get(asset, pos.entry_price)
                     ),
                     "stop_loss": pos.stop_loss,
                     "take_profit": pos.take_profit,
+                    "mt5_ticket": pos.mt5_ticket,
+                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
                 }
                 for asset, pos in self.positions.items()
             },
@@ -718,3 +786,44 @@ class PortfolioManager:
             self.close_position(asset, exit_price, reason="shutdown")
 
         logger.info("All positions closed")
+
+
+# ====================================================================================
+# MT5 EXECUTION HANDLER UPDATE - Pass MT5 ticket to Portfolio Manager
+# ====================================================================================
+"""
+In your MT5ExecutionHandler._open_mt5_position() method, update the 
+portfolio_manager.add_position() call to include the MT5 ticket:
+
+OLD CODE:
+    success = self.portfolio_manager.add_position(
+        asset=asset,
+        symbol=symbol,
+        side=position_side,
+        entry_price=execution_price,
+        position_size_usd=actual_position_size,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        trailing_stop_pct=trailing_stop_pct,
+    )
+
+NEW CODE:
+    success = self.portfolio_manager.add_position(
+        asset=asset,
+        symbol=symbol,
+        side=position_side,
+        entry_price=execution_price,
+        position_size_usd=actual_position_size,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        trailing_stop_pct=trailing_stop_pct,
+        mt5_ticket=result.order,  # ← ADD THIS LINE to track MT5 ticket
+    )
+
+Then in your main trading loop, call update_mt5_positions_profit() regularly:
+    
+    # Every iteration of your main loop
+    portfolio_manager.update_positions(current_prices)
+    
+This will automatically fetch real-time profit from MT5 and include it in P&L calculations.
+"""
