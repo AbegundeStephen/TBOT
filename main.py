@@ -373,8 +373,8 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                    "buy_threshold": 0.20,
-                    "sell_threshold": 0.25,
+                    "buy_threshold": 0.23,
+                    "sell_threshold": 0.27,
                     "two_strategy_bonus": 0.25,
                     "three_strategy_bonus": 0.30,
                     # UPDATED: Strongest regime bias for scalping (was 0.02-0.05)
@@ -443,8 +443,8 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                    "buy_threshold": 0.20,
-                    "sell_threshold": 0.24,
+                    "buy_threshold": 0.23,
+                    "sell_threshold": 0.27,
                     "two_strategy_bonus": 0.25,
                     "three_strategy_bonus": 0.35,
                     # UPDATED: Strongest regime bias for scalping (was 0.01-0.04)
