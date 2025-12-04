@@ -2,10 +2,10 @@
 Conservative Auto-Preset Selection System
 based on backtest results: Balanced > Conservative > Aggressive > Scalper
 Key Changes:
-- Defaults to BALANCED (90% of conditions)
-- Only uses CONSERVATIVE in extreme low volatility
-- RARELY uses AGGRESSIVE (extreme conditions only)
-- NEVER uses SCALPER automatically
+- Defaults to BALANCED (75% of conditions)
+- Uses CONSERVATIVE in moderate low volatility (15% of conditions)
+- Uses AGGRESSIVE in higher volatility (8% of conditions)
+- Uses SCALPER in extreme high volatility/momentum (2% of conditions)
 - Transaction costs and signal quality prioritized over signal frequency
 """
 
@@ -25,10 +25,10 @@ class AutoPresetSelector:
     ================================================
     - Quality > Quantity (fewer, better trades win)
     - Transaction costs matter more than signal frequency
-    - Balanced preset is optimal for 90% of conditions
-    - Conservative for extreme low volatility
-    - Aggressive only for once-per-year extreme conditions
-    - Scalper DISABLED (proven worst performer)
+    - Balanced preset is optimal for most conditions (75%)
+    - Conservative for low volatility (15%)
+    - Aggressive for high volatility (8%)
+    - Scalper for extreme volatility/momentum ONLY (2%)
     """
     
     def __init__(self, data_manager, config):
@@ -45,8 +45,8 @@ class AutoPresetSelector:
         self.preset_performance_rank = [
             "balanced",      # 1st: Best performer
             "conservative",  # 2nd: Second best
-            "aggressive",    # 3rd: Third (rarely use)
-            # "scalper"      # 4th: Worst (disabled)
+            "aggressive",    # 3rd: Third
+            "scalper"        # 4th: Last (use sparingly)
         ]
         
     def get_asset_type(self, asset_name: str) -> str:
@@ -236,27 +236,34 @@ class AutoPresetSelector:
         CONSERVATIVE DECISION LOGIC (Based on Backtest Results):
         =========================================================
         
-        DEFAULT: BALANCED (90% of conditions)
-        - Proven best performer (+657,153% BTC, +454% Gold)
-        - Optimal quality/quantity balance
-        - Low transaction costs
-        - Strong regime bias (0.11)
+        PRESET DISTRIBUTION:
+        - BALANCED:     75% of conditions (default, best performer)
+        - CONSERVATIVE: 15% of conditions (low volatility)
+        - AGGRESSIVE:   8% of conditions (high volatility)
+        - SCALPER:      2% of conditions (extreme volatility + momentum)
         
-        CONSERVATIVE: Only extreme low volatility (8% of conditions)
-        - Volatility < 1.2% (BTC) or < 0.7% (Gold)
-        - OR ADX < 15 (very weak trend)
-        - Highest signal quality, lowest costs
+        SELECTION CRITERIA:
         
-        AGGRESSIVE: Only extreme conditions (2% of conditions)
-        - Volatility > 7% (BTC) or > 3.5% (Gold)
-        - AND ADX > 45 (extremely strong trend)
-        - Once-per-year market events
-        - ⚠️ WARNING: Higher transaction costs
+        1. CONSERVATIVE: Low volatility or weak trend
+           - Volatility < 1.5% (BTC) or < 0.8% (Gold)
+           - OR ADX < 18 (weak trend)
+           → Highest signal quality, lowest costs
         
-        SCALPER: DISABLED (0% of conditions)
-        - Proven worst performer in backtests
-        - Transaction costs destroy returns
-        - Never used automatically
+        2. BALANCED: Normal conditions (DEFAULT)
+           - Volatility 1.5-5.5% (BTC) or 0.8-2.5% (Gold)
+           - ADX 18-40
+           → Optimal quality/quantity balance
+        
+        3. AGGRESSIVE: High volatility with strong trend
+           - Volatility 5.5-9% (BTC) or 2.5-4.5% (Gold)
+           - AND ADX > 35
+           → More signals, higher costs
+        
+        4. SCALPER: Extreme volatility + momentum
+           - Volatility > 9% (BTC) or > 4.5% (Gold)
+           - AND (ADX > 50 OR abs(momentum) > 15%)
+           → Maximum signals, highest costs
+           → ⚠️ Use only in extreme market events
         """
         metrics = self.analyze_market_conditions(asset_name)
         
@@ -269,53 +276,80 @@ class AutoPresetSelector:
         regime = metrics['regime']
         price_momentum = metrics['price_momentum']
         
-        # Asset-specific thresholds (VERY CONSERVATIVE)
+        # Asset-specific thresholds
         asset_type = self.get_asset_type(asset_name)
         
         if asset_type == "BTC":
-            # BTC thresholds (very conservative)
-            conservative_vol_threshold = 1.2    # Below this → conservative
-            aggressive_vol_threshold = 7.0      # Above this + strong trend → aggressive
-            aggressive_adx_threshold = 45       # Need VERY strong trend
+            # BTC thresholds
+            conservative_vol = 1.5       # Below this → conservative
+            balanced_vol_max = 5.5       # Above this → aggressive/scalper
+            aggressive_vol_max = 9.0     # Above this → scalper
+            
+            conservative_adx = 18        # Below this → conservative
+            aggressive_adx = 35          # Need for aggressive
+            scalper_adx = 50             # Need for scalper
+            
+            scalper_momentum = 15.0      # Abs momentum for scalper
         else:  # GOLD
-            # Gold thresholds (very conservative)
-            conservative_vol_threshold = 0.7
-            aggressive_vol_threshold = 3.5
-            aggressive_adx_threshold = 45
+            # Gold thresholds
+            conservative_vol = 0.8
+            balanced_vol_max = 2.5
+            aggressive_vol_max = 4.5
+            
+            conservative_adx = 18
+            aggressive_adx = 35
+            scalper_adx = 50
+            
+            scalper_momentum = 8.0
         
-        # ===== CONSERVATIVE DECISION TREE =====
+        # ===== PRESET DECISION TREE =====
         
-        # 1. EXTREME LOW VOLATILITY → Conservative (8% of conditions)
-        if volatility < conservative_vol_threshold or trend_strength < 15:
+        # 1. CONSERVATIVE: Low volatility or weak trend (15%)
+        if volatility < conservative_vol or trend_strength < conservative_adx:
             preset = "conservative"
-            reason = f"Extreme low volatility ({volatility:.2f}%) or very weak trend (ADX={trend_strength:.1f})"
+            reason = f"Low volatility ({volatility:.2f}%) or weak trend (ADX={trend_strength:.1f})"
             explanation = [
                 "Market is choppy/range-bound",
                 "Conservative avoids false signals",
                 "Highest quality trades only",
-                "Second-best performer in backtests"
+                "Second-best performer in backtests",
+                "Low transaction costs"
             ]
         
-        # 2. EXTREME HIGH VOLATILITY + VERY STRONG TREND → Aggressive (2% of conditions)
-        elif volatility > aggressive_vol_threshold and trend_strength > aggressive_adx_threshold:
-            preset = "aggressive"
-            reason = f"EXTREME volatility ({volatility:.2f}%) + VERY strong trend (ADX={trend_strength:.1f})"
+        # 2. SCALPER: Extreme volatility + momentum (2%)
+        elif (volatility > aggressive_vol_max and 
+              (trend_strength > scalper_adx or abs(price_momentum) > scalper_momentum)):
+            preset = "scalper"
+            reason = f"EXTREME volatility ({volatility:.2f}%) + strong momentum (ADX={trend_strength:.1f}, Mom={price_momentum:+.1f}%)"
             explanation = [
-                "⚠️ RARE: Once-per-year market event",
-                "Parabolic move or crash conditions",
-                "Aggressive captures rapid moves",
-                "WARNING: Higher transaction costs",
-                "Will revert to BALANCED when conditions normalize"
+                "⚠️ RARE: Extreme market event",
+                "Parabolic move, crash, or high volatility breakout",
+                "Scalper captures all micro-movements",
+                "WARNING: Highest transaction costs",
+                "Maximum signal frequency (70%+)",
+                "Will revert when conditions normalize"
             ]
         
-        # 3. DEFAULT TO BALANCED (90% of conditions) ✅
+        # 3. AGGRESSIVE: High volatility + strong trend (8%)
+        elif volatility > balanced_vol_max and trend_strength > aggressive_adx:
+            preset = "aggressive"
+            reason = f"High volatility ({volatility:.2f}%) + strong trend (ADX={trend_strength:.1f})"
+            explanation = [
+                "Elevated volatility with clear direction",
+                "Aggressive captures frequent moves",
+                "Higher signal rate than balanced",
+                "WARNING: Moderate transaction costs",
+                "Will revert to BALANCED when vol normalizes"
+            ]
+        
+        # 4. BALANCED: Normal conditions (75%) ✅
         else:
             preset = "balanced"
             reason = f"Normal trading conditions (vol={volatility:.2f}%, ADX={trend_strength:.1f})"
             explanation = [
                 "✅ BALANCED is the proven best performer",
                 "Optimal signal quality vs. quantity",
-                "Low transaction costs (moderate frequency)",
+                "Moderate transaction costs",
                 "Strong regime bias (0.11) for trend-following",
                 "+657,153% return in BTC backtest"
             ]
@@ -337,7 +371,7 @@ class AutoPresetSelector:
         for line in explanation:
             logger.info(f"  • {line}")
         logger.info(f"")
-        logger.info(f"Performance Rank: Balanced > Conservative > Aggressive")
+        logger.info(f"Performance Rank: Balanced > Conservative > Aggressive > Scalper")
         logger.info(f"{'=' * 70}\n")
         
         return preset
@@ -349,8 +383,8 @@ class AutoPresetSelector:
         logger.info("\n" + "=" * 70)
         logger.info("AUTO-PRESET SELECTION FOR ALL ASSETS")
         logger.info("=" * 70)
-        logger.info("Strategy: Conservative (Balanced 90%, Conservative 8%, Aggressive 2%)")
-        logger.info("Scalper: DISABLED (worst performer)")
+        logger.info("Strategy: Conservative distribution")
+        logger.info("Expected: Balanced 75%, Conservative 15%, Aggressive 8%, Scalper 2%")
         logger.info("=" * 70 + "\n")
         
         for asset_name, asset_cfg in self.config["assets"].items():
@@ -380,10 +414,11 @@ class AutoPresetSelector:
             "balanced_count": preset_counts.get("balanced", 0),
             "conservative_count": preset_counts.get("conservative", 0),
             "aggressive_count": preset_counts.get("aggressive", 0),
-            "scalper_count": 0,  # Always 0 (disabled)
+            "scalper_count": preset_counts.get("scalper", 0),
             "balanced_pct": (preset_counts.get("balanced", 0) / total * 100) if total > 0 else 0,
             "conservative_pct": (preset_counts.get("conservative", 0) / total * 100) if total > 0 else 0,
             "aggressive_pct": (preset_counts.get("aggressive", 0) / total * 100) if total > 0 else 0,
+            "scalper_pct": (preset_counts.get("scalper", 0) / total * 100) if total > 0 else 0,
         }
         
         return stats
