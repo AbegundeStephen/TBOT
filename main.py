@@ -373,22 +373,23 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                    "buy_threshold": 0.23,
-                    "sell_threshold": 0.20,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.30,
-                    # UPDATED: Strongest regime bias for scalping (was 0.02-0.05)
-                    "bull_buy_boost": 0.15,  # Increased from 0.05
-                    "bull_sell_penalty": 0.10,  # Increased from 0.02
-                    "bear_sell_boost": 0.15,  # Increased from 0.05
-                    "bear_buy_penalty": 0.10,  # Increased from 0.02
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.20,
-                    "hold_contribution_pct": 0.20,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                },
+                "buy_threshold": 0.24,
+                "sell_threshold": 0.30,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.30,
+                "bull_buy_boost": 0.15,
+                "bull_sell_penalty": 0.10,
+                "bear_sell_boost": 0.15,
+                "bear_buy_penalty": 0.10,
+                "min_confidence_to_use": 0.08,
+                "min_signal_quality": 0.20,
+                "hold_contribution_pct": 0.20,
+                "allow_single_override": True,
+                "single_override_threshold": 0.65,
+                "verbose": False,
+                # ✨ NEW: Quality margin to filter weak signals
+                "min_quality_margin": 0.05,  # ← ADD THIS LINE
+            },
             },
             "GOLD": {
                 "conservative": {
@@ -443,7 +444,7 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                "buy_threshold": 0.24,
+                "buy_threshold": 0.23,
                 "sell_threshold": 0.30,
                 "two_strategy_bonus": 0.25,
                 "three_strategy_bonus": 0.35,

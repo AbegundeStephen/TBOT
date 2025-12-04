@@ -146,7 +146,7 @@ AGGREGATOR_PRESETS = {
             "verbose": False,
         },
         "scalper": {
-            "buy_threshold": 0.24,
+            "buy_threshold": 0.23,
             "sell_threshold": 0.30,
             "two_strategy_bonus": 0.25,
             "three_strategy_bonus": 0.35,
