@@ -28,13 +28,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.40,
             "two_strategy_bonus": 0.18,
             "three_strategy_bonus": 0.20,
-            
             # UPDATED: Stronger regime bias (was 0.03-0.05)
-            "bull_buy_boost": 0.10,        # Increased from 0.03
-            "bull_sell_penalty": 0.12,     # Increased from 0.05
-            "bear_sell_boost": 0.10,       # Increased from 0.03
-            "bear_buy_penalty": 0.12,      # Increased from 0.05
-            
+            "bull_buy_boost": 0.10,  # Increased from 0.03
+            "bull_sell_penalty": 0.12,  # Increased from 0.05
+            "bear_sell_boost": 0.10,  # Increased from 0.03
+            "bear_buy_penalty": 0.12,  # Increased from 0.05
             "min_confidence_to_use": 0.12,
             "min_signal_quality": 0.32,
             "hold_contribution_pct": 0.15,
@@ -47,13 +45,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.36,
             "two_strategy_bonus": 0.20,
             "three_strategy_bonus": 0.22,
-            
             # UPDATED: Stronger regime bias (was 0.035-0.04)
-            "bull_buy_boost": 0.11,        # Increased from 0.035
-            "bull_sell_penalty": 0.11,     # Increased from 0.04
-            "bear_sell_boost": 0.11,       # Increased from 0.035
-            "bear_buy_penalty": 0.11,      # Increased from 0.04
-            
+            "bull_buy_boost": 0.11,  # Increased from 0.035
+            "bull_sell_penalty": 0.11,  # Increased from 0.04
+            "bear_sell_boost": 0.11,  # Increased from 0.035
+            "bear_buy_penalty": 0.11,  # Increased from 0.04
             "min_confidence_to_use": 0.10,
             "min_signal_quality": 0.28,
             "hold_contribution_pct": 0.17,
@@ -66,13 +62,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.30,
             "two_strategy_bonus": 0.22,
             "three_strategy_bonus": 0.25,
-            
             # UPDATED: Stronger regime bias (was 0.03-0.04)
-            "bull_buy_boost": 0.12,        # Increased from 0.04
-            "bull_sell_penalty": 0.12,     # Increased from 0.03
-            "bear_sell_boost": 0.12,       # Increased from 0.04
-            "bear_buy_penalty": 0.12,      # Increased from 0.03
-            
+            "bull_buy_boost": 0.12,  # Increased from 0.04
+            "bull_sell_penalty": 0.12,  # Increased from 0.03
+            "bear_sell_boost": 0.12,  # Increased from 0.04
+            "bear_buy_penalty": 0.12,  # Increased from 0.03
             "min_confidence_to_use": 0.09,
             "min_signal_quality": 0.25,
             "hold_contribution_pct": 0.18,
@@ -81,23 +75,22 @@ AGGREGATOR_PRESETS = {
             "verbose": False,
         },
         "scalper": {
-            "buy_threshold": 0.20,
-            "sell_threshold": 0.25,
+            "buy_threshold": 0.24,
+            "sell_threshold": 0.30,
             "two_strategy_bonus": 0.25,
             "three_strategy_bonus": 0.30,
-            
-            # UPDATED: Strongest regime bias for scalping (was 0.02-0.05)
-            "bull_buy_boost": 0.15,        # Increased from 0.05
-            "bull_sell_penalty": 0.10,     # Increased from 0.02
-            "bear_sell_boost": 0.15,       # Increased from 0.05
-            "bear_buy_penalty": 0.10,      # Increased from 0.02
-            
+            "bull_buy_boost": 0.15,
+            "bull_sell_penalty": 0.10,
+            "bear_sell_boost": 0.15,
+            "bear_buy_penalty": 0.10,
             "min_confidence_to_use": 0.08,
             "min_signal_quality": 0.20,
             "hold_contribution_pct": 0.20,
             "allow_single_override": True,
             "single_override_threshold": 0.65,
             "verbose": False,
+            # ✨ NEW: Quality margin to filter weak signals
+            "min_quality_margin": 0.05,  # ← ADD THIS LINE
         },
     },
     "GOLD": {
@@ -106,13 +99,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.42,
             "two_strategy_bonus": 0.18,
             "three_strategy_bonus": 0.25,
-            
             # UPDATED: Stronger regime bias (was 0.02-0.03)
-            "bull_buy_boost": 0.07,        # Increased from 0.02
-            "bull_sell_penalty": 0.09,     # Increased from 0.03
-            "bear_sell_boost": 0.07,       # Increased from 0.02
-            "bear_buy_penalty": 0.09,      # Increased from 0.03
-            
+            "bull_buy_boost": 0.07,  # Increased from 0.02
+            "bull_sell_penalty": 0.09,  # Increased from 0.03
+            "bear_sell_boost": 0.07,  # Increased from 0.02
+            "bear_buy_penalty": 0.09,  # Increased from 0.03
             "min_confidence_to_use": 0.12,
             "min_signal_quality": 0.30,
             "hold_contribution_pct": 0.12,
@@ -125,13 +116,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.36,
             "two_strategy_bonus": 0.20,
             "three_strategy_bonus": 0.25,
-            
             # UPDATED: Stronger regime bias (was 0.02)
-            "bull_buy_boost": 0.08,        # Increased from 0.02
-            "bull_sell_penalty": 0.08,     # Increased from 0.02
-            "bear_sell_boost": 0.08,       # Increased from 0.02
-            "bear_buy_penalty": 0.08,      # Increased from 0.02
-            
+            "bull_buy_boost": 0.08,  # Increased from 0.02
+            "bull_sell_penalty": 0.08,  # Increased from 0.02
+            "bear_sell_boost": 0.08,  # Increased from 0.02
+            "bear_buy_penalty": 0.08,  # Increased from 0.02
             "min_confidence_to_use": 0.10,
             "min_signal_quality": 0.28,
             "hold_contribution_pct": 0.14,
@@ -144,13 +133,11 @@ AGGREGATOR_PRESETS = {
             "sell_threshold": 0.30,
             "two_strategy_bonus": 0.22,
             "three_strategy_bonus": 0.30,
-            
             # UPDATED: Stronger regime bias (was 0.01-0.03)
-            "bull_buy_boost": 0.09,        # Increased from 0.03
-            "bull_sell_penalty": 0.09,     # Increased from 0.01
-            "bear_sell_boost": 0.09,       # Increased from 0.03
-            "bear_buy_penalty": 0.09,      # Increased from 0.01
-            
+            "bull_buy_boost": 0.09,  # Increased from 0.03
+            "bull_sell_penalty": 0.09,  # Increased from 0.01
+            "bear_sell_boost": 0.09,  # Increased from 0.03
+            "bear_buy_penalty": 0.09,  # Increased from 0.01
             "min_confidence_to_use": 0.08,
             "min_signal_quality": 0.22,
             "hold_contribution_pct": 0.15,
@@ -159,27 +146,25 @@ AGGREGATOR_PRESETS = {
             "verbose": False,
         },
         "scalper": {
-            "buy_threshold": 0.22,
-            "sell_threshold": 0.24,
+            "buy_threshold": 0.24,
+            "sell_threshold": 0.30,
             "two_strategy_bonus": 0.25,
             "three_strategy_bonus": 0.35,
-            
-            # UPDATED: Strongest regime bias for scalping (was 0.01-0.04)
-            "bull_buy_boost": 0.12,        # Increased from 0.04
-            "bull_sell_penalty": 0.08,     # Increased from 0.01
-            "bear_sell_boost": 0.12,       # Increased from 0.04
-            "bear_buy_penalty": 0.08,      # Increased from 0.01
-            
+            "bull_buy_boost": 0.12,
+            "bull_sell_penalty": 0.08,
+            "bear_sell_boost": 0.12,
+            "bear_buy_penalty": 0.08,
             "min_confidence_to_use": 0.06,
             "min_signal_quality": 0.18,
             "hold_contribution_pct": 0.18,
             "allow_single_override": True,
             "single_override_threshold": 0.65,
             "verbose": False,
+            # ✨ NEW: Quality margin to filter weak signals
+            "min_quality_margin": 0.06,  # ← ADD THIS LINE
         },
     },
 }
-
 
 
 class MLStrategy(bt.Strategy):
@@ -211,7 +196,7 @@ class MLStrategy(bt.Strategy):
             config = json.load(f)
 
         self.config = config
-        
+
         # Set model paths dynamically based on asset
         mean_rev_model_path = f"models/mean_reversion_{self.asset_key.lower()}.pkl"
         trend_model_path = f"models/trend_following_{self.asset_key.lower()}.pkl"
@@ -220,12 +205,14 @@ class MLStrategy(bt.Strategy):
         # Load strategy configs from config.json
         mr_config = config["strategy_configs"]["mean_reversion"][self.asset_key]
         tf_config = config["strategy_configs"]["trend_following"][self.asset_key]
-        ema_config = config["strategy_configs"]["exponential_moving_averages"][self.asset_key]
+        ema_config = config["strategy_configs"]["exponential_moving_averages"][
+            self.asset_key
+        ]
 
         self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
         self.trailing_stop_price = None
         self.highest_price_since_entry = None
-        
+
         # Initialize strategies
         self.mean_reversion = MeanReversionStrategy(mr_config)
         self.trend_following = TrendFollowingStrategy(tf_config)
@@ -278,7 +265,7 @@ class MLStrategy(bt.Strategy):
 
         if self.params.use_trailing_stop:
             logger.info(f"  Trailing Stop: {self.params.trailing_stop_pct * 100}%")
-        
+
         logger.info(f"Position Sizing:")
         logger.info(f"  ATR-based: {self.params.use_atr_sizing}")
         if self.params.use_atr_sizing:
@@ -517,17 +504,17 @@ class MLStrategy(bt.Strategy):
         logger.info(f"=" * 70)
         logger.info(f"Total bars processed: {self.next_call_count}")
         logger.info(f"Total signals logged: {len(self.signal_log)}")
-        
+
         if self.signal_log:
             signal_counts = {-1: 0, 0: 0, 1: 0}
             reasoning_counts = {}
-            
+
             for log in self.signal_log:
                 sig = log["signal"]
                 signal_counts[sig] = signal_counts.get(sig, 0) + 1
                 reason = log["details"].get("reasoning", "unknown")
                 reasoning_counts[reason] = reasoning_counts.get(reason, 0) + 1
-            
+
             total_signals = len(self.signal_log)
             logger.info(f"Signal distribution:")
             logger.info(
@@ -539,7 +526,7 @@ class MLStrategy(bt.Strategy):
             logger.info(
                 f"  BUY  ( 1): {signal_counts[1]:>4} ({signal_counts[1]/total_signals*100:>5.1f}%)"
             )
-            
+
             logger.info(f"\nTop signal reasoning:")
             sorted_reasons = sorted(
                 reasoning_counts.items(), key=lambda x: x[1], reverse=True
@@ -548,7 +535,7 @@ class MLStrategy(bt.Strategy):
                 logger.info(f"  {reason}: {count} ({count/total_signals*100:.1f}%)")
         else:
             logger.warning("⚠️ NO SIGNALS WERE GENERATED!")
-        
+
         # Print aggregator statistics
         stats = self.aggregator.get_statistics()
         logger.info(f"\n📊 Aggregator Statistics:")
@@ -568,7 +555,7 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
     logger.info("=" * 70)
     logger.info(f"Aggregator Preset: {aggregator_preset}")
     logger.info("=" * 70)
-    
+
     try:
         with open("config/config.json") as f:
             config = json.load(f)
@@ -665,7 +652,7 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
         closed = trades.total.closed if hasattr(trades, "total") else 0
         won = trades.won.total if hasattr(trades, "won") else 0
         lost = trades.lost.total if hasattr(trades, "lost") else 0
-        
+
         if closed > 0:
             win_rate = won / closed * 100
             logger.info(f"─" * 70)
@@ -674,7 +661,7 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
             logger.info(f"  Winning Trades: {won}")
             logger.info(f"  Losing Trades: {lost}")
             logger.info(f"  Win Rate: {win_rate:.2f}%")
-            
+
             if hasattr(trades, "pnl") and hasattr(trades.pnl, "net"):
                 logger.info(f"  Total Net PnL: ${trades.pnl.net.total:.2f}")
                 if hasattr(trades.pnl.net, "average"):
@@ -683,8 +670,12 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
             logger.warning("=" * 70)
             logger.warning("⚠️ NO TRADES EXECUTED!")
             logger.warning("=" * 70)
-            logger.warning("Try: python backtest.py --asset " + asset_key + " --preset aggressive")
-            logger.warning("Or:  python backtest.py --asset " + asset_key + " --preset scalper")
+            logger.warning(
+                "Try: python backtest.py --asset " + asset_key + " --preset aggressive"
+            )
+            logger.warning(
+                "Or:  python backtest.py --asset " + asset_key + " --preset scalper"
+            )
     except Exception as e:
         logger.error(f"❌ Error extracting trade statistics: {e}")
 
@@ -724,6 +715,6 @@ Examples:
         choices=["conservative", "balanced", "aggressive", "scalper"],
         help="Signal threshold preset",
     )
-    
+
     args = parser.parse_args()
     run_backtest(asset_key=args.asset, aggregator_preset=args.preset)

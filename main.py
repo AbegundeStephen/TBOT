@@ -374,7 +374,7 @@ class TradingBot:
                 },
                 "scalper": {
                     "buy_threshold": 0.23,
-                    "sell_threshold": 0.27,
+                    "sell_threshold": 0.20,
                     "two_strategy_bonus": 0.25,
                     "three_strategy_bonus": 0.30,
                     # UPDATED: Strongest regime bias for scalping (was 0.02-0.05)
@@ -443,22 +443,23 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                    "buy_threshold": 0.23,
-                    "sell_threshold": 0.27,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.35,
-                    # UPDATED: Strongest regime bias for scalping (was 0.01-0.04)
-                    "bull_buy_boost": 0.20,  # Increased from 0.04
-                    "bull_sell_penalty": 0.08,  # Increased from 0.01
-                    "bear_sell_boost": 0.12,  # Increased from 0.04
-                    "bear_buy_penalty": 0.08,  # Increased from 0.01
-                    "min_confidence_to_use": 0.06,
-                    "min_signal_quality": 0.18,
-                    "hold_contribution_pct": 0.18,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                },
+                "buy_threshold": 0.24,
+                "sell_threshold": 0.30,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.35,
+                "bull_buy_boost": 0.12,
+                "bull_sell_penalty": 0.08,
+                "bear_sell_boost": 0.12,
+                "bear_buy_penalty": 0.08,
+                "min_confidence_to_use": 0.06,
+                "min_signal_quality": 0.18,
+                "hold_contribution_pct": 0.18,
+                "allow_single_override": True,
+                "single_override_threshold": 0.65,
+                "verbose": False,
+                # ✨ NEW: Quality margin to filter weak signals
+                "min_quality_margin": 0.06,  # ← ADD THIS LINE
+            },
             },
         }
 
