@@ -964,6 +964,8 @@ class TradingBot:
 
                 if handler:
                     current_prices[asset_name] = handler.get_current_price()
+                    self.portfolio_manager.update_positions(current_prices)
+    
             except Exception as e:
                 logger.debug(f"Failed to get {asset_name} price: {e}")
 

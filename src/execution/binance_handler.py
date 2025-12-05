@@ -1,6 +1,6 @@
 """
-Binance Execution Handler with Hybrid Position Sizing
-INTEGRATED: Automated risk management + manual override support
+Binance Execution Handler with Hybrid Position Sizing + Order Tracking
+ENHANCED: Track Binance order IDs for accurate P&L tracking
 """
 
 import logging
@@ -292,7 +292,7 @@ class HybridPositionSizer:
 
 class BinanceExecutionHandler:
     """
-    Binance Execution Handler with Hybrid Position Sizing
+    Binance Execution Handler with Hybrid Position Sizing + Order Tracking
     """
 
     def __init__(self, config: Dict, client: Client, portfolio_manager):
@@ -412,19 +412,19 @@ class BinanceExecutionHandler:
                         return True
                     else:
                         logger.debug(f"{asset_name}: Holding position, no action needed")
-                        return False  # Return False for HOLD signals with no action
+                        return False
 
                 elif signal == 1 and position_side == "long":
                     logger.info(
                         f"[SKIP] {asset_name}: BUY signal ignored - Already have LONG position"
                     )
-                    return False  # No trade executed
+                    return False
 
                 elif signal == -1 and position_side == "short":
                     logger.info(
                         f"[SKIP] {asset_name}: SELL signal ignored - Already have SHORT position"
                     )
-                    return False  # No trade executed
+                    return False
 
             # === OPEN NEW POSITION ===
             if signal == 1:
@@ -432,7 +432,7 @@ class BinanceExecutionHandler:
                     logger.warning(
                         f"[SKIP] {asset_name}: BUY signal - Position already exists"
                     )
-                    return False  # No trade executed
+                    return False
 
                 logger.info(f"[SIGNAL] {asset_name}: BUY signal - Opening LONG position")
                 return self._open_position(
@@ -448,9 +448,9 @@ class BinanceExecutionHandler:
 
             elif signal == -1:
                 logger.debug(f"{asset_name}: SELL signal - No position to close, no action")
-                return False  # No trade executed
+                return False
 
-            return False  # Default return for any other case
+            return False
 
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
@@ -635,11 +635,18 @@ class BinanceExecutionHandler:
             logger.info(f"   SL: ${stop_loss:,.2f} ({stop_loss_pct:.1%})")
             logger.info(f"   TP: ${take_profit:,.2f} ({take_profit_pct:.1%})")
 
+            # ✅ NEW: Store order ID for tracking (paper mode = None)
+            order_id = None
+            
             if self.mode.lower() != "paper":
                 logger.warning(
                     f"[LIVE MODE] Actual Binance order placement not implemented yet"
                 )
+                # When you implement live trading, capture order_id here:
+                # order_result = self.client.order_market_buy(...)
+                # order_id = order_result['orderId']
 
+            # ✅ NEW: Pass order_id to Portfolio Manager (similar to MT5 ticket)
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
@@ -649,12 +656,15 @@ class BinanceExecutionHandler:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 trailing_stop_pct=trailing_stop_pct,
+                binance_order_id=order_id,  # ← NEW: Track Binance order ID
             )
 
             if success:
                 logger.info(
                     f"[OK] {order_side} {asset_name} - Position opened successfully"
                 )
+                if order_id:
+                    logger.info(f"  └─ Binance Order ID: {order_id}")
                 return True
             else:
                 logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")

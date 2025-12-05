@@ -28,7 +28,8 @@ class Position:
         stop_loss: float = None,
         take_profit: float = None,
         trailing_stop_pct: float = None,
-        mt5_ticket: int = None,  # NEW: Track MT5 ticket number
+        mt5_ticket: int = None,  # Track MT5 ticket number
+        binance_order_id: int = None,  # Track Binance order ID
     ):
         self.asset = asset
         self.symbol = symbol
@@ -42,10 +43,14 @@ class Position:
         self.highest_price = entry_price if side == "long" else entry_price
         self.lowest_price = entry_price if side == "short" else entry_price
         
-        # NEW: MT5 specific tracking
+        # Exchange-specific tracking
         self.mt5_ticket = mt5_ticket
         self.mt5_profit = 0.0  # Real-time profit from MT5
         self.mt5_last_update = None
+        
+        self.binance_order_id = binance_order_id  # Track Binance order ID
+        self.binance_profit = 0.0  # Real-time profit from Binance
+        self.binance_last_update = None
 
         self.session_start_time = None
         self.session_start_equity = None
@@ -65,6 +70,18 @@ class Position:
     def get_mt5_pnl(self) -> float:
         """Get real-time P&L from MT5 position"""
         return self.mt5_profit
+    
+    def get_binance_pnl(self) -> float:
+        """Get real-time P&L from Binance position"""
+        return self.binance_profit
+    
+    def get_exchange_pnl(self) -> float:
+        """Get real-time P&L from either exchange"""
+        if self.mt5_ticket and self.mt5_profit != 0.0:
+            return self.mt5_profit
+        elif self.binance_order_id and self.binance_profit != 0.0:
+            return self.binance_profit
+        return 0.0
 
     def get_pnl_pct(self, current_price: float) -> float:
         """Get current profit/loss percentage"""
@@ -358,6 +375,43 @@ class PortfolioManager:
         
         except Exception as e:
             logger.error(f"Error updating MT5 positions profit: {e}", exc_info=True)
+    
+    def update_binance_positions_profit(self):
+        """
+        Update all Binance positions with real-time profit
+        Call this periodically to sync P&L
+        """
+        try:
+            if self.binance_client is None:
+                return
+            
+            # Get current prices for all Binance positions
+            for asset, position in self.positions.items():
+                if position.binance_order_id is None:
+                    continue  # Skip non-Binance positions (e.g., MT5)
+                
+                # Get current price
+                try:
+                    ticker = self.binance_client.get_symbol_ticker(symbol=position.symbol)
+                    current_price = float(ticker["price"])
+                    
+                    # Calculate real-time P&L
+                    if position.side == "long":
+                        position.binance_profit = (current_price - position.entry_price) * position.quantity
+                    else:
+                        position.binance_profit = (position.entry_price - current_price) * position.quantity
+                    
+                    position.binance_last_update = datetime.now()
+                    
+                    logger.debug(
+                        f"[BINANCE] Updated {asset} profit: ${position.binance_profit:,.2f}"
+                    )
+                
+                except Exception as e:
+                    logger.debug(f"Error fetching Binance price for {asset}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Error updating Binance positions profit: {e}", exc_info=True)
 
     def calculate_position_size(
         self, asset: str, current_price: float, volatility: float = None
@@ -499,7 +553,8 @@ class PortfolioManager:
         stop_loss: float = None,
         take_profit: float = None,
         trailing_stop_pct: float = None,
-        mt5_ticket: int = None,  # NEW: Accept MT5 ticket number
+        mt5_ticket: int = None,  # Track MT5 ticket
+        binance_order_id: int = None,  # Track Binance order ID
     ) -> bool:
         """Add a new position to the portfolio"""
         can_open, reason = self.can_open_position(asset, side)
@@ -529,7 +584,8 @@ class PortfolioManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop_pct=trailing_stop_pct,
-            mt5_ticket=mt5_ticket,  # NEW: Store MT5 ticket
+            mt5_ticket=mt5_ticket,  # Store MT5 ticket
+            binance_order_id=binance_order_id,  # Store Binance order ID
         )
 
         self.positions[asset] = position
@@ -542,6 +598,8 @@ class PortfolioManager:
         
         if mt5_ticket:
             logger.info(f"  └─ MT5 Ticket: {mt5_ticket}")
+        if binance_order_id:
+            logger.info(f"  └─ Binance Order ID: {binance_order_id}")
 
         if stop_loss:
             logger.info(f"  └─ Stop Loss: ${stop_loss:,.2f}")
@@ -562,10 +620,13 @@ class PortfolioManager:
 
         position = self.positions[asset]
 
-        # Use MT5 profit if available, otherwise calculate
+        # Use exchange profit if available, otherwise calculate
         if position.mt5_ticket and position.mt5_profit != 0.0:
             pnl = position.mt5_profit
             logger.info(f"Using MT5 profit: ${pnl:,.2f}")
+        elif position.binance_order_id and position.binance_profit != 0.0:
+            pnl = position.binance_profit
+            logger.info(f"Using Binance profit: ${pnl:,.2f}")
         else:
             pnl = position.get_pnl(exit_price)
         
@@ -600,6 +661,7 @@ class PortfolioManager:
             / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
+            "binance_order_id": position.binance_order_id,
         }
 
         self.closed_positions.append(trade_result)
@@ -614,10 +676,11 @@ class PortfolioManager:
         return trade_result
 
     def update_positions(self, prices: Dict[str, float] = None):
-        """Update all positions with current prices and MT5 profit"""
-        # Update MT5 positions with real-time profit
+        """Update all positions with current prices and exchange profit"""
+        # Update exchange positions with real-time profit
         if not self.is_paper_mode:
             self.update_mt5_positions_profit()
+            self.update_binance_positions_profit()
         
         if prices:
             for asset, price in prices.items():
@@ -629,11 +692,15 @@ class PortfolioManager:
         # Calculate unrealized P&L
         total_unrealized_pnl = 0.0
         for pos in self.positions.values():
+            # Prioritize exchange-reported profit
             if pos.mt5_ticket and pos.mt5_profit != 0.0:
                 # Use MT5 profit for MT5 positions
                 total_unrealized_pnl += pos.mt5_profit
+            elif pos.binance_order_id and pos.binance_profit != 0.0:
+                # Use Binance profit for Binance positions
+                total_unrealized_pnl += pos.binance_profit
             elif prices and pos.asset in prices:
-                # Calculate for Binance positions
+                # Calculate for positions without exchange tracking
                 total_unrealized_pnl += pos.get_pnl(prices[pos.asset])
 
         if self.is_paper_mode:
@@ -690,9 +757,10 @@ class PortfolioManager:
 
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
         """Get current portfolio status with real-time data"""
-        # Update MT5 positions first
+        # Update exchange positions first
         if not self.is_paper_mode:
             self.update_mt5_positions_profit()
+            self.update_binance_positions_profit()
         
         # Use current prices if provided, otherwise use entry prices
         if current_prices is None:
@@ -707,9 +775,11 @@ class PortfolioManager:
             current_price = current_prices.get(pos.asset, pos.entry_price)
             total_exposure += pos.get_position_value(current_price)
             
-            # Use MT5 profit if available
+            # Use exchange profit if available
             if pos.mt5_ticket and pos.mt5_profit != 0.0:
                 total_unrealized_pnl += pos.mt5_profit
+            elif pos.binance_order_id and pos.binance_profit != 0.0:
+                total_unrealized_pnl += pos.binance_profit
             else:
                 total_unrealized_pnl += pos.get_pnl(current_price)
 
@@ -757,8 +827,10 @@ class PortfolioManager:
                     "current_value": pos.get_position_value(
                         current_prices.get(asset, pos.entry_price)
                     ),
-                    "pnl": pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0) else pos.get_pnl(
-                        current_prices.get(asset, pos.entry_price)
+                    "pnl": (
+                        pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
+                        else pos.binance_profit if (pos.binance_order_id and pos.binance_profit != 0.0)
+                        else pos.get_pnl(current_prices.get(asset, pos.entry_price))
                     ),
                     "pnl_pct": pos.get_pnl_pct(
                         current_prices.get(asset, pos.entry_price)
@@ -767,6 +839,8 @@ class PortfolioManager:
                     "take_profit": pos.take_profit,
                     "mt5_ticket": pos.mt5_ticket,
                     "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
+                    "binance_order_id": pos.binance_order_id,
+                    "binance_profit": pos.binance_profit if pos.binance_order_id else None,
                 }
                 for asset, pos in self.positions.items()
             },
