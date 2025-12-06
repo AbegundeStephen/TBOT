@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
 from collections import defaultdict
-
+from telegram.request import HTTPXRequest
 
 matplotlib.use("Agg")  # Non-interactive backend
 
@@ -28,6 +28,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut, RetryAfter, TelegramError
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +40,12 @@ class SignalMonitoringIntegration:
     """
 
     def __init__(self, max_history: int = 100):
-        """
-        Initialize signal monitoring
-
-        Args:
-            max_history: Keep track of last N signals per asset
-        """
         self.signal_history: Dict[str, List[Dict]] = defaultdict(list)
         self.max_history = max_history
-
-        # Regime tracking per asset
         self.regime_tracking: Dict[str, Dict] = defaultdict(
             lambda: {"current": None, "changes": [], "change_count": 0}
         )
-
-        # Override tracking per asset
         self.override_tracking: Dict[str, List[Dict]] = defaultdict(list)
-
         logger.info(
             f"SignalMonitoringIntegration initialized (max_history={max_history})"
         )
@@ -68,16 +58,7 @@ class SignalMonitoringIntegration:
         price: float,
         timestamp: datetime = None,
     ):
-        """
-        Record a signal for monitoring
-
-        Args:
-            asset: Asset name (BTC, GOLD, etc.)
-            signal: -1 (SELL), 0 (HOLD), 1 (BUY)
-            details: Full signal details from aggregator
-            price: Current asset price
-            timestamp: Signal timestamp
-        """
+        """Record a signal for monitoring"""
         if timestamp is None:
             timestamp = datetime.now()
 
@@ -100,11 +81,9 @@ class SignalMonitoringIntegration:
 
         self.signal_history[asset].append(entry)
 
-        # Keep only recent history
         if len(self.signal_history[asset]) > self.max_history:
             self.signal_history[asset].pop(0)
 
-        # Track regime changes
         if entry["regime_changed"]:
             self.regime_tracking[asset]["changes"].append(
                 {
@@ -116,7 +95,6 @@ class SignalMonitoringIntegration:
             )
             self.regime_tracking[asset]["change_count"] += 1
 
-        # Track overrides (sells blocked)
         if "override" in entry["reasoning"].lower():
             self.override_tracking[asset].append(
                 {
@@ -164,7 +142,7 @@ class SignalMonitoringIntegration:
 
         return {
             "change_count": tracking["change_count"],
-            "last_changes": tracking["changes"][-5:],  # Last 5 changes
+            "last_changes": tracking["changes"][-5:],
         }
 
     def get_override_info(self, asset: str) -> Dict:
@@ -178,7 +156,7 @@ class SignalMonitoringIntegration:
         return {
             "total": len(events),
             "avg_quality": avg_quality,
-            "last_events": events[-5:],  # Last 5 overrides
+            "last_events": events[-5:],
         }
 
 
@@ -208,14 +186,6 @@ class TradingTelegramBot:
     """
 
     def __init__(self, token: str, admin_ids: List[int], trading_bot):
-        """
-        Initialize Telegram bot
-
-        Args:
-            token: Telegram bot token
-            admin_ids: List of authorized Telegram user IDs
-            trading_bot: Reference to main trading bot instance
-        """
         self.token = token
         self.admin_ids = admin_ids
         self.trading_bot = trading_bot
@@ -226,11 +196,17 @@ class TradingTelegramBot:
 
         self._is_ready = False
         self._init_lock = asyncio.Lock()
-        self._message_queue = []  # Queue for messages during init
+        self._message_queue = []
 
         # Track shutdown state
         self._shutdown_event = asyncio.Event()
         self._shutdown_complete = False
+
+        # ✨ NEW: Network error tracking
+        self._network_error_count = 0
+        self._last_network_error = None
+        self._max_consecutive_errors = 5
+        self._reconnect_delay = 5  # seconds
 
         # Track notification counts to avoid spam
         self.notification_counts = {}
@@ -239,26 +215,33 @@ class TradingTelegramBot:
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
 
     async def initialize(self):
-        """Initialize with proper error handling and verification"""
+        """Initialize with improved error handling and retry logic"""
+        request = HTTPXRequest(
+            read_timeout=60,
+            write_timeout=60,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
         try:
             async with self._init_lock:
-                # Reset shutdown state
                 self._shutdown_event.clear()
                 self._shutdown_complete = False
 
                 logger.info("[TELEGRAM] Building application...")
+
+                # ✨ IMPROVED: Longer timeouts and connection pooling
                 self.application = (
                     Application.builder()
                     .token(self.token)
-                    .connect_timeout(30)
-                    .read_timeout(30)
-                    .write_timeout(30)
-                    .pool_timeout(30)
-                    .get_updates_read_timeout(30)
+                    .connect_timeout(60)  # Increased from 30
+                    .read_timeout(60)  # Increased from 30
+                    .write_timeout(60)  # Increased from 30
+                    .pool_timeout(60)  # Increased from 30
+                    .get_updates_read_timeout(60)  # Increased from 30
+                    .connection_pool_size(8)  # ✨ NEW: Connection pooling
                     .build()
                 )
 
-                # Register handlers
                 logger.info("[TELEGRAM] Registering command handlers...")
                 self._register_handlers()
 
@@ -269,31 +252,31 @@ class TradingTelegramBot:
                 await self.application.start()
 
                 logger.info("[TELEGRAM] Starting update polling...")
+
+                # ✨ IMPROVED: Better polling configuration
                 await self.application.updater.start_polling(
-                    poll_interval=1.0,
-                    timeout=30,
+                    poll_interval=2.0,  # Increased from 1.0 for stability
+                    timeout=60,  # Increased from 30
                     drop_pending_updates=True,
                     allowed_updates=Update.ALL_TYPES,
-                    bootstrap_retries=5,
+                    bootstrap_retries=10,  # Increased from 5
                 )
 
-                # CRITICAL: Wait for polling to actually start
-                await asyncio.sleep(2)
+                # Wait for polling to stabilize
+                await asyncio.sleep(3)  # Increased from 2
 
-                # Verify bot is responsive
                 if await self._verify_bot_ready():
                     self._is_ready = True
                     self.is_running = True
+                    self._network_error_count = 0  # ✨ Reset error count
                     logger.info("[TELEGRAM] ✅ Bot fully operational")
 
-                    # Send startup notification
                     await self.send_notification(
                         "🤖 *Trading Bot Started*\n\n"
                         f"Bot initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         "Type /help for available commands"
                     )
 
-                    # Process queued messages
                     await self._process_message_queue()
                 else:
                     logger.error("[TELEGRAM] ❌ Bot verification failed")
@@ -304,16 +287,35 @@ class TradingTelegramBot:
             self._is_ready = False
             raise
 
+    async def _keepalive_monitor(self):
+        """Monitor bot health and restart if needed"""
+        while self.is_running:
+            try:
+                await asyncio.sleep(300)  # Check every 5 minutes
+                if self._is_ready:
+                    # Ping the bot
+                    await self.application.bot.get_me()
+                    logger.debug("[TELEGRAM] Keepalive check passed")
+            except Exception as e:
+                logger.warning(f"[TELEGRAM] Keepalive failed: {e}")
+                await self._attempt_reconnection()
+
     async def _verify_bot_ready(self) -> bool:
-        """Verify bot can send messages"""
-        try:
-            # Try to get bot info
-            bot_info = await self.application.bot.get_me()
-            logger.info(f"[TELEGRAM] Bot verified: @{bot_info.username}")
-            return True
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Verification failed: {e}")
-            return False
+        """Verify bot can send messages with retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                bot_info = await self.application.bot.get_me()
+                logger.info(f"[TELEGRAM] Bot verified: @{bot_info.username}")
+                return True
+            except Exception as e:
+                logger.warning(
+                    f"[TELEGRAM] Verification attempt {attempt + 1}/{max_retries} failed: {e}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+
+        return False
 
     async def _process_message_queue(self):
         """Send any queued messages from before initialization"""
@@ -335,7 +337,6 @@ class TradingTelegramBot:
         self.application.add_handler(
             CommandHandler("performance", self.cmd_performance)
         )
-
         self.application.add_handler(CommandHandler("signals", self.cmd_signals))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
@@ -348,26 +349,130 @@ class TradingTelegramBot:
         )
         self.application.add_handler(CommandHandler("presets", self.cmd_presets))
         self.application.add_handler(CommandHandler("debug", self.cmd_debug_positions))
-
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
+        # ✨ NEW: Add error handler
+        self.application.add_error_handler(self.error_handler)
+
+    async def error_handler(
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """
+        ✨ NEW: Global error handler for Telegram errors
+        Handles network issues gracefully without crashing
+        """
+        error = context.error
+
+        # Log all errors
+        logger.error(
+            f"[TELEGRAM] Error handler caught: {error}", exc_info=context.error
+        )
+
+        # Handle specific Telegram errors
+        if isinstance(error, NetworkError):
+            self._network_error_count += 1
+            self._last_network_error = datetime.now()
+            logger.warning(
+                f"[TELEGRAM] Network error #{self._network_error_count}: {error}"
+            )
+
+            # If too many consecutive errors, attempt reconnection
+            if self._network_error_count >= self._max_consecutive_errors:
+                logger.error(
+                    f"[TELEGRAM] Too many network errors ({self._network_error_count}), "
+                    f"attempting reconnection..."
+                )
+                await self._attempt_reconnection()
+
+        elif isinstance(error, TimedOut):
+            logger.warning(f"[TELEGRAM] Request timed out: {error}")
+            # Don't count timeouts as critical errors
+
+        elif isinstance(error, RetryAfter):
+            retry_after = error.retry_after
+            logger.warning(f"[TELEGRAM] Rate limited, retry after {retry_after}s")
+            await asyncio.sleep(retry_after)
+
+        elif isinstance(error, TelegramError):
+            logger.error(f"[TELEGRAM] Telegram error: {error}")
+
+        else:
+            logger.error(f"[TELEGRAM] Unexpected error: {error}")
+
+        # Don't let errors crash the bot
+        return None
+
+    async def _attempt_reconnection(self):
+        """
+        ✨ NEW: Attempt to reconnect after network issues
+        """
+        try:
+            logger.info(
+                f"[TELEGRAM] Waiting {self._reconnect_delay}s before reconnection..."
+            )
+            await asyncio.sleep(self._reconnect_delay)
+
+            logger.info("[TELEGRAM] Testing connection...")
+            if await self._verify_bot_ready():
+                logger.info("[TELEGRAM] ✅ Reconnection successful")
+                self._network_error_count = 0
+                self._last_network_error = None
+            else:
+                logger.error("[TELEGRAM] ❌ Reconnection failed")
+                self._reconnect_delay = min(
+                    self._reconnect_delay * 2, 60
+                )  # Exponential backoff
+
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Reconnection error: {e}")
+
     async def run_polling(self):
-        """Keep the bot running with polling -  VERSION"""
+        """
+        ✨ IMPROVED: Keep the bot running with better error recovery
+        """
         try:
             logger.info("[TELEGRAM] Starting polling loop...")
             while self.is_running and not self._shutdown_event.is_set():
-                await asyncio.sleep(1)
+                try:
+                    # ✨ NEW: Periodic health check
+                    if self._network_error_count > 0:
+                        time_since_error = (
+                            (datetime.now() - self._last_network_error).total_seconds()
+                            if self._last_network_error
+                            else 999
+                        )
+
+                        # Reset error count if no errors for 5 minutes
+                        if time_since_error > 300:
+                            logger.info(
+                                "[TELEGRAM] Resetting error count after recovery period"
+                            )
+                            self._network_error_count = 0
+                            self._reconnect_delay = 5
+
+                    await asyncio.sleep(1)
+
+                except asyncio.CancelledError:
+                    logger.info("[TELEGRAM] Polling cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Error in polling loop: {e}")
+                    await asyncio.sleep(5)  # Wait before retrying
+
             logger.info("[TELEGRAM] Polling loop ended")
+
         except asyncio.CancelledError:
             logger.info("[TELEGRAM] Polling cancelled")
             raise
         except Exception as e:
-            logger.error(f"[TELEGRAM] Error in polling loop: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] Fatal error in polling loop: {e}", exc_info=True)
 
     async def shutdown(self):
-        """Gracefully shutdown the Telegram bot with proper task cleanup"""
+        """
+        ✨ IMPROVED: Gracefully shutdown with better task cleanup
+        """
         if self._shutdown_complete:
             logger.info("[TELEGRAM] Already shut down, skipping")
             return
@@ -376,13 +481,12 @@ class TradingTelegramBot:
             "[TELEGRAM] ==================== SHUTDOWN STARTED ===================="
         )
 
-        # Signal shutdown immediately
         self._shutdown_event.set()
         self.is_running = False
         self._is_ready = False
 
         try:
-            # Try to send shutdown notification (but don't wait too long)
+            # Try to send shutdown notification
             if self.application and self._is_ready:
                 try:
                     await asyncio.wait_for(
@@ -390,17 +494,38 @@ class TradingTelegramBot:
                             "🛑 *Trading Bot Stopped*\n\n"
                             f"Bot shutdown at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         ),
-                        timeout=2.0,
+                        timeout=3.0,
                     )
-                except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] Shutdown notification timed out")
-                except Exception as e:
+                except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(
                         f"[TELEGRAM] Could not send shutdown notification: {e}"
                     )
 
             if self.application:
-                # Stop the updater first
+                # ✨ IMPROVED: More aggressive task cancellation
+                # Cancel all pending tasks first
+                try:
+                    tasks = [t for t in asyncio.all_tasks() if not t.done()]
+                    if tasks:
+                        logger.info(
+                            f"[TELEGRAM] Cancelling {len(tasks)} pending tasks..."
+                        )
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+
+                        # Wait for cancellation with timeout
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.gather(*tasks, return_exceptions=True),
+                                timeout=2.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("[TELEGRAM] Task cancellation timeout")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Error cancelling tasks: {e}")
+
+                # Stop the updater
                 if hasattr(self.application, "updater") and self.application.updater:
                     logger.info("[TELEGRAM] Stopping updater...")
                     try:
@@ -410,7 +535,7 @@ class TradingTelegramBot:
                             )
                             logger.info("[TELEGRAM] ✅ Updater stopped")
                     except asyncio.TimeoutError:
-                        logger.warning("[TELEGRAM] ⚠️ Updater stop timed out - forcing")
+                        logger.warning("[TELEGRAM] ⚠️ Updater stop timed out")
                     except Exception as e:
                         logger.warning(f"[TELEGRAM] ⚠️ Updater stop error: {e}")
 
@@ -421,26 +546,22 @@ class TradingTelegramBot:
                         await asyncio.wait_for(self.application.stop(), timeout=3.0)
                         logger.info("[TELEGRAM] ✅ Application stopped")
                 except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] ⚠️ Application stop timed out - forcing")
+                    logger.warning("[TELEGRAM] ⚠️ Application stop timed out")
                 except Exception as e:
                     logger.warning(f"[TELEGRAM] ⚠️ Application stop error: {e}")
 
-                # Shutdown the application (cleanup resources)
+                # Shutdown the application
                 logger.info("[TELEGRAM] Shutting down application...")
                 try:
                     await asyncio.wait_for(self.application.shutdown(), timeout=3.0)
                     logger.info("[TELEGRAM] ✅ Application shutdown complete")
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        "[TELEGRAM] ⚠️ Application shutdown timed out - forcing"
-                    )
+                    logger.warning("[TELEGRAM] ⚠️ Application shutdown timed out")
                 except Exception as e:
                     logger.warning(f"[TELEGRAM] ⚠️ Application shutdown error: {e}")
 
-                # Clear reference
                 self.application = None
 
-            # Mark as complete
             self._shutdown_complete = True
             logger.info(
                 "[TELEGRAM] ==================== SHUTDOWN COMPLETE ===================="
@@ -456,7 +577,6 @@ class TradingTelegramBot:
         """Handle /start command"""
         user_id = update.effective_user.id
         username = update.effective_user.username or "Unknown"
-
         is_admin = user_id in self.admin_ids
 
         welcome_msg = (
@@ -1202,7 +1322,9 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_signals_message: {e}")
 
     async def send_notification(self, message: str, disable_preview: bool = True):
-        """Send notification with queuing support"""
+        """
+        ✨ IMPROVED: Send notification with retry logic and error handling
+        """
         # If not ready, queue the message
         if not self._is_ready:
             logger.warning("[TELEGRAM] Bot not ready, queuing message")
@@ -1214,18 +1336,41 @@ class TradingTelegramBot:
             return
 
         success_count = 0
+        max_retries = 3
+
         for admin_id in self.admin_ids:
-            try:
-                await self.application.bot.send_message(
-                    chat_id=admin_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=disable_preview,
-                )
-                success_count += 1
-                logger.debug(f"[TELEGRAM] Notification sent to {admin_id}")
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Failed to send to {admin_id}: {e}")
+            for attempt in range(max_retries):
+                try:
+                    await asyncio.wait_for(
+                        self.application.bot.send_message(
+                            chat_id=admin_id,
+                            text=message,
+                            parse_mode=ParseMode.MARKDOWN,
+                            disable_web_page_preview=disable_preview,
+                        ),
+                        timeout=10.0,  # ✨ NEW: Timeout for send operation
+                    )
+                    success_count += 1
+                    logger.debug(f"[TELEGRAM] Notification sent to {admin_id}")
+                    break  # Success, no need to retry
+
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[TELEGRAM] Timeout sending to {admin_id} (attempt {attempt + 1}/{max_retries})"
+                    )
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+
+                except (NetworkError, TimedOut) as e:
+                    logger.warning(
+                        f"[TELEGRAM] Network error sending to {admin_id} (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Failed to send to {admin_id}: {e}")
+                    break  # Don't retry on non-network errors
 
         if success_count == 0:
             logger.error("[TELEGRAM] Failed to send notification to any admin")

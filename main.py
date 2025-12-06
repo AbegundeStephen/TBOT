@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Main Trading Bot - CORRECTED HANDLER INTEGRATION
-: Proper initialization order, configuration structure, and async handling
+Main Trading Bot - IMPROVED STABILITY VERSION
+Enhanced error handling, network resilience, and Telegram thread management
 """
 
 import json
@@ -14,9 +14,10 @@ from datetime import datetime, timedelta, timezone
 import schedule
 import io
 import signal
-from threading import Thread
+from threading import Thread, Event
+from typing import Optional
 
-#  Windows encoding BEFORE any imports that use logging
+# Windows encoding fix
 if sys.platform == "win32":
     try:
         sys.stdout = io.TextIOWrapper(
@@ -45,14 +46,22 @@ from telegram_config import TELEGRAM_CONFIG
 
 
 def setup_logging(config):
-    """Setup logging with proper encoding"""
+    """Setup logging with proper encoding and rotation"""
     log_config = config.get("logging", {})
     log_level = getattr(logging, log_config.get("level", "INFO"))
     log_file = log_config.get("file", "logs/trading_bot.log")
 
     Path(log_file).parent.mkdir(exist_ok=True)
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    # ✨ IMPROVED: Add log rotation
+    from logging.handlers import RotatingFileHandler
+    
+    file_handler = RotatingFileHandler(
+        log_file, 
+        encoding="utf-8",
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
     file_handler.setLevel(log_level)
 
     console_handler = logging.StreamHandler(sys.stdout)
@@ -74,11 +83,11 @@ logger = logging.getLogger(__name__)
 
 
 class TradingBot:
-    """Main trading bot with CORRECTED handler integration"""
+    """Main trading bot with improved stability and error recovery"""
 
     def __init__(self, config_path: str = "config/config.json"):
         logger.info("=" * 70)
-        logger.info("INITIALIZING TRADING BOT WITH HANDLER INTEGRATION")
+        logger.info("INITIALIZING TRADING BOT WITH ENHANCED STABILITY")
         logger.info("=" * 70)
 
         with open(config_path, encoding="utf-8") as f:
@@ -90,7 +99,7 @@ class TradingBot:
         self.data_manager = DataManager(self.config)
         self.portfolio_manager = None
 
-        # Handler instances (initialized later)
+        # Handler instances
         self.binance_handler = None
         self.mt5_handler = None
 
@@ -105,29 +114,32 @@ class TradingBot:
         self.last_trade_times = {}
         self.last_market_status_log = None
 
-        # Signal aggregators (initialized AFTER strategies AND exchanges)
+        # Signal aggregators
         self.aggregators = {}
         self.selected_presets = {}
 
-        # Telegram integration
+        # ✨ NEW: Telegram thread management
         self.telegram_bot = None
         self.telegram_loop = None
         self.telegram_thread = None
+        self._telegram_ready = Event()
+        self._telegram_error_count = 0
+        self._max_telegram_restarts = 3
+        self._telegram_last_restart = None
+        
+        # ✨ NEW: Main bot state
         self._shutdown_requested = False
+        self._main_loop_running = False
+        self._last_successful_cycle = None
+        self._consecutive_errors = 0
+        self._max_consecutive_errors = 5
 
-        # Initialize in correct order (but NOT aggregators yet)
+        # Initialize components
         self._initialize_telegram()
-        self._initialize_strategies()  #
+        self._initialize_strategies()
 
     def initialize_exchanges(self):
-        """
-        Initialize exchange connections and handlers
-
-        CORRECT ORDER:
-        1. Connect to data sources (MT5, Binance)
-        2. Initialize portfolio manager with connections
-        3. Initialize execution handlers with portfolio manager
-        """
+        """Initialize exchange connections and handlers"""
         logger.info("\n" + "-" * 70)
         logger.info("STEP 1: Initializing Exchange Connections")
         logger.info("-" * 70)
@@ -141,9 +153,7 @@ class TradingBot:
                     logger.info("[OK] MT5 connection established")
                     mt5_initialized = True
                 else:
-                    logger.error(
-                        "[FAIL] Failed to initialize MT5 - GOLD trading disabled"
-                    )
+                    logger.error("[FAIL] Failed to initialize MT5 - GOLD trading disabled")
                     self.config["assets"]["GOLD"]["enabled"] = False
             except Exception as e:
                 logger.error(f"[FAIL] MT5 initialization error: {e}")
@@ -155,22 +165,19 @@ class TradingBot:
                 if self.data_manager.initialize_binance():
                     logger.info("[OK] Binance connection established")
                 else:
-                    logger.error(
-                        "[FAIL] Failed to initialize Binance - BTC trading disabled"
-                    )
+                    logger.error("[FAIL] Failed to initialize Binance - BTC trading disabled")
                     self.config["assets"]["BTC"]["enabled"] = False
             except Exception as e:
                 logger.error(f"[FAIL] Binance initialization error: {e}")
                 self.config["assets"]["BTC"]["enabled"] = False
 
-        # Initialize portfolio manager with exchange clients
+        # Initialize portfolio manager
         logger.info("\n" + "-" * 70)
         logger.info("STEP 2: Initializing Portfolio Manager")
         logger.info("-" * 70)
 
         try:
             import MetaTrader5 as mt5
-
             mt5_handler = mt5 if mt5_initialized else None
         except ImportError:
             mt5_handler = None
@@ -182,20 +189,17 @@ class TradingBot:
                 mt5_handler=mt5_handler,
                 binance_client=self.data_manager.binance_client,
             )
-            logger.info(
-                f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
-            )
+            logger.info(f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})")
             logger.info(f"     Capital: ${self.portfolio_manager.current_capital:,.2f}")
         except Exception as e:
             logger.error(f"[FAIL] Portfolio Manager initialization failed: {e}")
             raise
 
-        # Initialize execution handlers with portfolio manager
+        # Initialize execution handlers
         logger.info("\n" + "-" * 70)
         logger.info("STEP 3: Initializing Execution Handlers")
         logger.info("-" * 70)
 
-        # Initialize Binance handler if both BTC is enabled AND we have a Binance client
         if (
             self.config["assets"]["BTC"].get("enabled", False)
             and self.data_manager.binance_client is not None
@@ -212,7 +216,6 @@ class TradingBot:
                 self.binance_handler = None
                 self.config["assets"]["BTC"]["enabled"] = False
 
-        # Initialize MT5 handler if both GOLD is enabled AND MT5 is initialized
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
                 self.mt5_handler = MT5ExecutionHandler(
@@ -225,14 +228,11 @@ class TradingBot:
                 self.mt5_handler = None
                 self.config["assets"]["GOLD"]["enabled"] = False
 
-        # Verify at least one handler is available
         if not self.binance_handler and not self.mt5_handler:
-            raise RuntimeError(
-                "No execution handlers available! Check configuration and API credentials."
-            )
+            raise RuntimeError("No execution handlers available! Check configuration and API credentials.")
 
     def _initialize_telegram(self):
-        """Initialize Telegram bot"""
+        """Initialize Telegram bot with error handling"""
         try:
             if not TELEGRAM_CONFIG.get("enabled", False):
                 logger.info("[TELEGRAM] Disabled in config")
@@ -254,9 +254,10 @@ class TradingBot:
 
         except Exception as e:
             logger.warning(f"[TELEGRAM] Initialization failed: {e}")
+            self.telegram_bot = None
 
     def _initialize_strategies(self):
-        """Initialize all three strategies for enabled assets (WITHOUT aggregators)"""
+        """Initialize all strategies"""
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Strategies (MR + TF + EMA)")
         logger.info("-" * 70)
@@ -273,9 +274,7 @@ class TradingBot:
             if strategies_cfg.get("mean_reversion", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
-                    self.strategies[asset_name]["mean_reversion"] = (
-                        MeanReversionStrategy(cfg)
-                    )
+                    self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} Mean Reversion: {e}")
@@ -284,21 +283,15 @@ class TradingBot:
             if strategies_cfg.get("trend_following", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
-                    self.strategies[asset_name]["trend_following"] = (
-                        TrendFollowingStrategy(cfg)
-                    )
+                    self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Trend Following")
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} Trend Following: {e}")
 
             # EMA Strategy
-            if strategies_cfg.get("exponential_moving_averages", {}).get(
-                "enabled", False
-            ):
+            if strategies_cfg.get("exponential_moving_averages", {}).get("enabled", False):
                 try:
-                    cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(
-                        asset_name, {}
-                    )
+                    cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(asset_name, {})
                     self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: EMA Strategy")
                 except Exception as e:
@@ -309,9 +302,7 @@ class TradingBot:
                 logger.warning(f"[!] {asset_name}: NO strategies enabled")
             else:
                 strat_names = ", ".join(self.strategies[asset_name].keys())
-                logger.info(
-                    f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}"
-                )
+                logger.info(f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}")
 
     def _initialize_aggregators(self):
         """Initialize signal aggregators with AUTO-PRESET support"""
@@ -319,6 +310,7 @@ class TradingBot:
         logger.info("Initializing Signal Aggregators")
         logger.info("-" * 70)
 
+        # (Keep your existing AGGREGATOR_PRESETS dictionary here)
         AGGREGATOR_PRESETS = {
             "BTC": {
                 "conservative": {
@@ -326,11 +318,10 @@ class TradingBot:
                     "sell_threshold": 0.40,
                     "two_strategy_bonus": 0.18,
                     "three_strategy_bonus": 0.20,
-                    # UPDATED: Stronger regime bias (was 0.03-0.05)
-                    "bull_buy_boost": 0.10,  # Increased from 0.03
-                    "bull_sell_penalty": 0.12,  # Increased from 0.05
-                    "bear_sell_boost": 0.10,  # Increased from 0.03
-                    "bear_buy_penalty": 0.12,  # Increased from 0.05
+                    "bull_buy_boost": 0.10,
+                    "bull_sell_penalty": 0.12,
+                    "bear_sell_boost": 0.10,
+                    "bear_buy_penalty": 0.12,
                     "min_confidence_to_use": 0.12,
                     "min_signal_quality": 0.32,
                     "hold_contribution_pct": 0.15,
@@ -343,11 +334,10 @@ class TradingBot:
                     "sell_threshold": 0.36,
                     "two_strategy_bonus": 0.20,
                     "three_strategy_bonus": 0.22,
-                    # UPDATED: Stronger regime bias (was 0.035-0.04)
-                    "bull_buy_boost": 0.11,  # Increased from 0.035
-                    "bull_sell_penalty": 0.11,  # Increased from 0.04
-                    "bear_sell_boost": 0.11,  # Increased from 0.035
-                    "bear_buy_penalty": 0.11,  # Increased from 0.04
+                    "bull_buy_boost": 0.11,
+                    "bull_sell_penalty": 0.11,
+                    "bear_sell_boost": 0.11,
+                    "bear_buy_penalty": 0.11,
                     "min_confidence_to_use": 0.10,
                     "min_signal_quality": 0.28,
                     "hold_contribution_pct": 0.17,
@@ -360,11 +350,10 @@ class TradingBot:
                     "sell_threshold": 0.30,
                     "two_strategy_bonus": 0.22,
                     "three_strategy_bonus": 0.25,
-                    # UPDATED: Stronger regime bias (was 0.03-0.04)
-                    "bull_buy_boost": 0.12,  # Increased from 0.04
-                    "bull_sell_penalty": 0.12,  # Increased from 0.03
-                    "bear_sell_boost": 0.12,  # Increased from 0.04
-                    "bear_buy_penalty": 0.12,  # Increased from 0.03
+                    "bull_buy_boost": 0.12,
+                    "bull_sell_penalty": 0.12,
+                    "bear_sell_boost": 0.12,
+                    "bear_buy_penalty": 0.12,
                     "min_confidence_to_use": 0.09,
                     "min_signal_quality": 0.25,
                     "hold_contribution_pct": 0.18,
@@ -373,23 +362,22 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                "buy_threshold": 0.24,
-                "sell_threshold": 0.30,
-                "two_strategy_bonus": 0.25,
-                "three_strategy_bonus": 0.30,
-                "bull_buy_boost": 0.15,
-                "bull_sell_penalty": 0.10,
-                "bear_sell_boost": 0.15,
-                "bear_buy_penalty": 0.10,
-                "min_confidence_to_use": 0.08,
-                "min_signal_quality": 0.20,
-                "hold_contribution_pct": 0.20,
-                "allow_single_override": True,
-                "single_override_threshold": 0.65,
-                "verbose": False,
-                # ✨ NEW: Quality margin to filter weak signals
-                "min_quality_margin": 0.05,  # ← ADD THIS LINE
-            },
+                    "buy_threshold": 0.24,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.25,
+                    "three_strategy_bonus": 0.30,
+                    "bull_buy_boost": 0.15,
+                    "bull_sell_penalty": 0.10,
+                    "bear_sell_boost": 0.15,
+                    "bear_buy_penalty": 0.10,
+                    "min_confidence_to_use": 0.08,
+                    "min_signal_quality": 0.20,
+                    "hold_contribution_pct": 0.20,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.65,
+                    "verbose": False,
+                    "min_quality_margin": 0.05,
+                },
             },
             "GOLD": {
                 "conservative": {
@@ -397,11 +385,10 @@ class TradingBot:
                     "sell_threshold": 0.42,
                     "two_strategy_bonus": 0.18,
                     "three_strategy_bonus": 0.25,
-                    # UPDATED: Stronger regime bias (was 0.02-0.03)
-                    "bull_buy_boost": 0.07,  # Increased from 0.02
-                    "bull_sell_penalty": 0.09,  # Increased from 0.03
-                    "bear_sell_boost": 0.07,  # Increased from 0.02
-                    "bear_buy_penalty": 0.09,  # Increased from 0.03
+                    "bull_buy_boost": 0.07,
+                    "bull_sell_penalty": 0.09,
+                    "bear_sell_boost": 0.07,
+                    "bear_buy_penalty": 0.09,
                     "min_confidence_to_use": 0.12,
                     "min_signal_quality": 0.30,
                     "hold_contribution_pct": 0.12,
@@ -414,11 +401,10 @@ class TradingBot:
                     "sell_threshold": 0.36,
                     "two_strategy_bonus": 0.20,
                     "three_strategy_bonus": 0.25,
-                    # UPDATED: Stronger regime bias (was 0.02)
-                    "bull_buy_boost": 0.08,  # Increased from 0.02
-                    "bull_sell_penalty": 0.08,  # Increased from 0.02
-                    "bear_sell_boost": 0.08,  # Increased from 0.02
-                    "bear_buy_penalty": 0.08,  # Increased from 0.02
+                    "bull_buy_boost": 0.08,
+                    "bull_sell_penalty": 0.08,
+                    "bear_sell_boost": 0.08,
+                    "bear_buy_penalty": 0.08,
                     "min_confidence_to_use": 0.10,
                     "min_signal_quality": 0.28,
                     "hold_contribution_pct": 0.14,
@@ -431,11 +417,10 @@ class TradingBot:
                     "sell_threshold": 0.30,
                     "two_strategy_bonus": 0.22,
                     "three_strategy_bonus": 0.30,
-                    # UPDATED: Stronger regime bias (was 0.01-0.03)
-                    "bull_buy_boost": 0.09,  # Increased from 0.03
-                    "bull_sell_penalty": 0.09,  # Increased from 0.01
-                    "bear_sell_boost": 0.09,  # Increased from 0.03
-                    "bear_buy_penalty": 0.09,  # Increased from 0.01
+                    "bull_buy_boost": 0.09,
+                    "bull_sell_penalty": 0.09,
+                    "bear_sell_boost": 0.09,
+                    "bear_buy_penalty": 0.09,
                     "min_confidence_to_use": 0.08,
                     "min_signal_quality": 0.22,
                     "hold_contribution_pct": 0.15,
@@ -444,29 +429,25 @@ class TradingBot:
                     "verbose": False,
                 },
                 "scalper": {
-                "buy_threshold": 0.23,
-                "sell_threshold": 0.30,
-                "two_strategy_bonus": 0.25,
-                "three_strategy_bonus": 0.35,
-                "bull_buy_boost": 0.12,
-                "bull_sell_penalty": 0.08,
-                "bear_sell_boost": 0.12,
-                "bear_buy_penalty": 0.08,
-                "min_confidence_to_use": 0.06,
-                "min_signal_quality": 0.18,
-                "hold_contribution_pct": 0.18,
-                "allow_single_override": True,
-                "single_override_threshold": 0.65,
-                "verbose": False,
-                # ✨ NEW: Quality margin to filter weak signals
-                "min_quality_margin": 0.06,  # ← ADD THIS LINE
-            },
+                    "buy_threshold": 0.23,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.25,
+                    "three_strategy_bonus": 0.35,
+                    "bull_buy_boost": 0.12,
+                    "bull_sell_penalty": 0.08,
+                    "bear_sell_boost": 0.12,
+                    "bear_buy_penalty": 0.08,
+                    "min_confidence_to_use": 0.06,
+                    "min_signal_quality": 0.18,
+                    "hold_contribution_pct": 0.18,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.65,
+                    "verbose": False,
+                    "min_quality_margin": 0.06,
+                },
             },
         }
 
-        # ============================================================
-        # AUTO-PRESET SELECTION LOGIC
-        # ============================================================
         aggregator_cfg = self.config.get("aggregator_settings", {})
         preset = aggregator_cfg.get("preset", "auto")
 
@@ -474,13 +455,8 @@ class TradingBot:
             logger.info("\n" + "=" * 70)
             logger.info("🤖 AUTO-PRESET MODE ENABLED")
             logger.info("=" * 70)
-            logger.info("Analyzing market conditions to select optimal presets...")
-            logger.info("")
-
-            # Initialize auto-selector
+            
             selector = AutoPresetSelector(self.data_manager, self.config)
-
-            # Get optimal preset for each enabled asset
             asset_presets = selector.get_preset_for_all_assets()
 
             logger.info("\n" + "=" * 70)
@@ -494,14 +470,11 @@ class TradingBot:
             logger.warning(f"Unknown preset '{preset}', using 'balanced'")
             asset_presets = {name: "balanced" for name in self.strategies.keys()}
         else:
-            # Manual preset specified - use for all assets
             logger.info(f"Using manual preset: {preset.upper()}")
             asset_presets = {name: preset for name in self.strategies.keys()}
 
         self.selected_presets = asset_presets.copy()
-        # ============================================================
-        # CREATE AGGREGATORS WITH SELECTED PRESETS
-        # ============================================================
+
         for asset_name, strategies in self.strategies.items():
             if not self.config["assets"][asset_name].get("enabled", False):
                 continue
@@ -511,10 +484,7 @@ class TradingBot:
                 logger.warning(f"[!] {asset_name}: No strategies, skipping aggregator")
                 continue
 
-            # Get the preset for this specific asset
             selected_preset = asset_presets.get(asset_name, "balanced")
-
-            # Get configuration for the selected preset
             config_for_aggregator = AGGREGATOR_PRESETS[asset_name][selected_preset]
 
             try:
@@ -566,9 +536,268 @@ class TradingBot:
             sys.exit(1)
 
         logger.info(f"\n[OK] Loaded {loaded}/{expected} models")
-
-        # NOW initialize aggregators after models are loaded and exchanges connected
         self._initialize_aggregators()
+
+    # ✨ NEW: Improved Telegram thread management
+    def _start_telegram_with_monitoring(self):
+        """Start Telegram bot with health monitoring and auto-restart"""
+        max_restart_interval = 300  # 5 minutes
+        
+        while not self._shutdown_requested:
+            try:
+                # Check if we should attempt restart
+                if self._telegram_error_count >= self._max_telegram_restarts:
+                    if self._telegram_last_restart:
+                        time_since_restart = (datetime.now() - self._telegram_last_restart).total_seconds()
+                        if time_since_restart < max_restart_interval:
+                            logger.warning(
+                                f"[TELEGRAM] Max restarts reached, waiting {max_restart_interval - time_since_restart:.0f}s"
+                            )
+                            time.sleep(60)
+                            continue
+                    
+                    # Reset counter after cooldown
+                    logger.info("[TELEGRAM] Resetting restart counter after cooldown")
+                    self._telegram_error_count = 0
+
+                logger.info(f"[TELEGRAM] Starting bot (attempt {self._telegram_error_count + 1}/{self._max_telegram_restarts})...")
+                self._run_telegram_loop()
+                
+                # If we get here, the loop exited normally
+                if self._shutdown_requested:
+                    logger.info("[TELEGRAM] Normal shutdown")
+                    break
+                else:
+                    logger.warning("[TELEGRAM] Loop exited unexpectedly")
+                    self._telegram_error_count += 1
+                    self._telegram_last_restart = datetime.now()
+                    
+                    if not self._shutdown_requested:
+                        logger.info("[TELEGRAM] Restarting in 10 seconds...")
+                        time.sleep(10)
+                
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Critical error: {e}", exc_info=True)
+                self._telegram_error_count += 1
+                self._telegram_last_restart = datetime.now()
+                
+                if not self._shutdown_requested:
+                    logger.info("[TELEGRAM] Restarting in 10 seconds...")
+                    time.sleep(10)
+        
+        logger.info("[TELEGRAM] Monitoring thread stopped")
+
+    async def _start_telegram_bot(self):
+        """Start Telegram bot with improved error handling"""
+        try:
+            logger.info("[TELEGRAM] Initializing...")
+            await self.telegram_bot.initialize()
+            self._telegram_ready.set()
+            logger.info("[TELEGRAM] Ready")
+            await self.telegram_bot.run_polling()
+        except asyncio.CancelledError:
+            logger.info("[TELEGRAM] Cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Error: {e}", exc_info=True)
+            self._telegram_ready.clear()
+            raise
+
+    def _run_telegram_loop(self):
+        """Run Telegram event loop with proper cleanup"""
+        self.telegram_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.telegram_loop)
+        self._telegram_ready.clear()
+
+        try:
+            logger.info("[TELEGRAM] Event loop starting...")
+            self.telegram_loop.run_until_complete(self._start_telegram_bot())
+        except KeyboardInterrupt:
+            logger.info("[TELEGRAM] Keyboard interrupt")
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
+        finally:
+            logger.info("[TELEGRAM] Cleaning up event loop...")
+            self._telegram_ready.clear()
+
+            try:
+                # Cancel all tasks
+                pending = asyncio.all_tasks(self.telegram_loop)
+                if pending:
+                    logger.info(f"[TELEGRAM] Cancelling {len(pending)} tasks...")
+                    for task in pending:
+                        task.cancel()
+
+                    try:
+                        self.telegram_loop.run_until_complete(
+                            asyncio.wait_for(
+                                asyncio.gather(*pending, return_exceptions=True),
+                                timeout=5.0,
+                            )
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        logger.warning(f"[TELEGRAM] Task cleanup timeout: {e}")
+            except Exception as e:
+                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
+            finally:
+                if not self.telegram_loop.is_closed():
+                    self.telegram_loop.close()
+                    logger.info("[TELEGRAM] Event loop closed")
+
+    def _send_telegram_notification(self, coro):
+        """Send Telegram notification with improved error handling"""
+        if not self.telegram_bot or not self.telegram_loop:
+            return
+
+        if not self._telegram_ready.is_set():
+            logger.debug("[TELEGRAM] Bot not ready, skipping notification")
+            return
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
+            future.result(timeout=10)  # Increased timeout
+        except TimeoutError:
+            logger.debug("[TELEGRAM] Notification timeout")
+        except Exception as e:
+            logger.debug(f"[TELEGRAM] Notification error: {e}")
+
+    # ✨ IMPROVED: Trading cycle with better error handling
+    def run_trading_cycle(self):
+        """Execute one complete trading cycle with error recovery"""
+        try:
+            logger.info("\n" + "=" * 70)
+            logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("=" * 70)
+
+            # Refresh capital if live
+            if not self.portfolio_manager.is_paper_mode:
+                try:
+                    self.portfolio_manager.refresh_capital()
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to refresh capital: {e}")
+
+            self.reset_daily_counters()
+
+            # Get current prices for all assets
+            current_prices = {}
+            enabled = [
+                name
+                for name, cfg in self.config["assets"].items()
+                if cfg.get("enabled", False)
+            ]
+
+            for asset_name in enabled:
+                try:
+                    asset_cfg = self.config["assets"][asset_name]
+                    exchange = asset_cfg.get("exchange", "binance")
+                    handler = (
+                        self.binance_handler if exchange == "binance" else self.mt5_handler
+                    )
+
+                    if handler:
+                        current_prices[asset_name] = handler.get_current_price()
+                except Exception as e:
+                    logger.error(f"Failed to get {asset_name} price: {e}")
+
+            # Update positions with current prices
+            try:
+                self.portfolio_manager.update_positions(current_prices)
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to update positions: {e}")
+
+            logger.info(f"[ASSETS] Enabled: {', '.join(enabled)}")
+
+            # Trade each asset
+            for asset_name in enabled:
+                try:
+                    self.trade_asset(asset_name)
+                    time.sleep(2)
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to trade {asset_name}: {e}", exc_info=True)
+                    self._consecutive_errors += 1
+
+            # Get portfolio status
+            try:
+                status = self.portfolio_manager.get_portfolio_status(current_prices)
+                self._log_portfolio_status(status)
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to get portfolio status: {e}")
+
+            # Reset error counter on successful cycle
+            self._consecutive_errors = 0
+            self._last_successful_cycle = datetime.now()
+            
+            logger.info("[OK] Trading cycle complete")
+            logger.info("=" * 70)
+
+        except Exception as e:
+            logger.error(f"[ERROR] Trading cycle failed: {e}", exc_info=True)
+            self._consecutive_errors += 1
+            
+            # Check if we have too many consecutive errors
+            if self._consecutive_errors >= self._max_consecutive_errors:
+                logger.error(
+                    f"[CRITICAL] Too many consecutive errors ({self._consecutive_errors}), "
+                    "entering safe mode"
+                )
+                self._send_telegram_notification(
+                    self.telegram_bot.notify_error(
+                        f"🚨 CRITICAL: {self._consecutive_errors} consecutive errors!\n"
+                        "Bot entering safe mode."
+                    )
+                )
+                time.sleep(300)  # Wait 5 minutes before next cycle
+
+    def _log_portfolio_status(self, status):
+        """Log portfolio status"""
+        logger.info(f"\n{'-' * 70}")
+        logger.info("[PORTFOLIO STATUS]")
+        logger.info(f"{'-' * 70}")
+        logger.info(f"Mode:           {status.get('mode', 'N/A').upper()}")
+        logger.info(f"Total Value:    ${status.get('total_value', 0):,.2f}")
+        logger.info(f"Cash:           ${status.get('cash', 0):,.2f}")
+        logger.info(
+            f"Exposure:       ${status.get('total_exposure', 0):,.2f} ({status.get('exposure_pct', 0):.1%})"
+        )
+        logger.info(f"Open Positions: {status.get('open_positions', 0)}")
+        logger.info(f"Total Trades:   {status.get('total_trades', 0)}")
+
+        daily_pnl = status.get("daily_pnl", 0)
+        daily_pnl_color = "+" if daily_pnl >= 0 else ""
+        logger.info(f"Daily P&L:      {daily_pnl_color}${daily_pnl:,.2f}")
+
+        realized_pnl = status.get("realized_pnl_today", 0)
+        realized_color = "+" if realized_pnl >= 0 else ""
+        logger.info(f"Realized P&L:   {realized_color}${realized_pnl:,.2f}")
+
+        # Show individual position P&L
+        positions = status.get("positions", {})
+        if positions:
+            logger.info(f"\n{'-' * 70}")
+            logger.info("[OPEN POSITIONS]")
+            logger.info(f"{'-' * 70}")
+
+            for asset, pos_data in positions.items():
+                side = pos_data.get("side", "N/A").upper()
+                entry = pos_data.get("entry_price", 0)
+                current = pos_data.get("current_price", 0)
+                pnl = pos_data.get("pnl", 0)
+                pnl_pct = pos_data.get("pnl_pct", 0) * 100
+
+                pnl_color = "+" if pnl >= 0 else ""
+
+                logger.info(f"{asset} {side}:")
+                logger.info(f"  Entry:   ${entry:,.2f}")
+                logger.info(f"  Current: ${current:,.2f}")
+                logger.info(f"  P&L:     {pnl_color}${pnl:,.2f} ({pnl_color}{pnl_pct:.2f}%)")
+
+                if pos_data.get("mt5_ticket"):
+                    mt5_profit = pos_data.get("mt5_profit", 0)
+                    logger.info(f"  MT5 P&L: ${mt5_profit:,.2f} (Ticket: {pos_data['mt5_ticket']})")
+
+                logger.info("")
+
+        logger.info(f"{'-' * 70}")
 
     def reset_daily_counters(self):
         """Reset daily trading counters"""
@@ -580,16 +809,20 @@ class TradingBot:
             logger.info(f"[RESET] Daily counters reset for {current_date}")
             self.portfolio_manager.start_trading_session()
             logger.info(f"[SESSION] Trading session started")
+            
             if not self.portfolio_manager.is_paper_mode:
                 logger.info("[REFRESH] Fetching updated capital...")
-                self.portfolio_manager.refresh_capital()
-                self.portfolio_manager.reset_daily_pnl()
+                try:
+                    self.portfolio_manager.refresh_capital()
+                    self.portfolio_manager.reset_daily_pnl()
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to refresh capital: {e}")
 
             # Send daily summary via Telegram
-            if self.telegram_bot and self.telegram_loop:
+            if self.telegram_bot and self._telegram_ready.is_set():
                 try:
-                    asyncio.run_coroutine_threadsafe(
-                        self.telegram_bot.send_daily_summary(), self.telegram_loop
+                    self._send_telegram_notification(
+                        self.telegram_bot.send_daily_summary()
                     )
                 except Exception as e:
                     logger.debug(f"[TELEGRAM] Daily summary error: {e}")
@@ -600,9 +833,7 @@ class TradingBot:
 
         max_daily_trades = risk_cfg.get("max_daily_trades", 10)
         if self.trade_count_today >= max_daily_trades:
-            logger.warning(
-                f"[LIMIT] Daily trades ({self.trade_count_today}/{max_daily_trades})"
-            )
+            logger.warning(f"[LIMIT] Daily trades ({self.trade_count_today}/{max_daily_trades})")
             return False
 
         max_daily_loss = risk_cfg.get("max_daily_loss_pct", 0.05)
@@ -618,13 +849,12 @@ class TradingBot:
         )
         if loss_pct >= circuit_breaker:
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
-            if self.telegram_bot and self.telegram_loop:
+            if self.telegram_bot and self._telegram_ready.is_set():
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    self._send_telegram_notification(
                         self.telegram_bot.notify_error(
                             f"🚨 CIRCUIT BREAKER!\nLoss: {loss_pct:.2%}"
-                        ),
-                        self.telegram_loop,
+                        )
                     )
                 except:
                     pass
@@ -657,24 +887,19 @@ class TradingBot:
         """Check if market is open for the asset"""
         if asset_name == "BTC":
             return True
-
         elif asset_name == "GOLD":
             is_open = should_trade_gold()
-
             if not is_open:
                 status, message = MarketHours.get_market_status("gold")
-
                 current_hour = datetime.now().hour
                 if self.last_market_status_log != current_hour:
                     logger.info(f"[MARKET] {asset_name}: {message}")
                     self.last_market_status_log = current_hour
-
             return is_open
-
         return True
 
     def trade_asset(self, asset_name: str):
-        """Execute trading logic for a single asset"""
+        """Execute trading logic for a single asset with error handling"""
         asset_cfg = self.config["assets"][asset_name]
         if not asset_cfg.get("enabled", False):
             return
@@ -686,7 +911,6 @@ class TradingBot:
         exchange = asset_cfg.get("exchange", "binance")
         symbol = asset_cfg.get("symbol", "BTCUSDT")
 
-        # Verify handler is available
         handler = self.binance_handler if exchange == "binance" else self.mt5_handler
         if not handler:
             logger.warning(f"[!] {asset_name}: {exchange.upper()} handler unavailable")
@@ -704,48 +928,51 @@ class TradingBot:
             else:
                 logger.info(f"[MARKET] {asset_name}: 24/7 (Cryptocurrency)")
 
-            # Fetch data
-            end_time = datetime.now(timezone.utc)
-            if exchange == "binance":
-                interval = asset_cfg.get("interval", "1h")
-                lookback = 15 if interval == "1h" else 60
-            else:
-                timeframe = asset_cfg.get("timeframe", "H1")
-                lookback = 25 if timeframe == "H1" else 75
+            # Fetch data with error handling
+            try:
+                end_time = datetime.now(timezone.utc)
+                if exchange == "binance":
+                    interval = asset_cfg.get("interval", "1h")
+                    lookback = 15 if interval == "1h" else 60
+                else:
+                    timeframe = asset_cfg.get("timeframe", "H1")
+                    lookback = 25 if timeframe == "H1" else 75
 
-            start_time = end_time - timedelta(days=lookback)
-            logger.info(f"[DATA] Fetching {lookback} days...")
+                start_time = end_time - timedelta(days=lookback)
+                logger.info(f"[DATA] Fetching {lookback} days...")
 
-            if exchange == "binance":
-                df = self.data_manager.fetch_binance_data(
-                    symbol=symbol,
-                    interval=asset_cfg.get("interval", "1h"),
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-            else:
-                df = self.data_manager.fetch_mt5_data(
-                    symbol=symbol,
-                    timeframe=asset_cfg.get("timeframe", "H1"),
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
+                if exchange == "binance":
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=symbol,
+                        interval=asset_cfg.get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                else:
+                    df = self.data_manager.fetch_mt5_data(
+                        symbol=symbol,
+                        timeframe=asset_cfg.get("timeframe", "H1"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
 
-            df = self.data_manager.clean_data(df)
-            min_bars = 250
-            if len(df) < min_bars:
-                logger.warning(
-                    f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})"
-                )
+                df = self.data_manager.clean_data(df)
+                min_bars = 250
+                if len(df) < min_bars:
+                    logger.warning(f"[!] {asset_name}: Insufficient data ({len(df)}/{min_bars})")
+                    return
+
+                logger.info(f"[OK] {len(df)} bars fetched")
+
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to fetch data for {asset_name}: {e}")
                 return
 
-            logger.info(f"[OK] {len(df)} bars fetched")
-
-            # Get current price
+            # Get current price with fallback
             try:
                 if exchange == "binance":
                     current_price = handler.get_current_price(symbol)
-                else:  # MT5
+                else:
                     current_price = handler.get_current_price(symbol)
             except Exception as e:
                 logger.warning(f"Failed to get current price: {e}, using last close")
@@ -755,22 +982,23 @@ class TradingBot:
 
             # Get aggregated signal
             aggregator = self.aggregators.get(asset_name)
-            logger.info(f"[AGGREGATOR] {aggregator}")
             if not aggregator:
                 logger.warning(f"[!] {asset_name}: No aggregator configured")
                 return
 
             signal, details = aggregator.get_aggregated_signal(df)
-            self.telegram_bot.signal_monitor.record_signal(
-                asset=asset_name,
-                signal=signal,
-                details=details,
-                price=current_price,
-                timestamp=datetime.now(),
-            )
+            
+            # Record signal for monitoring
+            if self.telegram_bot:
+                self.telegram_bot.signal_monitor.record_signal(
+                    asset=asset_name,
+                    signal=signal,
+                    details=details,
+                    price=current_price,
+                    timestamp=datetime.now(),
+                )
 
-            # Log all three strategy signals
-            # Log all three strategy signals
+            # Log signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
                 f"  Mean Reversion:   {details.get('mr_signal', 0):>2} "
@@ -788,7 +1016,7 @@ class TradingBot:
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
             logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
 
-            # Skip if signal is HOLD (0)
+            # Skip if HOLD signal
             if signal == 0:
                 logger.info(f"[HOLD] {asset_name}: No action (HOLD signal)")
                 return
@@ -799,43 +1027,46 @@ class TradingBot:
                 logger.warning(f"[SKIP] {asset_name}: No open position to sell")
                 return
 
-            # Check trading limits and cooldowns before proceeding
+            # Check trading limits
             if not self.check_trading_limits():
-                logger.info(
-                    f"[LIMIT] {asset_name}: Trading limits prevent new position"
-                )
+                logger.info(f"[LIMIT] {asset_name}: Trading limits prevent new position")
                 return
 
             if not self.check_min_time_between_trades(asset_name):
                 logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
                 return
 
-            # Execute signal with appropriate handler
+            # Execute signal
             success = False
-            if exchange == "binance":
-                success = self.binance_handler.execute_signal(
-                    signal=signal,
-                    current_price=current_price,
-                    asset_name=asset_name,
-                    confidence_score=details.get("signal_quality", 0.5),
-                    market_condition=(
-                        "bull" if details.get("regime") == "🚀 BULL" else "bear"
-                    ),
-                )
-                self.binance_handler.check_and_update_positions(asset_name)
-            else:
-                success = self.mt5_handler.execute_signal(
-                    signal=signal,
-                    symbol=symbol,
-                    asset=asset_name,
-                    confidence_score=details.get("signal_quality", 0.5),
-                    market_condition=(
-                        "bull" if details.get("regime") == "🚀 BULL" else "bear"
-                    ),
-                )
-                self.mt5_handler.check_and_update_positions(asset_name)
+            try:
+                if exchange == "binance":
+                    success = self.binance_handler.execute_signal(
+                        signal=signal,
+                        current_price=current_price,
+                        asset_name=asset_name,
+                        confidence_score=details.get("signal_quality", 0.5),
+                        market_condition=(
+                            "bull" if details.get("regime") == "🚀 BULL" else "bear"
+                        ),
+                    )
+                    self.binance_handler.check_and_update_positions(asset_name)
+                else:
+                    success = self.mt5_handler.execute_signal(
+                        signal=signal,
+                        symbol=symbol,
+                        asset=asset_name,
+                        confidence_score=details.get("signal_quality", 0.5),
+                        market_condition=(
+                            "bull" if details.get("regime") == "🚀 BULL" else "bear"
+                        ),
+                    )
+                    self.mt5_handler.check_and_update_positions(asset_name)
 
-            # Only log success if the trade was actually executed
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to execute signal for {asset_name}: {e}")
+                return
+
+            # Handle success
             if success:
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
@@ -844,7 +1075,7 @@ class TradingBot:
                     f"[SUCCESS] {asset_name} {signal_type} executed (Daily count: {self.trade_count_today})"
                 )
 
-                # Check if new position was opened
+                # Send Telegram notifications
                 new_pos = self.portfolio_manager.get_position(asset_name)
                 if new_pos and not existing_pos and signal != 0:
                     try:
@@ -852,11 +1083,7 @@ class TradingBot:
                         self._send_telegram_notification(
                             self.telegram_bot.notify_trade_opened(
                                 asset=asset_name,
-                                side=(
-                                    pos.side
-                                    if hasattr(pos, "side")
-                                    else pos.get("side")
-                                ),
+                                side=(pos.side if hasattr(pos, "side") else pos.get("side")),
                                 price=current_price,
                                 size=(
                                     pos.quantity * current_price
@@ -878,7 +1105,6 @@ class TradingBot:
                     except Exception as e:
                         logger.error(f"Failed to send Telegram notification: {e}")
 
-                # Check if position was closed
                 if existing_pos and not new_pos:
                     try:
                         closed = self.portfolio_manager.closed_positions
@@ -908,13 +1134,12 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
-            if self.telegram_bot and self.telegram_loop:
+            if self.telegram_bot and self._telegram_ready.is_set():
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    self._send_telegram_notification(
                         self.telegram_bot.notify_error(
                             f"Error in {asset_name}:\n{str(e)[:200]}"
-                        ),
-                        self.telegram_loop,
+                        )
                     )
                 except:
                     pass
@@ -934,115 +1159,9 @@ class TradingBot:
         except Exception as e:
             logger.debug(f"Trade log error: {e}")
 
-    def run_trading_cycle(self):
-        """Execute one complete trading cycle"""
-        logger.info("\n" + "=" * 70)
-        logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info("=" * 70)
-
-        # Refresh capital if live
-        if not self.portfolio_manager.is_paper_mode:
-            self.portfolio_manager.refresh_capital()
-
-        self.reset_daily_counters()
-
-        # ✅ FIX: Get current prices for all assets
-        current_prices = {}
-        enabled = [
-            name
-            for name, cfg in self.config["assets"].items()
-            if cfg.get("enabled", False)
-        ]
-
-        for asset_name in enabled:
-            try:
-                asset_cfg = self.config["assets"][asset_name]
-                exchange = asset_cfg.get("exchange", "binance")
-                handler = (
-                    self.binance_handler if exchange == "binance" else self.mt5_handler
-                )
-
-                if handler:
-                    current_prices[asset_name] = handler.get_current_price()
-                    self.portfolio_manager.update_positions(current_prices)
-    
-            except Exception as e:
-                logger.debug(f"Failed to get {asset_name} price: {e}")
-
-        # ✅ FIX: Update positions with current prices (this will fetch MT5 profit)
-        self.portfolio_manager.update_positions(current_prices)
-
-        logger.info(f"[ASSETS] Enabled: {', '.join(enabled)}")
-
-        for asset_name in enabled:
-            self.trade_asset(asset_name)
-            time.sleep(2)
-
-        # ✅ FIX: Get portfolio status with current prices
-        status = self.portfolio_manager.get_portfolio_status(current_prices)
-
-        logger.info(f"\n{'-' * 70}")
-        logger.info("[PORTFOLIO STATUS]")
-        logger.info(f"{'-' * 70}")
-        logger.info(f"Mode:           {status.get('mode', 'N/A').upper()}")
-        logger.info(f"Total Value:    ${status.get('total_value', 0):,.2f}")
-        logger.info(f"Cash:           ${status.get('cash', 0):,.2f}")
-        logger.info(
-            f"Exposure:       ${status.get('total_exposure', 0):,.2f} ({status.get('exposure_pct', 0):.1%})"
-        )
-        logger.info(f"Open Positions: {status.get('open_positions', 0)}")
-        logger.info(f"Total Trades:   {status.get('total_trades', 0)}")
-
-        # ✅ FIX: Display daily P&L correctly
-        daily_pnl = status.get("daily_pnl", 0)
-        daily_pnl_color = "+" if daily_pnl >= 0 else ""
-        logger.info(f"Daily P&L:      {daily_pnl_color}${daily_pnl:,.2f}")
-
-        # ✅ FIX: Display realized P&L today
-        realized_pnl = status.get("realized_pnl_today", 0)
-        realized_color = "+" if realized_pnl >= 0 else ""
-        logger.info(f"Realized P&L:   {realized_color}${realized_pnl:,.2f}")
-
-        # ✅ FIX: Show individual position P&L
-        positions = status.get("positions", {})
-        if positions:
-            logger.info(f"\n{'-' * 70}")
-            logger.info("[OPEN POSITIONS]")
-            logger.info(f"{'-' * 70}")
-
-            for asset, pos_data in positions.items():
-                side = pos_data.get("side", "N/A").upper()
-                entry = pos_data.get("entry_price", 0)
-                current = pos_data.get("current_price", 0)
-                pnl = pos_data.get("pnl", 0)
-                pnl_pct = pos_data.get("pnl_pct", 0) * 100
-
-                pnl_color = "+" if pnl >= 0 else ""
-
-                logger.info(f"{asset} {side}:")
-                logger.info(f"  Entry:   ${entry:,.2f}")
-                logger.info(f"  Current: ${current:,.2f}")
-                logger.info(
-                    f"  P&L:     {pnl_color}${pnl:,.2f} ({pnl_color}{pnl_pct:.2f}%)"
-                )
-
-                # ✅ FIX: Show MT5 profit if available
-                if pos_data.get("mt5_ticket"):
-                    mt5_profit = pos_data.get("mt5_profit", 0)
-                    logger.info(
-                        f"  MT5 P&L: ${mt5_profit:,.2f} (Ticket: {pos_data['mt5_ticket']})"
-                    )
-
-                logger.info("")
-
-        logger.info(f"{'-' * 70}")
-        logger.info("[OK] Trading cycle complete")
-        logger.info("=" * 70)
-
     def log_detailed_pnl_report(self):
-        """Log detailed P&L report for monitoring"""
+        """Log detailed P&L report"""
         try:
-            # Get current prices
             current_prices = {}
             for asset_name, asset_cfg in self.config["assets"].items():
                 if not asset_cfg.get("enabled", False):
@@ -1059,10 +1178,7 @@ class TradingBot:
                     except:
                         pass
 
-            # Update positions with MT5 profit
             self.portfolio_manager.update_positions(current_prices)
-
-            # Get status
             status = self.portfolio_manager.get_portfolio_status(current_prices)
 
             logger.info("\n" + "=" * 70)
@@ -1072,23 +1188,18 @@ class TradingBot:
             logger.info(f"Mode: {status['mode'].upper()}")
             logger.info("")
 
-            # Capital
             logger.info("[CAPITAL]")
-            logger.info(
-                f"  Initial:     ${self.portfolio_manager.initial_capital:,.2f}"
-            )
+            logger.info(f"  Initial:     ${self.portfolio_manager.initial_capital:,.2f}")
             logger.info(f"  Current:     ${status['capital']:,.2f}")
             logger.info(f"  Total Value: ${status['total_value']:,.2f}")
             logger.info("")
 
-            # P&L Breakdown
             logger.info("[P&L BREAKDOWN]")
             logger.info(f"  Daily P&L:      ${status['daily_pnl']:+,.2f}")
             logger.info(f"  Realized Today: ${status['realized_pnl_today']:+,.2f}")
             logger.info(f"  Unrealized:     ${status['total_unrealized_pnl']:+,.2f}")
             logger.info("")
 
-            # Positions
             positions = status.get("positions", {})
             if positions:
                 logger.info("[POSITION DETAILS]")
@@ -1111,7 +1222,6 @@ class TradingBot:
                 logger.info("[NO OPEN POSITIONS]")
                 logger.info("")
 
-            # Risk Metrics
             logger.info("[RISK METRICS]")
             logger.info(
                 f"  Exposure:     ${status['total_exposure']:,.2f} ({status['exposure_pct']:.1%})"
@@ -1124,73 +1234,8 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
-    async def _start_telegram_bot(self):
-        """Start Telegram bot"""
-        try:
-            logger.info("[TELEGRAM] Initializing...")
-            await self.telegram_bot.initialize()
-            logger.info("[TELEGRAM] Ready")
-            await self.telegram_bot.run_polling()
-        except asyncio.CancelledError:
-            logger.info("[TELEGRAM] Cancelled")
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Error: {e}", exc_info=True)
-
-    def _run_telegram_loop(self):
-        """Run Telegram event loop"""
-        self.telegram_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.telegram_loop)
-
-        try:
-            logger.info("[TELEGRAM] Event loop starting...")
-            self.telegram_loop.run_until_complete(self._start_telegram_bot())
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
-        finally:
-            logger.info("[TELEGRAM] Cleaning up event loop...")
-
-            try:
-                pending = asyncio.all_tasks(self.telegram_loop)
-                if pending:
-                    logger.info(f"[TELEGRAM] Cancelling {len(pending)} tasks...")
-                    for task in pending:
-                        task.cancel()
-
-                    try:
-                        self.telegram_loop.run_until_complete(
-                            asyncio.wait_for(
-                                asyncio.gather(*pending, return_exceptions=True),
-                                timeout=3.0,
-                            )
-                        )
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-            except Exception as e:
-                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
-            finally:
-                if not self.telegram_loop.is_closed():
-                    self.telegram_loop.close()
-                    logger.info("[TELEGRAM] Event loop closed")
-
-    def _send_telegram_notification(self, coro):
-        """Send Telegram notification from main thread"""
-        if not self.telegram_bot or not self.telegram_loop:
-            return
-
-        if not self.telegram_bot._is_ready:
-            logger.debug("[TELEGRAM] Bot not ready")
-            return
-
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
-            future.result(timeout=5)
-        except TimeoutError:
-            logger.debug("[TELEGRAM] Notification timeout")
-        except Exception as e:
-            logger.debug(f"[TELEGRAM] Notification error: {e}")
-
     def start(self):
-        """Start the trading bot"""
+        """Start the trading bot with improved stability"""
         logger.info("\n" + "=" * 70)
         logger.info("[START] TRADING BOT INITIALIZING")
         logger.info("=" * 70)
@@ -1216,23 +1261,16 @@ class TradingBot:
 
             # Start Telegram bot if enabled
             if self.telegram_bot:
-                logger.info("\n[TELEGRAM] Starting bot in background thread...")
+                logger.info("\n[TELEGRAM] Starting bot with monitoring...")
                 self.telegram_thread = Thread(
-                    target=self._run_telegram_loop, daemon=True
+                    target=self._start_telegram_with_monitoring, 
+                    daemon=True
                 )
                 self.telegram_thread.start()
 
                 # Wait for bot ready
                 logger.info("[TELEGRAM] Waiting for bot to be ready...")
-                timeout = 30
-                start = time.time()
-
-                while (
-                    not self.telegram_bot._is_ready and (time.time() - start) < timeout
-                ):
-                    time.sleep(0.5)
-
-                if self.telegram_bot._is_ready:
+                if self._telegram_ready.wait(timeout=60):
                     logger.info("[TELEGRAM] ✅ Bot ready for notifications")
                 else:
                     logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout")
@@ -1252,6 +1290,7 @@ class TradingBot:
             schedule.every(1).hours.do(self.log_detailed_pnl_report)
 
             self.is_running = True
+            self._main_loop_running = True
             logger.info(f"\n[OK] Trading bot running")
             logger.info(
                 f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
@@ -1261,10 +1300,29 @@ class TradingBot:
             # Run initial cycle
             self.run_trading_cycle()
 
-            # Main loop
+            # Main loop with health monitoring
+            last_health_check = datetime.now()
+            health_check_interval = 300  # 5 minutes
+
             while self.is_running and not self._shutdown_requested:
-                schedule.run_pending()
-                time.sleep(1)
+                try:
+                    schedule.run_pending()
+                    
+                    # Periodic health check
+                    now = datetime.now()
+                    if (now - last_health_check).total_seconds() >= health_check_interval:
+                        self._perform_health_check()
+                        last_health_check = now
+                    
+                    time.sleep(1)
+                
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.error(f"[ERROR] Main loop error: {e}", exc_info=True)
+                    time.sleep(10)  # Wait before continuing
+
+            logger.info("[STOP] Main loop ended")
 
         except KeyboardInterrupt:
             logger.info("\n[!] KeyboardInterrupt received")
@@ -1273,6 +1331,32 @@ class TradingBot:
             logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
             self.stop()
             sys.exit(1)
+
+    def _perform_health_check(self):
+        """Perform periodic health check"""
+        try:
+            logger.debug("[HEALTH] Performing health check...")
+            
+            # Check if we've had a successful cycle recently
+            if self._last_successful_cycle:
+                time_since_cycle = (datetime.now() - self._last_successful_cycle).total_seconds()
+                if time_since_cycle > 1800:  # 30 minutes
+                    logger.warning(f"[HEALTH] No successful cycle in {time_since_cycle/60:.0f} minutes")
+            
+            # Check consecutive errors
+            if self._consecutive_errors > 0:
+                logger.warning(f"[HEALTH] Consecutive errors: {self._consecutive_errors}")
+            
+            # Check Telegram bot
+            if self.telegram_bot and not self._telegram_ready.is_set():
+                logger.warning("[HEALTH] Telegram bot not ready")
+                if self._telegram_error_count < self._max_telegram_restarts:
+                    logger.info("[HEALTH] Telegram bot will auto-restart")
+            
+            logger.debug("[HEALTH] Health check complete")
+            
+        except Exception as e:
+            logger.error(f"[HEALTH] Health check error: {e}")
 
     def stop(self):
         """Stop the trading bot gracefully"""
@@ -1286,6 +1370,7 @@ class TradingBot:
 
         self._shutdown_requested = True
         self.is_running = False
+        self._main_loop_running = False
 
         # Close positions if configured
         if self.config["trading"].get("close_positions_on_shutdown", False):
@@ -1307,7 +1392,7 @@ class TradingBot:
                     )
 
                     try:
-                        future.result(timeout=10)
+                        future.result(timeout=15)
                         logger.info("[TELEGRAM] ✅ Bot shutdown complete")
                     except TimeoutError:
                         logger.warning("[TELEGRAM] ⚠️ Shutdown timeout")
@@ -1318,10 +1403,10 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[TELEGRAM] Error during shutdown: {e}")
 
-        # Wait for event loop thread
+        # Wait for Telegram thread
         if self.telegram_thread and self.telegram_thread.is_alive():
-            logger.info("[TELEGRAM] Waiting for event loop thread...")
-            self.telegram_thread.join(timeout=5)
+            logger.info("[TELEGRAM] Waiting for thread...")
+            self.telegram_thread.join(timeout=10)
 
             if self.telegram_thread.is_alive():
                 logger.warning("[TELEGRAM] ⚠️ Thread still alive")
@@ -1360,14 +1445,10 @@ def main():
             strategies = asset_cfg.get("strategies", {})
 
             if strategies.get("mean_reversion", {}).get("enabled", False):
-                required_models.append(
-                    f"models/mean_reversion_{asset_name.lower()}.pkl"
-                )
+                required_models.append(f"models/mean_reversion_{asset_name.lower()}.pkl")
 
             if strategies.get("trend_following", {}).get("enabled", False):
-                required_models.append(
-                    f"models/trend_following_{asset_name.lower()}.pkl"
-                )
+                required_models.append(f"models/trend_following_{asset_name.lower()}.pkl")
 
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
                 required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
