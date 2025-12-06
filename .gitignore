@@ -21,6 +21,8 @@ data/*.csv
 data/*.parquet
 logs/*.log
 log/
+logs/*
+
 
 # IDE
 .vscode/
