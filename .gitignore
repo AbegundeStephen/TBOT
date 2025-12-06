@@ -20,6 +20,7 @@ models/*.pkl
 data/*.csv
 data/*.parquet
 logs/*.log
+log/
 
 # IDE
 .vscode/
