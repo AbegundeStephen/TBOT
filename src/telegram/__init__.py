@@ -182,7 +182,7 @@ def admin_only(func):
 class TradingTelegramBot:
     """
     Telegram bot interface for trading bot
-    Handles notifications and user commands
+    Handles notifications and user commands properly
     """
 
     def __init__(self, token: str, admin_ids: List[int], trading_bot):
