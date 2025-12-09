@@ -877,7 +877,7 @@ class TradingTelegramBot:
             positions_msg += (
                 f"*Portfolio Summary*\n"
                 f"💼 Total Exposure: ${total_exposure:,.2f}\n"
-                f"{unrealized_icon} Total Unrealized P&L: {unrealized_sign}${total_unrealized:,.2f}\n\n"
+                f"{unrealized_icon} Total realized P&L: {unrealized_sign}${total_unrealized:,.2f}\n\n"
             )
 
             positions_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"

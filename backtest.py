@@ -22,150 +22,141 @@ logger = logging.getLogger(__name__)
 
 # Asset-specific presets based on actual training performance
 AGGREGATOR_PRESETS = {
-    "BTC": {
-        "conservative": {
-            "buy_threshold": 0.35,
-            "sell_threshold": 0.40,
-            "two_strategy_bonus": 0.18,
-            "three_strategy_bonus": 0.20,
-            # UPDATED: Stronger regime bias (was 0.03-0.05)
-            "bull_buy_boost": 0.10,  # Increased from 0.03
-            "bull_sell_penalty": 0.12,  # Increased from 0.05
-            "bear_sell_boost": 0.10,  # Increased from 0.03
-            "bear_buy_penalty": 0.12,  # Increased from 0.05
-            "min_confidence_to_use": 0.12,
-            "min_signal_quality": 0.32,
-            "hold_contribution_pct": 0.15,
-            "allow_single_override": True,
-            "single_override_threshold": 0.75,
-            "verbose": False,
-        },
-        "balanced": {
-            "buy_threshold": 0.30,
-            "sell_threshold": 0.36,
-            "two_strategy_bonus": 0.20,
-            "three_strategy_bonus": 0.22,
-            # UPDATED: Stronger regime bias (was 0.035-0.04)
-            "bull_buy_boost": 0.11,  # Increased from 0.035
-            "bull_sell_penalty": 0.11,  # Increased from 0.04
-            "bear_sell_boost": 0.11,  # Increased from 0.035
-            "bear_buy_penalty": 0.11,  # Increased from 0.04
-            "min_confidence_to_use": 0.10,
-            "min_signal_quality": 0.28,
-            "hold_contribution_pct": 0.17,
-            "allow_single_override": True,
-            "single_override_threshold": 0.72,
-            "verbose": False,
-        },
-        "aggressive": {
-            "buy_threshold": 0.25,
-            "sell_threshold": 0.30,
-            "two_strategy_bonus": 0.22,
-            "three_strategy_bonus": 0.25,
-            # UPDATED: Stronger regime bias (was 0.03-0.04)
-            "bull_buy_boost": 0.12,  # Increased from 0.04
-            "bull_sell_penalty": 0.12,  # Increased from 0.03
-            "bear_sell_boost": 0.12,  # Increased from 0.04
-            "bear_buy_penalty": 0.12,  # Increased from 0.03
-            "min_confidence_to_use": 0.09,
-            "min_signal_quality": 0.25,
-            "hold_contribution_pct": 0.18,
-            "allow_single_override": True,
-            "single_override_threshold": 0.70,
-            "verbose": False,
-        },
-        "scalper": {
-            "buy_threshold": 0.24,
-            "sell_threshold": 0.30,
-            "two_strategy_bonus": 0.25,
-            "three_strategy_bonus": 0.30,
-            "bull_buy_boost": 0.14,
-            "bull_sell_penalty": 0.10,
-            "bear_sell_boost": 0.15,
-            "bear_buy_penalty": 0.10,
-            "min_confidence_to_use": 0.08,
-            "min_signal_quality": 0.20,
-            "hold_contribution_pct": 0.19,
-            "allow_single_override": True,
-            "single_override_threshold": 0.65,
-            "verbose": False,
-            # ✨ NEW: Quality margin to filter weak signals
-            "min_quality_margin": 0.05,  # ← ADD THIS LINE
-        },
-    },
-    "GOLD": {
-        "conservative": {
-            "buy_threshold": 0.38,
-            "sell_threshold": 0.42,
-            "two_strategy_bonus": 0.18,
-            "three_strategy_bonus": 0.25,
-            # UPDATED: Stronger regime bias (was 0.02-0.03)
-            "bull_buy_boost": 0.07,  # Increased from 0.02
-            "bull_sell_penalty": 0.09,  # Increased from 0.03
-            "bear_sell_boost": 0.07,  # Increased from 0.02
-            "bear_buy_penalty": 0.09,  # Increased from 0.03
-            "min_confidence_to_use": 0.12,
-            "min_signal_quality": 0.30,
-            "hold_contribution_pct": 0.12,
-            "allow_single_override": True,
-            "single_override_threshold": 0.75,
-            "verbose": False,
-        },
-        "balanced": {
-            "buy_threshold": 0.33,
-            "sell_threshold": 0.36,
-            "two_strategy_bonus": 0.20,
-            "three_strategy_bonus": 0.25,
-            # UPDATED: Stronger regime bias (was 0.02)
-            "bull_buy_boost": 0.08,  # Increased from 0.02
-            "bull_sell_penalty": 0.08,  # Increased from 0.02
-            "bear_sell_boost": 0.08,  # Increased from 0.02
-            "bear_buy_penalty": 0.08,  # Increased from 0.02
-            "min_confidence_to_use": 0.10,
-            "min_signal_quality": 0.28,
-            "hold_contribution_pct": 0.14,
-            "allow_single_override": True,
-            "single_override_threshold": 0.72,
-            "verbose": False,
-        },
-        "aggressive": {
-            "buy_threshold": 0.28,
-            "sell_threshold": 0.30,
-            "two_strategy_bonus": 0.22,
-            "three_strategy_bonus": 0.30,
-            # UPDATED: Stronger regime bias (was 0.01-0.03)
-            "bull_buy_boost": 0.09,  # Increased from 0.03
-            "bull_sell_penalty": 0.09,  # Increased from 0.01
-            "bear_sell_boost": 0.09,  # Increased from 0.03
-            "bear_buy_penalty": 0.09,  # Increased from 0.01
-            "min_confidence_to_use": 0.08,
-            "min_signal_quality": 0.22,
-            "hold_contribution_pct": 0.15,
-            "allow_single_override": True,
-            "single_override_threshold": 0.70,
-            "verbose": False,
-        },
-        "scalper": {
-            "buy_threshold": 0.23,
-            "sell_threshold": 0.30,
-            "two_strategy_bonus": 0.25,
-            "three_strategy_bonus": 0.35,
-            "bull_buy_boost": 0.12,
-            "bull_sell_penalty": 0.08,
-            "bear_sell_boost": 0.12,
-            "bear_buy_penalty": 0.08,
-            "min_confidence_to_use": 0.06,
-            "min_signal_quality": 0.18,
-            "hold_contribution_pct": 0.18,
-            "allow_single_override": True,
-            "single_override_threshold": 0.65,
-            "verbose": False,
-            # ✨ NEW: Quality margin to filter weak signals
-            "min_quality_margin": 0.06,  # ← ADD THIS LINE
-        },
-    },
+            "BTC": {
+                "conservative": {
+                    "buy_threshold": 0.35,
+                    "sell_threshold": 0.40,
+                    "two_strategy_bonus": 0.18,
+                    "three_strategy_bonus": 0.20,
+                    "bull_buy_boost": 0.10,
+                    "bull_sell_penalty": 0.12,
+                    "bear_sell_boost": 0.10,
+                    "bear_buy_penalty": 0.12,
+                    "min_confidence_to_use": 0.12,
+                    "min_signal_quality": 0.32,
+                    "hold_contribution_pct": 0.15,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.75,
+                    "verbose": False,
+                },
+                "balanced": {
+                    "buy_threshold": 0.30,
+                    "sell_threshold": 0.36,
+                    "two_strategy_bonus": 0.20,
+                    "three_strategy_bonus": 0.22,
+                    "bull_buy_boost": 0.11,
+                    "bull_sell_penalty": 0.11,
+                    "bear_sell_boost": 0.11,
+                    "bear_buy_penalty": 0.11,
+                    "min_confidence_to_use": 0.10,
+                    "min_signal_quality": 0.28,
+                    "hold_contribution_pct": 0.17,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.72,
+                    "verbose": False,
+                },
+                "aggressive": {
+                    "buy_threshold": 0.25,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.22,
+                    "three_strategy_bonus": 0.25,
+                    "bull_buy_boost": 0.12,
+                    "bull_sell_penalty": 0.12,
+                    "bear_sell_boost": 0.12,
+                    "bear_buy_penalty": 0.12,
+                    "min_confidence_to_use": 0.09,
+                    "min_signal_quality": 0.25,
+                    "hold_contribution_pct": 0.18,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.70,
+                    "verbose": False,
+                },
+                "scalper": {
+                    "buy_threshold": 0.24,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.25,
+                    "three_strategy_bonus": 0.30,
+                    "bull_buy_boost": 0.15,
+                    "bull_sell_penalty": 0.10,
+                    "bear_sell_boost": 0.15,
+                    "bear_buy_penalty": 0.10,
+                    "min_confidence_to_use": 0.08,
+                    "min_signal_quality": 0.20,
+                    "hold_contribution_pct": 0.20,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.65,
+                    "verbose": False,
+                    "min_quality_margin": 0.05,
+                },
+            },
+            "GOLD": {
+                "conservative": {
+                    "buy_threshold": 0.38,
+                    "sell_threshold": 0.42,
+                    "two_strategy_bonus": 0.18,
+                    "three_strategy_bonus": 0.25,
+                    "bull_buy_boost": 0.07,
+                    "bull_sell_penalty": 0.09,
+                    "bear_sell_boost": 0.07,
+                    "bear_buy_penalty": 0.09,
+                    "min_confidence_to_use": 0.12,
+                    "min_signal_quality": 0.30,
+                    "hold_contribution_pct": 0.12,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.75,
+                    "verbose": False,
+                },
+                "balanced": {
+                    "buy_threshold": 0.33,
+                    "sell_threshold": 0.36,
+                    "two_strategy_bonus": 0.20,
+                    "three_strategy_bonus": 0.25,
+                    "bull_buy_boost": 0.08,
+                    "bull_sell_penalty": 0.08,
+                    "bear_sell_boost": 0.08,
+                    "bear_buy_penalty": 0.08,
+                    "min_confidence_to_use": 0.10,
+                    "min_signal_quality": 0.28,
+                    "hold_contribution_pct": 0.14,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.72,
+                    "verbose": False,
+                },
+                "aggressive": {
+                    "buy_threshold": 0.28,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.22,
+                    "three_strategy_bonus": 0.30,
+                    "bull_buy_boost": 0.09,
+                    "bull_sell_penalty": 0.09,
+                    "bear_sell_boost": 0.09,
+                    "bear_buy_penalty": 0.09,
+                    "min_confidence_to_use": 0.08,
+                    "min_signal_quality": 0.22,
+                    "hold_contribution_pct": 0.15,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.70,
+                    "verbose": False,
+                },
+                "scalper": {
+                    "buy_threshold": 0.23,
+                    "sell_threshold": 0.30,
+                    "two_strategy_bonus": 0.25,
+                    "three_strategy_bonus": 0.35,
+                    "bull_buy_boost": 0.12,
+                    "bull_sell_penalty": 0.08,
+                    "bear_sell_boost": 0.12,
+                    "bear_buy_penalty": 0.08,
+                    "min_confidence_to_use": 0.06,
+                    "min_signal_quality": 0.18,
+                    "hold_contribution_pct": 0.18,
+                    "allow_single_override": True,
+                    "single_override_threshold": 0.65,
+                    "verbose": False,
+                    "min_quality_margin": 0.06,
+                },
+            },
 }
-
 
 class MLStrategy(bt.Strategy):
     """
