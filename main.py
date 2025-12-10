@@ -39,7 +39,8 @@ from src.execution.mt5_handler import MT5ExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.utils.market_hours import MarketHours, should_trade_btc, should_trade_gold
 from src.execution.auto_preset_selector import AutoPresetSelector
-
+from src.ai import DynamicAnalyst, OHLCSniper, HybridSignalValidator
+import pickle
 # Import Telegram bot
 from src.telegram import TradingTelegramBot
 from telegram_config import TELEGRAM_CONFIG
@@ -303,6 +304,81 @@ class TradingBot:
             else:
                 strat_names = ", ".join(self.strategies[asset_name].keys())
                 logger.info(f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}")
+                
+    def initialize_ai_layer(self):
+        """
+        Initialize AI validation layer
+        Add this method to your TradingBot class
+        """
+        try:
+            logger.info("="*70)
+            logger.info("Initializing AI Layer...")
+            logger.info("="*70)
+            
+            models_dir = Path("models/ai")
+            
+            # Check if model files exist
+            model_path = models_dir / "sniper.weights.h5"
+            mapping_path = models_dir / "pattern_mapping.pkl"
+            config_path = models_dir / "training_config.pkl"
+            
+            if not model_path.exists():
+                logger.error(f"[ERROR] Model not found: {model_path}")
+                logger.error("Please run: python train_ai_layer.py")
+                self.ai_validator = None
+                return
+            
+            # Load pattern mapping
+            with open(mapping_path, 'rb') as f:
+                pattern_map = pickle.load(f)
+            
+            # Load training config
+            with open(config_path, 'rb') as f:
+                config = pickle.load(f)
+            
+            logger.info(f"Loaded {len(pattern_map)} patterns")
+            logger.info(f"Model validation accuracy: {config['validation_accuracy']:.2%}")
+            
+            # Initialize Analyst (Support/Resistance)
+            self.analyst = DynamicAnalyst(
+                atr_multiplier=1.5,
+                min_samples=5
+            )
+            logger.info("[OK] Analyst initialized (S/R detection)")
+            
+            # Initialize Sniper (Pattern recognition)
+            self.sniper = OHLCSniper(
+                input_shape=(15, 4),
+                num_classes=config['num_classes']
+            )
+            self.sniper.load_model(str(model_path))
+            logger.info("[OK] Sniper initialized (Pattern recognition)")
+            
+            # Initialize Hybrid Validator (Integration layer)
+            self.ai_validator = HybridSignalValidator(
+                analyst=self.analyst,
+                sniper=self.sniper,
+                pattern_id_map=pattern_map,
+                sr_threshold_pct=0.005,      # 0.5% distance to S/R level
+                pattern_confidence_min=0.65,  # 65% confidence (lowered from 70%)
+                use_ai_validation=True        # Toggle this to enable/disable
+            )
+            logger.info("[OK] AI Validator initialized")
+            
+            logger.info("="*70)
+            logger.info("✓ AI Layer ready (Status: ENABLED)")
+            logger.info("  - S/R Threshold: 0.5%")
+            logger.info("  - Pattern Confidence: 65%")
+            logger.info("  - Toggle: self.ai_validator.use_ai_validation")
+            logger.info("="*70)
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to initialize AI layer: {e}")
+            logger.error("AI layer will be disabled")
+            self.ai_validator = None
+            import traceback
+            traceback.print_exc()
+
 
     def _initialize_aggregators(self):
         """Initialize signal aggregators with AUTO-PRESET support"""
@@ -321,6 +397,7 @@ class TradingBot:
                     # Strategy agreement bonuses
                     "two_strategy_bonus": 0.25,
                     "three_strategy_bonus": 0.30,
+                    "opposition_penalty": 0.5,
                     
                     # SIGNIFICANTLY INCREASED regime influence
                     "bull_buy_boost": 0.25,      # Was 0.15, now much stronger
@@ -353,6 +430,7 @@ class TradingBot:
                     "hold_contribution_pct": 0.15,
                     "allow_single_override": True,
                     "single_override_threshold": 0.75,
+                    "opposition_penalty": 0.5,
                     "verbose": False,
                 },
                 "balanced": {
@@ -369,6 +447,7 @@ class TradingBot:
                     "hold_contribution_pct": 0.17,
                     "allow_single_override": True,
                     "single_override_threshold": 0.72,
+                    "opposition_penalty": 0.5,
                     "verbose": False,
                 },
                 "aggressive": {
@@ -385,6 +464,7 @@ class TradingBot:
                     "hold_contribution_pct": 0.18,
                     "allow_single_override": True,
                     "single_override_threshold": 0.70,
+                    "opposition_penalty": 0.5,
                     "verbose": False,
                 },
             },
@@ -404,6 +484,7 @@ class TradingBot:
                     "allow_single_override": True,
                     "single_override_threshold": 0.65,
                     "verbose": False,
+                    "opposition_penalty": 0.5,
                     "min_quality_margin": 0.06,
                 },
                 "conservative": {
@@ -420,6 +501,7 @@ class TradingBot:
                     "hold_contribution_pct": 0.12,
                     "allow_single_override": True,
                     "single_override_threshold": 0.75,
+                    "opposition_penalty": 0.5,
                     "verbose": False,
                 },
                 "balanced": {
@@ -437,6 +519,7 @@ class TradingBot:
                     "allow_single_override": True,
                     "single_override_threshold": 0.72,
                     "verbose": False,
+                    "opposition_penalty": 0.5,
                 },
                 "aggressive": {
                     "buy_threshold": 0.30,
@@ -444,6 +527,7 @@ class TradingBot:
                     "two_strategy_bonus": 0.22,
                     "three_strategy_bonus": 0.30,
                     "bull_buy_boost": 0.21,
+                    "opposition_penalty": 0.5,
                     "bull_sell_penalty": 0.12,
                     "bear_sell_boost": 0.21,
                     "bear_buy_penalty": 0.24,
@@ -546,6 +630,7 @@ class TradingBot:
 
         logger.info(f"\n[OK] Loaded {loaded}/{expected} models")
         self._initialize_aggregators()
+        self.initialize_ai_layer()
 
     # ✨ NEW: Improved Telegram thread management
     def _start_telegram_with_monitoring(self):
@@ -997,17 +1082,7 @@ class TradingBot:
 
             signal, details = aggregator.get_aggregated_signal(df)
             
-            # Record signal for monitoring
-            if self.telegram_bot:
-                self.telegram_bot.signal_monitor.record_signal(
-                    asset=asset_name,
-                    signal=signal,
-                    details=details,
-                    price=current_price,
-                    timestamp=datetime.now(),
-                )
-
-            # Log signals
+                        # Log signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
                 f"  Mean Reversion:   {details.get('mr_signal', 0):>2} "
@@ -1021,6 +1096,24 @@ class TradingBot:
                 f"  EMA Regime:       {details.get('regime', 'N/A'):>2} "
                 f"(confidence: {details.get('regime_confidence', 0):.3f})"
             )
+            # Check if AI modified anything
+            if details.get('ai_modified', False):
+                logger.info(f"\n[AI] Signal modifications:")
+                for strat, change in details.get('ai_changes', {}).items():
+                    logger.info(f"  {strat.upper()}: {change}")
+            
+            # Record signal for monitoring
+            if self.telegram_bot:
+                self.telegram_bot.signal_monitor.record_signal(
+                    asset=asset_name,
+                    signal=signal,
+                    details=details,
+                    price=current_price,
+                    timestamp=datetime.now(),
+                )
+
+
+            
             logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
             logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
@@ -1152,6 +1245,15 @@ class TradingBot:
                     )
                 except:
                     pass
+    def toggle_ai_validation(self, enable: bool):
+        """Toggle AI validation on/off"""
+        if hasattr(self, 'ai_validator') and self.ai_validator is not None:
+            self.ai_validator.use_ai_validation = enable
+            status = "ENABLED" if enable else "DISABLED"
+            logger.info(f"[AI] Validation layer {status}")
+            return f"✓ AI Validation {status}"
+        else:
+            return "✗ AI layer not initialized"            
 
     def _log_trade(self, asset: str, signal: int, details: dict, price: float):
         """Log trade to file"""

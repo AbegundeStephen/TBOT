@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backtesting Script - Properly integrates PerformanceWeightedAggregator
+Backtesting Script - With AI Validation Layer Integration
 """
 import json
 import logging
@@ -10,10 +10,12 @@ import sys
 import pandas as pd
 import backtrader as bt
 from datetime import datetime, timedelta
+import pickle
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
 from src.execution.signal_aggregator import PerformanceWeightedAggregator
+from src.ai import DynamicAnalyst, OHLCSniper, HybridSignalValidator
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -22,161 +24,177 @@ logger = logging.getLogger(__name__)
 
 # Asset-specific presets based on actual training performance
 AGGREGATOR_PRESETS = {
-            "BTC": {
-                "conservative": {
-                    "buy_threshold": 0.35,
-                    "sell_threshold": 0.40,
-                    "two_strategy_bonus": 0.18,
-                    "three_strategy_bonus": 0.20,
-                    "bull_buy_boost": 0.10,
-                    "bull_sell_penalty": 0.12,
-                    "bear_sell_boost": 0.10,
-                    "bear_buy_penalty": 0.12,
-                    "min_confidence_to_use": 0.12,
-                    "min_signal_quality": 0.32,
-                    "hold_contribution_pct": 0.15,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.75,
-                    "verbose": False,
-                },
-                "balanced": {
-                    "buy_threshold": 0.30,
-                    "sell_threshold": 0.36,
-                    "two_strategy_bonus": 0.20,
-                    "three_strategy_bonus": 0.22,
-                    "bull_buy_boost": 0.11,
-                    "bull_sell_penalty": 0.11,
-                    "bear_sell_boost": 0.11,
-                    "bear_buy_penalty": 0.11,
-                    "min_confidence_to_use": 0.10,
-                    "min_signal_quality": 0.28,
-                    "hold_contribution_pct": 0.17,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.72,
-                    "verbose": False,
-                },
-                "aggressive": {
-                    "buy_threshold": 0.25,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.22,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.12,
-                    "bull_sell_penalty": 0.12,
-                    "bear_sell_boost": 0.12,
-                    "bear_buy_penalty": 0.12,
-                    "min_confidence_to_use": 0.09,
-                    "min_signal_quality": 0.25,
-                    "hold_contribution_pct": 0.18,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.70,
-                    "verbose": False,
-                },
-                "scalper": {
-                    "buy_threshold": 0.24,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.30,
-                    "bull_buy_boost": 0.15,
-                    "bull_sell_penalty": 0.10,
-                    "bear_sell_boost": 0.15,
-                    "bear_buy_penalty": 0.10,
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.20,
-                    "hold_contribution_pct": 0.20,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                    "min_quality_margin": 0.05,
-                },
-            },
-            "GOLD": {
-                "conservative": {
-                    "buy_threshold": 0.38,
-                    "sell_threshold": 0.42,
-                    "two_strategy_bonus": 0.18,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.07,
-                    "bull_sell_penalty": 0.09,
-                    "bear_sell_boost": 0.07,
-                    "bear_buy_penalty": 0.09,
-                    "min_confidence_to_use": 0.12,
-                    "min_signal_quality": 0.30,
-                    "hold_contribution_pct": 0.12,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.75,
-                    "verbose": False,
-                },
-                "balanced": {
-                    "buy_threshold": 0.33,
-                    "sell_threshold": 0.36,
-                    "two_strategy_bonus": 0.20,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.08,
-                    "bull_sell_penalty": 0.08,
-                    "bear_sell_boost": 0.08,
-                    "bear_buy_penalty": 0.08,
-                    "min_confidence_to_use": 0.10,
-                    "min_signal_quality": 0.28,
-                    "hold_contribution_pct": 0.14,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.72,
-                    "verbose": False,
-                },
-                "aggressive": {
-                    "buy_threshold": 0.28,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.22,
-                    "three_strategy_bonus": 0.30,
-                    "bull_buy_boost": 0.09,
-                    "bull_sell_penalty": 0.09,
-                    "bear_sell_boost": 0.09,
-                    "bear_buy_penalty": 0.09,
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.22,
-                    "hold_contribution_pct": 0.15,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.70,
-                    "verbose": False,
-                },
-                "scalper": {
-                    "buy_threshold": 0.23,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.35,
-                    "bull_buy_boost": 0.12,
-                    "bull_sell_penalty": 0.08,
-                    "bear_sell_boost": 0.12,
-                    "bear_buy_penalty": 0.08,
-                    "min_confidence_to_use": 0.06,
-                    "min_signal_quality": 0.18,
-                    "hold_contribution_pct": 0.18,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                    "min_quality_margin": 0.06,
-                },
-            },
+    "BTC": {
+        "conservative": {
+            "buy_threshold": 0.35,
+            "sell_threshold": 0.40,
+            "two_strategy_bonus": 0.18,
+            "three_strategy_bonus": 0.20,
+            "bull_buy_boost": 0.10,
+            "bull_sell_penalty": 0.12,
+            "bear_sell_boost": 0.10,
+            "bear_buy_penalty": 0.12,
+            "min_confidence_to_use": 0.12,
+            "min_signal_quality": 0.32,
+            "hold_contribution_pct": 0.15,
+            "allow_single_override": True,
+            "single_override_threshold": 0.75,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "balanced": {
+            "buy_threshold": 0.30,
+            "sell_threshold": 0.36,
+            "two_strategy_bonus": 0.20,
+            "three_strategy_bonus": 0.22,
+            "bull_buy_boost": 0.11,
+            "bull_sell_penalty": 0.11,
+            "bear_sell_boost": 0.11,
+            "bear_buy_penalty": 0.11,
+            "min_confidence_to_use": 0.10,
+            "min_signal_quality": 0.28,
+            "hold_contribution_pct": 0.17,
+            "allow_single_override": True,
+            "single_override_threshold": 0.72,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "aggressive": {
+            "buy_threshold": 0.25,
+            "sell_threshold": 0.30,
+            "two_strategy_bonus": 0.22,
+            "three_strategy_bonus": 0.25,
+            "bull_buy_boost": 0.12,
+            "bull_sell_penalty": 0.12,
+            "bear_sell_boost": 0.12,
+            "bear_buy_penalty": 0.12,
+            "min_confidence_to_use": 0.09,
+            "min_signal_quality": 0.25,
+            "hold_contribution_pct": 0.18,
+            "allow_single_override": True,
+            "single_override_threshold": 0.70,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "scalper": {
+            "buy_threshold": 0.24,
+            "sell_threshold": 0.30,
+            "two_strategy_bonus": 0.25,
+            "three_strategy_bonus": 0.30,
+            "bull_buy_boost": 0.15,
+            "bull_sell_penalty": 0.10,
+            "bear_sell_boost": 0.15,
+            "bear_buy_penalty": 0.10,
+            "min_confidence_to_use": 0.08,
+            "min_signal_quality": 0.20,
+            "hold_contribution_pct": 0.20,
+            "allow_single_override": True,
+            "single_override_threshold": 0.65,
+            "verbose": False,
+            "min_quality_margin": 0.05,
+            "opposition_penalty": 0.5,
+        },
+    },
+    "GOLD": {
+        "conservative": {
+            "buy_threshold": 0.38,
+            "sell_threshold": 0.42,
+            "two_strategy_bonus": 0.18,
+            "three_strategy_bonus": 0.25,
+            "bull_buy_boost": 0.07,
+            "bull_sell_penalty": 0.09,
+            "bear_sell_boost": 0.07,
+            "bear_buy_penalty": 0.09,
+            "min_confidence_to_use": 0.12,
+            "min_signal_quality": 0.30,
+            "hold_contribution_pct": 0.12,
+            "allow_single_override": True,
+            "single_override_threshold": 0.75,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "balanced": {
+            "buy_threshold": 0.33,
+            "sell_threshold": 0.36,
+            "two_strategy_bonus": 0.20,
+            "three_strategy_bonus": 0.25,
+            "bull_buy_boost": 0.08,
+            "bull_sell_penalty": 0.08,
+            "bear_sell_boost": 0.08,
+            "bear_buy_penalty": 0.08,
+            "min_confidence_to_use": 0.10,
+            "min_signal_quality": 0.28,
+            "hold_contribution_pct": 0.14,
+            "allow_single_override": True,
+            "single_override_threshold": 0.72,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "aggressive": {
+            "buy_threshold": 0.28,
+            "sell_threshold": 0.30,
+            "two_strategy_bonus": 0.22,
+            "three_strategy_bonus": 0.30,
+            "bull_buy_boost": 0.09,
+            "bull_sell_penalty": 0.09,
+            "bear_sell_boost": 0.09,
+            "bear_buy_penalty": 0.09,
+            "min_confidence_to_use": 0.08,
+            "min_signal_quality": 0.22,
+            "hold_contribution_pct": 0.15,
+            "allow_single_override": True,
+            "single_override_threshold": 0.70,
+            "opposition_penalty": 0.5,
+            "verbose": False,
+        },
+        "scalper": {
+            "buy_threshold": 0.23,
+            "sell_threshold": 0.30,
+            "two_strategy_bonus": 0.25,
+            "three_strategy_bonus": 0.35,
+            "bull_buy_boost": 0.12,
+            "bull_sell_penalty": 0.08,
+            "bear_sell_boost": 0.12,
+            "bear_buy_penalty": 0.08,
+            "min_confidence_to_use": 0.06,
+            "min_signal_quality": 0.18,
+            "hold_contribution_pct": 0.18,
+            "allow_single_override": True,
+            "single_override_threshold": 0.65,
+            "verbose": False,
+            "min_quality_margin": 0.06,
+            "opposition_penalty": 0.5,
+        },
+    },
 }
+
 
 class MLStrategy(bt.Strategy):
     """
-    Backtrader strategy wrapper using PerformanceWeightedAggregator
+    Backtrader strategy wrapper with AI Validation Layer
     """
 
     params = (
-        ("stop_loss_pct", 0.004),
-        ("take_profit_pct", 0.08),
-        ("trailing_stop_pct", 0.015),
-        ("risk_per_trade", 0.10),
-        ("max_position_pct", 0.95),
-        ("use_atr_sizing", True),
-        ("atr_period", 14),
-        ("atr_multiplier", 1.2),
-        ("lookback", 100),
-        ("aggregator_preset", "balanced"),
-        ("use_trailing_stop", True),
-        ("exit_on_opposite_signal", True),
-    )
+            ("stop_loss_pct", 0.004),
+            ("take_profit_pct", 0.08),
+            ("trailing_stop_pct", 0.015),
+            ("risk_per_trade", 0.10),
+            ("max_position_pct", 0.95),
+            ("use_atr_sizing", True),
+            ("atr_period", 14),
+            ("atr_multiplier", 1.2),
+            ("lookback", 100),
+            ("aggregator_preset", "balanced"),
+            ("use_trailing_stop", True),
+            ("exit_on_opposite_signal", True),
+            
+            # ==== IMPROVED AI VALIDATION PARAMETERS ====
+            ("use_ai_validation", True),
+            ("ai_sr_threshold", 0.015),  # 1.5% (was 0.5%)
+            ("ai_pattern_confidence", 0.50),  # 50% (was 65%)
+            ("ai_enable_adaptive", True),  # NEW: Enable adaptive thresholds
+            ("ai_strong_signal_bypass", 0.75),  # NEW: Bypass AI for strong signals
+        )
 
     def __init__(self):
         # Set asset key from class attribute
@@ -208,6 +226,13 @@ class MLStrategy(bt.Strategy):
         self.mean_reversion = MeanReversionStrategy(mr_config)
         self.trend_following = TrendFollowingStrategy(tf_config)
         self.ema_strategy = EMAStrategy(ema_config)
+        
+        # ===================================================================
+        # NEW: Initialize AI Validation Layer
+        # ===================================================================
+        self.ai_validator = None
+        if self.params.use_ai_validation:
+            self.ai_validator = self._initialize_ai_layer()
 
         # Load trained models
         mr_loaded = self.mean_reversion.load_model(mean_rev_model_path)
@@ -232,6 +257,7 @@ class MLStrategy(bt.Strategy):
             ema_strategy=self.ema_strategy,
             asset_type=self.asset_key,
             config=confidence_config,
+            ai_validator=self.ai_validator if self.params.use_ai_validation else None  # NEW
         )
 
         self.order = None
@@ -242,10 +268,28 @@ class MLStrategy(bt.Strategy):
         self.stop_loss = None
         self.take_profit = None
 
+        # NEW: Track AI validation statistics
+        self.ai_stats = {
+            "total_signals": 0,
+            "ai_approved": 0,
+            "ai_rejected": 0,
+            "rejected_no_sr": 0,
+            "rejected_no_pattern": 0,
+        }
+
         logger.info(f"=" * 70)
         logger.info(f" Strategy Configuration for {self.asset_key}")
         logger.info(f"=" * 70)
         logger.info(f"Preset: {preset_name}")
+        
+        # NEW: Log AI validation status
+        if self.ai_validator:
+            logger.info(f"AI Validation: ENABLED")
+            logger.info(f"  S/R Threshold: {self.params.ai_sr_threshold:.2%}")
+            logger.info(f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%}")
+        else:
+            logger.info(f"AI Validation: DISABLED")
+        
         logger.info(f"Risk Management:")
         logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}%")
         logger.info(f"  Take-Profit: {self.params.take_profit_pct * 100}%")
@@ -263,6 +307,60 @@ class MLStrategy(bt.Strategy):
             logger.info(f"  ATR Period: {self.params.atr_period}")
             logger.info(f"  ATR Multiplier: {self.params.atr_multiplier}x")
         logger.info(f"=" * 70)
+
+    def _initialize_ai_layer(self):
+        """Initialize AI validation layer with improved settings"""
+        try:
+            models_dir = Path("models/ai")
+            model_path = models_dir / "sniper.weights.h5"
+            mapping_path = models_dir / "pattern_mapping.pkl"
+            config_path = models_dir / "training_config.pkl"
+
+            if not model_path.exists():
+                logger.warning(f"[AI] Model not found: {model_path}")
+                logger.warning("[AI] Backtesting WITHOUT AI validation")
+                return None
+
+            # Load mappings
+            with open(mapping_path, "rb") as f:
+                pattern_map = pickle.load(f)
+            with open(config_path, "rb") as f:
+                ai_config = pickle.load(f)
+
+            logger.info(f"[AI] Loaded {len(pattern_map)} patterns")
+            logger.info(f"[AI] Model accuracy: {ai_config['validation_accuracy']:.2%}")
+
+            # Initialize components
+            analyst = DynamicAnalyst(atr_multiplier=1.5, min_samples=5)
+            sniper = OHLCSniper(
+                input_shape=(15, 4), 
+                num_classes=ai_config["num_classes"]
+            )
+            sniper.load_model(str(model_path))
+
+            # ===== USE IMPROVED VALIDATOR =====
+            validator = HybridSignalValidator(
+                analyst=analyst,
+                sniper=sniper,
+                pattern_id_map=pattern_map,
+                sr_threshold_pct=self.params.ai_sr_threshold,  # 1.5%
+                pattern_confidence_min=self.params.ai_pattern_confidence,  # 50%
+                use_ai_validation=True,
+                enable_adaptive_thresholds=self.params.ai_enable_adaptive,  # NEW
+                strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,  # NEW
+            )
+
+            logger.info("[AI] ✓ Enhanced validation layer initialized")
+            logger.info(f"  S/R Threshold: {self.params.ai_sr_threshold:.2%} (adaptive)")
+            logger.info(f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%} (adaptive)")
+            logger.info(f"  Strong Signal Bypass: {self.params.ai_strong_signal_bypass:.0%}")
+            
+            return validator
+
+        except Exception as e:
+            logger.error(f"[AI] Failed to initialize: {e}")
+            logger.warning("[AI] Backtesting WITHOUT AI validation")
+            return None
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -380,6 +478,7 @@ class MLStrategy(bt.Strategy):
                         "date": self.data.datetime.date(0),
                         "price": current_price,
                         "signal": signal,
+                    # "original_signal": original_signal,
                         "details": details,
                     }
                 )
@@ -389,12 +488,15 @@ class MLStrategy(bt.Strategy):
                 regime = details.get("regime", "UNKNOWN")
                 quality = details.get("signal_quality", 0)
 
-                logger.info(
+                log_msg = (
                     f"📍 {self.data.datetime.date(0)} | "
                     f"${current_price:.2f} | {regime} | "
                     f"B/S: {buy_score:.2f}/{sell_score:.2f} | "
-                    f"Sig: {signal:>2} | Q: {quality:.2f}"
+                    f"Sig: {signal:>2}"
                 )
+
+                log_msg += f" | Q: {quality:.2f}"
+                logger.info(log_msg)
 
             # Execute trades
             if not self.position:
@@ -420,11 +522,19 @@ class MLStrategy(bt.Strategy):
                         self.trailing_stop_price = None
                         self.highest_price_since_entry = None
 
-                        logger.info(
+                        # Enhanced logging with AI info
+                        log_msg = (
                             f"🟢 BUY at ${current_price:.2f} | Size: {size:.8f} | "
-                            f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f} | "
-                            f"Reason: {details.get('reasoning', 'N/A')}"
+                            f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}"
                         )
+                        
+                        if self.ai_validator and "ai_pattern_check" in details:
+                            pattern_info = details["ai_pattern_check"]
+                            if pattern_info.get("pattern_confirmed"):
+                                log_msg += f" | AI: {pattern_info['pattern_name']} ({pattern_info['confidence']:.0%})"
+                        
+                        log_msg += f" | Reason: {details.get('reasoning', 'N/A')}"
+                        logger.info(log_msg)
             else:
                 # Exit on opposite signal
                 if self.params.exit_on_opposite_signal and signal == -1:
@@ -536,15 +646,29 @@ class MLStrategy(bt.Strategy):
         logger.info(f"  Bull Regime: {stats['bull_regime_pct']:.2f}%")
         logger.info(f"  Bear Regime: {stats['bear_regime_pct']:.2f}%")
         logger.info(f"  Regime Changes: {stats['regime_changes']}")
-        logger.info(f"  Consensus Signals: {stats['consensus_rate']:.2f}%")
+
+        # NEW: Print AI validation statistics
+        if self.ai_validator and self.ai_stats["total_signals"] > 0:
+            logger.info(f"\n🤖 AI Validation Statistics:")
+            logger.info(f"  Total Signals: {self.ai_stats['total_signals']}")
+            logger.info(f"  Approved: {self.ai_stats['ai_approved']} ({self.ai_stats['ai_approved']/self.ai_stats['total_signals']*100:.1f}%)")
+            logger.info(f"  Rejected: {self.ai_stats['ai_rejected']} ({self.ai_stats['ai_rejected']/self.ai_stats['total_signals']*100:.1f}%)")
+            logger.info(f"    - No S/R level: {self.ai_stats['rejected_no_sr']}")
+            logger.info(f"    - No pattern: {self.ai_stats['rejected_no_pattern']}")
+            
+            # Calculate AI impact
+            if self.ai_stats['ai_rejected'] > 0:
+                filter_rate = (self.ai_stats['ai_rejected'] / self.ai_stats['total_signals']) * 100
+                logger.info(f"  Filter Rate: {filter_rate:.1f}% (signals blocked)")
 
 
-def run_backtest(asset_key, aggregator_preset="balanced"):
-    """Run backtest with PerformanceWeightedAggregator"""
+def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
+    """Run backtest with optional AI validation"""
     logger.info("=" * 70)
     logger.info(f"🚀 STARTING BACKTEST FOR {asset_key.upper()}")
     logger.info("=" * 70)
     logger.info(f"Aggregator Preset: {aggregator_preset}")
+    logger.info(f"AI Validation: {'ENABLED' if use_ai else 'DISABLED'}")
     logger.info("=" * 70)
 
     try:
@@ -593,9 +717,13 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
     )
     cerebro.adddata(data)
 
-    # Add strategy
+    # Add strategy with AI toggle
     MLStrategy.asset_key = asset_key.upper()
-    cerebro.addstrategy(MLStrategy, aggregator_preset=aggregator_preset)
+    cerebro.addstrategy(
+        MLStrategy, 
+        aggregator_preset=aggregator_preset,
+        use_ai_validation=use_ai  # Pass AI toggle
+    )
 
     # Broker settings
     initial_capital = config["backtesting"]["initial_capital"]
@@ -662,7 +790,7 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
             logger.warning("⚠️ NO TRADES EXECUTED!")
             logger.warning("=" * 70)
             logger.warning(
-                "Try: python backtest.py --asset " + asset_key + " --preset aggressive"
+                "Try: python backtest.py --asset " + asset_key + " --preset aggressive --no-ai"
             )
             logger.warning(
                 "Or:  python backtest.py --asset " + asset_key + " --preset scalper"
@@ -675,20 +803,23 @@ def run_backtest(asset_key, aggregator_preset="balanced"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run backtest with PerformanceWeightedAggregator",
+        description="Run backtest with AI Validation Layer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Balanced approach (default)
+  # With AI validation (default)
   python backtest.py --asset BTC
 
-  # More trades
+  # Without AI validation
+  python backtest.py --asset BTC --no-ai
+
+  # Compare presets with AI
   python backtest.py --asset GOLD --preset aggressive
 
-  # High frequency
-  python backtest.py --asset BTC --preset scalper
+  # High frequency without AI filtering
+  python backtest.py --asset BTC --preset scalper --no-ai
 
-  # Quality over quantity
+  # Conservative with AI
   python backtest.py --asset GOLD --preset conservative
         """,
     )
@@ -706,6 +837,15 @@ Examples:
         choices=["conservative", "balanced", "aggressive", "scalper"],
         help="Signal threshold preset",
     )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Disable AI validation layer",
+    )
 
     args = parser.parse_args()
-    run_backtest(asset_key=args.asset, aggregator_preset=args.preset)
+    run_backtest(
+        asset_key=args.asset, 
+        aggregator_preset=args.preset,
+        use_ai=not args.no_ai
+    )
