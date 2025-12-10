@@ -1,25 +1,25 @@
 """
-Complete PerformanceWeightedAggregator with Dynamic Regime Adjustments
-Copy this entire class into your signal_aggregator.py file
+Enhanced PerformanceWeightedAggregator with AI Safety Features
+===============================================================
+IMPROVEMENTS:
+- AI circuit breaker to prevent over-filtering
+- Regime context passed to AI validator
+- Better cold-start handling for regime detection
+- AI performance tracking
+- Graceful degradation if AI fails
 """
-
 import pandas as pd
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import numpy as np
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
-
 class PerformanceWeightedAggregator:
     """
-    Multi-Strategy Aggregator with RESPONSIVE regime detection
-    - Reduced hysteresis from ±0.3% to ±0.15% for faster regime changes
-    - Added momentum and volatility to regime detection
-    - Multiple regime confirmation signals (not just EMA crossover)
-    - DYNAMIC threshold adjustment based on regime confidence
+    Multi-Strategy Aggregator with AI validation and safety features
     """
-
     def __init__(
         self,
         mean_reversion_strategy,
@@ -27,6 +27,8 @@ class PerformanceWeightedAggregator:
         ema_strategy,
         asset_type: str = "BTC",
         config: Dict = None,
+        ai_validator=None,
+        enable_ai_circuit_breaker: bool = False,
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -36,6 +38,52 @@ class PerformanceWeightedAggregator:
         # Initialize regime tracking
         self.previous_regime = None
         self.regime_initialized = False
+
+        # ================================================================
+        # AI VALIDATOR SETUP WITH SAFETY CHECKS
+        # ================================================================
+        self.ai_validator = None
+        self.ai_enabled = True
+
+        if ai_validator is not None:
+            try:
+                # Validate AI is properly initialized
+                assert hasattr(ai_validator, "sniper"), "Sniper not initialized"
+                assert hasattr(ai_validator.sniper, "model"), "Model not loaded"
+                assert hasattr(ai_validator, "pattern_id_map"), "Pattern mapping missing"
+                assert len(ai_validator.pattern_id_map) > 0, "Pattern mapping empty"
+
+                self.ai_validator = ai_validator
+                self.ai_enabled = True
+
+                logger.info(f"[AGGREGATOR] AI validation: ✓ ENABLED")
+                logger.info(f"[AGGREGATOR] Patterns loaded: {len(ai_validator.pattern_id_map)}")
+
+            except (AssertionError, AttributeError) as e:
+                logger.error(f"[AGGREGATOR] AI validation setup failed: {e}")
+                logger.warning("[AGGREGATOR] Continuing without AI validation")
+                self.ai_validator = None
+                self.ai_enabled = True
+
+        # AI statistics tracking
+        if self.ai_enabled:
+            self.ai_stats = {
+                "mr_signals_checked": 0,
+                "mr_approved": 0,
+                "mr_rejected": 0,
+                "tf_signals_checked": 0,
+                "tf_approved": 0,
+                "tf_rejected": 0,
+            }
+
+            # Circuit breaker configuration
+            self.enable_circuit_breaker = enable_ai_circuit_breaker
+            self.ai_rejection_window = deque(maxlen=50)  # Last 50 AI decisions
+            self.ai_bypass_active = False
+            self.ai_bypass_threshold = 0.85  # Bypass if >85% rejection
+            self.ai_bypass_cooldown = 0
+
+            logger.info(f"[AGGREGATOR] AI circuit breaker: {'ENABLED' if enable_ai_circuit_breaker else 'DISABLED'}")
 
         # Strategy weights
         if self.asset_type == "BTC":
@@ -60,6 +108,7 @@ class PerformanceWeightedAggregator:
                     "min_confidence_to_use": 0.08,
                     "min_signal_quality": 0.28,
                     "hold_contribution_pct": 0.20,
+                    "opposition_penalty": 0.5,
                 }
             else:  # GOLD
                 self.config = {
@@ -74,6 +123,7 @@ class PerformanceWeightedAggregator:
                     "min_confidence_to_use": 0.06,
                     "min_signal_quality": 0.25,
                     "hold_contribution_pct": 0.18,
+                    "opposition_penalty": 0.5,
                 }
 
         self.stats = {
@@ -98,78 +148,123 @@ class PerformanceWeightedAggregator:
         logger.info(f"🎯   PerformanceWeightedAggregator - {self.asset_type}")
         logger.info("=" * 80)
         logger.info("")
-        logger.info("   ✓ TIGHTER HYSTERESIS: ±0.15% (was ±0.3%)")
+        logger.info("   ✓ TIGHTER HYSTERESIS: ±0.15% (BTC) / ±0.10% (GOLD)")
         logger.info("   ✓ Multi-factor regime: EMA + momentum + volatility")
-        logger.info("   ✓ Faster response to market changes")
-        logger.info("   ✓ DYNAMIC threshold adjustment based on regime confidence")
+        logger.info("   ✓ DYNAMIC threshold adjustment")
+        if self.ai_enabled:
+            logger.info("   ✓ AI VALIDATION: Active with circuit breaker")
+        else:
+            logger.info("   ⚠ AI VALIDATION: Disabled")
         logger.info("")
         logger.info("📊 STRATEGY ROLES:")
         logger.info("   Mean Reversion:   DECISION MAKER (weight: 0.50)")
         logger.info("   Trend Following:  DECISION MAKER (weight: 0.50)")
-        logger.info("   EMA 50/200 FOR BTC:       REGIME DETECTOR (multi-factor)")
-        logger.info("   EMA 50/100 FOR GOLD:       REGIME DETECTOR (multi-factor)")
-        logger.info("")
-        logger.info("🔒 REGIME HYSTERESIS:")
-        logger.info("   Bullish Threshold: EMA diff > +0.15% + positive momentum")
-        logger.info("   Bearish Threshold: EMA diff < -0.15% + negative momentum")
-        logger.info("   → More responsive while avoiding noise")
+        logger.info(f"   EMA 50/{'200' if self.asset_type == 'BTC' else '100'}:       REGIME DETECTOR")
         logger.info("=" * 80)
         logger.info("")
 
-    def calculate_regime_adjusted_thresholds(
-        self, is_bull: bool, regime_confidence: float
-    ) -> Tuple[float, float]:
+    def get_statistics(self) -> Dict:
+        """Return comprehensive statistics"""
+        total = max(self.stats["total_evaluations"], 1)
+        base_stats = {
+            **self.stats,
+            "signal_rate": (self.stats["signals_generated"] / total) * 100,
+            "buy_rate": (self.stats["buy_signals"] / total) * 100,
+            "sell_rate": (self.stats["sell_signals"] / total) * 100,
+            "bull_regime_pct": (self.stats["bull_regime_count"] / total) * 100,
+            "bear_regime_pct": (self.stats["bear_regime_count"] / total) * 100,
+        }
+
+        # Add AI statistics
+        if self.ai_enabled and hasattr(self, "ai_stats"):
+            mr_total = self.ai_stats["mr_signals_checked"]
+            tf_total = self.ai_stats["tf_signals_checked"]
+
+            base_stats["ai_validation"] = {
+                "enabled": True,
+                "circuit_breaker_active": self.ai_bypass_active,
+                "mr_checked": mr_total,
+                "mr_approved": self.ai_stats["mr_approved"],
+                "mr_rejected": self.ai_stats["mr_rejected"],
+                "mr_rejection_rate": (
+                    (self.ai_stats["mr_rejected"] / mr_total * 100)
+                    if mr_total > 0
+                    else 0
+                ),
+                "tf_checked": tf_total,
+                "tf_approved": self.ai_stats["tf_approved"],
+                "tf_rejected": self.ai_stats["tf_rejected"],
+                "tf_rejection_rate": (
+                    (self.ai_stats["tf_rejected"] / tf_total * 100)
+                    if tf_total > 0
+                    else 0
+                ),
+            }
+
+        return base_stats
+
+    def _check_ai_circuit_breaker(self) -> bool:
         """
-        Dynamically adjust thresholds based on regime strength
-        
-        Args:
-            is_bull: True if bullish regime
-            regime_confidence: Confidence level (0.5-1.0)
-        
-        Returns:
-            (adjusted_buy_threshold, adjusted_sell_threshold)
+        Check if AI is rejecting too many signals
+        Returns True if AI should be bypassed
         """
-        base_buy = self.config["buy_threshold"]
-        base_sell = self.config["sell_threshold"]
-        
-        # Scale adjustment by regime confidence (0.5 = weak, 1.0 = strong)
-        strength = (regime_confidence - 0.5) * 2  # Map 0.5-1.0 to 0.0-1.0
-        strength = max(0.0, min(1.0, strength))
-        
-        if is_bull:
-            # Bull market: encourage buying, discourage selling
-            adjusted_buy = base_buy - (0.10 * strength)  # Up to -10%
-            adjusted_sell = base_sell + (0.10 * strength)  # Up to +10%
-        else:
-            # Bear market: STRONGLY discourage buying, encourage selling
-            adjusted_buy = base_buy + (0.15 * strength)  # Up to +15%
-            adjusted_sell = base_sell - (0.12 * strength)  # Up to -12%
-        
-        # Ensure thresholds stay reasonable
-        adjusted_buy = max(0.15, min(0.60, adjusted_buy))
-        adjusted_sell = max(0.15, min(0.60, adjusted_sell))
-        
-        return adjusted_buy, adjusted_sell
+        if not self.enable_circuit_breaker or len(self.ai_rejection_window) < 20:
+            return False
+
+        # Calculate rejection rate (True = rejected, False = approved)
+        rejection_rate = sum(self.ai_rejection_window) / len(self.ai_rejection_window)
+
+        if rejection_rate > self.ai_bypass_threshold:
+            if not self.ai_bypass_active:
+                logger.warning("")
+                logger.warning("=" * 70)
+                logger.warning("⚠️  AI CIRCUIT BREAKER TRIGGERED")
+                logger.warning(f"   Rejection rate: {rejection_rate:.0%} (threshold: {self.ai_bypass_threshold:.0%})")
+                logger.warning(f"   AI validation temporarily DISABLED for next 10 signals")
+                logger.warning("=" * 70)
+                logger.warning("")
+                self.ai_bypass_active = True
+                self.ai_bypass_cooldown = 10  # Bypass next 10 signals
+
+            return True
+
+        # Check if cooldown expired
+        if self.ai_bypass_active and self.ai_bypass_cooldown <= 0:
+            logger.info("🔄 AI circuit breaker reset - validation RE-ENABLED")
+            self.ai_bypass_active = False
+            self.ai_rejection_window.clear()  # Reset tracking
+
+        return self.ai_bypass_active
 
     def _detect_regime(self, df: pd.DataFrame) -> Tuple[bool, float]:
         """
-        Multi-factor regime detection with tighter hysteresis
-        
-        Returns:
-            (is_bull, confidence)
+        Multi-factor regime detection with improved cold-start handling
+        Returns: (is_bull, confidence)
         """
         try:
             MIN_DATA_POINTS = 50
-
             if len(df) < MIN_DATA_POINTS:
                 logger.warning(f"Insufficient data for regime detection: {len(df)} rows")
                 self.stats["regime_detection_failures"] += 1
-                fallback_regime = self.previous_regime if self.previous_regime is not None else False
-                return fallback_regime, 0.3
+
+                # IMPROVED: Better fallback logic
+                if self.previous_regime is not None:
+                    # Use previous regime
+                    return self.previous_regime, 0.3
+
+                # Emergency fallback: simple momentum check
+                if len(df) >= 20:
+                    recent_momentum = (df["close"].iloc[-1] - df["close"].iloc[-20]) / df["close"].iloc[-20]
+                    emergency_regime = recent_momentum > 0
+                    logger.info(f"[REGIME] Emergency mode: {'BULL' if emergency_regime else 'BEAR'} (20-day momentum: {recent_momentum:.2%})")
+                    return emergency_regime, 0.3
+
+                # Last resort: default to BEAR (conservative)
+                logger.warning("[REGIME] Insufficient data - defaulting to BEAR (conservative)")
+                return False, 0.3
 
             # Generate features
             features_df = self.s_ema.generate_features(df.tail(250))
-
             if features_df.empty or len(features_df) < MIN_DATA_POINTS:
                 logger.warning(f"EMA features insufficient: {len(features_df)} rows")
                 self.stats["regime_detection_failures"] += 1
@@ -220,7 +315,7 @@ class PerformanceWeightedAggregator:
             bullish_score = 0
             bearish_score = 0
 
-            # Factor 1: EMA positioning
+            # Factor 1: EMA positioning (most important)
             if ema_diff_pct > BULLISH_THRESHOLD:
                 bullish_score += 3
             elif ema_diff_pct < BEARISH_THRESHOLD:
@@ -278,18 +373,15 @@ class PerformanceWeightedAggregator:
 
             # Confidence calculation
             confidence = 0.5
-
             if abs(ema_diff_pct) > 0.5:
                 confidence += 0.15
             if (is_bull and ret_20 > 0.03) or (not is_bull and ret_20 < -0.03):
                 confidence += 0.15
             if adx > 25:
                 confidence += 0.1
-
             score_diff = abs(bullish_score - bearish_score)
             if score_diff >= 4:
                 confidence += 0.1
-
             confidence = min(1.0, max(0.3, confidence))
 
             # Logging
@@ -306,6 +398,7 @@ class PerformanceWeightedAggregator:
                 logger.info(f"   Confidence: {confidence:.2f}")
                 logger.info("=" * 70)
                 logger.info("")
+
             elif not self.regime_initialized:
                 regime_name = "🚀 BULL MARKET" if is_bull else "🐻 BEAR MARKET"
                 logger.info("")
@@ -333,21 +426,44 @@ class PerformanceWeightedAggregator:
             fallback_regime = self.previous_regime if self.previous_regime is not None else False
             return fallback_regime, 0.3
 
-    def _calculate_score(
-        self,
-        target_signal: int,
-        mr_signal: int,
-        mr_conf: float,
-        tf_signal: int,
-        tf_conf: float,
-        is_bull: bool,
-    ) -> Tuple[float, str, int]:
-        """Calculate score with HOLD signals contributing context"""
+    def calculate_regime_adjusted_thresholds(self, is_bull: bool, regime_confidence: float) -> Tuple[float, float]:
+        """
+        Dynamically adjust thresholds based on regime strength
+        """
+        base_buy = self.config["buy_threshold"]
+        base_sell = self.config["sell_threshold"]
+
+        # Scale adjustment by regime confidence
+        strength = (regime_confidence - 0.5) * 2  # Map 0.5-1.0 to 0.0-1.0
+        strength = max(0.0, min(1.0, strength))
+
+        if is_bull:
+            # Bull market: encourage buying
+            adjusted_buy = base_buy - (0.10 * strength)
+            adjusted_sell = base_sell + (0.10 * strength)
+        else:
+            # Bear market: discourage buying
+            adjusted_buy = base_buy + (0.15 * strength)
+            adjusted_sell = base_sell - (0.12 * strength)
+
+        # Safety bounds
+        adjusted_buy = max(0.15, min(0.60, adjusted_buy))
+        adjusted_sell = max(0.15, min(0.60, adjusted_sell))
+
+        # Log significant changes
+        if abs(adjusted_buy - base_buy) > 0.05:
+            logger.debug(f"[THRESHOLD] Buy: {base_buy:.2f}→{adjusted_buy:.2f} ({'BULL' if is_bull else 'BEAR'}, conf:{regime_confidence:.2f})")
+
+        return adjusted_buy, adjusted_sell
+
+    def _calculate_score(self, target_signal: int, mr_signal: int, mr_conf: float, tf_signal: int, tf_conf: float, is_bull: bool) -> Tuple[float, str, int]:
+        """Calculate aggregated score"""
         components = []
         total_score = 0.0
         agreement_count = 0
         min_conf = self.config["min_confidence_to_use"]
         hold_contrib = self.config["hold_contribution_pct"]
+        opposition_penalty = self.config["opposition_penalty"]
 
         # Mean Reversion contribution
         if mr_signal == target_signal:
@@ -363,7 +479,7 @@ class PerformanceWeightedAggregator:
             components.append(f"MR_hold:{contribution:.3f}")
         else:
             effective_conf = max(mr_conf, min_conf)
-            penalty = (effective_conf * 0.5) * self.weights["mean_reversion"]
+            penalty = (effective_conf * opposition_penalty) * self.weights["mean_reversion"]
             total_score -= penalty
             components.append(f"MR_oppose:-{penalty:.3f}")
 
@@ -381,7 +497,7 @@ class PerformanceWeightedAggregator:
             components.append(f"TF_hold:{contribution:.3f}")
         else:
             effective_conf = max(tf_conf, min_conf)
-            penalty = (effective_conf * 0.5) * self.weights["trend_following"]
+            penalty = (effective_conf * opposition_penalty) * self.weights["trend_following"]
             total_score -= penalty
             components.append(f"TF_oppose:-{penalty:.3f}")
 
@@ -417,9 +533,10 @@ class PerformanceWeightedAggregator:
         return total_score, explanation, agreement_count
 
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
-        """Main aggregation logic with DYNAMIC regime-adjusted thresholds"""
+        """
+        Main aggregation logic with AI validation
+        """
         self.stats["total_evaluations"] += 1
-
         try:
             timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
@@ -432,7 +549,77 @@ class PerformanceWeightedAggregator:
             tf_signal, tf_conf = self.s_trend_following.generate_signal(df)
             ema_signal, ema_conf = self.s_ema.generate_signal(df)
 
-            # STEP 3: Calculate scores with regime penalties/boosts
+            # Store originals for logging
+            mr_original = mr_signal
+            tf_original = tf_signal
+
+            # ================================================================
+            # STEP 3: AI VALIDATION (with circuit breaker)
+            # ================================================================
+            ai_bypass = False
+            if self.ai_enabled and self.ai_validator is not None:
+                # Check circuit breaker
+                ai_bypass = self._check_ai_circuit_breaker()
+
+                if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
+                    self.ai_bypass_cooldown -= 1
+
+                # Validate signals if AI not bypassed
+                if not ai_bypass:
+                    # Validate Mean Reversion
+                    if mr_signal != 0:
+                        self.ai_stats["mr_signals_checked"] += 1
+
+                        validated_mr, mr_details = self.ai_validator.validate_signal(
+                            signal=mr_signal,
+                            signal_details={
+                                "strategy": "mean_reversion",
+                                "confidence": mr_conf,
+                                "regime": "bull" if is_bull else "bear",
+                                "regime_confidence": regime_conf
+                            },
+                            df=df
+                        )
+
+                        if validated_mr == 0 and mr_signal != 0:
+                            # AI rejected
+                            self.ai_stats["mr_rejected"] += 1
+                            self.ai_rejection_window.append(True)  # Track rejection
+                            logger.debug(f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}")
+                            mr_signal = 0
+                            mr_conf = 0.0
+                        else:
+                            self.ai_stats["mr_approved"] += 1
+                            self.ai_rejection_window.append(False)  # Track approval
+
+                    # Validate Trend Following
+                    if tf_signal != 0:
+                        self.ai_stats["tf_signals_checked"] += 1
+
+                        validated_tf, tf_details = self.ai_validator.validate_signal(
+                            signal=tf_signal,
+                            signal_details={
+                                "strategy": "trend_following",
+                                "confidence": tf_conf,
+                                "regime": "bull" if is_bull else "bear",
+                                "regime_confidence": regime_conf
+                            },
+                            df=df
+                        )
+
+                        if validated_tf == 0 and tf_signal != 0:
+                            # AI rejected
+                            self.ai_stats["tf_rejected"] += 1
+                            self.ai_rejection_window.append(True)
+                            logger.debug(f"[AI] TF {tf_signal} rejected: {tf_details.get('ai_validation', 'unknown')}")
+                            tf_signal = 0
+                            tf_conf = 0.0
+                        else:
+                            self.ai_stats["tf_approved"] += 1
+                            self.ai_rejection_window.append(False)
+                            logger.debug("[AI] Validator not initialized or disabled, skipping AI validation.")
+
+            # STEP 4: Calculate scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
                 target_signal=1,
                 mr_signal=mr_signal,
@@ -451,52 +638,43 @@ class PerformanceWeightedAggregator:
                 is_bull=is_bull,
             )
 
-            # STEP 4: Calculate DYNAMIC regime-adjusted thresholds
-            adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(
-                is_bull, regime_conf
-            )
-            
-            # Get base thresholds for comparison
+            # STEP 5: Dynamic thresholds
+            adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+
             base_buy_thresh = self.config["buy_threshold"]
             base_sell_thresh = self.config["sell_threshold"]
-            
-            # Log threshold adjustments (if significant)
-            if abs(adj_buy_thresh - base_buy_thresh) > 0.02 or abs(adj_sell_thresh - base_sell_thresh) > 0.02:
-                logger.info(f"🎯 {regime_name} regime adjustment (conf={regime_conf:.2f}):")
-                logger.info(f"   Buy threshold:  {base_buy_thresh:.3f} → {adj_buy_thresh:.3f} ({(adj_buy_thresh-base_buy_thresh)*100:+.1f}%)")
-                logger.info(f"   Sell threshold: {base_sell_thresh:.3f} → {adj_sell_thresh:.3f} ({(adj_sell_thresh-base_sell_thresh)*100:+.1f}%)")
 
-            # Get minimum quality requirement
+            # Get minimum quality
             min_quality = self.config["min_signal_quality"]
             signal_quality = max(buy_score, sell_score)
 
-            # STEP 5: Make decision using ADJUSTED thresholds
+            # STEP 6: Make decision
             if buy_score >= adj_buy_thresh and buy_score > sell_score:
                 if signal_quality >= min_quality:
                     final_signal = 1
-                    reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f}, quality:{signal_quality:.2f})"
+                    reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
                     self.stats["buy_signals"] += 1
                     self.stats["signals_generated"] += 1
                 else:
                     final_signal = 0
-                    reasoning = f"hold_lowquality (score:{buy_score:.2f}, min:{min_quality:.2f})"
+                    reasoning = f"hold_lowquality (score:{buy_score:.2f})"
                     self.stats["hold_signals"] += 1
             elif sell_score >= adj_sell_thresh and sell_score > buy_score:
                 if signal_quality >= min_quality:
                     final_signal = -1
-                    reasoning = f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f}, quality:{signal_quality:.2f})"
+                    reasoning = f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
                     self.stats["sell_signals"] += 1
                     self.stats["signals_generated"] += 1
                 else:
                     final_signal = 0
-                    reasoning = f"hold_lowquality (score:{sell_score:.2f}, min:{min_quality:.2f})"
+                    reasoning = f"hold_lowquality (score:{sell_score:.2f})"
                     self.stats["hold_signals"] += 1
             else:
                 final_signal = 0
-                reasoning = f"hold (buy:{buy_score:.2f}<{adj_buy_thresh:.2f} vs sell:{sell_score:.2f}<{adj_sell_thresh:.2f})"
+                reasoning = f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
                 self.stats["hold_signals"] += 1
 
-            # STEP 6: Build detailed response
+            # STEP 7: Build response
             details = {
                 "timestamp": timestamp,
                 "regime": regime_name,
@@ -511,12 +689,25 @@ class PerformanceWeightedAggregator:
                 "buy_threshold_base": base_buy_thresh,
                 "sell_threshold_base": base_sell_thresh,
                 "mr_signal": mr_signal,
+                "mr_signal_original": mr_original,
                 "mr_confidence": mr_conf,
                 "tf_signal": tf_signal,
+                "tf_signal_original": tf_original,
                 "tf_confidence": tf_conf,
                 "ema_regime_signal": ema_signal,
                 "ema_regime_confidence": ema_conf,
             }
+
+            # Add AI info
+            if self.ai_enabled:
+                details["ai_enabled"] = True
+                details["ai_bypassed"] = ai_bypass
+                if mr_original != mr_signal or tf_original != tf_signal:
+                    details["ai_modified"] = True
+                    details["ai_changes"] = {
+                        "mr": f"{mr_original}→{mr_signal}" if mr_original != mr_signal else "unchanged",
+                        "tf": f"{tf_original}→{tf_signal}" if tf_original != tf_signal else "unchanged"
+                    }
 
             return final_signal, details
 
@@ -530,15 +721,42 @@ class PerformanceWeightedAggregator:
                 "final_signal": 0,
             }
 
-    def get_statistics(self) -> Dict:
-        """Return aggregator statistics"""
-        total = max(self.stats["total_evaluations"], 1)
-        return {
-            **self.stats,
-            "signal_rate": (self.stats["signals_generated"] / total) * 100,
-            "buy_rate": (self.stats["buy_signals"] / total) * 100,
-            "sell_rate": (self.stats["sell_signals"] / total) * 100,
-            "bull_regime_pct": (self.stats["bull_regime_count"] / total) * 100,
-            "bear_regime_pct": (self.stats["bear_regime_count"] / total) * 100,
-            "consensus_rate": (self.stats["consensus_signals"] / max(self.stats["signals_generated"], 1)) * 100,
-        }
+
+    def _calculate_ai_impact(self, ai_stats: dict) -> dict:
+            """Calculate AI validation impact on trading"""
+            total_checks = ai_stats.get("total_checks", 0)
+            if total_checks == 0:
+                return {"message": "No AI checks performed"}
+            
+            approved = ai_stats.get("approved", 0)
+            rejected = ai_stats.get("rejected", 0)
+            bypassed_strong = ai_stats.get("bypassed_strong_signal", 0)
+            bypassed_breaker = ai_stats.get("bypassed_circuit_breaker", 0)
+            
+            effective_signals = approved + bypassed_strong + bypassed_breaker
+            filter_rate = (rejected / total_checks) * 100 if total_checks > 0 else 0
+            
+            return {
+                "total_signals_checked": total_checks,
+                "effective_signals": effective_signals,
+                "filtered_signals": rejected,
+                "filter_rate": f"{filter_rate:.1f}%",
+                "strong_signal_bypasses": bypassed_strong,
+                "circuit_breaker_bypasses": bypassed_breaker,
+                "net_approval_rate": f"{(effective_signals/total_checks)*100:.1f}%",
+                "assessment": self._assess_ai_performance(filter_rate)
+            }
+        
+    def _assess_ai_performance(self, filter_rate: float) -> str:
+            """Assess if AI filtering is appropriate"""
+            if filter_rate > 75:
+                return "⚠️ OVER-FILTERING: AI rejecting too many signals"
+            elif filter_rate > 50:
+                return "⚠️ HIGH FILTERING: AI may be too strict"
+            elif filter_rate > 25:
+                return "✓ BALANCED: AI filtering is reasonable"
+            elif filter_rate > 10:
+                return "✓ LIGHT FILTERING: AI approving most signals"
+            else:
+                return "ℹ️ MINIMAL FILTERING: AI rarely rejecting signals"
+        

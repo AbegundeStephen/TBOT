@@ -38,3 +38,5 @@ tenacity>=8.2.0
 #telegram bot
 python-telegram-bot>=20.7
 python-telegram-bot[job-queue]>=20.7
+tensorflow==2.20.0
+ccxt==4.5.26
