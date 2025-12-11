@@ -39,3 +39,5 @@ backtest_results/
 Thumbs.db
 EOF
 models/training_metadata.json
+
+data/
