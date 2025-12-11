@@ -352,6 +352,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.application.add_handler(CommandHandler("dtm", self.cmd_dtm_status))
 
         # ✨ NEW: Add error handler
         self.application.add_error_handler(self.error_handler)
@@ -614,6 +615,7 @@ class TradingTelegramBot:
             "/performance - Performance metrics\n"
             "/presets - View current aggregator presets\n"
             "/signals - Latest trading signals\n"
+            "/dtm - Latest dynamic Stop Loss and Take Profit signals.\n"
             "/stats - Signal statistics\n"
             "/regimes - Market regime tracking\n"
             "/overrides - Golden Cross overrides\n"
@@ -898,6 +900,47 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Error in cmd_positions: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching positions.")
+            
+    async def cmd_dtm_status(self, update, context):
+        """Show Dynamic Trade Manager status"""
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+            
+            positions = self.trading_bot.portfolio_manager.positions
+            
+            if not positions:
+                await update.message.reply_text("📊 No open positions")
+                return
+            
+            msg = "🎯 <b>DYNAMIC TRADE MANAGER STATUS</b>\n\n"
+            
+            for asset, position in positions.items():
+                dtm_status = position.get_dtm_status()
+                
+                if dtm_status:
+                    side_emoji = "🟢" if dtm_status['side'] == 'long' else "🔴"
+                    pnl_emoji = "💰" if dtm_status['pnl_pct'] > 0 else "📉"
+                    lock_emoji = "🔒" if dtm_status['profit_locked'] else "🔓"
+                    
+                    msg += f"{side_emoji} <b>{asset} {dtm_status['side'].upper()}</b>\n"
+                    msg += f"{pnl_emoji} P&L: <b>{dtm_status['pnl_pct']:+.2f}%</b>\n"
+                    msg += f"💵 Entry: ${dtm_status['entry_price']:,.2f}\n"
+                    msg += f"📍 Current: ${dtm_status['current_price']:,.2f}\n"
+                    msg += f"🛑 SL: ${dtm_status['stop_loss']:,.2f} ({dtm_status['distance_to_sl_pct']:+.1f}%)\n"
+                    msg += f"🎯 TP: ${dtm_status['take_profit']:,.2f} ({dtm_status['distance_to_tp_pct']:+.1f}%)\n"
+                    msg += f"{lock_emoji} Profit Lock: {'ON' if dtm_status['profit_locked'] else 'OFF'}\n"
+                    msg += f"🔄 Updates: {dtm_status['update_count']}\n\n"
+                else:
+                    msg += f"📊 <b>{asset}</b>: Static management (no DTM)\n\n"
+            
+            await update.message.reply_text(msg, parse_mode='HTML')
+        
+        except Exception as e:
+            logger.error(f"DTM status command error: {e}")
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /history command"""

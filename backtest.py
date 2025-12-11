@@ -175,26 +175,25 @@ class MLStrategy(bt.Strategy):
     """
 
     params = (
-            ("stop_loss_pct", 0.004),
-            ("take_profit_pct", 0.08),
-            ("trailing_stop_pct", 0.015),
-            ("risk_per_trade", 0.10),
-            ("max_position_pct", 0.95),
-            ("use_atr_sizing", True),
-            ("atr_period", 14),
-            ("atr_multiplier", 1.2),
-            ("lookback", 100),
-            ("aggregator_preset", "balanced"),
-            ("use_trailing_stop", True),
-            ("exit_on_opposite_signal", True),
-            
-            # ==== IMPROVED AI VALIDATION PARAMETERS ====
-            ("use_ai_validation", True),
-            ("ai_sr_threshold", 0.015),  # 1.5% (was 0.5%)
-            ("ai_pattern_confidence", 0.50),  # 50% (was 65%)
-            ("ai_enable_adaptive", True),  # NEW: Enable adaptive thresholds
-            ("ai_strong_signal_bypass", 0.75),  # NEW: Bypass AI for strong signals
-        )
+        ("stop_loss_pct", 0.004),
+        ("take_profit_pct", 0.08),
+        ("trailing_stop_pct", 0.015),
+        ("risk_per_trade", 0.10),
+        ("max_position_pct", 0.95),
+        ("use_atr_sizing", True),
+        ("atr_period", 14),
+        ("atr_multiplier", 1.2),
+        ("lookback", 100),
+        ("aggregator_preset", "balanced"),
+        ("use_trailing_stop", True),
+        ("exit_on_opposite_signal", True),
+        # ==== IMPROVED AI VALIDATION PARAMETERS ====
+        ("use_ai_validation", True),
+        ("ai_sr_threshold", 0.015),  # 1.5% (was 0.5%)
+        ("ai_pattern_confidence", 0.50),  # 50% (was 65%)
+        ("ai_enable_adaptive", True),  # NEW: Enable adaptive thresholds
+        ("ai_strong_signal_bypass", 0.75),  # NEW: Bypass AI for strong signals
+    )
 
     def __init__(self):
         # Set asset key from class attribute
@@ -226,7 +225,7 @@ class MLStrategy(bt.Strategy):
         self.mean_reversion = MeanReversionStrategy(mr_config)
         self.trend_following = TrendFollowingStrategy(tf_config)
         self.ema_strategy = EMAStrategy(ema_config)
-        
+
         # ===================================================================
         # NEW: Initialize AI Validation Layer
         # ===================================================================
@@ -257,7 +256,9 @@ class MLStrategy(bt.Strategy):
             ema_strategy=self.ema_strategy,
             asset_type=self.asset_key,
             config=confidence_config,
-            ai_validator=self.ai_validator if self.params.use_ai_validation else None  # NEW
+            ai_validator=(
+                self.ai_validator if self.params.use_ai_validation else None
+            ),  # NEW
         )
 
         self.order = None
@@ -281,15 +282,17 @@ class MLStrategy(bt.Strategy):
         logger.info(f" Strategy Configuration for {self.asset_key}")
         logger.info(f"=" * 70)
         logger.info(f"Preset: {preset_name}")
-        
+
         # NEW: Log AI validation status
         if self.ai_validator:
             logger.info(f"AI Validation: ENABLED")
             logger.info(f"  S/R Threshold: {self.params.ai_sr_threshold:.2%}")
-            logger.info(f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%}")
+            logger.info(
+                f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%}"
+            )
         else:
             logger.info(f"AI Validation: DISABLED")
-        
+
         logger.info(f"Risk Management:")
         logger.info(f"  Stop-Loss: {self.params.stop_loss_pct * 100}%")
         logger.info(f"  Take-Profit: {self.params.take_profit_pct * 100}%")
@@ -312,9 +315,9 @@ class MLStrategy(bt.Strategy):
         """Initialize AI validation layer with improved settings"""
         try:
             models_dir = Path("models/ai")
-            model_path = models_dir / "sniper.weights.h5"
-            mapping_path = models_dir / "pattern_mapping.pkl"
-            config_path = models_dir / "training_config.pkl"
+            model_path = models_dir / "sniper_btc_gold_v2.weights.h5"
+            mapping_path = models_dir / "sniper_btc_gold_v2_mapping.pkl"
+            config_path = models_dir / "sniper_btc_gold_v2_config.pkl"
 
             if not model_path.exists():
                 logger.warning(f"[AI] Model not found: {model_path}")
@@ -333,8 +336,7 @@ class MLStrategy(bt.Strategy):
             # Initialize components
             analyst = DynamicAnalyst(atr_multiplier=1.5, min_samples=5)
             sniper = OHLCSniper(
-                input_shape=(15, 4), 
-                num_classes=ai_config["num_classes"]
+                input_shape=(15, 4), num_classes=ai_config["num_classes"]
             )
             sniper.load_model(str(model_path))
 
@@ -351,10 +353,16 @@ class MLStrategy(bt.Strategy):
             )
 
             logger.info("[AI] ✓ Enhanced validation layer initialized")
-            logger.info(f"  S/R Threshold: {self.params.ai_sr_threshold:.2%} (adaptive)")
-            logger.info(f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%} (adaptive)")
-            logger.info(f"  Strong Signal Bypass: {self.params.ai_strong_signal_bypass:.0%}")
-            
+            logger.info(
+                f"  S/R Threshold: {self.params.ai_sr_threshold:.2%} (adaptive)"
+            )
+            logger.info(
+                f"  Pattern Confidence: {self.params.ai_pattern_confidence:.0%} (adaptive)"
+            )
+            logger.info(
+                f"  Strong Signal Bypass: {self.params.ai_strong_signal_bypass:.0%}"
+            )
+
             return validator
 
         except Exception as e:
@@ -478,7 +486,7 @@ class MLStrategy(bt.Strategy):
                         "date": self.data.datetime.date(0),
                         "price": current_price,
                         "signal": signal,
-                    # "original_signal": original_signal,
+                        # "original_signal": original_signal,
                         "details": details,
                     }
                 )
@@ -527,12 +535,12 @@ class MLStrategy(bt.Strategy):
                             f"🟢 BUY at ${current_price:.2f} | Size: {size:.8f} | "
                             f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}"
                         )
-                        
+
                         if self.ai_validator and "ai_pattern_check" in details:
                             pattern_info = details["ai_pattern_check"]
                             if pattern_info.get("pattern_confirmed"):
                                 log_msg += f" | AI: {pattern_info['pattern_name']} ({pattern_info['confidence']:.0%})"
-                        
+
                         log_msg += f" | Reason: {details.get('reasoning', 'N/A')}"
                         logger.info(log_msg)
             else:
@@ -651,14 +659,20 @@ class MLStrategy(bt.Strategy):
         if self.ai_validator and self.ai_stats["total_signals"] > 0:
             logger.info(f"\n🤖 AI Validation Statistics:")
             logger.info(f"  Total Signals: {self.ai_stats['total_signals']}")
-            logger.info(f"  Approved: {self.ai_stats['ai_approved']} ({self.ai_stats['ai_approved']/self.ai_stats['total_signals']*100:.1f}%)")
-            logger.info(f"  Rejected: {self.ai_stats['ai_rejected']} ({self.ai_stats['ai_rejected']/self.ai_stats['total_signals']*100:.1f}%)")
+            logger.info(
+                f"  Approved: {self.ai_stats['ai_approved']} ({self.ai_stats['ai_approved']/self.ai_stats['total_signals']*100:.1f}%)"
+            )
+            logger.info(
+                f"  Rejected: {self.ai_stats['ai_rejected']} ({self.ai_stats['ai_rejected']/self.ai_stats['total_signals']*100:.1f}%)"
+            )
             logger.info(f"    - No S/R level: {self.ai_stats['rejected_no_sr']}")
             logger.info(f"    - No pattern: {self.ai_stats['rejected_no_pattern']}")
-            
+
             # Calculate AI impact
-            if self.ai_stats['ai_rejected'] > 0:
-                filter_rate = (self.ai_stats['ai_rejected'] / self.ai_stats['total_signals']) * 100
+            if self.ai_stats["ai_rejected"] > 0:
+                filter_rate = (
+                    self.ai_stats["ai_rejected"] / self.ai_stats["total_signals"]
+                ) * 100
                 logger.info(f"  Filter Rate: {filter_rate:.1f}% (signals blocked)")
 
 
@@ -720,9 +734,9 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
     # Add strategy with AI toggle
     MLStrategy.asset_key = asset_key.upper()
     cerebro.addstrategy(
-        MLStrategy, 
+        MLStrategy,
         aggregator_preset=aggregator_preset,
-        use_ai_validation=use_ai  # Pass AI toggle
+        use_ai_validation=use_ai,  # Pass AI toggle
     )
 
     # Broker settings
@@ -790,7 +804,9 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
             logger.warning("⚠️ NO TRADES EXECUTED!")
             logger.warning("=" * 70)
             logger.warning(
-                "Try: python backtest.py --asset " + asset_key + " --preset aggressive --no-ai"
+                "Try: python backtest.py --asset "
+                + asset_key
+                + " --preset aggressive --no-ai"
             )
             logger.warning(
                 "Or:  python backtest.py --asset " + asset_key + " --preset scalper"
@@ -845,7 +861,5 @@ Examples:
 
     args = parser.parse_args()
     run_backtest(
-        asset_key=args.asset, 
-        aggregator_preset=args.preset,
-        use_ai=not args.no_ai
+        asset_key=args.asset, aggregator_preset=args.preset, use_ai=not args.no_ai
     )
