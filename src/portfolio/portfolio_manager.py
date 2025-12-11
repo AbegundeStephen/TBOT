@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+from src.execution.dynamic_trade_manager import DynamicTradeManager
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,9 @@ class Position:
         trailing_stop_pct: float = None,
         mt5_ticket: int = None,  # Track MT5 ticket number
         binance_order_id: int = None,  # Track Binance order ID
+        ohlc_data: dict = None,  # {'high': np.ndarray, 'low': np.ndarray, 'close': np.ndarray}
+        account_balance: float = None,
+        use_dynamic_management: bool = True,
     ):
         self.asset = asset
         self.symbol = symbol
@@ -55,6 +59,95 @@ class Position:
         self.session_start_time = None
         self.session_start_equity = None
         self.session_start_capital = None
+        
+        # ✨ NEW: Dynamic Trade Manager
+        self.trade_manager = None
+        if use_dynamic_management and ohlc_data is not None and account_balance is not None:
+            try:
+                self.trade_manager = DynamicTradeManager(
+                    entry_price=entry_price,
+                    side=side,
+                    high=ohlc_data['high'],
+                    low=ohlc_data['low'],
+                    close=ohlc_data['close'],
+                    account_balance=account_balance,
+                    account_risk=0.01,  # 1% risk per trade
+                    atr_period=14,
+                    reward_risk_ratio=2.0,
+                    sr_window=20,
+                    atr_multiplier=1.5,
+                    min_profit_lock=0.005,  # Lock profit after 0.5% gain
+                    aggressive_trail=False,
+                )
+                
+                # Use DTM's calculated SL/TP
+                self.stop_loss = self.trade_manager.stop_loss
+                self.take_profit = self.trade_manager.take_profit
+                
+                logger.info(
+                    f"[DTM] Initialized for {asset} {side.upper()}\n"
+                    f"      SL: ${self.stop_loss:,.2f} | TP: ${self.take_profit:,.2f}"
+                )
+            except Exception as e:
+                logger.error(f"[DTM] Failed to initialize: {e}")
+                self.trade_manager = None
+                
+    def update_with_new_bar(self, high: float, low: float, close: float):
+        """
+        Update position with new OHLC data
+        This should be called on every new bar/candle
+        """
+        if self.trade_manager:
+            try:
+                exit_signal = self.trade_manager.on_new_bar(high, low, close)
+                
+                # Update position's SL/TP with DTM's updated values
+                self.stop_loss = self.trade_manager.stop_loss
+                self.take_profit = self.trade_manager.take_profit
+                
+                return exit_signal  # Returns 'stop_loss', 'take_profit', or None
+            except Exception as e:
+                logger.error(f"[DTM] Error updating bar: {e}")
+                return None
+        return None
+
+    def should_close(self, current_price: float) -> Tuple[bool, str]:
+        """Check if position should be closed (with DTM integration)"""
+        # If using DTM, check its exit signal
+        if self.trade_manager:
+            exit_signal = self.trade_manager.check_exit(current_price)
+            if exit_signal:
+                return True, exit_signal
+        
+        # Fallback to original logic
+        if self.stop_loss:
+            if self.side == "long" and current_price <= self.stop_loss:
+                return True, "stop_loss"
+            elif self.side == "short" and current_price >= self.stop_loss:
+                return True, "stop_loss"
+
+        if self.take_profit:
+            if self.side == "long" and current_price >= self.take_profit:
+                return True, "take_profit"
+            elif self.side == "short" and current_price <= self.take_profit:
+                return True, "take_profit"
+
+        # Trailing stop (if no DTM)
+        if not self.trade_manager:
+            trail_stop = self.update_trailing_stop(current_price)
+            if trail_stop:
+                if self.side == "long" and current_price <= trail_stop:
+                    return True, "trailing_stop"
+                elif self.side == "short" and current_price >= trail_stop:
+                    return True, "trailing_stop"
+
+        return False, ""
+
+    def get_dtm_status(self) -> dict:
+        """Get Dynamic Trade Manager status"""
+        if self.trade_manager:
+            return self.trade_manager.get_status()
+        return None
 
     def get_position_value(self, current_price: float) -> float:
         """Get current position value in USD"""
@@ -553,10 +646,13 @@ class PortfolioManager:
         stop_loss: float = None,
         take_profit: float = None,
         trailing_stop_pct: float = None,
-        mt5_ticket: int = None,  # Track MT5 ticket
-        binance_order_id: int = None,  # Track Binance order ID
+        mt5_ticket: int = None,
+        binance_order_id: int = None,
+        ohlc_data: dict = None,  # ✨ NEW: Pass OHLC data for DTM
+        use_dynamic_management: bool = True,  # ✨ NEW: Enable/disable DTM
     ) -> bool:
-        """Add a new position to the portfolio"""
+        """Add a new position to the portfolio with optional dynamic management"""
+        
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
             logger.warning(f"Cannot open position: {reason}")
@@ -568,9 +664,7 @@ class PortfolioManager:
 
         if self.should_reduce_position(asset):
             position_size_usd *= 0.5
-            logger.info(
-                f"Position size reduced to ${position_size_usd:,.2f} due to correlation"
-            )
+            logger.info(f"Position size reduced to ${position_size_usd:,.2f} due to correlation")
 
         quantity = position_size_usd / entry_price
 
@@ -584,8 +678,12 @@ class PortfolioManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop_pct=trailing_stop_pct,
-            mt5_ticket=mt5_ticket,  # Store MT5 ticket
-            binance_order_id=binance_order_id,  # Store Binance order ID
+            mt5_ticket=mt5_ticket,
+            binance_order_id=binance_order_id,
+            # ✨ NEW: Pass OHLC and balance for DTM
+            ohlc_data=ohlc_data,
+            account_balance=self.current_capital,
+            use_dynamic_management=use_dynamic_management,
         )
 
         self.positions[asset] = position
@@ -600,15 +698,60 @@ class PortfolioManager:
             logger.info(f"  └─ MT5 Ticket: {mt5_ticket}")
         if binance_order_id:
             logger.info(f"  └─ Binance Order ID: {binance_order_id}")
-
+        if position.trade_manager:
+            logger.info(f"  └─ Dynamic Trade Manager: ACTIVE")
+        
         if stop_loss:
             logger.info(f"  └─ Stop Loss: ${stop_loss:,.2f}")
         if take_profit:
             logger.info(f"  └─ Take Profit: ${take_profit:,.2f}")
-        if trailing_stop_pct:
-            logger.info(f"  └─ Trailing Stop: {trailing_stop_pct:.1%}")
 
         return True
+    
+    def update_positions_with_ohlc(self, ohlc_data_dict: dict):
+        """
+        Update all positions with new OHLC data for dynamic management
+        
+        Args:
+            ohlc_data_dict: Dict with asset keys and {'high': float, 'low': float, 'close': float} values
+        
+        Example:
+            portfolio_manager.update_positions_with_ohlc({
+                'BTC': {'high': 45000, 'low': 44500, 'close': 44800},
+                'GOLD': {'high': 2050, 'low': 2045, 'close': 2048}
+            })
+        """
+        positions_to_close = []
+        
+        for asset, position in self.positions.items():
+            if asset not in ohlc_data_dict:
+                continue
+            
+            ohlc = ohlc_data_dict[asset]
+            
+            try:
+                # Update position with new bar
+                exit_signal = position.update_with_new_bar(
+                    high=ohlc['high'],
+                    low=ohlc['low'],
+                    close=ohlc['close']
+                )
+                
+                # If DTM signals exit, mark for closure
+                if exit_signal:
+                    positions_to_close.append((asset, ohlc['close'], exit_signal))
+                    logger.info(
+                        f"[DTM] {asset} triggered {exit_signal.upper()} @ ${ohlc['close']:,.2f}"
+                    )
+            
+            except Exception as e:
+                logger.error(f"[DTM] Error updating {asset}: {e}")
+        
+        # Close positions that received exit signals
+        for asset, exit_price, reason in positions_to_close:
+            self.close_position(asset=asset, exit_price=exit_price, reason=f"dtm_{reason}")
+        
+        return len(positions_to_close)
 
     def close_position(
         self, asset: str, exit_price: float, reason: str = "manual"

@@ -8,12 +8,14 @@ import MetaTrader5 as mt5
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 
 class SizingMode:
     """Position sizing modes"""
+
     AUTOMATED = "automated"
     MANUAL_OVERRIDE = "override"
     REDUCED_RISK = "reduced_risk"
@@ -22,7 +24,7 @@ class SizingMode:
 
 class PositionSizingRequest:
     """Request object for position sizing with manual override support"""
-    
+
     def __init__(
         self,
         asset: str,
@@ -48,7 +50,7 @@ class PositionSizingRequest:
 
 class HybridPositionSizer:
     """Hybrid position sizing with automated rules and manual overrides"""
-    
+
     def __init__(self, config: Dict, portfolio_manager):
         self.config = config
         self.portfolio_manager = portfolio_manager
@@ -56,24 +58,20 @@ class HybridPositionSizer:
         self.risk_cfg = config.get("risk_management", {})
         self.override_history = []
         logger.info("HybridPositionSizer initialized")
-    
+
     def calculate_size(self, request: PositionSizingRequest) -> Tuple[float, Dict]:
         """Calculate position size with hybrid logic"""
         try:
             # Step 1: Calculate base automated size
             base_size = self._calculate_automated_size(
-                request.asset,
-                request.current_price,
-                request.signal
+                request.asset, request.current_price, request.signal
             )
-            
+
             # Step 2: Apply confidence adjustments
             confidence_adjusted = self._apply_confidence_adjustment(
-                base_size,
-                request.confidence_score,
-                request.market_condition
+                base_size, request.confidence_score, request.market_condition
             )
-            
+
             # Step 3: Apply manual override if requested
             if request.mode == SizingMode.MANUAL_OVERRIDE and request.manual_size_usd:
                 final_size, override_result = self._apply_manual_override(
@@ -81,36 +79,34 @@ class HybridPositionSizer:
                     confidence_adjusted,
                     request.manual_size_usd,
                     request.override_reason,
-                    request.max_override_pct
+                    request.max_override_pct,
                 )
             elif request.mode == SizingMode.REDUCED_RISK:
                 final_size = confidence_adjusted * 0.5
                 override_result = {
                     "mode": "REDUCED_RISK",
                     "reason": "Lower exposure due to uncertain market conditions",
-                    "reduction_pct": 50
+                    "reduction_pct": 50,
                 }
             elif request.mode == SizingMode.ELEVATED_RISK:
                 final_size = min(
                     confidence_adjusted * 1.5,
-                    self._get_max_position_size(request.asset)
+                    self._get_max_position_size(request.asset),
                 )
                 override_result = {
                     "mode": "ELEVATED_RISK",
                     "reason": "Higher exposure for high-conviction trade",
-                    "elevation_pct": 50
+                    "elevation_pct": 50,
                 }
             else:
                 final_size = confidence_adjusted
                 override_result = {"mode": "AUTOMATED"}
-            
+
             # Step 4: Apply hard limits
             final_size = self._apply_hard_limits(
-                request.asset,
-                final_size,
-                request.signal
+                request.asset, final_size, request.signal
             )
-            
+
             # Build metadata
             metadata = {
                 "asset": request.asset,
@@ -124,170 +120,176 @@ class HybridPositionSizer:
                 "override_details": override_result,
                 "timestamp": datetime.now().isoformat(),
             }
-            
+
             self._log_sizing_decision(metadata)
-            
+
             if request.mode != SizingMode.AUTOMATED:
                 self.override_history.append(metadata)
-            
+
             return final_size, metadata
-            
+
         except Exception as e:
             logger.error(f"Error calculating position size: {e}", exc_info=True)
             return 0.0, {"error": str(e)}
-    
+
     def _calculate_automated_size(
-        self,
-        asset: str,
-        current_price: float,
-        signal: int
+        self, asset: str, current_price: float, signal: int
     ) -> float:
         """Calculate base position size using portfolio risk rules"""
-        
+
         asset_cfg = self.config["assets"][asset]
-        
+
         # Base: % of capital
         base_pct = self.portfolio_cfg.get("base_position_size", 0.10)
         base_size = self.portfolio_manager.current_capital * base_pct
-        
+
         # Apply asset weight
         asset_weight = asset_cfg.get("weight", 1.0)
         base_size *= asset_weight
-        
+
         # Apply signal adjustment
         if signal == -1:  # SELL signal
             base_size *= 0.8
-        
+
         # Apply max risk per trade
         max_risk_pct = self.risk_cfg.get("max_risk_per_trade", 0.02)
         max_risk_usd = self.portfolio_manager.current_capital * max_risk_pct
-        
+
         # Estimate SL distance
         risk_cfg = asset_cfg.get("risk", {})
         stop_loss_pct = risk_cfg.get("stop_loss_pct", 0.02)
-        
+
         # Max size based on risk
-        max_size_by_risk = max_risk_usd / stop_loss_pct if stop_loss_pct > 0 else base_size
+        max_size_by_risk = (
+            max_risk_usd / stop_loss_pct if stop_loss_pct > 0 else base_size
+        )
         base_size = min(base_size, max_size_by_risk)
-        
+
         # Enforce min/max
         min_size = asset_cfg.get("min_position_usd", 100)
         max_size = asset_cfg.get("max_position_usd", 6000)
         base_size = max(min_size, min(base_size, max_size))
-        
+
         logger.debug(
             f"{asset}: Automated base size = ${base_size:,.2f} "
             f"(weight={asset_weight}, signal={signal})"
         )
-        
+
         return base_size
-    
+
     def _apply_confidence_adjustment(
-        self,
-        base_size: float,
-        confidence_score: float,
-        market_condition: str
+        self, base_size: float, confidence_score: float, market_condition: str
     ) -> float:
         """Adjust size based on signal confidence and market conditions"""
-        
+
         # Confidence scaling: 0.3 to 1.5x
         confidence_scalar = 0.5 + (confidence_score * 1.0)
         confidence_scalar = max(0.3, min(1.5, confidence_scalar))
         adjusted_size = base_size * confidence_scalar
-        
+
         # Market condition adjustments
         condition_scalars = {
             "bullish": 1.1,
             "neutral": 1.0,
             "bearish": 0.8,
             "uncertain": 0.6,
-            "extreme_volatility": 0.5
+            "extreme_volatility": 0.5,
         }
         condition_scalar = condition_scalars.get(market_condition, 1.0)
         adjusted_size *= condition_scalar
-        
+
         logger.debug(
             f"Confidence adjustment: ${base_size:.2f} → ${adjusted_size:.2f} "
             f"(confidence={confidence_score:.2f}, condition={market_condition})"
         )
-        
+
         return adjusted_size
-    
+
     def _apply_manual_override(
         self,
         base_size: float,
         confidence_adjusted: float,
         manual_size_usd: float,
         override_reason: str,
-        max_override_pct: float
+        max_override_pct: float,
     ) -> Tuple[float, Dict]:
         """Apply manual override with safety guards"""
-        
+
         # Validate override is within reasonable bounds
         min_allowed = confidence_adjusted * (1 - max_override_pct / 100)
         max_allowed = confidence_adjusted * (1 + max_override_pct / 100)
-        
+
         if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
             logger.warning(
                 f"Manual override ${manual_size_usd:,.2f} exceeds bounds "
                 f"[${min_allowed:,.2f}, ${max_allowed:,.2f}]. Clamping."
             )
             manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
-        
-        deviation_pct = ((manual_size_usd - confidence_adjusted) / confidence_adjusted * 100) if confidence_adjusted > 0 else 0
-        
+
+        deviation_pct = (
+            ((manual_size_usd - confidence_adjusted) / confidence_adjusted * 100)
+            if confidence_adjusted > 0
+            else 0
+        )
+
         result = {
             "mode": "MANUAL_OVERRIDE",
             "reason": override_reason or "User override",
             "manual_size": manual_size_usd,
             "deviation_pct": deviation_pct,
         }
-        
+
         logger.info(
             f"Manual override applied: ${confidence_adjusted:,.2f} → ${manual_size_usd:,.2f} "
             f"({deviation_pct:+.1f}%) - Reason: {override_reason}"
         )
-        
+
         return manual_size_usd, result
-    
-    def _apply_hard_limits(self, asset: str, position_size: float, signal: int) -> float:
+
+    def _apply_hard_limits(
+        self, asset: str, position_size: float, signal: int
+    ) -> float:
         """Apply absolute limits to prevent excessive exposure"""
-        
+
         asset_cfg = self.config["assets"][asset]
-        
+
         # Hard limits
         min_size = asset_cfg.get("min_position_usd", 100)
         max_size = asset_cfg.get("max_position_usd", 6000)
         max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
         max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
-        
+
         # Check absolute limits
         if position_size < min_size:
-            logger.debug(f"Position size ${position_size:,.2f} below minimum ${min_size}")
+            logger.debug(
+                f"Position size ${position_size:,.2f} below minimum ${min_size}"
+            )
             return 0.0
-        
+
         position_size = min(position_size, max_size)
-        
+
         # Check portfolio exposure
         current_exposure = self._calculate_current_exposure()
         max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
         if current_exposure + position_size > max_portfolio_usd:
             position_size = max(0, max_portfolio_usd - current_exposure)
-            logger.warning(f"Position clamped to portfolio limit: ${position_size:,.2f}")
-        
+            logger.warning(
+                f"Position clamped to portfolio limit: ${position_size:,.2f}"
+            )
+
         # Check single asset limit
         max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
         position_size = min(position_size, max_asset_usd)
-        
+
         return position_size
-    
+
     def _calculate_current_exposure(self) -> float:
         """Calculate total current portfolio exposure"""
         return sum(
             pos.quantity * pos.entry_price
             for pos in self.portfolio_manager.positions.values()
         )
-    
+
     def _get_max_position_size(self, asset: str) -> float:
         """Get maximum allowed position size for an asset"""
         asset_cfg = self.config["assets"][asset]
@@ -295,7 +297,7 @@ class HybridPositionSizer:
         max_asset_pct = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
         max_asset_usd = self.portfolio_manager.current_capital * max_asset_pct
         return min(max_usd, max_asset_usd)
-    
+
     def _log_sizing_decision(self, metadata: Dict):
         """Log sizing decision for audit"""
         logger.info(
@@ -490,7 +492,6 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Error executing {asset} signal: {e}", exc_info=True)
             return False
-
 
     def _check_stop_loss_take_profit(
         self, position, current_price: float
@@ -689,7 +690,9 @@ class MT5ExecutionHandler:
                 max_override_pct=2.0,
             )
 
-            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
+            position_size_usd, sizing_metadata = self.sizer.calculate_size(
+                sizing_request
+            )
             # ==========================================
 
             if position_size_usd <= 0:
@@ -759,6 +762,33 @@ class MT5ExecutionHandler:
                 logger.error(f"[FAIL] Order failed: {error_msg} (code: {error_code})")
                 return False
 
+            try:
+                # Fetch recent OHLC data for DTM
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=10)  # Get 10 days of data
+
+                df = self.data_manager.fetch_binance_data(
+                    symbol=self.symbol,
+                    interval=self.config["assets"][asset].get("interval", "1h"),
+                    start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+
+                # Prepare OHLC arrays for DTM
+                ohlc_data = {
+                    "high": df["high"].values,
+                    "low": df["low"].values,
+                    "close": df["close"].values,
+                }
+
+                logger.debug(f"[DTM] Prepared {len(df)} bars for dynamic management")
+
+            except Exception as e:
+                logger.warning(
+                    f"[DTM] Failed to fetch OHLC data: {e}, DTM disabled for this trade"
+                )
+                ohlc_data = None
+
             # Add position to portfolio manager
             success = self.portfolio_manager.add_position(
                 asset=asset,
@@ -770,6 +800,8 @@ class MT5ExecutionHandler:
                 take_profit=take_profit,
                 trailing_stop_pct=trailing_stop_pct,
                 mt5_ticket=result.order,
+                ohlc_data=ohlc_data,  # ✨ NEW: Pass OHLC for DTM
+                use_dynamic_management=True,  # ✨ NEW: Enable DTM
             )
 
             if not success:
@@ -785,6 +817,100 @@ class MT5ExecutionHandler:
 
         except Exception as e:
             logger.error(f"Error opening MT5 position: {e}", exc_info=True)
+            return False
+
+    def check_and_update_positions_dtm(self, asset_name: str = "BTC"):
+        """
+        Check and update positions with DTM using fresh OHLC data
+        Call this method every check interval (e.g., every 5 minutes)
+        """
+        try:
+            position = self.portfolio_manager.get_position(asset_name)
+            if not position:
+                return
+
+            # Fetch latest candle data
+            current_price = self.get_current_price()
+            if current_price is None:
+                logger.warning(f"Could not get price for {asset_name}")
+                return
+
+            # Get recent OHLC for DTM update
+            try:
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(hours=24)  # Last 24 hours
+
+                # For Binance
+                if hasattr(self, "binance_client"):
+                    df = self.data_manager.fetch_mt5_data(
+                        symbol=self.symbol,
+                        interval=self.config["assets"][asset_name].get(
+                            "interval", "1h"
+                        ),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                # For MT5
+                else:
+                    df = self.data_manager.fetch_mt5_data(
+                        symbol=self.symbol,
+                        timeframe=self.config["assets"][asset_name].get(
+                            "timeframe", "H1"
+                        ),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+
+                if len(df) > 0:
+                    latest_bar = df.iloc[-1]
+
+                    # Update position with new bar
+                    exit_signal = position.update_with_new_bar(
+                        high=latest_bar["high"],
+                        low=latest_bar["low"],
+                        close=latest_bar["close"],
+                    )
+
+                    # Log DTM status
+                    if position.trade_manager:
+                        dtm_status = position.get_dtm_status()
+                        logger.info(
+                            f"[DTM] {asset_name} Status:\n"
+                            f"      Current: ${dtm_status['current_price']:,.2f} | "
+                            f"P&L: {dtm_status['pnl_pct']:+.2f}%\n"
+                            f"      SL: ${dtm_status['stop_loss']:,.2f} "
+                            f"({dtm_status['distance_to_sl_pct']:+.2f}% away)\n"
+                            f"      TP: ${dtm_status['take_profit']:,.2f} "
+                            f"({dtm_status['distance_to_tp_pct']:+.2f}% away)\n"
+                            f"      Profit Locked: {dtm_status['profit_locked']}"
+                        )
+
+                    # If DTM signals exit
+                    if exit_signal:
+                        logger.info(
+                            f"[DTM] {asset_name}: {exit_signal.upper()} signal received"
+                        )
+                        self._close_position(
+                            position, current_price, asset_name, f"dtm_{exit_signal}"
+                        )
+                        return True
+
+            except Exception as e:
+                logger.debug(f"[DTM] Error fetching OHLC: {e}")
+
+            # Fallback: check traditional SL/TP
+            should_close, reason = self._check_stop_loss_take_profit(
+                position, current_price
+            )
+            if should_close:
+                logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
+                self._close_position(position, current_price, asset_name, reason)
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking DTM positions: {e}", exc_info=True)
             return False
 
     def _emergency_close_mt5_position(
@@ -825,27 +951,32 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Emergency close error: {e}", exc_info=True)
 
-    def check_and_update_positions(self, asset: str = "GOLD"):
-        """Actively check and update all positions (for HOLD signals)"""
+    def check_and_update_positions(self, asset_name: str = "BTC"):
+        """
+        Actively check and update all positions
+        NOW WITH DTM SUPPORT
+        """
         try:
-            position = self.portfolio_manager.get_position(asset)
+            # Use DTM version if available
+            if hasattr(self, "check_and_update_positions_dtm"):
+                return self.check_and_update_positions_dtm(asset_name)
 
+            # Fallback to original implementation
+            position = self.portfolio_manager.get_position(asset_name)
             if not position:
                 return
 
             current_price = self.get_current_price()
-
-            if current_price == 0:
-                logger.warning(f"Could not get price for {asset}")
+            if current_price is None:
+                logger.warning(f"Could not get price for {asset_name}")
                 return
 
             should_close, reason = self._check_stop_loss_take_profit(
                 position, current_price
             )
-
             if should_close:
-                logger.info(f"[AUTO-CLOSE] {asset}: {reason}")
-                self._close_mt5_position(position, current_price, asset, reason)
+                logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
+                self._close_position(position, current_price, asset_name, reason)
 
         except Exception as e:
             logger.error(f"Error checking positions: {e}", exc_info=True)
@@ -870,7 +1001,9 @@ class MT5ExecutionHandler:
 
             if mt5_positions and len(mt5_positions) > 0 and not portfolio_position:
                 import_enabled = bool(
-                    self.config.get("portfolio", {}).get("import_existing_positions", False)
+                    self.config.get("portfolio", {}).get(
+                        "import_existing_positions", False
+                    )
                 )
                 if import_enabled:
                     logger.info(
@@ -943,9 +1076,7 @@ class MT5ExecutionHandler:
 
             if mt5_positions and len(mt5_positions) > 0 and portfolio_position:
                 mt5_pos = mt5_positions[0]
-                mt5_side = (
-                    "long" if mt5_pos.type == mt5.POSITION_TYPE_BUY else "short"
-                )
+                mt5_side = "long" if mt5_pos.type == mt5.POSITION_TYPE_BUY else "short"
                 portfolio_side = getattr(
                     portfolio_position,
                     "side",

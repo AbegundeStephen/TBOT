@@ -14,6 +14,7 @@ from binance.enums import (
 )
 from typing import Dict, Optional, Tuple
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -647,18 +648,44 @@ class BinanceExecutionHandler:
                 # order_id = order_result['orderId']
 
             # ✅ NEW: Pass order_id to Portfolio Manager (similar to MT5 ticket)
+            try:
+                # Fetch recent OHLC data for DTM
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=10)  # Get 10 days of data
+                
+                df = self.data_manager.fetch_binance_data(
+                    symbol=self.symbol,
+                    interval=self.config["assets"][asset_name].get("interval", "1h"),
+                    start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                
+                # Prepare OHLC arrays for DTM
+                ohlc_data = {
+                    'high': df['high'].values,
+                    'low': df['low'].values,
+                    'close': df['close'].values,
+                }
+                
+                logger.debug(f"[DTM] Prepared {len(df)} bars for dynamic management")
+                
+            except Exception as e:
+                logger.warning(f"[DTM] Failed to fetch OHLC data: {e}, DTM disabled for this trade")
+                ohlc_data = None
+        
             success = self.portfolio_manager.add_position(
-                asset=asset_name,
-                symbol=self.symbol,
-                side=side,
-                entry_price=current_price,
-                position_size_usd=position_size_usd,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                trailing_stop_pct=trailing_stop_pct,
-                binance_order_id=order_id,  # ← NEW: Track Binance order ID
-            )
-
+            asset=asset_name,
+            symbol=self.symbol,
+            side=side,
+            entry_price=current_price,
+            position_size_usd=position_size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            trailing_stop_pct=trailing_stop_pct,
+            binance_order_id=order_id,
+            ohlc_data=ohlc_data,  # ✨ NEW: Pass OHLC for DTM
+            use_dynamic_management=True,  # ✨ NEW: Enable DTM
+        )
             if success:
                 logger.info(
                     f"[OK] {order_side} {asset_name} - Position opened successfully"
@@ -674,24 +701,116 @@ class BinanceExecutionHandler:
             logger.error(f"Error opening position: {e}", exc_info=True)
             return False
 
-    def check_and_update_positions(self, asset_name: str = "BTC"):
-        """Actively check and update all positions (for HOLD signals)"""
+    def check_and_update_positions_dtm(self, asset_name: str = "BTC"):
+        """
+        Check and update positions with DTM using fresh OHLC data
+        Call this method every check interval (e.g., every 5 minutes)
+        """
         try:
             position = self.portfolio_manager.get_position(asset_name)
+            if not position:
+                return
+            
+            # Fetch latest candle data
+            current_price = self.get_current_price()
+            if current_price is None:
+                logger.warning(f"Could not get price for {asset_name}")
+                return
+            
+            # Get recent OHLC for DTM update
+            try:
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(hours=24)  # Last 24 hours
+                
+                # For Binance
+                if hasattr(self, 'binance_client'):
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=self.symbol,
+                        interval=self.config["assets"][asset_name].get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                # For MT5
+                else:
+                    df = self.data_manager.fetch_mt5_data(
+                        symbol=self.symbol,
+                        timeframe=self.config["assets"][asset_name].get("timeframe", "H1"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                
+                if len(df) > 0:
+                    latest_bar = df.iloc[-1]
+                    
+                    # Update position with new bar
+                    exit_signal = position.update_with_new_bar(
+                        high=latest_bar['high'],
+                        low=latest_bar['low'],
+                        close=latest_bar['close']
+                    )
+                    
+                    # Log DTM status
+                    if position.trade_manager:
+                        dtm_status = position.get_dtm_status()
+                        logger.info(
+                            f"[DTM] {asset_name} Status:\n"
+                            f"      Current: ${dtm_status['current_price']:,.2f} | "
+                            f"P&L: {dtm_status['pnl_pct']:+.2f}%\n"
+                            f"      SL: ${dtm_status['stop_loss']:,.2f} "
+                            f"({dtm_status['distance_to_sl_pct']:+.2f}% away)\n"
+                            f"      TP: ${dtm_status['take_profit']:,.2f} "
+                            f"({dtm_status['distance_to_tp_pct']:+.2f}% away)\n"
+                            f"      Profit Locked: {dtm_status['profit_locked']}"
+                        )
+                    
+                    # If DTM signals exit
+                    if exit_signal:
+                        logger.info(f"[DTM] {asset_name}: {exit_signal.upper()} signal received")
+                        self._close_position(
+                            position, 
+                            current_price, 
+                            asset_name, 
+                            f"dtm_{exit_signal}"
+                        )
+                        return True
+            
+            except Exception as e:
+                logger.debug(f"[DTM] Error fetching OHLC: {e}")
+            
+            # Fallback: check traditional SL/TP
+            should_close, reason = self._check_stop_loss_take_profit(position, current_price)
+            if should_close:
+                logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
+                self._close_position(position, current_price, asset_name, reason)
+                return True
+            
+            return False
 
+        except Exception as e:
+            logger.error(f"Error checking DTM positions: {e}", exc_info=True)
+            return False
+
+    def check_and_update_positions(self, asset_name: str = "BTC"):
+        """
+        Actively check and update all positions
+        NOW WITH DTM SUPPORT
+        """
+        try:
+            # Use DTM version if available
+            if hasattr(self, 'check_and_update_positions_dtm'):
+                return self.check_and_update_positions_dtm(asset_name)
+            
+            # Fallback to original implementation
+            position = self.portfolio_manager.get_position(asset_name)
             if not position:
                 return
 
             current_price = self.get_current_price()
-
             if current_price is None:
                 logger.warning(f"Could not get price for {asset_name}")
                 return
 
-            should_close, reason = self._check_stop_loss_take_profit(
-                position, current_price
-            )
-
+            should_close, reason = self._check_stop_loss_take_profit(position, current_price)
             if should_close:
                 logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
                 self._close_position(position, current_price, asset_name, reason)
