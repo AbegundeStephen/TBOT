@@ -431,13 +431,13 @@ class TradingTelegramBot:
 
     async def run_polling(self):
         """
-        ✨ IMPROVED: Keep the bot running with better error recovery
+        ✨ IMPROVED: Keep the bot running with clean cancellation handling
         """
         try:
             logger.info("[TELEGRAM] Starting polling loop...")
             while self.is_running and not self._shutdown_event.is_set():
                 try:
-                    # ✨ NEW: Periodic health check
+                    # Periodic health check
                     if self._network_error_count > 0:
                         time_since_error = (
                             (datetime.now() - self._last_network_error).total_seconds()
@@ -445,7 +445,7 @@ class TradingTelegramBot:
                             else 999
                         )
 
-                        # Reset error count if no errors for 5 minutes
+                        # Reset error count after 5 minutes of stability
                         if time_since_error > 300:
                             logger.info(
                                 "[TELEGRAM] Resetting error count after recovery period"
@@ -456,23 +456,27 @@ class TradingTelegramBot:
                     await asyncio.sleep(1)
 
                 except asyncio.CancelledError:
-                    logger.info("[TELEGRAM] Polling cancelled")
-                    raise
+                    # ✨ FIX: This is NORMAL during shutdown, don't log as error
+                    logger.info("[TELEGRAM] Polling cancelled (shutdown)")
+                    raise  # Re-raise to exit cleanly
+                    
                 except Exception as e:
                     logger.error(f"[TELEGRAM] Error in polling loop: {e}")
-                    await asyncio.sleep(5)  # Wait before retrying
+                    await asyncio.sleep(5)
 
-            logger.info("[TELEGRAM] Polling loop ended")
+            logger.info("[TELEGRAM] Polling loop ended normally")
 
         except asyncio.CancelledError:
+            # ✨ FIX: Expected during shutdown
             logger.info("[TELEGRAM] Polling cancelled")
-            raise
+            # Don't re-raise, just exit gracefully
+            
         except Exception as e:
             logger.error(f"[TELEGRAM] Fatal error in polling loop: {e}", exc_info=True)
 
     async def shutdown(self):
         """
-        ✨ IMPROVED: Gracefully shutdown with better task cleanup
+        ✨ FINAL FIX: Gracefully shutdown with proper error handling
         """
         if self._shutdown_complete:
             logger.info("[TELEGRAM] Already shut down, skipping")
@@ -498,35 +502,32 @@ class TradingTelegramBot:
                         timeout=3.0,
                     )
                 except (asyncio.TimeoutError, Exception) as e:
-                    logger.warning(
-                        f"[TELEGRAM] Could not send shutdown notification: {e}"
-                    )
+                    logger.debug(f"[TELEGRAM] Notification skipped: {e}")
 
             if self.application:
-                # ✨ IMPROVED: More aggressive task cancellation
-                # Cancel all pending tasks first
+                # Cancel pending tasks
                 try:
-                    tasks = [t for t in asyncio.all_tasks() if not t.done()]
-                    if tasks:
-                        logger.info(
-                            f"[TELEGRAM] Cancelling {len(tasks)} pending tasks..."
-                        )
-                        for task in tasks:
-                            if not task.done():
+                    loop = asyncio.get_event_loop()
+                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                    
+                    if pending:
+                        logger.info(f"[TELEGRAM] Cancelling {len(pending)} pending tasks...")
+                        
+                        for task in pending:
+                            if not task.done() and not task.cancelled():
                                 task.cancel()
-
-                        # Wait for cancellation with timeout
+                        
+                        # Wait for cancellations
                         try:
-                            await asyncio.wait_for(
-                                asyncio.gather(*tasks, return_exceptions=True),
-                                timeout=2.0,
-                            )
+                            await asyncio.wait(pending, timeout=2.0)
+                            logger.info("[TELEGRAM] ✅ Tasks cancelled")
                         except asyncio.TimeoutError:
-                            logger.warning("[TELEGRAM] Task cancellation timeout")
+                            logger.debug("[TELEGRAM] Task cancellation timeout")
+                        
                 except Exception as e:
-                    logger.warning(f"[TELEGRAM] Error cancelling tasks: {e}")
+                    logger.debug(f"[TELEGRAM] Task cleanup: {e}")
 
-                # Stop the updater
+                # Stop updater
                 if hasattr(self.application, "updater") and self.application.updater:
                     logger.info("[TELEGRAM] Stopping updater...")
                     try:
@@ -536,30 +537,30 @@ class TradingTelegramBot:
                             )
                             logger.info("[TELEGRAM] ✅ Updater stopped")
                     except asyncio.TimeoutError:
-                        logger.warning("[TELEGRAM] ⚠️ Updater stop timed out")
+                        logger.debug("[TELEGRAM] Updater stop timeout")
                     except Exception as e:
-                        logger.warning(f"[TELEGRAM] ⚠️ Updater stop error: {e}")
+                        logger.debug(f"[TELEGRAM] Updater stop: {e}")
 
-                # Stop the application
+                # Stop application
                 logger.info("[TELEGRAM] Stopping application...")
                 try:
                     if self.application.running:
                         await asyncio.wait_for(self.application.stop(), timeout=3.0)
                         logger.info("[TELEGRAM] ✅ Application stopped")
                 except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] ⚠️ Application stop timed out")
+                    logger.debug("[TELEGRAM] Application stop timeout")
                 except Exception as e:
-                    logger.warning(f"[TELEGRAM] ⚠️ Application stop error: {e}")
+                    logger.debug(f"[TELEGRAM] Application stop: {e}")
 
-                # Shutdown the application
+                # Shutdown application
                 logger.info("[TELEGRAM] Shutting down application...")
                 try:
                     await asyncio.wait_for(self.application.shutdown(), timeout=3.0)
                     logger.info("[TELEGRAM] ✅ Application shutdown complete")
                 except asyncio.TimeoutError:
-                    logger.warning("[TELEGRAM] ⚠️ Application shutdown timed out")
+                    logger.debug("[TELEGRAM] Application shutdown timeout")
                 except Exception as e:
-                    logger.warning(f"[TELEGRAM] ⚠️ Application shutdown error: {e}")
+                    logger.debug(f"[TELEGRAM] Application shutdown: {e}")
 
                 self.application = None
 
@@ -569,8 +570,9 @@ class TradingTelegramBot:
             )
 
         except Exception as e:
-            logger.error(f"[TELEGRAM] ❌ Error during shutdown: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] ❌ Shutdown error: {e}", exc_info=True)
             self._shutdown_complete = True
+
 
     # ==================== COMMAND HANDLERS ====================
 

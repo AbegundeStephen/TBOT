@@ -296,10 +296,11 @@ class BinanceExecutionHandler:
     Binance Execution Handler with Hybrid Position Sizing + Order Tracking
     """
 
-    def __init__(self, config: Dict, client: Client, portfolio_manager):
+    def __init__(self, config: Dict, client: Client, portfolio_manager, data_manager=None):
         self.config = config
         self.client = client
         self.portfolio_manager = portfolio_manager
+        self.data_manager = data_manager
         self.sizer = HybridPositionSizer(config, portfolio_manager)
 
         self.asset_config = config["assets"]["BTC"]
@@ -648,31 +649,34 @@ class BinanceExecutionHandler:
                 # order_id = order_result['orderId']
 
             # ✅ NEW: Pass order_id to Portfolio Manager (similar to MT5 ticket)
-            try:
-                # Fetch recent OHLC data for DTM
-                end_time = datetime.now(timezone.utc)
-                start_time = end_time - timedelta(days=10)  # Get 10 days of data
-                
-                df = self.data_manager.fetch_binance_data(
-                    symbol=self.symbol,
-                    interval=self.config["assets"][asset_name].get("interval", "1h"),
-                    start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                
-                # Prepare OHLC arrays for DTM
-                ohlc_data = {
-                    'high': df['high'].values,
-                    'low': df['low'].values,
-                    'close': df['close'].values,
-                }
-                
-                logger.debug(f"[DTM] Prepared {len(df)} bars for dynamic management")
-                
-            except Exception as e:
-                logger.warning(f"[DTM] Failed to fetch OHLC data: {e}, DTM disabled for this trade")
-                ohlc_data = None
-        
+            ohlc_data = None
+            if self.data_manager is not None:
+                try:
+                    # Fetch recent OHLC data for DTM
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=10)
+                    
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=self.symbol,
+                        interval=self.config["assets"][asset_name].get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    
+                    if len(df) > 0:
+                        ohlc_data = {
+                            'high': df['high'].values,
+                            'low': df['low'].values,
+                            'close': df['close'].values,
+                        }
+                        logger.info(f"[DTM] Prepared {len(df)} bars for dynamic management")
+                    
+                except Exception as e:
+                    logger.warning(f"[DTM] Failed to fetch OHLC data: {e}")
+                    ohlc_data = None
+            else:
+                logger.warning("[DTM] data_manager not available, DTM disabled for this trade")
+            
             success = self.portfolio_manager.add_position(
             asset=asset_name,
             symbol=self.symbol,
@@ -692,6 +696,8 @@ class BinanceExecutionHandler:
                 )
                 if order_id:
                     logger.info(f"  └─ Binance Order ID: {order_id}")
+                if ohlc_data is not None:
+                    logger.info(f"  └─ Dynamic Trade Manager: ACTIVE")
                 return True
             else:
                 logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")
@@ -704,74 +710,54 @@ class BinanceExecutionHandler:
     def check_and_update_positions_dtm(self, asset_name: str = "BTC"):
         """
         Check and update positions with DTM using fresh OHLC data
-        Call this method every check interval (e.g., every 5 minutes)
+        ✅ FIXED: Now updates with current price for intra-bar trailing
         """
         try:
             position = self.portfolio_manager.get_position(asset_name)
             if not position:
                 return
             
-            # Fetch latest candle data
+            # Get current price (real-time)
             current_price = self.get_current_price()
             if current_price is None:
                 logger.warning(f"Could not get price for {asset_name}")
                 return
             
-            # Get recent OHLC for DTM update
+            # ✅ NEW: Update DTM with current price FIRST (for intra-bar trailing)
+            if position.trade_manager:
+                exit_signal = position.trade_manager.update_with_current_price(current_price)
+                
+                if exit_signal:
+                    logger.info(f"[DTM] {asset_name} triggered {exit_signal.upper()} @ ${current_price:,.2f}")
+                    self._close_position(position, current_price, asset_name, f"dtm_{exit_signal}")
+                    return True
+            
+            # Fetch latest candle data (for bar-close updates)
             try:
                 end_time = datetime.now(timezone.utc)
-                start_time = end_time - timedelta(hours=24)  # Last 24 hours
+                start_time = end_time - timedelta(hours=24)
                 
-                # For Binance
-                if hasattr(self, 'binance_client'):
-                    df = self.data_manager.fetch_binance_data(
-                        symbol=self.symbol,
-                        interval=self.config["assets"][asset_name].get("interval", "1h"),
-                        start_date=start_time.strftime("%Y-%m-%d"),
-                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-                # For MT5
-                else:
-                    df = self.data_manager.fetch_mt5_data(
-                        symbol=self.symbol,
-                        timeframe=self.config["assets"][asset_name].get("timeframe", "H1"),
-                        start_date=start_time.strftime("%Y-%m-%d"),
-                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
+                df = self.data_manager.fetch_binance_data(
+                    symbol=self.symbol,
+                    interval=self.config["assets"][asset_name].get("interval", "1h"),
+                    start_date=start_time.strftime("%Y-%m-%d"),
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
                 
                 if len(df) > 0:
                     latest_bar = df.iloc[-1]
                     
-                    # Update position with new bar
+                    # Update position with new bar (on bar close)
                     exit_signal = position.update_with_new_bar(
                         high=latest_bar['high'],
                         low=latest_bar['low'],
                         close=latest_bar['close']
                     )
                     
-                    # Log DTM status
-                    if position.trade_manager:
-                        dtm_status = position.get_dtm_status()
-                        logger.info(
-                            f"[DTM] {asset_name} Status:\n"
-                            f"      Current: ${dtm_status['current_price']:,.2f} | "
-                            f"P&L: {dtm_status['pnl_pct']:+.2f}%\n"
-                            f"      SL: ${dtm_status['stop_loss']:,.2f} "
-                            f"({dtm_status['distance_to_sl_pct']:+.2f}% away)\n"
-                            f"      TP: ${dtm_status['take_profit']:,.2f} "
-                            f"({dtm_status['distance_to_tp_pct']:+.2f}% away)\n"
-                            f"      Profit Locked: {dtm_status['profit_locked']}"
-                        )
-                    
                     # If DTM signals exit
                     if exit_signal:
                         logger.info(f"[DTM] {asset_name}: {exit_signal.upper()} signal received")
-                        self._close_position(
-                            position, 
-                            current_price, 
-                            asset_name, 
-                            f"dtm_{exit_signal}"
-                        )
+                        self._close_position(position, current_price, asset_name, f"dtm_{exit_signal}")
                         return True
             
             except Exception as e:
@@ -806,6 +792,8 @@ class BinanceExecutionHandler:
                 return
 
             current_price = self.get_current_price()
+            
+            
             if current_price is None:
                 logger.warning(f"Could not get price for {asset_name}")
                 return
