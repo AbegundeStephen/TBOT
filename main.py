@@ -92,14 +92,6 @@ logger = logging.getLogger(__name__)
 class TradingBot:
     """Main trading bot with improved stability and error recovery"""
 
-    params = SimpleNamespace(
-        use_ai_validation=True,
-        ai_sr_threshold=0.015,
-        ai_pattern_confidence=0.50,
-        ai_enable_adaptive=True,
-        ai_strong_signal_bypass=0.75,
-    )
-
     def __init__(self, config_path: str = "config/config.json"):
         logger.info("=" * 70)
         logger.info("INITIALIZING TRADING BOT WITH ENHANCED STABILITY")
@@ -109,6 +101,14 @@ class TradingBot:
             self.config = json.load(f)
 
         setup_logging(self.config)
+
+        self.params = SimpleNamespace(
+            use_ai_validation=True,
+            ai_sr_threshold=0.020,
+            ai_pattern_confidence=0.45,
+            ai_enable_adaptive=True,
+            ai_strong_signal_bypass=0.70,
+        )
 
         # Initialize core components
         self.data_manager = DataManager(self.config)
@@ -138,6 +138,7 @@ class TradingBot:
         self.telegram_loop = None
         self.telegram_thread = None
         self._telegram_ready = Event()
+        self._telegram_should_stop = Event()
         self._telegram_error_count = 0
         self._max_telegram_restarts = 3
         self._telegram_last_restart = None
@@ -227,10 +228,12 @@ class TradingBot:
             and self.data_manager.binance_client is not None
         ):
             try:
+                # ✨ FIXED: Pass data_manager to BinanceExecutionHandler
                 self.binance_handler = BinanceExecutionHandler(
                     config=self.config,
                     client=self.data_manager.binance_client,
                     portfolio_manager=self.portfolio_manager,
+                    data_manager=self.data_manager,  # ✨ NEW: Add this line
                 )
                 logger.info("[OK] Binance Execution Handler initialized")
             except Exception as e:
@@ -240,9 +243,11 @@ class TradingBot:
 
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
+                # ✨ FIXED: Pass data_manager to MT5ExecutionHandler too
                 self.mt5_handler = MT5ExecutionHandler(
                     config=self.config,
                     portfolio_manager=self.portfolio_manager,
+                    data_manager=self.data_manager,  # ✨ NEW: Add this line
                 )
                 logger.info("[OK] MT5 Execution Handler initialized")
             except Exception as e:
@@ -593,7 +598,7 @@ class TradingBot:
         self.selected_presets = asset_presets.copy()
 
         ai_validator_instance = None
-        if hasattr(self, 'ai_validator') and self.ai_validator is not None:
+        if hasattr(self, "ai_validator") and self.ai_validator is not None:
             ai_validator_instance = self.ai_validator
             logger.info("[AGGREGATOR] AI validator available: ✅")
         else:
@@ -613,10 +618,14 @@ class TradingBot:
                 continue
 
             selected_preset = asset_presets.get(asset_name, "balanced")
-            config_for_aggregator = AGGREGATOR_PRESETS.get(asset_name, {}).get(selected_preset)
+            config_for_aggregator = AGGREGATOR_PRESETS.get(asset_name, {}).get(
+                selected_preset
+            )
 
             if config_for_aggregator is None:
-                logger.error(f"[!] No AGGREGATOR_PRESETS found for {asset_name} / {selected_preset}, skipping.")
+                logger.error(
+                    f"[!] No AGGREGATOR_PRESETS found for {asset_name} / {selected_preset}, skipping."
+                )
                 continue
 
             try:
@@ -626,7 +635,9 @@ class TradingBot:
                     ema_strategy=strategies.get("ema_strategy"),
                     asset_type=asset_name,
                     config=config_for_aggregator,
-                    ai_validator=ai_validator_instance,
+                    ai_validator=(
+                        ai_validator_instance if self.params.use_ai_validation else None
+                    ),
                     enable_ai_circuit_breaker=True,
                 )
                 logger.info(
@@ -634,7 +645,6 @@ class TradingBot:
                 )
             except Exception as e:
                 logger.error(f"[FAIL] {asset_name} aggregator: {e}")
-
 
     def load_models(self):
         """Load trained ML models for all strategies"""
@@ -739,76 +749,122 @@ class TradingBot:
         logger.info("[TELEGRAM] Monitoring thread stopped")
 
     async def _start_telegram_bot(self):
-        """Start Telegram bot with improved error handling"""
+        """
+        ✨ FIXED: Start bot with proper cancellation handling
+        """
         try:
-            logger.info("[TELEGRAM] Initializing...")
+            logger.info("[TELEGRAM] Initializing bot...")
             await self.telegram_bot.initialize()
+
             self._telegram_ready.set()
-            logger.info("[TELEGRAM] Ready")
+            logger.info("[TELEGRAM] ✅ Bot ready")
+
+            # Run polling until shutdown requested
             await self.telegram_bot.run_polling()
+
         except asyncio.CancelledError:
-            logger.info("[TELEGRAM] Cancelled")
-            raise
+            # ✨ FIX: Expected during shutdown - don't log as error
+            logger.info("[TELEGRAM] Bot cancelled (shutdown)")
+            raise  # Re-raise to propagate cancellation
+
         except Exception as e:
-            logger.error(f"[TELEGRAM] Error: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] Bot error: {e}", exc_info=True)
             self._telegram_ready.clear()
             raise
 
     def _run_telegram_loop(self):
-        """Run Telegram event loop with proper cleanup"""
+        """
+        ✨ FIXED: Run Telegram with proper cleanup (NO RECURSION)
+        """
+        # Create fresh event loop for this thread
         self.telegram_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.telegram_loop)
         self._telegram_ready.clear()
 
         try:
             logger.info("[TELEGRAM] Event loop starting...")
+
+            # Run the async bot
             self.telegram_loop.run_until_complete(self._start_telegram_bot())
+
         except KeyboardInterrupt:
-            logger.info("[TELEGRAM] Keyboard interrupt")
+            logger.info("[TELEGRAM] Keyboard interrupt received")
+
+        except asyncio.CancelledError:
+            # ✨ FIX: This is NORMAL during shutdown
+            logger.info("[TELEGRAM] Tasks cancelled (shutdown)")
+
         except Exception as e:
             logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
+            self._telegram_is_healthy = False
+
         finally:
             logger.info("[TELEGRAM] Cleaning up event loop...")
             self._telegram_ready.clear()
 
             try:
-                # Cancel all tasks
-                pending = asyncio.all_tasks(self.telegram_loop)
+                # ✨ FIXED: Gentle task cleanup
+                pending = [
+                    task
+                    for task in asyncio.all_tasks(self.telegram_loop)
+                    if not task.done()
+                ]
+
                 if pending:
                     logger.info(f"[TELEGRAM] Cancelling {len(pending)} tasks...")
-                    for task in pending:
-                        task.cancel()
 
+                    # Cancel each task
+                    for task in pending:
+                        if not task.cancelled():
+                            task.cancel()
+
+                    # Give them a moment to cancel
                     try:
                         self.telegram_loop.run_until_complete(
-                            asyncio.wait_for(
-                                asyncio.gather(*pending, return_exceptions=True),
-                                timeout=5.0,
-                            )
+                            asyncio.wait(pending, timeout=2.0)
                         )
-                    except (asyncio.TimeoutError, Exception) as e:
-                        logger.warning(f"[TELEGRAM] Task cleanup timeout: {e}")
-            except Exception as e:
-                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
-            finally:
+                    except Exception as e:
+                        logger.debug(f"[TELEGRAM] Task wait: {e}")
+
+                # Close the loop
                 if not self.telegram_loop.is_closed():
                     self.telegram_loop.close()
                     logger.info("[TELEGRAM] Event loop closed")
 
+            except Exception as e:
+                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
+
     def _send_telegram_notification(self, coro):
-        """Send Telegram notification with improved error handling"""
+        """
+        ✨ FIXED: Send notification with proper error handling
+        """
         if not self.telegram_bot or not self.telegram_loop:
+            logger.debug("[TELEGRAM] Bot/loop not available")
             return
 
         if not self._telegram_ready.is_set():
             logger.debug("[TELEGRAM] Bot not ready, skipping notification")
             return
 
+        # ✨ FIX: Check if loop is still running
+        if self.telegram_loop.is_closed():
+            logger.debug("[TELEGRAM] Loop closed, skipping notification")
+            return
+
         try:
             future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
-            future.result(timeout=10)  # Increased timeout
+            future.result(timeout=10)
+
         except TimeoutError:
             logger.debug("[TELEGRAM] Notification timeout")
+
+        except RuntimeError as e:
+            # ✨ FIX: Handle "Event loop is closed" gracefully
+            if "closed" in str(e).lower():
+                logger.debug("[TELEGRAM] Loop closed during notification")
+            else:
+                logger.debug(f"[TELEGRAM] Runtime error: {e}")
+
         except Exception as e:
             logger.debug(f"[TELEGRAM] Notification error: {e}")
 
@@ -859,48 +915,63 @@ class TradingBot:
                     # Only update if position exists
                     if self.portfolio_manager.has_position(asset_name):
                         handler = (
-                            self.binance_handler 
-                            if self.config["assets"][asset_name].get("exchange") == "binance"
+                            self.binance_handler
+                            if self.config["assets"][asset_name].get("exchange")
+                            == "binance"
                             else self.mt5_handler
                         )
-                        
+
                         if handler:
                             try:
                                 # Fetch latest OHLC
                                 end_time = datetime.now(timezone.utc)
                                 start_time = end_time - timedelta(hours=24)
-                                
+
                                 if handler == self.binance_handler:
                                     df = self.data_manager.fetch_binance_data(
-                                        symbol=self.config["assets"][asset_name]["symbol"],
-                                        interval=self.config["assets"][asset_name].get("interval", "1h"),
+                                        symbol=self.config["assets"][asset_name][
+                                            "symbol"
+                                        ],
+                                        interval=self.config["assets"][asset_name].get(
+                                            "interval", "1h"
+                                        ),
                                         start_date=start_time.strftime("%Y-%m-%d"),
                                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                                     )
                                 else:
                                     df = self.data_manager.fetch_mt5_data(
-                                        symbol=self.config["assets"][asset_name]["symbol"],
-                                        timeframe=self.config["assets"][asset_name].get("timeframe", "H1"),
+                                        symbol=self.config["assets"][asset_name][
+                                            "symbol"
+                                        ],
+                                        timeframe=self.config["assets"][asset_name].get(
+                                            "timeframe", "H1"
+                                        ),
                                         start_date=start_time.strftime("%Y-%m-%d"),
                                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                                     )
-                                
+
                                 if len(df) > 0:
                                     latest = df.iloc[-1]
                                     ohlc_data_dict[asset_name] = {
-                                        'high': latest['high'],
-                                        'low': latest['low'],
-                                        'close': latest['close']
+                                        "high": latest["high"],
+                                        "low": latest["low"],
+                                        "close": latest["close"],
                                     }
                             except Exception as e:
-                                logger.debug(f"[DTM] Failed to fetch OHLC for {asset_name}: {e}")
-                
+                                logger.debug(
+                                    f"[DTM] Failed to fetch OHLC for {asset_name}: {e}"
+                                )
+
                 # Update all positions with DTM
                 if ohlc_data_dict:
-                    closed_count = self.portfolio_manager.update_positions_with_ohlc(ohlc_data_dict)
+                    closed_count = self.portfolio_manager.update_positions_with_ohlc(
+                        ohlc_data_dict
+                    )
                     if closed_count > 0:
-                        logger.info(f"[DTM] Closed {closed_count} position(s) via dynamic management")
-                        
+                        logger.info(
+                            f"[DTM] Closed {closed_count} position(s) via dynamic management"
+                        )
+
                         # Send Telegram notification
                         if self.telegram_bot and self._telegram_ready.is_set():
                             for asset in enabled:
@@ -918,7 +989,7 @@ class TradingBot:
                                                     reason=last_trade["reason"],
                                                 )
                                             )
-            
+
             except Exception as e:
                 logger.error(f"[DTM] Error updating positions: {e}")
 
@@ -945,10 +1016,10 @@ class TradingBot:
             try:
                 status = self.portfolio_manager.get_portfolio_status(current_prices)
                 self._log_portfolio_status(status)
-                
+
                 # ✨ NEW: Log DTM status for open positions
                 self._log_dtm_status()
-                
+
             except Exception as e:
                 logger.error(f"[ERROR] Failed to get portfolio status: {e}")
 
@@ -975,40 +1046,48 @@ class TradingBot:
                         "Bot entering safe mode."
                     )
                 )
-                time.sleep(300)  
-                
-    
-                
+                time.sleep(300)
+
     def _log_dtm_status(self):
         """Log Dynamic Trade Manager status for all positions"""
         try:
             has_dtm = False
-            
+
             for asset, position in self.portfolio_manager.positions.items():
                 if position.trade_manager:
                     has_dtm = True
                     dtm_status = position.get_dtm_status()
-                    
+
                     logger.info(f"\n{'-' * 70}")
                     logger.info(f"[DTM STATUS] {asset} {dtm_status['side'].upper()}")
                     logger.info(f"{'-' * 70}")
                     logger.info(f"Entry Price:      ${dtm_status['entry_price']:,.2f}")
-                    logger.info(f"Current Price:    ${dtm_status['current_price']:,.2f}")
+                    logger.info(
+                        f"Current Price:    ${dtm_status['current_price']:,.2f}"
+                    )
                     logger.info(f"P&L:              {dtm_status['pnl_pct']:+.2f}%")
                     logger.info(f"")
-                    logger.info(f"Stop Loss:        ${dtm_status['stop_loss']:,.2f} ({dtm_status['distance_to_sl_pct']:+.2f}% away)")
-                    logger.info(f"Take Profit:      ${dtm_status['take_profit']:,.2f} ({dtm_status['distance_to_tp_pct']:+.2f}% away)")
+                    logger.info(
+                        f"Stop Loss:        ${dtm_status['stop_loss']:,.2f} ({dtm_status['distance_to_sl_pct']:+.2f}% away)"
+                    )
+                    logger.info(
+                        f"Take Profit:      ${dtm_status['take_profit']:,.2f} ({dtm_status['distance_to_tp_pct']:+.2f}% away)"
+                    )
                     logger.info(f"")
-                    logger.info(f"Profit Locked:    {'✓ YES' if dtm_status['profit_locked'] else '✗ NO'}")
+                    logger.info(
+                        f"Profit Locked:    {'✓ YES' if dtm_status['profit_locked'] else '✗ NO'}"
+                    )
                     logger.info(f"Updates Count:    {dtm_status['update_count']}")
                     logger.info(f"Last Update:      {dtm_status['last_update']}")
                     logger.info(f"{'-' * 70}")
-            
+
             if not has_dtm and len(self.portfolio_manager.positions) > 0:
                 logger.debug("[DTM] No positions using dynamic management")
-        
+
         except Exception as e:
-            logger.error(f"Error logging DTM status: {e}")# Wait 5 minutes before next cycle # Wait 5 minutes before next cycle
+            logger.error(
+                f"Error logging DTM status: {e}"
+            )  # Wait 5 minutes before next cycle # Wait 5 minutes before next cycle
 
     def _log_portfolio_status(self, status):
         """Log portfolio status"""
@@ -1528,45 +1607,123 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
+    def _restart_telegram_thread(self):
+        """
+        ✨ NEW: Restart Telegram thread if it dies unexpectedly
+        """
+        try:
+            logger.info("[TELEGRAM] Restarting thread...")
+
+            self._telegram_ready.clear()
+            self.telegram_thread = Thread(
+                target=self._run_telegram_loop, daemon=True, name="TelegramBot"
+            )
+            self.telegram_thread.start()
+
+            if self._telegram_ready.wait(timeout=30):
+                logger.info("[TELEGRAM] ✅ Thread restarted successfully")
+            else:
+                logger.warning("[TELEGRAM] ⚠️ Restart timeout")
+
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Restart failed: {e}")
+
     def start(self):
-        """Start the trading bot with improved stability"""
+        """
+        ✨ FIXED: Start bot with proper Telegram thread management
+        """
         logger.info("\n" + "=" * 70)
         logger.info("[START] TRADING BOT INITIALIZING")
         logger.info("=" * 70)
-        logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"Mode: {self.config['trading']['mode'].upper()}")
-        logger.info("Strategies: Mean Reversion + Trend Following + EMA Crossover")
 
         try:
             # Initialize exchanges and handlers
             self.initialize_exchanges()
-
-            # Load trained models
             self.load_models()
 
-            logger.info("\n[MARKET HOURS]")
-            logger.info("  BTC (Crypto):  24/7 - Always open")
-            logger.info("  GOLD (Forex):  Sun 22:00 UTC - Fri 22:00 UTC")
-            logger.info("=" * 70)
-
-            # Verify handlers
-            if not self.binance_handler and not self.mt5_handler:
-                raise RuntimeError("No execution handlers available!")
-
-            # Start Telegram bot if enabled
+            # ✨ FIXED: Start Telegram in dedicated thread
             if self.telegram_bot:
-                logger.info("\n[TELEGRAM] Starting bot with monitoring...")
+                logger.info("\n[TELEGRAM] Starting bot thread...")
+
+                self._telegram_should_stop.clear()
                 self.telegram_thread = Thread(
-                    target=self._start_telegram_with_monitoring, daemon=True
+                    target=self._run_telegram_loop, daemon=True, name="TelegramBot"
                 )
                 self.telegram_thread.start()
 
-                # Wait for bot ready
+                # Wait for bot to be ready (with timeout)
                 logger.info("[TELEGRAM] Waiting for bot to be ready...")
-                if self._telegram_ready.wait(timeout=60):
+                if self._telegram_ready.wait(timeout=30):
                     logger.info("[TELEGRAM] ✅ Bot ready for notifications")
                 else:
                     logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout")
+
+            # Setup signal handlers
+            def signal_handler(signum, frame):
+                logger.info(f"\n[!] Signal {signum} received, shutting down...")
+                self.stop()
+                sys.exit(0)
+
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+
+            # Schedule trading cycles
+            check_interval = self.config["trading"].get("check_interval_seconds", 300)
+            schedule.every(check_interval).seconds.do(self.run_trading_cycle)
+            schedule.every(1).hours.do(self.log_detailed_pnl_report)
+
+            self.is_running = True
+            self._main_loop_running = True
+
+            logger.info(f"\n[OK] Trading bot running")
+            logger.info(
+                f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
+            )
+            logger.info(f"Press Ctrl+C to stop\n")
+
+            # Run initial cycle
+            self.run_trading_cycle()
+
+            # ✨ FIXED: Main loop with health monitoring
+            last_health_check = datetime.now()
+
+            while self.is_running:
+                try:
+                    schedule.run_pending()
+
+                    # Periodic Telegram health check
+                    now = datetime.now()
+                    if (now - last_health_check).total_seconds() >= 300:  # 5 min
+                        if self.telegram_thread and not self.telegram_thread.is_alive():
+                            logger.warning("[HEALTH] Telegram thread died!")
+                            if (
+                                self._telegram_is_healthy
+                                and not self._telegram_should_stop.is_set()
+                            ):
+                                logger.info("[HEALTH] Attempting Telegram restart...")
+                                self._restart_telegram_thread()
+
+                        last_health_check = now
+
+                    time.sleep(1)
+
+                except KeyboardInterrupt:
+                    raise
+
+                except Exception as e:
+                    logger.error(f"[ERROR] Main loop error: {e}", exc_info=True)
+                    time.sleep(10)
+
+            logger.info("[STOP] Main loop ended")
+
+        except KeyboardInterrupt:
+            logger.info("\n[!] KeyboardInterrupt received")
+            self.stop()
+
+        except Exception as e:
+            logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
+            self.stop()
+            sys.exit(1)
 
             # Setup signal handlers
             def signal_handler(signum, frame):
@@ -1660,16 +1817,19 @@ class TradingBot:
             logger.error(f"[HEALTH] Health check error: {e}")
 
     def stop(self):
-        """Stop the trading bot gracefully"""
-        if self._shutdown_requested:
+        """
+        ✨ FIXED: Graceful shutdown with proper Telegram cleanup
+        """
+        if hasattr(self, "_shutdown_in_progress") and self._shutdown_in_progress:
             logger.info("[STOP] Shutdown already in progress")
             return
+
+        self._shutdown_in_progress = True
 
         logger.info("\n" + "=" * 70)
         logger.info("[STOP] SHUTTING DOWN TRADING BOT")
         logger.info("=" * 70)
 
-        self._shutdown_requested = True
         self.is_running = False
         self._main_loop_running = False
 
@@ -1682,37 +1842,49 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[STOP] Error closing positions: {e}")
 
-        # Shutdown Telegram bot
-        if self.telegram_bot and self.telegram_loop:
-            try:
-                logger.info("[TELEGRAM] Initiating bot shutdown...")
+        # ✨ FIXED: Shutdown Telegram properly
+        if self.telegram_bot:
+            logger.info("[TELEGRAM] Initiating shutdown...")
 
-                if self.telegram_bot.is_running:
+            # Signal shutdown
+            self._telegram_should_stop.set()
+
+            # Try to shutdown gracefully
+            if self.telegram_loop and not self.telegram_loop.is_closed():
+                try:
+                    # Schedule shutdown in the Telegram loop
                     future = asyncio.run_coroutine_threadsafe(
                         self.telegram_bot.shutdown(), self.telegram_loop
                     )
 
+                    # Wait with timeout
                     try:
-                        future.result(timeout=15)
+                        future.result(timeout=10)
                         logger.info("[TELEGRAM] ✅ Bot shutdown complete")
                     except TimeoutError:
                         logger.warning("[TELEGRAM] ⚠️ Shutdown timeout")
                         future.cancel()
-                    except Exception as e:
-                        logger.error(f"[TELEGRAM] Shutdown error: {e}")
 
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Error during shutdown: {e}")
+                except RuntimeError as e:
+                    if "closed" in str(e).lower():
+                        logger.info("[TELEGRAM] ✅ Loop already closed")
+                    else:
+                        logger.debug(f"[TELEGRAM] Shutdown error: {e}")
 
-        # Wait for Telegram thread
-        if self.telegram_thread and self.telegram_thread.is_alive():
-            logger.info("[TELEGRAM] Waiting for thread...")
-            self.telegram_thread.join(timeout=10)
+                except Exception as e:
+                    logger.debug(f"[TELEGRAM] Shutdown error: {e}")
 
-            if self.telegram_thread.is_alive():
-                logger.warning("[TELEGRAM] ⚠️ Thread still alive")
-            else:
-                logger.info("[TELEGRAM] ✅ Thread terminated")
+            # Wait for thread to finish (with timeout)
+            if self.telegram_thread and self.telegram_thread.is_alive():
+                logger.info("[TELEGRAM] Waiting for thread (10s timeout)...")
+                self.telegram_thread.join(timeout=10)
+
+                if self.telegram_thread.is_alive():
+                    logger.warning(
+                        "[TELEGRAM] ⚠️ Thread still alive (will be abandoned)"
+                    )
+                else:
+                    logger.info("[TELEGRAM] ✅ Thread terminated")
 
         # Shutdown data manager
         try:

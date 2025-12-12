@@ -189,7 +189,7 @@ class MLStrategy(bt.Strategy):
         ("exit_on_opposite_signal", True),
         # ==== IMPROVED AI VALIDATION PARAMETERS ====
         ("use_ai_validation", True),
-        ("ai_sr_threshold", 0.015),  # 1.5% (was 0.5%)
+        ("ai_sr_threshold", 0.025),  # 1.5% (was 0.5%)
         ("ai_pattern_confidence", 0.50),  # 50% (was 65%)
         ("ai_enable_adaptive", True),  # NEW: Enable adaptive thresholds
         ("ai_strong_signal_bypass", 0.75),  # NEW: Bypass AI for strong signals

@@ -554,6 +554,11 @@ class PerformanceWeightedAggregator:
             tf_original = tf_signal
 
             # ================================================================
+            # FIX: Initialize signal_quality early for AI validation
+            # ================================================================
+            signal_quality = max(mr_conf, tf_conf)  # Preliminary quality estimate
+
+            # ================================================================
             # STEP 3: AI VALIDATION (with circuit breaker)
             # ================================================================
             ai_bypass = False
@@ -576,7 +581,9 @@ class PerformanceWeightedAggregator:
                                 "strategy": "mean_reversion",
                                 "confidence": mr_conf,
                                 "regime": "bull" if is_bull else "bear",
-                                "regime_confidence": regime_conf
+                                "regime_confidence": regime_conf,
+                                "asset": self.asset_type,
+                                "signal_quality": signal_quality  # ✓ Now defined
                             },
                             df=df
                         )
@@ -584,13 +591,13 @@ class PerformanceWeightedAggregator:
                         if validated_mr == 0 and mr_signal != 0:
                             # AI rejected
                             self.ai_stats["mr_rejected"] += 1
-                            self.ai_rejection_window.append(True)  # Track rejection
+                            self.ai_rejection_window.append(True)
                             logger.debug(f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}")
                             mr_signal = 0
                             mr_conf = 0.0
                         else:
                             self.ai_stats["mr_approved"] += 1
-                            self.ai_rejection_window.append(False)  # Track approval
+                            self.ai_rejection_window.append(False)
 
                     # Validate Trend Following
                     if tf_signal != 0:
@@ -602,7 +609,9 @@ class PerformanceWeightedAggregator:
                                 "strategy": "trend_following",
                                 "confidence": tf_conf,
                                 "regime": "bull" if is_bull else "bear",
-                                "regime_confidence": regime_conf
+                                "regime_confidence": regime_conf,
+                                "asset": self.asset_type,
+                                "signal_quality": signal_quality  # ✓ Now defined
                             },
                             df=df
                         )
@@ -617,7 +626,8 @@ class PerformanceWeightedAggregator:
                         else:
                             self.ai_stats["tf_approved"] += 1
                             self.ai_rejection_window.append(False)
-                            logger.debug("[AI] Validator not initialized or disabled, skipping AI validation.")
+            else:
+                logger.debug("[AI] Validator not initialized or disabled, skipping AI validation.")
 
             # STEP 4: Calculate scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
@@ -644,9 +654,9 @@ class PerformanceWeightedAggregator:
             base_buy_thresh = self.config["buy_threshold"]
             base_sell_thresh = self.config["sell_threshold"]
 
-            # Get minimum quality
-            min_quality = self.config["min_signal_quality"]
+            # Recalculate final signal_quality based on aggregated scores
             signal_quality = max(buy_score, sell_score)
+            min_quality = self.config["min_signal_quality"]
 
             # STEP 6: Make decision
             if buy_score >= adj_buy_thresh and buy_score > sell_score:

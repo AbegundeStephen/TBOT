@@ -1,6 +1,7 @@
 """
 Dynamic Trade Manager with ATR-based trailing stops and S/R levels
 Supports both LONG and SHORT positions with intelligent exit management
+FIXED: Realistic stop loss calculations with ATR caps
 """
 
 import logging
@@ -31,9 +32,11 @@ class DynamicTradeManager:
         atr_period: int = 14,
         reward_risk_ratio: float = 2.0,
         sr_window: int = 20,
-        atr_multiplier: float = 1.5,  # More conservative than 1.0
+        atr_multiplier: float = 1.5,
         min_profit_lock: float = 0.005,  # Lock profit after 0.5% gain
-        aggressive_trail: bool = False,  # Enable aggressive trailing after profit
+        aggressive_trail: bool = False,
+        max_stop_loss_pct: float = 0.08,  # ✅ NEW: Maximum SL distance (8%)
+        min_stop_loss_pct: float = 0.015,  # ✅ NEW: Minimum SL distance (1.5%)
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -48,6 +51,8 @@ class DynamicTradeManager:
         self.atr_multiplier = atr_multiplier
         self.min_profit_lock = min_profit_lock
         self.aggressive_trail = aggressive_trail
+        self.max_stop_loss_pct = max_stop_loss_pct  # ✅ NEW
+        self.min_stop_loss_pct = min_stop_loss_pct  # ✅ NEW
 
         # State tracking
         self.stop_loss = None
@@ -65,7 +70,8 @@ class DynamicTradeManager:
         logger.info(
             f"[DTM] Trade Manager initialized for {side.upper()} @ ${entry_price:,.2f}\n"
             f"      Initial SL: ${self.stop_loss:,.2f} | TP: ${self.take_profit:,.2f}\n"
-            f"      Position Size: {self.position_size:.6f} | Risk: {account_risk:.1%}"
+            f"      Position Size: {self.position_size:.6f} | Risk: {account_risk:.1%}\n"
+            f"      SL Range: {self.min_stop_loss_pct:.1%} - {self.max_stop_loss_pct:.1%}"
         )
 
     def calculate_atr(self) -> float:
@@ -86,6 +92,50 @@ class DynamicTradeManager:
         except Exception as e:
             logger.error(f"[DTM] S/R detection error: {e}")
             return self.entry_price * 0.95, self.entry_price * 1.05
+
+    def _calculate_atr_based_stop(
+        self, 
+        reference_price: float, 
+        atr: float, 
+        is_long: bool
+    ) -> float:
+        """
+        ✅ NEW: Calculate ATR-based stop with realistic caps
+        
+        Args:
+            reference_price: Price to calculate from (entry or current)
+            atr: Current ATR value
+            is_long: True for long, False for short
+            
+        Returns:
+            Stop loss price with ATR capped to reasonable percentage
+        """
+        # Calculate raw ATR-based distance
+        raw_atr_distance = atr * self.atr_multiplier
+        
+        # Convert to percentage
+        raw_atr_pct = raw_atr_distance / reference_price
+        
+        # ✅ Cap ATR distance to max_stop_loss_pct
+        capped_atr_pct = min(raw_atr_pct, self.max_stop_loss_pct)
+        
+        # Ensure minimum distance for breathing room
+        final_atr_pct = max(capped_atr_pct, self.min_stop_loss_pct)
+        
+        # Calculate stop loss price
+        if is_long:
+            stop_loss = reference_price * (1 - final_atr_pct)
+        else:
+            stop_loss = reference_price * (1 + final_atr_pct)
+        
+        # Log if ATR was capped
+        if raw_atr_pct > self.max_stop_loss_pct:
+            logger.info(
+                f"[DTM] ATR capped: Raw={raw_atr_pct:.2%} → Capped={final_atr_pct:.2%} "
+                f"(ATR=${raw_atr_distance:,.2f})"
+            )
+        
+        return stop_loss
 
     def update_levels(self, initial: bool = False, current_price: Optional[float] = None):
         """Update SL and TP dynamically based on market conditions"""
@@ -115,32 +165,89 @@ class DynamicTradeManager:
             # Check if we should lock in profit
             if profit_pct >= self.min_profit_lock and not self.profit_locked:
                 self.profit_locked = True
+                
+                # ✅ ACTUALLY LOCK PROFIT: Move SL to break-even or better
+                if self.side == 'long':
+                    breakeven_sl = self.entry_price * 1.002  # 0.2% above entry
+                    if breakeven_sl > self.stop_loss:
+                        old_sl = self.stop_loss
+                        self.stop_loss = breakeven_sl
+                        logger.info(
+                            f"[DTM] 🔒 PROFIT LOCKED: SL → break-even "
+                            f"${old_sl:,.2f} → ${self.stop_loss:,.2f}"
+                        )
+                else:  # short
+                    breakeven_sl = self.entry_price * 0.998
+                    if breakeven_sl < self.stop_loss:
+                        old_sl = self.stop_loss
+                        self.stop_loss = breakeven_sl
+                        logger.info(
+                            f"[DTM] 🔒 PROFIT LOCKED: SL → break-even "
+                            f"${old_sl:,.2f} → ${self.stop_loss:,.2f}"
+                        )
+                
                 logger.info(f"[DTM] Profit locked at {profit_pct:.2%} gain")
 
             # === LONG POSITION ===
             if self.side == 'long':
-                # ATR-based SL
-                sl_atr = self.entry_price - (last_atr * self.atr_multiplier)
-                
                 if initial:
-                    # Initial SL: use ATR but respect support
-                    self.stop_loss = max(sl_atr, support * 0.995)  # Slight buffer below support
+                    # ✅ FIXED: Use capped ATR-based stop
+                    sl_atr = self._calculate_atr_based_stop(
+                        reference_price=self.entry_price,
+                        atr=last_atr,
+                        is_long=True
+                    )
+                    
+                    # Consider support, but don't let it create excessive risk
+                    sl_support = support * 0.995
+                    
+                    # Choose the tighter of the two (closer to entry = less risk)
+                    self.stop_loss = max(sl_atr, sl_support)
+                    
+                    # ✅ Final safety check: ensure within max distance
+                    max_sl_price = self.entry_price * (1 - self.max_stop_loss_pct)
+                    if self.stop_loss < max_sl_price:
+                        logger.warning(
+                            f"[DTM] SL too wide, clamping: "
+                            f"${self.stop_loss:,.2f} → ${max_sl_price:,.2f}"
+                        )
+                        self.stop_loss = max_sl_price
+                    
+                    # Log breakdown
+                    actual_sl_pct = (self.entry_price - self.stop_loss) / self.entry_price
+                    logger.info(
+                        f"[DTM] Initial SL breakdown:\n"
+                        f"      ATR-based: ${sl_atr:,.2f} (ATR=${last_atr:,.2f})\n"
+                        f"      Support: ${sl_support:,.2f}\n"
+                        f"      → Selected: ${self.stop_loss:,.2f} ({actual_sl_pct:.2%} below entry)"
+                    )
                 else:
                     # Trailing SL logic
                     if self.profit_locked or self.aggressive_trail:
-                        # Aggressive trailing: follow price closely
-                        new_sl = self.highest_price - (last_atr * 0.8)
+                        # Aggressive trailing: follow price closely, IGNORE support
+                        aggressive_atr_distance = min(
+                            last_atr * 0.8,
+                            self.highest_price * self.max_stop_loss_pct
+                        )
+                        new_sl = self.highest_price - aggressive_atr_distance
                     else:
-                        # Conservative trailing: wider stops
-                        new_sl = max(sl_atr, support * 0.995)
+                        # Conservative trailing: use capped ATR + support
+                        new_sl = self._calculate_atr_based_stop(
+                            reference_price=current_price,
+                            atr=last_atr,
+                            is_long=True
+                        )
+                        # Only respect support when NOT in profit
+                        new_sl = max(new_sl, support * 0.995)
                     
                     # Only move SL up, never down
                     if new_sl > self.stop_loss:
                         old_sl = self.stop_loss
                         self.stop_loss = new_sl
+                        pct_move = ((self.stop_loss - old_sl) / old_sl * 100)
                         logger.info(
-                            f"[DTM] SL moved up: ${old_sl:,.2f} → ${self.stop_loss:,.2f} "
-                            f"(+{((self.stop_loss - old_sl) / old_sl * 100):.2f}%)"
+                            f"[DTM] SL trailed up: ${old_sl:,.2f} → ${self.stop_loss:,.2f} "
+                            f"(+{pct_move:.2f}%)"
                         )
 
                 # Take Profit calculation
@@ -148,31 +255,67 @@ class DynamicTradeManager:
                 tp_atr = self.entry_price + (risk * self.reward_risk_ratio)
                 
                 # Respect resistance but allow extension if momentum is strong
-                if profit_pct > 0.01:  # If already 1% in profit, allow TP beyond resistance
+                if profit_pct > 0.01:  # If already 1% in profit
                     self.take_profit = tp_atr
                 else:
-                    self.take_profit = min(tp_atr, resistance * 1.002)  # Slight buffer above resistance
+                    self.take_profit = min(tp_atr, resistance * 1.002)
 
             # === SHORT POSITION ===
             else:
-                # ATR-based SL (above entry for shorts)
-                sl_atr = self.entry_price + (last_atr * self.atr_multiplier)
-                
                 if initial:
-                    self.stop_loss = min(sl_atr, resistance * 1.005)
+                    # ✅ FIXED: Use capped ATR-based stop
+                    sl_atr = self._calculate_atr_based_stop(
+                        reference_price=self.entry_price,
+                        atr=last_atr,
+                        is_long=False
+                    )
+                    
+                    sl_resistance = resistance * 1.005
+                    
+                    # Choose the tighter of the two
+                    self.stop_loss = min(sl_atr, sl_resistance)
+                    
+                    # ✅ Final safety check
+                    max_sl_price = self.entry_price * (1 + self.max_stop_loss_pct)
+                    if self.stop_loss > max_sl_price:
+                        logger.warning(
+                            f"[DTM] SL too wide, clamping: "
+                            f"${self.stop_loss:,.2f} → ${max_sl_price:,.2f}"
+                        )
+                        self.stop_loss = max_sl_price
+                    
+                    actual_sl_pct = (self.stop_loss - self.entry_price) / self.entry_price
+                    logger.info(
+                        f"[DTM] Initial SL breakdown (SHORT):\n"
+                        f"      ATR-based: ${sl_atr:,.2f} (ATR=${last_atr:,.2f})\n"
+                        f"      Resistance: ${sl_resistance:,.2f}\n"
+                        f"      → Selected: ${self.stop_loss:,.2f} ({actual_sl_pct:.2%} above entry)"
+                    )
                 else:
                     if self.profit_locked or self.aggressive_trail:
-                        new_sl = self.lowest_price + (last_atr * 0.8)
+                        # Aggressive trailing: IGNORE resistance when in profit
+                        aggressive_atr_distance = min(
+                            last_atr * 0.8,
+                            self.lowest_price * self.max_stop_loss_pct
+                        )
+                        new_sl = self.lowest_price + aggressive_atr_distance
                     else:
-                        new_sl = min(sl_atr, resistance * 1.005)
+                        # Conservative trailing: respect resistance
+                        new_sl = self._calculate_atr_based_stop(
+                            reference_price=current_price,
+                            atr=last_atr,
+                            is_long=False
+                        )
+                        new_sl = min(new_sl, resistance * 1.005)
                     
                     # Only move SL down (closer to entry), never up
                     if new_sl < self.stop_loss:
                         old_sl = self.stop_loss
                         self.stop_loss = new_sl
+                        pct_move = ((old_sl - self.stop_loss) / old_sl * 100)
                         logger.info(
-                            f"[DTM] SL moved down: ${old_sl:,.2f} → ${self.stop_loss:,.2f} "
-                            f"(-{((old_sl - self.stop_loss) / old_sl * 100):.2f}%)"
+                            f"[DTM] SL trailed down: ${old_sl:,.2f} → ${self.stop_loss:,.2f} "
+                            f"(-{pct_move:.2f}%)"
                         )
 
                 # Take Profit calculation
@@ -238,6 +381,71 @@ class DynamicTradeManager:
 
         except Exception as e:
             logger.error(f"[DTM] Error checking exit: {e}")
+            return None
+
+    def update_with_current_price(self, current_price: float) -> Optional[str]:
+        """
+        ✅ NEW: Update trailing stop based on current price (not just bar close)
+        Call this every 1-5 minutes for active management
+        
+        This allows the DTM to trail stops in real-time rather than waiting
+        for the next bar close, which is critical for volatile assets like crypto.
+        
+        Args:
+            current_price: Current market price
+            
+        Returns:
+            'stop_loss', 'take_profit', or None
+        """
+        try:
+            # Update highest/lowest
+            if self.side == 'long':
+                old_high = self.highest_price
+                self.highest_price = max(self.highest_price, current_price)
+                
+                # If new high and we're in profit-lock mode, trail immediately
+                if self.highest_price > old_high and (self.profit_locked or self.aggressive_trail):
+                    last_atr = self.calculate_atr()
+                    if last_atr > 0:
+                        aggressive_atr_distance = min(
+                            last_atr * 0.8,
+                            self.highest_price * self.max_stop_loss_pct
+                        )
+                        new_sl = self.highest_price - aggressive_atr_distance
+                        
+                        if new_sl > self.stop_loss:
+                            old_sl = self.stop_loss
+                            self.stop_loss = new_sl
+                            logger.info(
+                                f"[DTM] 📈 New high ${self.highest_price:,.2f} - "
+                                f"SL trailed: ${old_sl:,.2f} → ${self.stop_loss:,.2f}"
+                            )
+            else:  # short
+                old_low = self.lowest_price
+                self.lowest_price = min(self.lowest_price, current_price)
+                
+                if self.lowest_price < old_low and (self.profit_locked or self.aggressive_trail):
+                    last_atr = self.calculate_atr()
+                    if last_atr > 0:
+                        aggressive_atr_distance = min(
+                            last_atr * 0.8,
+                            self.lowest_price * self.max_stop_loss_pct
+                        )
+                        new_sl = self.lowest_price + aggressive_atr_distance
+                        
+                        if new_sl < self.stop_loss:
+                            old_sl = self.stop_loss
+                            self.stop_loss = new_sl
+                            logger.info(
+                                f"[DTM] 📉 New low ${self.lowest_price:,.2f} - "
+                                f"SL trailed: ${old_sl:,.2f} → ${self.stop_loss:,.2f}"
+                            )
+            
+            # Check exit on current price
+            return self.check_exit(current_price)
+        
+        except Exception as e:
+            logger.error(f"[DTM] Error updating with current price: {e}")
             return None
 
     def on_new_bar(
