@@ -884,8 +884,10 @@ class TradingBot:
                     logger.error(f"[ERROR] Failed to refresh capital: {e}")
 
             self.reset_daily_counters()
+            self._check_dtm_positions()
 
             # Get current prices for all assets
+            
             current_prices = {}
             enabled = [
                 name
@@ -1047,6 +1049,41 @@ class TradingBot:
                     )
                 )
                 time.sleep(300)
+                
+    def _check_dtm_positions(self):
+        """
+        ✅ NEW: Check all DTM-managed positions for exits
+        This runs EVERY cycle (every 5 min) for real-time trailing
+        """
+        try:
+            for asset_name in ["BTC", "GOLD"]:
+                if not self.config["assets"][asset_name].get("enabled", False):
+                    continue
+                
+                position = self.portfolio_manager.get_position(asset_name)
+                if not position or not position.trade_manager:
+                    continue
+                
+                # Get handler
+                exchange = self.config["assets"][asset_name].get("exchange", "binance")
+                handler = self.binance_handler if exchange == "binance" else self.mt5_handler
+                
+                if not handler:
+                    continue
+                
+                # Check DTM with real-time updates
+                try:
+                    if exchange == "binance":
+                        handler.check_and_update_positions_dtm(asset_name)
+                    else:
+                        # MT5 equivalent
+                        handler.check_and_update_positions(asset_name)
+                
+                except Exception as e:
+                    logger.error(f"[DTM] Error checking {asset_name}: {e}")
+        
+        except Exception as e:
+            logger.error(f"[DTM] Position check error: {e}")           
 
     def _log_dtm_status(self):
         """Log Dynamic Trade Manager status for all positions"""
