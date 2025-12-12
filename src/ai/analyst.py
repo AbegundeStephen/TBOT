@@ -16,15 +16,15 @@ class DynamicAnalyst:
     using volatility-adaptive clustering
     """
     
-    def __init__(self, atr_multiplier=1.5, min_samples=5):
+    def __init__(self, atr_multiplier=2.0, min_samples=3):  # Changed: 1.5→2.0, 5→3
         """
         Args:
-            atr_multiplier: Width of noise filter (1.5x ATR is standard)
-            min_samples: Minimum points to form a valid cluster
+            atr_multiplier: Wider noise filter (2.0x ATR instead of 1.5x)
+            min_samples: Lower threshold (3 instead of 5)
         """
         self.atr_multiplier = atr_multiplier
         self.min_samples = min_samples
-        logger.info(f"[ANALYST] Initialized with ATR multiplier: {atr_multiplier}")
+        logger.info(f"[ANALYST] Initialized with ATR multiplier: {atr_multiplier}, min_samples: {min_samples}")
 
     def calculate_atr(self, highs, lows, closes, period=14):
         """
@@ -64,43 +64,35 @@ class DynamicAnalyst:
         closes, 
         n_levels=5
     ):
-        """
-        Identify key Support/Resistance price levels
+        """IMPROVED: More robust level detection"""
         
-        Args:
-            pivot_points: Array of local highs/lows
-            highs, lows, closes: Full price history
-            n_levels: Number of S/R levels to identify
-            
-        Returns:
-            List[float]: Sorted S/R price levels
-        """
+        # FIXED: Lower threshold from 5 to 3
         if len(pivot_points) < self.min_samples:
             logger.warning(f"[ANALYST] Insufficient pivots: {len(pivot_points)}")
             return []
 
-        # Step 1: Measure current volatility
+        # Calculate volatility-based clustering epsilon
         current_atr = self.calculate_atr(highs, lows, closes)
-        dynamic_eps = current_atr * self.atr_multiplier
+        dynamic_eps = current_atr * self.atr_multiplier  # Now 2.0x instead of 1.5x
         
         if dynamic_eps <= 0:
-            dynamic_eps = np.std(pivot_points) * 0.1  # Fallback
+            dynamic_eps = np.std(pivot_points) * 0.15  # More lenient fallback
         
         logger.debug(f"[ANALYST] ATR={current_atr:.2f}, epsilon={dynamic_eps:.2f}")
 
-        # Step 2: Filter noise using DBSCAN
+        # DBSCAN filtering
         X = pivot_points.reshape(-1, 1)
         db = DBSCAN(eps=dynamic_eps, min_samples=self.min_samples).fit(X)
         
-        # Keep only non-noise points (label != -1)
         clean_mask = db.labels_ != -1
         clean_X = X[clean_mask]
 
-        if len(clean_X) < n_levels:
-            logger.warning(f"[ANALYST] Only {len(clean_X)} clean pivots found")
-            return sorted(clean_X.flatten().tolist()) if len(clean_X) > 0 else []
+        # FIXED: Return raw pivots if clustering removes too much
+        if len(clean_X) < max(3, n_levels // 2):
+            logger.warning(f"[ANALYST] Clustering too aggressive ({len(clean_X)} points), using raw pivots")
+            return sorted(pivot_points.tolist())
 
-        # Step 3: Cluster clean data to find levels
+        # K-means clustering
         n_clusters = min(n_levels, len(clean_X))
         kmeans = KMeans(
             n_clusters=n_clusters, 

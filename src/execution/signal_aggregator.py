@@ -543,7 +543,7 @@ class PerformanceWeightedAggregator:
 
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
         """
-        Main aggregation logic with AI validation - FIXED
+        Main aggregation logic with AI validation
         """
         self.stats["total_evaluations"] += 1
         try:
@@ -563,59 +563,22 @@ class PerformanceWeightedAggregator:
             tf_original = tf_signal
 
             # ================================================================
-            # STEP 3: Calculate PRELIMINARY signal quality (PROPERLY)
+            # FIX: Initialize signal_quality early for AI validation
             # ================================================================
-            preliminary_buy_score, _, _ = self._calculate_score(
-                target_signal=1,
-                mr_signal=mr_signal,
-                mr_conf=mr_conf,
-                tf_signal=tf_signal,
-                tf_conf=tf_conf,
-                is_bull=is_bull,
-            )
-            
-            preliminary_sell_score, _, _ = self._calculate_score(
-                target_signal=-1,
-                mr_signal=mr_signal,
-                mr_conf=mr_conf,
-                tf_signal=tf_signal,
-                tf_conf=tf_conf,
-                is_bull=is_bull,
-            )
-            
-            # Use PROPER aggregated score for quality assessment
-            signal_quality = max(preliminary_buy_score, preliminary_sell_score)
-            
-            if self.detailed_logging:
-                logger.debug(f"[QUALITY] Preliminary: BUY={preliminary_buy_score:.3f}, SELL={preliminary_sell_score:.3f}, Quality={signal_quality:.3f}")
+            signal_quality = max(mr_conf, tf_conf)  # Preliminary quality estimate
 
             # ================================================================
-            # STEP 4: AI VALIDATION (with circuit breaker and bypass)
+            # STEP 3: AI VALIDATION (with circuit breaker)
             # ================================================================
             ai_bypass = False
-            bypass_reason = None
-            
             if self.ai_enabled and self.ai_validator is not None:
-                # Check circuit breaker first
-                if self._check_ai_circuit_breaker():
-                    ai_bypass = True
-                    bypass_reason = "circuit_breaker"
-                    
-                    if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
-                        self.ai_bypass_cooldown -= 1
-                        if self.detailed_logging:
-                            logger.info(f"[AI] Circuit breaker active (cooldown: {self.ai_bypass_cooldown})")
-                
-                # Check strong signal bypass (only if circuit breaker not active)
-                if not ai_bypass and signal_quality >= self.strong_signal_bypass:
-                    ai_bypass = True
-                    bypass_reason = "strong_signal"
-                    self.ai_stats["bypassed_strong_signal"] += 1
-                    
-                    if self.detailed_logging:
-                        logger.info(f"[AI] Strong signal bypass: quality={signal_quality:.3f} >= {self.strong_signal_bypass:.3f}")
+                # Check circuit breaker
+                ai_bypass = self._check_ai_circuit_breaker()
 
-                # Validate signals if NOT bypassed
+                if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
+                    self.ai_bypass_cooldown -= 1
+
+                # Validate signals if AI not bypassed
                 if not ai_bypass:
                     # Validate Mean Reversion
                     if mr_signal != 0:
@@ -629,7 +592,7 @@ class PerformanceWeightedAggregator:
                                 "regime": "bull" if is_bull else "bear",
                                 "regime_confidence": regime_conf,
                                 "asset": self.asset_type,
-                                "signal_quality": signal_quality
+                                "signal_quality": signal_quality  # ✓ Now defined
                             },
                             df=df
                         )
@@ -638,10 +601,7 @@ class PerformanceWeightedAggregator:
                             # AI rejected
                             self.ai_stats["mr_rejected"] += 1
                             self.ai_rejection_window.append(True)
-                            
-                            if self.detailed_logging:
-                                logger.debug(f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}")
-                            
+                            logger.debug(f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}")
                             mr_signal = 0
                             mr_conf = 0.0
                         else:
@@ -660,7 +620,7 @@ class PerformanceWeightedAggregator:
                                 "regime": "bull" if is_bull else "bear",
                                 "regime_confidence": regime_conf,
                                 "asset": self.asset_type,
-                                "signal_quality": signal_quality
+                                "signal_quality": signal_quality  # ✓ Now defined
                             },
                             df=df
                         )
@@ -669,22 +629,16 @@ class PerformanceWeightedAggregator:
                             # AI rejected
                             self.ai_stats["tf_rejected"] += 1
                             self.ai_rejection_window.append(True)
-                            
-                            if self.detailed_logging:
-                                logger.debug(f"[AI] TF {tf_signal} rejected: {tf_details.get('ai_validation', 'unknown')}")
-                            
+                            logger.debug(f"[AI] TF {tf_signal} rejected: {tf_details.get('ai_validation', 'unknown')}")
                             tf_signal = 0
                             tf_conf = 0.0
                         else:
                             self.ai_stats["tf_approved"] += 1
                             self.ai_rejection_window.append(False)
             else:
-                if self.detailed_logging:
-                    logger.debug("[AI] Validator not initialized or disabled")
+                logger.debug("[AI] Validator not initialized or disabled, skipping AI validation.")
 
-            # ================================================================
-            # STEP 5: Recalculate scores with potentially modified signals
-            # ================================================================
+            # STEP 4: Calculate scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
                 target_signal=1,
                 mr_signal=mr_signal,
@@ -695,63 +649,73 @@ class PerformanceWeightedAggregator:
             )
 
             sell_score, sell_explanation, sell_agreement = self._calculate_score(
-                target_signal=-1,
-                mr_signal=mr_signal,
-                mr_conf=mr_conf,
-                tf_signal=tf_signal,
-                tf_conf=tf_conf,
-                is_bull=is_bull,
-            )
+            target_signal=-1,
+            mr_signal=mr_signal,
+            mr_conf=mr_conf,
+            tf_signal=tf_signal,
+            tf_conf=tf_conf,
+            is_bull=is_bull,
+        )
 
-            # STEP 6: Dynamic thresholds
+                # STEP 5: Dynamic thresholds
             adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
 
             base_buy_thresh = self.config["buy_threshold"]
             base_sell_thresh = self.config["sell_threshold"]
 
-            # Update final signal_quality
-            final_signal_quality = max(buy_score, sell_score)
-            min_quality = self.config["min_signal_quality"]
-            
-            # Log quality changes if AI modified signals
-            if self.detailed_logging and abs(final_signal_quality - signal_quality) > 0.05:
-                logger.debug(f"[QUALITY] After AI: {signal_quality:.3f} → {final_signal_quality:.3f} (Δ: {final_signal_quality - signal_quality:+.3f})")
+            # STEP 6: Make decision FIRST (before calculating signal_quality)
+            final_signal = 0  # Initialize with default
+            reasoning = ""
 
-            # STEP 7: Make decision
             if buy_score >= adj_buy_thresh and buy_score > sell_score:
-                if final_signal_quality >= min_quality:
-                    final_signal = 1
-                    reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
-                    self.stats["buy_signals"] += 1
-                    self.stats["signals_generated"] += 1
-                else:
-                    final_signal = 0
-                    reasoning = f"hold_lowquality (score:{buy_score:.2f})"
-                    self.stats["hold_signals"] += 1
+                final_signal = 1
+                reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
             elif sell_score >= adj_sell_thresh and sell_score > buy_score:
-                if final_signal_quality >= min_quality:
-                    final_signal = -1
-                    reasoning = f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
-                    self.stats["sell_signals"] += 1
-                    self.stats["signals_generated"] += 1
-                else:
-                    final_signal = 0
-                    reasoning = f"hold_lowquality (score:{sell_score:.2f})"
-                    self.stats["hold_signals"] += 1
+                final_signal = -1
+                reasoning = f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
             else:
                 final_signal = 0
                 reasoning = f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
+
+            # NOW calculate signal_quality (after final_signal is defined)
+            base_buy = min(buy_score, 0.7)  # Cap contribution
+            base_sell = min(sell_score, 0.7)
+            raw_quality = max(base_buy, base_sell)
+
+            # Apply agreement penalty
+            if buy_agreement < 2 and sell_agreement < 2:
+                raw_quality *= 0.7  # Penalize if no consensus
+
+            # Apply regime alignment bonus
+            if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull):
+                raw_quality *= 1.15  # Small boost for regime alignment
+
+            # Cap at 1.0
+            signal_quality = min(raw_quality, 1.0)
+            min_quality = self.config["min_signal_quality"]
+
+            # Apply quality filter to the decision
+            if final_signal != 0 and signal_quality < min_quality:
+                final_signal = 0
+                reasoning = f"hold_lowquality (original:{reasoning}, quality:{signal_quality:.2f})"
+                self.stats["hold_signals"] += 1
+            elif final_signal == 1:
+                self.stats["buy_signals"] += 1
+                self.stats["signals_generated"] += 1
+            elif final_signal == -1:
+                self.stats["sell_signals"] += 1
+                self.stats["signals_generated"] += 1
+            else:
                 self.stats["hold_signals"] += 1
 
-            # STEP 8: Build response
+            # STEP 7: Build response
             details = {
                 "timestamp": timestamp,
                 "regime": regime_name,
                 "regime_confidence": regime_conf,
                 "final_signal": final_signal,
                 "reasoning": reasoning,
-                "signal_quality": final_signal_quality,
-                "preliminary_signal_quality": signal_quality,
+                "signal_quality": signal_quality,
                 "buy_score": buy_score,
                 "sell_score": sell_score,
                 "buy_threshold": adj_buy_thresh,
@@ -772,9 +736,6 @@ class PerformanceWeightedAggregator:
             if self.ai_enabled:
                 details["ai_enabled"] = True
                 details["ai_bypassed"] = ai_bypass
-                if ai_bypass:
-                    details["ai_bypass_reason"] = bypass_reason
-                
                 if mr_original != mr_signal or tf_original != tf_signal:
                     details["ai_modified"] = True
                     details["ai_changes"] = {
@@ -793,7 +754,6 @@ class PerformanceWeightedAggregator:
                 "signal_quality": 0.0,
                 "final_signal": 0,
             }
-
     def _calculate_ai_impact(self, ai_stats: dict) -> dict:
             """Calculate AI validation impact on trading"""
             total_checks = ai_stats.get("total_checks", 0)
