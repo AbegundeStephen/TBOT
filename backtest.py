@@ -189,10 +189,11 @@ class MLStrategy(bt.Strategy):
         ("exit_on_opposite_signal", True),
         # ==== IMPROVED AI VALIDATION PARAMETERS ====
         ("use_ai_validation", True),
-        ("ai_sr_threshold", 0.025),  # 1.5% (was 0.5%)
-        ("ai_pattern_confidence", 0.50),  # 50% (was 65%)
-        ("ai_enable_adaptive", True),  # NEW: Enable adaptive thresholds
-        ("ai_strong_signal_bypass", 0.75),  # NEW: Bypass AI for strong signals
+        ("ai_sr_threshold", 0.015),  # 1.5% (was 0.05 = 5%!)
+        ("ai_pattern_confidence", 0.50),
+        ("ai_enable_adaptive", True),
+        ("ai_strong_signal_bypass", 0.85),  # 70% (must match aggregator)
+        ("ai_circuit_breaker_threshold", 0.70),  # NEW: Control circuit breaker  # NEW: Bypass AI for strong signals
     )
 
     def __init__(self):
@@ -256,9 +257,10 @@ class MLStrategy(bt.Strategy):
             ema_strategy=self.ema_strategy,
             asset_type=self.asset_key,
             config=confidence_config,
-            ai_validator=(
-                self.ai_validator if self.params.use_ai_validation else None
-            ),  # NEW
+            ai_validator=self.ai_validator if self.params.use_ai_validation else None,
+            enable_ai_circuit_breaker=True,
+            enable_detailed_logging=True,
+            strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,  # Pass same value!
         )
 
         self.order = None
@@ -340,18 +342,19 @@ class MLStrategy(bt.Strategy):
             )
             sniper.load_model(str(model_path))
 
-            # ===== USE IMPROVED VALIDATOR =====
+                # ===== USE IMPROVED VALIDATOR =====
             validator = HybridSignalValidator(
                 analyst=analyst,
                 sniper=sniper,
                 pattern_id_map=pattern_map,
-                sr_threshold_pct=self.params.ai_sr_threshold,  # 1.5%
-                pattern_confidence_min=self.params.ai_pattern_confidence,  # 50%
+                sr_threshold_pct=self.params.ai_sr_threshold,  # 0.015 = 1.5%
+                pattern_confidence_min=self.params.ai_pattern_confidence,
                 use_ai_validation=True,
-                enable_adaptive_thresholds=self.params.ai_enable_adaptive,  # NEW
-                strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,  # NEW
+                enable_adaptive_thresholds=self.params.ai_enable_adaptive,
+                strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,  # 0.70
+                circuit_breaker_threshold=self.params.ai_circuit_breaker_threshold,  # 0.70
+                enable_detailed_logging=False,  # Turn on for debugging
             )
-
             logger.info("[AI] ✓ Enhanced validation layer initialized")
             logger.info(
                 f"  S/R Threshold: {self.params.ai_sr_threshold:.2%} (adaptive)"
@@ -363,12 +366,56 @@ class MLStrategy(bt.Strategy):
                 f"  Strong Signal Bypass: {self.params.ai_strong_signal_bypass:.0%}"
             )
 
+            self.ai_validator = validator
+            self._diagnose_sr_levels()
+            
             return validator
 
         except Exception as e:
             logger.error(f"[AI] Failed to initialize: {e}")
             logger.warning("[AI] Backtesting WITHOUT AI validation")
             return None
+        
+    def _diagnose_sr_levels(self):
+        """NEW: Check if S/R levels are being generated"""
+        logger.info("=" * 70)
+        logger.info("🔍 S/R LEVEL DIAGNOSTIC")
+        logger.info("=" * 70)
+        
+        # Get first 200 bars to test
+        if len(self.data) >= 200:
+            test_df = pd.DataFrame({
+                'open': [x for x in self.data.open.get(size=200)],
+                'high': [x for x in self.data.high.get(size=200)],
+                'low': [x for x in self.data.low.get(size=200)],
+                'close': [x for x in self.data.close.get(size=200)],
+                'volume': [x for x in self.data.volume.get(size=200)],
+            })
+            
+            # Force S/R update
+            self.ai_validator._update_sr_levels(test_df)
+            
+            # Check results
+            levels = self.ai_validator.sr_cache.get('levels', [])
+            pivot_count = self.ai_validator.sr_cache.get('pivot_count', 0)
+            
+            logger.info(f"Test Data: 200 bars")
+            logger.info(f"Pivots Found: {pivot_count}")
+            logger.info(f"S/R Levels Generated: {len(levels)}")
+            
+            if levels:
+                current_price = test_df['close'].iloc[-1]
+                logger.info(f"Current Price: ${current_price:.2f}")
+                logger.info(f"S/R Levels:")
+                for i, level in enumerate(levels[:5], 1):
+                    distance = abs(current_price - level) / current_price * 100
+                    logger.info(f"  {i}. ${level:.2f} (distance: {distance:.2f}%)")
+            else:
+                logger.warning("⚠️  NO S/R LEVELS GENERATED!")
+                logger.warning("This will cause AI to reject ALL signals!")
+                
+        logger.info("=" * 70)
+
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -858,8 +905,16 @@ Examples:
         action="store_true",
         help="Disable AI validation layer",
     )
-
+    parser.add_argument(
+            "--diagnose",
+            action="store_true",
+            help="Enable full diagnostic logging"
+        )
+        
     args = parser.parse_args()
+    if args.diagnose:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.info("🔍 DIAGNOSTIC MODE ENABLED")
     run_backtest(
         asset_key=args.asset, aggregator_preset=args.preset, use_ai=not args.no_ai
     )

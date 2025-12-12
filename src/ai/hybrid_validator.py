@@ -28,14 +28,19 @@ class HybridSignalValidator:
     BULLISH_PATTERNS = {
         'Engulfing', 'Morning Star', 'Hammer', 'Inverted Hammer',
         'Three White Soldiers', 'Piercing', 'Harami', 'Three Inside',
-        'Dragonfly Doji', 'Bullish Engulfing'
+        'Dragonfly Doji', 'Bullish Engulfing', 'Bullish Harami',
+        'Marubozu',  # ← ADDED (can be bullish if long white body)
     }
     
     BEARISH_PATTERNS = {
         'Evening Star', 'Shooting Star', 'Hanging Man', 
         'Three Black Crows', 'Dark Cloud', 'Gravestone Doji',
-        'Bearish Engulfing', 'Three Outside',
-        'Dark Cloud Cover',  # ← Add this if it's missing
+        'Bearish Engulfing', 'Three Outside', 'Dark Cloud Cover',
+        'Bearish Harami',
+    }
+    NEUTRAL_PATTERNS = {
+        'Doji',  # Context-dependent
+        'Spinning Top',
     }
     
     def __init__(
@@ -47,9 +52,9 @@ class HybridSignalValidator:
         pattern_confidence_min=0.44,
         use_ai_validation=True,
         enable_adaptive_thresholds=True,
-        strong_signal_bypass_threshold=0.70,
+        strong_signal_bypass_threshold=0.85,
         circuit_breaker_threshold=0.70,
-        enable_detailed_logging=True,
+        enable_detailed_logging=False,
     ):
         """
         Initialize validator with REALISTIC thresholds
@@ -73,6 +78,9 @@ class HybridSignalValidator:
         self.base_pattern_confidence = pattern_confidence_min
         self.use_ai_validation = use_ai_validation
         self.enable_adaptive = enable_adaptive_thresholds
+        logger.info(f"[AI VALIDATOR] Initialized")
+        logger.info(f"  Strong Signal Bypass: {strong_signal_bypass_threshold:.0%} (was 70%)")
+        logger.info(f"  Expected validation rate: ~40-60% of signals")
         self.strong_signal_bypass = strong_signal_bypass_threshold
         self.bypass_threshold = circuit_breaker_threshold
         self.detailed_logging = enable_detailed_logging
@@ -734,12 +742,25 @@ class HybridSignalValidator:
         logger.info("🔄 AI circuit breaker reset - validation RE-ENABLED")
     
     def _update_sr_levels(self, df: pd.DataFrame):
-        """Recalculate S/R levels"""
+        """IMPROVED: More robust S/R level extraction"""
         pivots = self._extract_pivots(df, window=7)
         
-        if len(pivots) < 5:
-            logger.debug(f"[SR UPDATE] Only {len(pivots)} pivots found")
-            self.sr_cache = {'levels': []}
+        # FIXED: Lower threshold from 5 to 3 pivots
+        if len(pivots) < 3:
+            logger.warning(f"[SR UPDATE] Only {len(pivots)} pivots - using price quantiles as fallback")
+            
+            # Fallback: Use price distribution quantiles as S/R levels
+            closes = df['close'].values
+            levels = np.percentile(closes, [10, 25, 50, 75, 90]).tolist()
+            
+            self.sr_cache = {
+                'levels': sorted(levels),
+                'updated_at': datetime.now(),
+                'pivot_count': 0,
+                'fallback_mode': True
+            }
+            
+            logger.info(f"[SR UPDATE] Fallback: {len(levels)} quantile-based levels")
             return
         
         try:
@@ -751,32 +772,61 @@ class HybridSignalValidator:
                 n_levels=7
             )
             
+            # FIXED: If clustering fails, use pivots directly
+            if not levels:
+                logger.warning("[SR UPDATE] Clustering returned no levels - using raw pivots")
+                levels = sorted(np.unique(pivots).tolist())
+            
             self.sr_cache = {
                 'levels': levels,
                 'updated_at': datetime.now(),
-                'pivot_count': len(pivots)
+                'pivot_count': len(pivots),
+                'fallback_mode': False
             }
             
             logger.debug(f"[SR UPDATE] {len(levels)} levels from {len(pivots)} pivots")
             
         except Exception as e:
             logger.error(f"[SR UPDATE] Failed: {e}")
-            self.sr_cache = {'levels': []}
+            
+            # Emergency fallback: use price range
+            closes = df['close'].values
+            levels = np.percentile(closes, [10, 30, 50, 70, 90]).tolist()
+            
+            self.sr_cache = {
+                'levels': sorted(levels),
+                'updated_at': datetime.now(),
+                'pivot_count': 0,
+                'fallback_mode': True
+            }
+            
+            logger.warning(f"[SR UPDATE] Emergency fallback: {len(levels)} quantile levels")
+    
     
     def _extract_pivots(self, df: pd.DataFrame, window=7) -> np.ndarray:
-        """Extract pivot points"""
-        highs = df['high'].values
-        lows = df['low'].values
-        pivots = []
-        
-        for i in range(window, len(df) - window):
-            if highs[i] == max(highs[i-window:i+window+1]):
-                pivots.append(highs[i])
-            if lows[i] == min(lows[i-window:i+window+1]):
-                pivots.append(lows[i])
-        
-        return np.array(pivots) if pivots else np.array([])
-    
+            """IMPROVED: Extract more pivots with lower window"""
+            highs = df['high'].values
+            lows = df['low'].values
+            pivots = []
+            
+            # FIXED: Try smaller window if too few pivots
+            for window_size in [window, 5, 3]:
+                pivots = []
+                
+                for i in range(window_size, len(df) - window_size):
+                    # High pivot
+                    if highs[i] == max(highs[i-window_size:i+window_size+1]):
+                        pivots.append(highs[i])
+                    
+                    # Low pivot
+                    if lows[i] == min(lows[i-window_size:i+window_size+1]):
+                        pivots.append(lows[i])
+                
+                if len(pivots) >= 3:
+                    logger.debug(f"[PIVOT] Found {len(pivots)} pivots with window={window_size}")
+                    break
+            
+            return np.array(pivots) if pivots else np.array([])
     def _resolve_pattern_name(self, pattern_id: int) -> str:
         """
         FIXED: Multi-stage pattern name resolution
@@ -826,7 +876,7 @@ class HybridSignalValidator:
         min_confidence: float
     ) -> dict:
         """
-        FIXED: Check for confirming pattern with better name resolution
+        FIXED: Handle Marubozu and context-dependent patterns
         """
         if len(df) < 15:
             return {
@@ -842,10 +892,10 @@ class HybridSignalValidator:
             last_15 = df.tail(15)[['open', 'high', 'low', 'close']].values
             pattern_id, confidence = self.sniper.predict(last_15)
             
-            # FIXED: Multi-stage pattern name lookup
+            # Resolve pattern name
             pattern_name = self._resolve_pattern_name(pattern_id)
             
-            # Special case: Noise pattern (ID 0)
+            # Noise pattern
             if pattern_id == 0:
                 return {
                     "pattern_confirmed": False,
@@ -855,26 +905,67 @@ class HybridSignalValidator:
                     "confidence": confidence
                 }
             
-            # Check if pattern is classified
+            # Check classification
             is_bullish = pattern_name in self.BULLISH_PATTERNS
             is_bearish = pattern_name in self.BEARISH_PATTERNS
+            is_neutral = pattern_name in self.NEUTRAL_PATTERNS
             
-            # DIAGNOSTIC: Log unknown patterns
+            # ===== NEW: Handle Marubozu (directional context) =====
+            if pattern_name == 'Marubozu':
+                # Marubozu is directional based on color
+                last_candle = df.iloc[-1]
+                is_white = last_candle['close'] > last_candle['open']
+                
+                if signal == 1 and is_white:
+                    is_bullish = True
+                    is_bearish = False
+                elif signal == -1 and not is_white:
+                    is_bearish = True
+                    is_bullish = False
+                else:
+                    # Wrong color for signal direction
+                    return {
+                        "pattern_confirmed": False,
+                        "reason": f"marubozu_wrong_color",
+                        "pattern_name": pattern_name,
+                        "pattern_id": pattern_id,
+                        "confidence": confidence,
+                        "direction": "white" if is_white else "black"
+                    }
+            
+            # ===== Handle neutral patterns =====
+            if is_neutral:
+                # For neutral patterns, rely on signal direction + market context
+                regime = df.iloc[-1].get('regime', 'BULL')  # Assume bull if missing
+                
+                if signal == 1 and 'BULL' in str(regime):
+                    is_bullish = True
+                elif signal == -1 and 'BEAR' in str(regime):
+                    is_bearish = True
+                else:
+                    return {
+                        "pattern_confirmed": False,
+                        "reason": f"neutral_pattern_weak_context",
+                        "pattern_name": pattern_name,
+                        "pattern_id": pattern_id,
+                        "confidence": confidence
+                    }
+            
+            # ===== Check if still unclassified =====
             if not is_bullish and not is_bearish:
-                logger.warning(f"[PATTERN] Unclassified pattern: {pattern_name} (ID: {pattern_id})")
-                logger.warning(f"[PATTERN] Add to BULLISH_PATTERNS or BEARISH_PATTERNS in validator")
+                logger.warning(f"[PATTERN] Unclassified: {pattern_name} (ID: {pattern_id})")
+                logger.warning(f"[PATTERN] Add to BULLISH_PATTERNS, BEARISH_PATTERNS, or NEUTRAL_PATTERNS")
                 return {
                     "pattern_confirmed": False,
                     "reason": f"unclassified_pattern",
                     "pattern_name": pattern_name,
                     "pattern_id": pattern_id,
                     "confidence": confidence,
-                    "note": "Pattern not in BULLISH_PATTERNS or BEARISH_PATTERNS"
+                    "note": "Pattern not in any classification set"
                 }
             
-            # Direction mismatch check
+            # ===== Direction mismatch check =====
             if signal == 1 and not is_bullish:
-                self.stats["rejected_direction_mismatch"] += 1
                 return {
                     "pattern_confirmed": False,
                     "reason": f"bearish_pattern_for_buy",
@@ -885,7 +976,6 @@ class HybridSignalValidator:
                 }
             
             if signal == -1 and not is_bearish:
-                self.stats["rejected_direction_mismatch"] += 1
                 return {
                     "pattern_confirmed": False,
                     "reason": f"bullish_pattern_for_sell",
@@ -895,9 +985,8 @@ class HybridSignalValidator:
                     "direction": "bullish"
                 }
             
-            # Confidence check
+            # ===== Confidence check =====
             if confidence < min_confidence:
-                self.stats["rejected_low_confidence"] += 1
                 return {
                     "pattern_confirmed": False,
                     "reason": f"low_confidence_{confidence:.0%}_vs_{min_confidence:.0%}",
@@ -918,8 +1007,6 @@ class HybridSignalValidator:
             
         except Exception as e:
             logger.error(f"[PATTERN CHECK] Error: {e}")
-            import traceback
-            logger.error(f"[PATTERN CHECK] Traceback:\n{traceback.format_exc()}")
             return {
                 "pattern_confirmed": False,
                 "reason": f"error",
@@ -928,6 +1015,8 @@ class HybridSignalValidator:
                 "confidence": 0.0,
                 "error_details": str(e)
             }
+
+
 
 
     def get_statistics(self) -> dict:
