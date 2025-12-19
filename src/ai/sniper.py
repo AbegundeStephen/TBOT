@@ -1,205 +1,165 @@
-"""
-IMPROVED Sniper: Enhanced CNN-LSTM Pattern Recognition Model
-Key improvements:
-1. Deeper architecture with residual connections
-2. Better regularization (dropout + L2)
-3. Attention mechanism for pattern focus
-4. Improved feature extraction
-"""
+# ==============================================================================
+# 2. IMPROVED SNIPER.PY
+# ==============================================================================
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models, regularizers
+from tensorflow.keras import layers, models, regularizers, callbacks
 from sklearn.utils.class_weight import compute_class_weight
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class OHLCSniperV2:
+class OHLCSniper:
     """
-    IMPROVED deep learning model for candlestick pattern recognition
-    Architecture: Multi-scale Conv1D → Attention → Bidirectional LSTM → Dense
+    Pattern recognition model trained on 15min candles
+    Client Requirement: Must detect patterns from 15min timeframe
     """
     
-    def __init__(self, input_shape=(15, 4), num_classes=21):
-        """
-        Args:
-            input_shape: (sequence_length, 4) for OHLC
-            num_classes: Number of patterns + 1 (Noise class)
-        """
+    def __init__(self, input_shape=(15, 4), num_classes=17, dropout_rate=0.3):   
         self.input_shape = input_shape
         self.num_classes = num_classes
-        self.model = self._build_improved_model()
+        self.dropout_rate = dropout_rate
+        self.timeframe = '15min'
+        self.timeframe = '15min'  # Explicit timeframe tracking
+        self.model = self._build_model()
         
-        logger.info(f"[SNIPER V2] Model initialized: {input_shape} → {num_classes} classes")
+        logger.info(
+            f"[SNIPER] Initialized for {self.timeframe} candles: "
+            f"{input_shape} → {num_classes} classes"
+        )
 
-    def _build_improved_model(self):
-        """
-        Build improved CNN-LSTM hybrid with attention
-        
-        Returns:
-            Compiled Keras model
-        """
+    def _build_model(self):
+        """Build enhanced CNN-LSTM architecture"""        
         inputs = layers.Input(shape=self.input_shape)
         
-        # ==================================================================
-        # MULTI-SCALE FEATURE EXTRACTION
-        # Extract features at different time scales (short, medium, long)
-        # ==================================================================
-        
-        # Short-term patterns (3-candle)
+        # Multi-scale feature extraction
         conv1_short = layers.Conv1D(
             64, 3, activation='relu', padding='same',
             kernel_regularizer=regularizers.l2(0.001)
         )(inputs)
         conv1_short = layers.BatchNormalization()(conv1_short)
         
-        # Medium-term patterns (5-candle)
         conv1_medium = layers.Conv1D(
             64, 5, activation='relu', padding='same',
             kernel_regularizer=regularizers.l2(0.001)
         )(inputs)
         conv1_medium = layers.BatchNormalization()(conv1_medium)
         
-        # Combine multi-scale features
-        conv1_combined = layers.Concatenate()([conv1_short, conv1_medium])
-        conv1_combined = layers.Dropout(0.2)(conv1_combined)
+        conv1_long = layers.Conv1D(
+            64, 7, activation='relu', padding='same',
+            kernel_regularizer=regularizers.l2(0.001)
+        )(inputs)
+        conv1_long = layers.BatchNormalization()(conv1_long)
         
-        # ==================================================================
-        # DEEPER FEATURE LEARNING
-        # ==================================================================
+        conv1_combined = layers.Concatenate()([conv1_short, conv1_medium, conv1_long])
+        conv1_combined = layers.Dropout(self.dropout_rate * 0.7)(conv1_combined)
         
+        # Deeper layers with residuals
         conv2 = layers.Conv1D(
             128, 3, activation='relu', padding='same',
             kernel_regularizer=regularizers.l2(0.001)
         )(conv1_combined)
         conv2 = layers.BatchNormalization()(conv2)
-        conv2 = layers.Dropout(0.3)(conv2)
+        conv2 = layers.Dropout(self.dropout_rate)(conv2)
         
         conv3 = layers.Conv1D(
             128, 3, activation='relu', padding='same',
             kernel_regularizer=regularizers.l2(0.001)
         )(conv2)
         conv3 = layers.BatchNormalization()(conv3)
-        
-        # Residual connection
         conv3 = layers.Add()([conv2, conv3])
-        conv3 = layers.Dropout(0.3)(conv3)
+        conv3 = layers.Dropout(self.dropout_rate)(conv3)
         
-        # ==================================================================
-        # ATTENTION MECHANISM
-        # Learn which parts of the sequence are important
-        # ==================================================================
-        
-        # Simple attention layer
+        # Attention mechanism
         attention = layers.Dense(1, activation='tanh')(conv3)
         attention = layers.Flatten()(attention)
         attention = layers.Activation('softmax')(attention)
         attention = layers.RepeatVector(128)(attention)
         attention = layers.Permute([2, 1])(attention)
-        
-        # Apply attention weights
         conv_attended = layers.Multiply()([conv3, attention])
         
-        # ==================================================================
-        # TEMPORAL MODELING with Bidirectional LSTM
-        # ==================================================================
-        
+        # Bidirectional LSTM
         lstm = layers.Bidirectional(
-            layers.LSTM(64, return_sequences=False, dropout=0.3, recurrent_dropout=0.2)
+            layers.LSTM(64, return_sequences=False, dropout=self.dropout_rate, recurrent_dropout=0.2)
         )(conv_attended)
-        lstm = layers.Dropout(0.4)(lstm)
+        lstm = layers.Dropout(self.dropout_rate * 1.2)(lstm)
         
-        # ==================================================================
-        # DECISION LAYERS
-        # ==================================================================
-        
+        # Decision layers
         dense1 = layers.Dense(
-            128, activation='relu',
+            256, activation='relu',
             kernel_regularizer=regularizers.l2(0.001)
         )(lstm)
         dense1 = layers.BatchNormalization()(dense1)
-        dense1 = layers.Dropout(0.4)(dense1)
+        dense1 = layers.Dropout(self.dropout_rate * 1.3)(dense1)
         
         dense2 = layers.Dense(
-            64, activation='relu',
+            128, activation='relu',
             kernel_regularizer=regularizers.l2(0.001)
         )(dense1)
-        dense2 = layers.Dropout(0.3)(dense2)
+        dense2 = layers.Dropout(self.dropout_rate)(dense2)
         
         outputs = layers.Dense(self.num_classes, activation='softmax')(dense2)
         
-        # ==================================================================
-        # BUILD AND COMPILE
-        # ==================================================================
-        
         model = models.Model(inputs=inputs, outputs=outputs)
         
-        # Use Adam with learning rate schedule
-        initial_lr = 0.001
-        optimizer = tf.keras.optimizers.Adam(learning_rate=initial_lr)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
         
+        # FIXED: Use SparseTopKCategoricalAccuracy for sparse labels
         model.compile(
             optimizer=optimizer,
             loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
+            metrics=[
+                'accuracy',
+                tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name='top3_acc')
+            ]
         )
         
-        logger.info(f"[SNIPER V2] Model compiled ({model.count_params():,} parameters)")
+        logger.info(f"[SNIPER] Model built ({model.count_params():,} parameters)")
         return model
 
-    def train(self, X_train, y_train, X_val=None, y_val=None, 
-              epochs=50, batch_size=32, use_class_weights=False):
-        """
-        Train the pattern recognition model
+    def train(
+        self,
+        X_train, y_train,
+        X_val=None, y_val=None,
+        epochs=300,
+        batch_size=64,
+        use_class_weights=True,
+        max_class_weight=10.0,
+        early_stopping_patience=30,
+        verbose=1
+    ):
+        """Train on 15min pattern data"""
+        logger.info(
+            f"[SNIPER] Training on {len(X_train)} {self.timeframe} samples..."
+        )
         
-        Args:
-            X_train: Training data (N, 15, 4)
-            y_train: Training labels (N,)
-            X_val: Validation data (optional)
-            y_val: Validation labels (optional)
-            epochs: Training epochs
-            batch_size: Batch size
-            use_class_weights: If True, balance classes using computed weights
-            
-        Returns:
-            Training history
-        """
-        logger.info(f"[SNIPER V2] Training on {len(X_train)} samples...")
-        
-        # Compute class weights if requested
+        # Compute class weights
         class_weights = None
         if use_class_weights:
             try:
                 classes = np.unique(y_train)
-                weights = compute_class_weight(
-                    class_weight='balanced',
-                    classes=classes,
-                    y=y_train
-                )
-                
-                class_weights = {int(cls): float(weight) for cls, weight in zip(classes, weights)}
-                
-                logger.info(f"[SNIPER V2] Using class weights:")
-                for cls, weight in sorted(class_weights.items()):
-                    logger.info(f"    Class {cls}: {weight:.3f}")
-                    
+                weights = compute_class_weight('balanced', classes=classes, y=y_train)
+                weights_capped = np.minimum(weights, max_class_weight)
+                class_weights = {int(cls): float(w) for cls, w in zip(classes, weights_capped)}
+                logger.info(f"[SNIPER] Using capped class weights (max={max_class_weight})")
             except Exception as e:
-                logger.warning(f"[SNIPER V2] Failed to compute class weights: {e}")
-                class_weights = None
+                logger.warning(f"[SNIPER] Class weights failed: {e}")
         
-        callbacks = [
+        # Callbacks
+        callbacks_list = [
             tf.keras.callbacks.EarlyStopping(
                 monitor='val_accuracy' if X_val is not None else 'accuracy',
-                patience=15,
+                patience=early_stopping_patience,
                 restore_best_weights=True,
-                verbose=1
+                verbose=1,
+                mode='max'
             ),
             tf.keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss' if X_val is not None else 'loss',
                 factor=0.5,
-                patience=5,
+                patience=10,
                 min_lr=1e-7,
                 verbose=1
             )
@@ -212,88 +172,90 @@ class OHLCSniperV2:
             validation_data=validation_data,
             epochs=epochs,
             batch_size=batch_size,
-            callbacks=callbacks,
+            callbacks=callbacks_list,
             class_weight=class_weights,
-            verbose=1
+            verbose=verbose
         )
         
         final_acc = history.history['accuracy'][-1]
-        val_info = ""
         if X_val is not None:
             final_val_acc = history.history['val_accuracy'][-1]
-            val_info = f", validation: {final_val_acc:.2%}"
-        
-        logger.info(f"[SNIPER V2] ✓ Training complete (train: {final_acc:.2%}{val_info})")
+            logger.info(
+                f"[SNIPER] ✓ Complete: train={final_acc:.2%}, val={final_val_acc:.2%}"
+            )
         
         return history
 
-    def predict(self, ohlc_sequence):
+    def predict(self, ohlc_sequence_15min):
         """
-        Predict pattern from recent candles
+        Predict pattern from last 15 candles of 15min data
         
         Args:
-            ohlc_sequence: Array of shape (15, 4) - last 15 OHLC candles
+            ohlc_sequence_15min: (15, 4) array of 15min OHLC candles
             
         Returns:
-            pattern_id: Predicted pattern ID (0 = Noise)
-            confidence: Prediction confidence (0-1)
+            pattern_id, confidence, extra_info
         """
-        # Normalize exactly as in training
-        if ohlc_sequence[0, 0] > 0:
-            normalized = ohlc_sequence / ohlc_sequence[0, 0] - 1
-        else:
-            normalized = ohlc_sequence.copy()
+        if ohlc_sequence_15min.shape != (15, 4):
+            raise ValueError(
+                f"Expected (15, 4) shape, got {ohlc_sequence_15min.shape}. "
+                f"Sniper requires 15 consecutive {self.timeframe} candles."
+            )
         
-        # Reshape for model input
+        if ohlc_sequence_15min[0, 0] > 0:
+            normalized = ohlc_sequence_15min / ohlc_sequence_15min[0, 0] - 1
+        else:
+            normalized = ohlc_sequence_15min.copy()
+        
         normalized = normalized.reshape(1, 15, 4)
         
-        # Get prediction
         prediction = self.model.predict(normalized, verbose=0)
         pattern_id = int(np.argmax(prediction))
         confidence = float(np.max(prediction))
         
-        return pattern_id, confidence
+        top3_ids = np.argsort(prediction[0])[-3:][::-1]
+        top3_conf = prediction[0][top3_ids]
+        
+        return pattern_id, confidence, {
+            'top3_ids': top3_ids.tolist(),
+            'top3_confidences': top3_conf.tolist()
+        }
 
-    def predict_batch(self, ohlc_sequences):
-        """
-        Predict patterns for multiple sequences at once
-        
-        Args:
-            ohlc_sequences: Array of shape (N, 15, 4)
+    def predict_single(self, ohlc_sequence_normalized):
+            """
+            ADDED: Predict from pre-normalized input (for HybridSignalValidator)
             
-        Returns:
-            pattern_ids: Array of predicted pattern IDs (N,)
-            confidences: Array of confidences (N,)
-        """
-        # Normalize all sequences
-        normalized = np.zeros_like(ohlc_sequences)
-        for i, seq in enumerate(ohlc_sequences):
-            if seq[0, 0] > 0:
-                normalized[i] = seq / seq[0, 0] - 1
-            else:
-                normalized[i] = seq.copy()
-        
-        # Get predictions
-        predictions = self.model.predict(normalized, verbose=0)
-        pattern_ids = np.argmax(predictions, axis=1)
-        confidences = np.max(predictions, axis=1)
-        
-        return pattern_ids, confidences
+            Args:
+                ohlc_sequence_normalized: Already normalized (1, 15, 4) array
+                
+            Returns:
+                pattern_id (int), confidence (float)
+            """
+            # Validate input shape
+            if len(ohlc_sequence_normalized.shape) != 3:
+                raise ValueError(
+                    f"Expected (1, 15, 4) shape, got {ohlc_sequence_normalized.shape}"
+                )
+            
+            if ohlc_sequence_normalized.shape != (1, 15, 4):
+                raise ValueError(
+                    f"Expected (1, 15, 4) shape, got {ohlc_sequence_normalized.shape}. "
+                    f"Input should be pre-normalized and batched."
+                )
+            
+            # Make prediction
+            prediction = self.model.predict(ohlc_sequence_normalized, verbose=0)
+            pattern_id = int(np.argmax(prediction[0]))
+            confidence = float(np.max(prediction[0]))
+            
+            return pattern_id, confidence
 
     def save_model(self, filepath):
-        """Save trained model weights"""
+        """Save weights"""
         self.model.save_weights(filepath)
-        logger.info(f"[SNIPER V2] Model saved to {filepath}")
+        logger.info(f"[SNIPER] Saved to {filepath}")
 
     def load_model(self, filepath):
-        """Load pre-trained model weights"""
+        """Load weights"""
         self.model.load_weights(filepath)
-        logger.info(f"[SNIPER V2] Model loaded from {filepath}")
-    
-    def get_model_summary(self):
-        """Print model architecture summary"""
-        return self.model.summary()
-
-
-# Alias for backward compatibility
-OHLCSniper = OHLCSniperV2
+        logger.info(f"[SNIPER] Loaded from {filepath}")

@@ -341,6 +341,9 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
         self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
+        self.application.add_handler(CommandHandler("test_viz", self.cmd_test_viz))
+        self.application.add_handler(CommandHandler("chart", self.cmd_chart))
+        self.application.add_handler(CommandHandler("charts", self.cmd_chart))  # Alias
         self.application.add_handler(
             CommandHandler("start_trading", self.cmd_start_trading)
         )
@@ -352,7 +355,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
-        self.application.add_handler(CommandHandler("dtm", self.cmd_dtm_status))
+        self.application.add_handler(CommandHandler("VTM", self.cmd_VTM_status))
 
         # ✨ NEW: Add error handler
         self.application.add_error_handler(self.error_handler)
@@ -459,7 +462,7 @@ class TradingTelegramBot:
                     # ✨ FIX: This is NORMAL during shutdown, don't log as error
                     logger.info("[TELEGRAM] Polling cancelled (shutdown)")
                     raise  # Re-raise to exit cleanly
-                    
+
                 except Exception as e:
                     logger.error(f"[TELEGRAM] Error in polling loop: {e}")
                     await asyncio.sleep(5)
@@ -470,7 +473,7 @@ class TradingTelegramBot:
             # ✨ FIX: Expected during shutdown
             logger.info("[TELEGRAM] Polling cancelled")
             # Don't re-raise, just exit gracefully
-            
+
         except Exception as e:
             logger.error(f"[TELEGRAM] Fatal error in polling loop: {e}", exc_info=True)
 
@@ -509,21 +512,23 @@ class TradingTelegramBot:
                 try:
                     loop = asyncio.get_event_loop()
                     pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                    
+
                     if pending:
-                        logger.info(f"[TELEGRAM] Cancelling {len(pending)} pending tasks...")
-                        
+                        logger.info(
+                            f"[TELEGRAM] Cancelling {len(pending)} pending tasks..."
+                        )
+
                         for task in pending:
                             if not task.done() and not task.cancelled():
                                 task.cancel()
-                        
+
                         # Wait for cancellations
                         try:
                             await asyncio.wait(pending, timeout=2.0)
                             logger.info("[TELEGRAM] ✅ Tasks cancelled")
                         except asyncio.TimeoutError:
                             logger.debug("[TELEGRAM] Task cancellation timeout")
-                        
+
                 except Exception as e:
                     logger.debug(f"[TELEGRAM] Task cleanup: {e}")
 
@@ -573,7 +578,6 @@ class TradingTelegramBot:
             logger.error(f"[TELEGRAM] ❌ Shutdown error: {e}", exc_info=True)
             self._shutdown_complete = True
 
-
     # ==================== COMMAND HANDLERS ====================
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -609,20 +613,21 @@ class TradingTelegramBot:
         is_admin = user_id in self.admin_ids
 
         help_text = (
-            "📋 *Available Commands*\n\n"
-            "*📊 Information Commands:*\n"
-            "/status - Current bot status and portfolio\n"
-            "/positions - View open positions with P&L\n"
-            "/history - Recent trade history\n"
-            "/performance - Performance metrics\n"
-            "/presets - View current aggregator presets\n"
-            "/signals - Latest trading signals\n"
-            "/dtm - Latest dynamic Stop Loss and Take Profit signals.\n"
-            "/stats - Signal statistics\n"
-            "/regimes - Market regime tracking\n"
-            "/overrides - Golden Cross overrides\n"
-            "/help - Show this help message\n\n"
-        )
+        "📋 *Available Commands*\n\n"
+        "*📊 Information Commands:*\n"
+        "/status - Current bot status and portfolio\n"
+        "/positions - View open positions with P&L\n"
+        "/history - Recent trade history\n"
+        "/performance - Performance metrics\n"
+        "/presets - View current aggregator presets\n"
+        "/signals - Latest trading signals\n"
+        "/vtm - Latest dynamic Stop Loss and Take Profit signals\n"
+        "/stats - Signal statistics\n"
+        "/regimes - Market regime tracking\n"
+        "/overrides - Golden Cross overrides\n"
+        "/chart [asset] - Generate AI decision chart (all or BTC/GOLD)\n"  # ✅ NEW
+        "/help - Show this help message\n\n"
+    )
 
         if is_admin:
             help_text += (
@@ -639,7 +644,7 @@ class TradingTelegramBot:
                 "🔒 Control commands are restricted to admins.\n"
                 "You have read-only access."
             )
-
+        
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -772,9 +777,9 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_status_message: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /positions command - Show open positions with P&L, entry price, and current price"""
+        """Handle /positions command - FIXED VERSION"""
         try:
-            # Fetch the latest prices for all assets
+            # Fetch latest prices
             current_prices = {}
             for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
                 if not asset_cfg.get("enabled", False):
@@ -792,16 +797,14 @@ class TradingTelegramBot:
                         price = handler.get_current_price()
                         if price and price > 0:
                             current_prices[asset_name] = price
-                            logger.debug(
-                                f"[TELEGRAM] {asset_name} price: ${price:,.2f}"
-                            )
+                            logger.debug(f"[TELEGRAM] {asset_name} price: ${price:,.2f}")
                     except Exception as e:
                         logger.error(f"Failed to get {asset_name} price: {e}")
 
-            # Update positions with the latest prices (this updates MT5/Binance profit)
+            # Update positions with latest prices
             self.trading_bot.portfolio_manager.update_positions(current_prices)
 
-            # Get the updated portfolio status with current prices
+            # Get updated portfolio status
             portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status(
                 current_prices
             )
@@ -816,17 +819,15 @@ class TradingTelegramBot:
 
             positions_msg = "📊 *Open Positions*\n\n"
 
-            for asset, pos in positions.items():
+            for position_id, pos in positions.items():
+                asset = pos["asset"]
                 side = pos["side"].upper()
                 side_icon = "🟢" if side == "LONG" else "🔴"
 
-                # Get accurate values
                 entry_price = pos.get("entry_price", 0)
                 current_price = pos.get("current_price", 0)
                 quantity = pos.get("quantity", 0)
                 current_value = pos.get("current_value", 0)
-
-                # Get P&L - prioritize exchange-reported profit
                 pnl = pos.get("pnl", 0)
                 pnl_pct = pos.get("pnl_pct", 0) * 100
 
@@ -842,7 +843,7 @@ class TradingTelegramBot:
                     f"{pnl_icon} P&L: {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
                 )
 
-                # Show exchange-specific tracking if available
+                # Show exchange-specific info
                 if pos.get("mt5_ticket"):
                     positions_msg += f"🎫 MT5 Ticket: {pos['mt5_ticket']}\n"
                     if pos.get("mt5_profit") is not None:
@@ -855,7 +856,7 @@ class TradingTelegramBot:
                         binance_profit = pos["binance_profit"]
                         positions_msg += f"   Binance P&L: ${binance_profit:,.2f}\n"
 
-                # Show stop loss and take profit
+                # Show SL/TP
                 if pos.get("stop_loss"):
                     sl = pos["stop_loss"]
                     sl_dist = abs(current_price - sl)
@@ -866,9 +867,7 @@ class TradingTelegramBot:
                     tp = pos["take_profit"]
                     tp_dist = abs(tp - current_price)
                     tp_pct = (tp_dist / current_price * 100) if current_price > 0 else 0
-                    positions_msg += (
-                        f"🎯 Take Profit: ${tp:,.2f} ({tp_pct:.2f}% away)\n"
-                    )
+                    positions_msg += f"🎯 Take Profit: ${tp:,.2f} ({tp_pct:.2f}% away)\n"
 
                 positions_msg += "\n"
 
@@ -881,12 +880,11 @@ class TradingTelegramBot:
             positions_msg += (
                 f"*Portfolio Summary*\n"
                 f"💼 Total Exposure: ${total_exposure:,.2f}\n"
-                f"{unrealized_icon} Total realized P&L: {unrealized_sign}${total_unrealized:,.2f}\n\n"
+                f"{unrealized_icon} Total Unrealized P&L: {unrealized_sign}${total_unrealized:,.2f}\n\n"
+                f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
             )
 
-            positions_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
-
-            # Add inline keyboard
+            # Add keyboard
             keyboard = [
                 [
                     InlineKeyboardButton("🔄 Refresh", callback_data="positions"),
@@ -902,47 +900,46 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Error in cmd_positions: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching positions.")
-            
-    async def cmd_dtm_status(self, update, context):
-        """Show Dynamic Trade Manager status"""
+
+    async def cmd_VTM_status(self, update, context):
+        """Show Dynamic Trade Manager status - FIXED"""
         try:
             if not self.trading_bot:
                 await update.message.reply_text("⚠️ Trading bot not connected")
                 return
-            
+
             positions = self.trading_bot.portfolio_manager.positions
-            
+
             if not positions:
                 await update.message.reply_text("📊 No open positions")
                 return
-            
-            msg = "🎯 <b>DYNAMIC TRADE MANAGER STATUS</b>\n\n"
-            
-            for asset, position in positions.items():
-                dtm_status = position.get_dtm_status()
-                
-                if dtm_status:
-                    side_emoji = "🟢" if dtm_status['side'] == 'long' else "🔴"
-                    pnl_emoji = "💰" if dtm_status['pnl_pct'] > 0 else "📉"
-                    lock_emoji = "🔒" if dtm_status['profit_locked'] else "🔓"
-                    
-                    msg += f"{side_emoji} <b>{asset} {dtm_status['side'].upper()}</b>\n"
-                    msg += f"{pnl_emoji} P&L: <b>{dtm_status['pnl_pct']:+.2f}%</b>\n"
-                    msg += f"💵 Entry: ${dtm_status['entry_price']:,.2f}\n"
-                    msg += f"📍 Current: ${dtm_status['current_price']:,.2f}\n"
-                    msg += f"🛑 SL: ${dtm_status['stop_loss']:,.2f} ({dtm_status['distance_to_sl_pct']:+.1f}%)\n"
-                    msg += f"🎯 TP: ${dtm_status['take_profit']:,.2f} ({dtm_status['distance_to_tp_pct']:+.1f}%)\n"
-                    msg += f"{lock_emoji} Profit Lock: {'ON' if dtm_status['profit_locked'] else 'OFF'}\n"
-                    msg += f"🔄 Updates: {dtm_status['update_count']}\n\n"
-                else:
-                    msg += f"📊 <b>{asset}</b>: Static management (no DTM)\n\n"
-            
-            await update.message.reply_text(msg, parse_mode='HTML')
-        
-        except Exception as e:
-            logger.error(f"DTM status command error: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
 
+            msg = "🎯 <b>DYNAMIC TRADE MANAGER STATUS</b>\n\n"
+
+            for position_id, position in positions.items():  # ✅ FIXED: iterate over items()
+                vtm_status = position.get_vtm_status()  # ✅ FIXED: correct method name
+
+                if vtm_status:
+                    side_emoji = "🟢" if vtm_status["side"] == "long" else "🔴"
+                    pnl_emoji = "💰" if vtm_status["pnl_pct"] > 0 else "📉"
+                    lock_emoji = "🔒" if vtm_status["profit_locked"] else "🔓"
+
+                    msg += f"{side_emoji} <b>{position.asset} {vtm_status['side'].upper()}</b>\n"
+                    msg += f"{pnl_emoji} P&L: <b>{vtm_status['pnl_pct']:+.2f}%</b>\n"
+                    msg += f"💵 Entry: ${vtm_status['entry_price']:,.2f}\n"
+                    msg += f"📍 Current: ${vtm_status['current_price']:,.2f}\n"
+                    msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.1f}%)\n"
+                    msg += f"🎯 TP: ${vtm_status['take_profit']:,.2f} ({vtm_status['distance_to_tp_pct']:+.1f}%)\n"
+                    msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
+                    msg += f"🔄 Updates: {vtm_status['update_count']}\n\n"
+                else:
+                    msg += f"📊 <b>{position.asset}</b>: Static management (no VTM)\n\n"
+
+            await update.message.reply_text(msg, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"VTM status command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)}")
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /history command"""
@@ -1119,24 +1116,49 @@ class TradingTelegramBot:
 
     @admin_only
     async def cmd_close_asset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /close <asset> command"""
+        """Handle /close <asset> [position_number] command - ENHANCED"""
         try:
             if not context.args:
-                await update.message.reply_text("⚠️ Usage: /close BTC or /close GOLD")
-                return
-
-            asset = context.args[0].upper()
-
-            if asset not in ["BTC", "GOLD"]:
                 await update.message.reply_text(
-                    "⚠️ Invalid asset. Use: /close BTC or /close GOLD"
+                    "⚠️ Usage:\n"
+                    "/close BTC - Close first BTC position\n"
+                    "/close BTC 2 - Close 2nd BTC position\n"
+                    "/close GOLD - Close first GOLD position"
                 )
                 return
 
-            # Check if position exists
-            if not self.trading_bot.portfolio_manager.has_position(asset):
-                await update.message.reply_text(f"ℹ️ No open position for {asset}")
+            asset = context.args[0].upper()
+            position_index = 0  # Default to first position
+            
+            if len(context.args) > 1:
+                try:
+                    position_index = int(context.args[1]) - 1  # Convert to 0-indexed
+                    if position_index < 0:
+                        raise ValueError("Position number must be positive")
+                except ValueError:
+                    await update.message.reply_text("⚠️ Invalid position number. Use: /close BTC 2")
+                    return
+
+            if asset not in ["BTC", "GOLD"]:
+                await update.message.reply_text("⚠️ Invalid asset. Use: BTC or GOLD")
                 return
+
+            # Get all positions for asset
+            positions = self.trading_bot.portfolio_manager.get_asset_positions(asset)
+            
+            if not positions:
+                await update.message.reply_text(f"ℹ️ No open positions for {asset}")
+                return
+                
+            if position_index >= len(positions):
+                await update.message.reply_text(
+                    f"⚠️ Position #{position_index + 1} doesn't exist.\n"
+                    f"You have {len(positions)} position(s) for {asset}"
+                )
+                return
+
+            # Get the specific position
+            position_to_close = positions[position_index]
 
             # Get current price
             if asset == "BTC" and self.trading_bot.binance_handler:
@@ -1147,19 +1169,25 @@ class TradingTelegramBot:
                 await update.message.reply_text(f"❌ Cannot get price for {asset}")
                 return
 
-            # Close position
+            # Close the position
             result = self.trading_bot.portfolio_manager.close_position(
-                asset=asset, exit_price=current_price, reason="manual_telegram"
+                position_id=position_to_close.position_id,
+                exit_price=current_price,
+                reason="manual_telegram"
             )
 
             if result:
                 pnl = result["pnl"]
                 pnl_icon = "🟢" if pnl >= 0 else "🔴"
                 pnl_sign = "+" if pnl >= 0 else ""
+                
+                remaining = len(positions) - 1
 
                 await update.message.reply_text(
-                    f"{pnl_icon} *{asset} Position Closed*\n\n"
+                    f"{pnl_icon} *{asset} Position #{position_index + 1} Closed*\n\n"
+                    f"Side: {result['side'].upper()}\n"
                     f"P&L: {pnl_sign}${pnl:,.2f}\n"
+                    f"Remaining positions: {remaining}\n"
                     f"Reason: Manual close via Telegram",
                     parse_mode=ParseMode.MARKDOWN,
                 )
@@ -1246,22 +1274,37 @@ class TradingTelegramBot:
         return descriptions.get(preset, "  • Unknown preset")
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button callbacks"""
+        """Handle inline button callbacks - COMPLETE"""
         query = update.callback_query
         await query.answer()
 
         callback_data = query.data
 
-        if callback_data == "status":
-            await self._send_status_message(query)
-        elif callback_data == "positions":
-            await self._send_positions_message(query)
-        elif callback_data == "history":
-            await self._send_history_message(query)
-        elif callback_data == "presets":  # ✨ NEW
-            await self._send_presets_message(query)
-        elif callback_data == "signals":
-            await self._send_signals_message(query)
+        try:
+            if callback_data == "status":
+                await self._send_status_message(query)
+            elif callback_data == "positions":
+                await self._send_positions_message(query)
+            elif callback_data == "history":
+                await self._send_history_message(query)
+            elif callback_data == "presets":
+                await self._send_presets_message(query)
+            elif callback_data == "signals":
+                await self._send_signals_message(query)
+            elif callback_data == "stats":  # ✅ ADD THIS
+                await self._send_stats_message(query)
+            elif callback_data == "regimes":  # ✅ ADD THIS
+                await self._send_regimes_message(query)
+            elif callback_data == "overrides":  # ✅ ADD THIS
+                await self._send_overrides_message(query)
+            else:
+                await query.edit_message_text(f"⚠️ Unknown command: {callback_data}")
+        except Exception as e:
+            logger.error(f"Button callback error: {e}", exc_info=True)
+            try:
+                await query.edit_message_text("❌ Error processing request")
+            except:
+                pass
         # ==================== NOTIFICATION METHODS ====================
 
     async def _send_presets_message(self, query):
@@ -1321,6 +1364,252 @@ class TradingTelegramBot:
 
         except Exception as e:
             logger.error(f"Error in _send_presets_message: {e}")
+            
+    async def _send_regimes_message(self, query):
+        """Send regime information (for callback)"""
+        try:
+            btc_regime = self.signal_monitor.get_regime_info("BTC")
+            gold_regime = self.signal_monitor.get_regime_info("GOLD")
+
+            msg = "🔄 *Market Regimes*\n\n"
+
+            msg += "*₿ BTC*\n"
+            msg += f"Changes: {btc_regime.get('change_count', 0)}\n"
+            if btc_regime.get("last_changes"):
+                msg += "Recent:\n"
+                for change in btc_regime["last_changes"][-3:]:
+                    ts = change["timestamp"].strftime("%H:%M")
+                    regime = "🚀" if "BULL" in change["regime"] else "🐻"
+                    msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
+            msg += "\n"
+
+            msg += "*🥇 GOLD*\n"
+            msg += f"Changes: {gold_regime.get('change_count', 0)}\n"
+            if gold_regime.get("last_changes"):
+                msg += "Recent:\n"
+                for change in gold_regime["last_changes"][-3:]:
+                    ts = change["timestamp"].strftime("%H:%M")
+                    regime = "🚀" if "BULL" in change["regime"] else "🐻"
+                    msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
+
+            keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="regimes")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error in _send_regimes_message: {e}")
+            
+    async def _send_overrides_message(self, query):
+        """Send override information (for callback)"""
+        try:
+            btc_overrides = self.signal_monitor.get_override_info("BTC")
+            gold_overrides = self.signal_monitor.get_override_info("GOLD")
+
+            msg = "🔒 *Golden Cross Overrides*\n\n"
+
+            msg += "*₿ BTC*\n"
+            msg += f"Total: {btc_overrides['total']}\n"
+            if btc_overrides["total"] > 0:
+                msg += f"Avg Quality: {btc_overrides['avg_quality']:.2f}\n"
+            msg += "\n"
+
+            msg += "*🥇 GOLD*\n"
+            msg += f"Total: {gold_overrides['total']}\n"
+            if gold_overrides["total"] > 0:
+                msg += f"Avg Quality: {gold_overrides['avg_quality']:.2f}\n"
+
+            keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="overrides")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error in _send_overrides_message: {e}")
+            
+    async def cmd_test_viz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test AI visualization (admin only)"""
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ Admin only")
+            return
+        
+        try:
+            await update.message.reply_text("🎨 Generating test chart...")
+            
+            # Use current market data
+            for asset_name in ["BTC", "GOLD"]:
+                if not self.trading_bot.config["assets"][asset_name].get("enabled"):
+                    continue
+                
+                # Fetch data
+                df_15min = self.trading_bot._fetch_current_data(asset_name)
+                df_4h = self.trading_bot._fetch_4h_data(asset_name)
+                
+                # Get current signal
+                aggregator = self.trading_bot.aggregators.get(asset_name)
+                signal, details = aggregator.get_aggregated_signal(df_15min)
+                
+                # Get current price
+                handler = (self.trading_bot.binance_handler if asset_name == "BTC" 
+                        else self.trading_bot.mt5_handler)
+                current_price = handler.get_current_price()
+                
+                # Send chart
+                if self.trading_bot.chart_sender:
+                    await self.trading_bot.chart_sender.send_decision_chart(
+                        asset_name=asset_name,
+                        df_15min=df_15min,
+                        df_4h=df_4h,
+                        signal=signal,
+                        details=details,
+                        current_price=current_price
+                    )
+                    await update.message.reply_text(f"✅ {asset_name} chart sent")
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+            
+    async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle /chart command - Generate charts for all enabled assets
+        Usage: /chart or /chart BTC or /chart GOLD
+        """
+        try:
+            user_id = update.effective_user.id
+            if user_id not in self.admin_ids:
+                await update.message.reply_text("❌ Admin only")
+                return
+            
+            # Check if specific asset requested
+            requested_asset = None
+            if context.args and len(context.args) > 0:
+                requested_asset = context.args[0].upper()
+                if requested_asset not in ["BTC", "GOLD"]:
+                    await update.message.reply_text(
+                        "⚠️ Invalid asset. Use: /chart BTC or /chart GOLD"
+                    )
+                    return
+            
+            await update.message.reply_text(
+                "🎨 Generating AI decision charts...\nThis may take 10-15 seconds."
+            )
+            
+            # Get enabled assets
+            assets_to_chart = []
+            for asset_name in ["BTC", "GOLD"]:
+                if not self.trading_bot.config["assets"][asset_name].get("enabled", False):
+                    continue
+                
+                # If specific asset requested, only chart that one
+                if requested_asset and asset_name != requested_asset:
+                    continue
+                    
+                assets_to_chart.append(asset_name)
+            
+            if not assets_to_chart:
+                await update.message.reply_text("❌ No enabled assets to chart")
+                return
+            
+            # Generate charts for each asset
+            charts_sent = 0
+            for asset_name in assets_to_chart:
+                try:
+                    logger.info(f"[CHART CMD] Generating chart for {asset_name}...")
+                    
+                    # Fetch current data
+                    df_15min = self.trading_bot._fetch_current_data(asset_name)
+                    df_4h = self.trading_bot._fetch_4h_data(asset_name)
+                    
+                    # Get current signal
+                    aggregator = self.trading_bot.aggregators.get(asset_name)
+                    if not aggregator:
+                        logger.error(f"[CHART CMD] No aggregator for {asset_name}")
+                        continue
+                    
+                    signal, details = aggregator.get_aggregated_signal(df_15min)
+                    
+                    # Get current price
+                    asset_cfg = self.trading_bot.config["assets"][asset_name]
+                    exchange = asset_cfg.get("exchange", "binance")
+                    handler = (
+                        self.trading_bot.binance_handler if exchange == "binance"
+                        else self.trading_bot.mt5_handler
+                    )
+                    
+                    if not handler:
+                        logger.error(f"[CHART CMD] No handler for {asset_name}")
+                        continue
+                    
+                    current_price = handler.get_current_price()
+                    
+                    # Send chart
+                    if self.trading_bot.chart_sender:
+                        await self.trading_bot.chart_sender.send_decision_chart(
+                            asset_name=asset_name,
+                            df_15min=df_15min,
+                            df_4h=df_4h,
+                            signal=signal,
+                            details=details,
+                            current_price=current_price
+                        )
+                        charts_sent += 1
+                        logger.info(f"[CHART CMD] ✓ {asset_name} chart sent")
+                        
+                        # Small delay between charts
+                        if len(assets_to_chart) > 1:
+                            await asyncio.sleep(2)
+                            
+                except Exception as e:
+                    logger.error(f"[CHART CMD] Error for {asset_name}: {e}")
+                    await update.message.reply_text(
+                        f"❌ Error generating {asset_name} chart: {str(e)[:100]}"
+                    )
+            
+            if charts_sent > 0:
+                await update.message.reply_text(
+                    f"✅ Sent {charts_sent} chart(s) successfully"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to generate any charts")
+                
+        except Exception as e:
+            logger.error(f"[CHART CMD] Command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+            
+    async def _send_stats_message(self, query):
+        """Send signal statistics (for callback)"""
+        try:
+            btc_stats = self.signal_monitor.get_signal_statistics("BTC")
+            gold_stats = self.signal_monitor.get_signal_statistics("GOLD")
+
+            msg = "📊 *Signal Statistics*\n\n"
+
+            if btc_stats:
+                msg += "*₿ BTC*\n"
+                msg += f"Total: {btc_stats['total_signals']}\n"
+                msg += f"🟢 BUY: {btc_stats['buy_signals']} ({btc_stats['buy_pct']:.1f}%)\n"
+                msg += f"🔴 SELL: {btc_stats['sell_signals']} ({btc_stats['sell_pct']:.1f}%)\n"
+                msg += f"⚪ HOLD: {btc_stats['hold_signals']} ({btc_stats['hold_pct']:.1f}%)\n"
+                msg += f"⭐ Avg Quality: {btc_stats['avg_quality']:.2f}\n\n"
+
+            if gold_stats:
+                msg += "*🥇 GOLD*\n"
+                msg += f"Total: {gold_stats['total_signals']}\n"
+                msg += f"🟢 BUY: {gold_stats['buy_signals']} ({gold_stats['buy_pct']:.1f}%)\n"
+                msg += f"🔴 SELL: {gold_stats['sell_signals']} ({gold_stats['sell_pct']:.1f}%)\n"
+                msg += f"⚪ HOLD: {gold_stats['hold_signals']} ({gold_stats['hold_pct']:.1f}%)\n"
+                msg += f"⭐ Avg Quality: {gold_stats['avg_quality']:.2f}\n"
+
+            keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="stats")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error in _send_stats_message: {e}")
 
     async def _send_signals_message(self, query):
         """Send signals message (for callback)"""
