@@ -2,6 +2,7 @@
 """
 Backtesting Script - With AI Validation Layer Integration
 """
+from vtm_integration import MLStrategyWithVTM
 import json
 import logging
 import argparse
@@ -317,9 +318,9 @@ class MLStrategy(bt.Strategy):
         """Initialize AI validation layer with improved settings"""
         try:
             models_dir = Path("models/ai")
-            model_path = models_dir / "sniper_btc_gold_v2.weights.h5"
-            mapping_path = models_dir / "sniper_btc_gold_v2_mapping.pkl"
-            config_path = models_dir / "sniper_btc_gold_v2_config.pkl"
+            model_path = models_dir / "sniper_dual_timeframe_v1.weights.h5"
+            mapping_path = models_dir / "sniper_dual_timeframe_v1_mapping.pkl"
+            config_path = models_dir / "sniper_dual_timeframe_v1_config.pkl"
 
             if not model_path.exists():
                 logger.warning(f"[AI] Model not found: {model_path}")
@@ -333,7 +334,7 @@ class MLStrategy(bt.Strategy):
                 ai_config = pickle.load(f)
 
             logger.info(f"[AI] Loaded {len(pattern_map)} patterns")
-            logger.info(f"[AI] Model accuracy: {ai_config['validation_accuracy']:.2%}")
+            #logger.info(f"[AI] Model accuracy: {ai_config['validation_accuracy']:.2%}")
 
             # Initialize components
             analyst = DynamicAnalyst(atr_multiplier=1.5, min_samples=5)

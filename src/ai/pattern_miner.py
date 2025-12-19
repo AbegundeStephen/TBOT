@@ -1,7 +1,11 @@
 """
-Historical Data Pattern Miner - FIXED VERSION
-Mines patterns from REAL market data for much better accuracy
+COMPLETE IMPROVED TRAINING SYSTEM
+All components enhanced with production-grade features
 """
+
+# ==============================================================================
+# 1. IMPROVED PATTERN_MINER.PY
+# ==============================================================================
 
 import numpy as np
 import pandas as pd
@@ -10,20 +14,28 @@ import random
 import logging
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
+from scipy.ndimage import shift
 
 logger = logging.getLogger(__name__)
 
 
+# ==============================================================================
+# 2. PATTERN MINER - Adapted for 15min Candles
+# ==============================================================================
+
 class PatternMiner:
     """
-    Mines candlestick patterns from real historical OHLC data
+    Mines candlestick patterns from 15min historical data
+    Client Requirement: Must use 15min timeframe for pattern detection
     """
     
     def __init__(self, sequence_length=15):
         self.seq_len = sequence_length
+        self.timeframe = '15min'  # Explicit timeframe tracking
         
-        # Focus on most reliable, distinct patterns
+        # 16 most reliable patterns
+        import talib
         self.target_patterns = {
             'Engulfing': talib.CDLENGULFING,
             'Morning Star': talib.CDLMORNINGSTAR,
@@ -43,140 +55,174 @@ class PatternMiner:
             'Marubozu': talib.CDLMARUBOZU,
         }
         
-        logger.info(f"[HISTORICAL MINER] Initialized with {len(self.target_patterns)} patterns")
+        logger.info(
+            f"[MINER] Initialized for {self.timeframe} candles: "
+            f"{len(self.target_patterns)} patterns"
+        )
 
-    def load_csv_data(self, filepath: str) -> pd.DataFrame:
+    def get_num_classes(self):
+        """Total classes including noise"""
+        return len(self.target_patterns) + 1
+
+    def get_pattern_map(self):
+        """Pattern ID mapping"""
+        return {name: i+1 for i, name in enumerate(self.target_patterns.keys())}
+
+    def load_csv_data(self, filepath: str, expected_timeframe: str = '15min') -> pd.DataFrame:
         """
-        Load OHLC data from CSV file
+        Load 15min OHLC data with validation
         
-        Expected columns: timestamp, open, high, low, close, volume
-        or: date, open, high, low, close, volume
+        Args:
+            filepath: Path to CSV file
+            expected_timeframe: Expected timeframe ('15min' or '4h')
         """
         try:
             df = pd.read_csv(filepath)
-            
-            # Standardize column names (lowercase)
             df.columns = df.columns.str.lower()
             
-            # Handle different timestamp column names
+            # Handle timestamps - FIXED to handle both string and numeric formats
             if 'timestamp' in df.columns:
-                df['date'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                # Try parsing as datetime string first
+                df['date'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                
+                # If that didn't work, try as Unix timestamp
+                if df['date'].isna().all():
+                    df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+                    df['date'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                    
             elif 'date' in df.columns:
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            elif 'time' in df.columns:
-                df['date'] = pd.to_datetime(df['time'], errors='coerce')
             
-            # Verify required columns
             required = ['open', 'high', 'low', 'close']
             if not all(col in df.columns for col in required):
                 raise ValueError(f"CSV must contain: {required}")
             
-            # Sort by date
+            # Sort chronologically
             if 'date' in df.columns:
                 df = df.sort_values('date').reset_index(drop=True)
             
-            logger.info(f"[HISTORICAL MINER] Loaded {len(df)} candles from {filepath}")
+            # Validate OHLC relationships
+            valid_mask = (
+                (df['high'] >= df['low']) &
+                (df['high'] >= df['open']) &
+                (df['high'] >= df['close']) &
+                (df['low'] <= df['open']) &
+                (df['low'] <= df['close']) &
+                (df['open'] > 0) &
+                (df['close'] > 0)
+            )
+            
+            invalid_count = (~valid_mask).sum()
+            if invalid_count > 0:
+                logger.warning(
+                    f"[MINER] Removed {invalid_count} invalid candles from {filepath}"
+                )
+                df = df[valid_mask].reset_index(drop=True)
+            
+            # Detect timeframe - only if we have valid dates
+            if 'date' in df.columns and len(df) > 1 and df['date'].notna().sum() > 1:
+                # Find first two non-NaN dates
+                valid_dates = df[df['date'].notna()]['date']
+                if len(valid_dates) >= 2:
+                    time_diff = (valid_dates.iloc[1] - valid_dates.iloc[0]).total_seconds() / 60
+                    detected_tf = f"{int(time_diff)}min" if time_diff < 60 else f"{int(time_diff/60)}H"
+                    
+                    if expected_timeframe == '15min' and abs(time_diff - 15) > 1:
+                        logger.warning(
+                            f"[MINER] Expected 15min data but detected {detected_tf} in {filepath}"
+                        )
+                    elif expected_timeframe == '4h' and abs(time_diff - 240) > 1:
+                        logger.warning(
+                            f"[MINER] Expected 4H data but detected {detected_tf} in {filepath}"
+                        )
+            
+            logger.info(
+                f"[MINER] Loaded {len(df)} {expected_timeframe} candles from {filepath}"
+            )
             return df
             
         except Exception as e:
-            logger.error(f"[HISTORICAL MINER] Error loading {filepath}: {e}")
+            logger.error(f"[MINER] Error loading {filepath}: {e}")
             raise
         
-    def load_saved_asset_data(self, asset_key: str, train_only: bool = True) -> pd.DataFrame:
-        """
-        Loads saved data for the asset
-        
-        Args:
-            asset_key: Asset identifier (e.g., "btc", "gold")
-            train_only: If True, loads ONLY training data. If False, loads train + test
-        
-        Example: 
-            load_saved_asset_data("btc", train_only=True)  # Only train_data_btc.csv
-            load_saved_asset_data("btc", train_only=False) # Both train + test
-        """
-
-        asset_key = asset_key.lower()
-
-        train_path = f"data/train_data_{asset_key}.csv"
-        test_path = f"data/test_data_{asset_key}.csv"
-
-        paths = []
-
-        # Always load training data
-        if Path(train_path).exists():
-            paths.append(train_path)
-        else:
-            raise FileNotFoundError(
-                f"Training data not found: {train_path}"
-            )
-        
-        # Optionally load test data
-        if not train_only and Path(test_path).exists():
-            paths.append(test_path)
-            logger.info(f"[HISTORICAL MINER] Loading train + test data for {asset_key}")
-        else:
-            logger.info(f"[HISTORICAL MINER] Loading TRAIN ONLY for {asset_key}")
-
-        return self.load_multiple_sources(paths)
-
-
-    def load_multiple_sources(self, filepaths: List[str]) -> pd.DataFrame:
-        """
-        Load and combine multiple CSV files
-        Useful for training on multiple symbols/timeframes
-        """
+    def load_multiple_sources(
+        self, 
+        filepaths: List[str],
+        expected_timeframe: str = '15min'
+    ) -> pd.DataFrame:
+        """Load and combine multiple 15min CSV files"""
         all_data = []
         
         for filepath in filepaths:
             try:
-                df = self.load_csv_data(filepath)
+                df = self.load_csv_data(filepath, expected_timeframe)
                 all_data.append(df)
-                logger.info(f"[HISTORICAL MINER] ✓ Loaded {Path(filepath).name}")
+                logger.info(f"[MINER] ✓ {Path(filepath).name}")
             except Exception as e:
-                logger.warning(f"[HISTORICAL MINER] ✗ Failed to load {filepath}: {e}")
+                logger.warning(f"[MINER] ✗ {filepath}: {e}")
         
         if not all_data:
-            raise ValueError("No data files loaded successfully")
+            raise ValueError("No data files loaded")
         
         combined = pd.concat(all_data, ignore_index=True)
-        logger.info(f"[HISTORICAL MINER] Combined total: {len(combined)} candles")
-        
+        logger.info(
+            f"[MINER] Combined: {len(combined)} {expected_timeframe} candles "
+            f"from {len(all_data)} files"
+        )
         return combined
 
-    def validate_pattern_strength(self, pattern_value):
-        """Only keep strong pattern signals (±100)"""
-        return abs(pattern_value) >= 100
-
-    def augment_pattern(self, snippet):
-        """
-        Light augmentation for historical data
-        (Less aggressive than synthetic since data is already real)
-        """
+    def augment_pattern(self, snippet, augmentation_strength='medium'):
+        """Multi-strategy augmentation for 15min patterns"""
+        from scipy.ndimage import shift
+        import random
+        
         augmented = [snippet.copy()]
         
-        # Add tiny noise (±0.2% - imperceptible)
-        if random.random() > 0.5:
-            noise = np.random.normal(1.0, 0.002, snippet.shape)
-            augmented.append(snippet * noise)
+        if augmentation_strength == 'light':
+            prob, max_augs, noise_std = 0.5, 2, 0.002
+        elif augmentation_strength == 'medium':
+            prob, max_augs, noise_std = 0.7, 3, 0.003
+        else:  # aggressive
+            prob, max_augs, noise_std = 0.9, 5, 0.005
+        
+        aug_count = 0
+        
+        # Gaussian noise
+        if random.random() < prob and aug_count < max_augs:
+            noise = np.random.normal(0, noise_std, snippet.shape)
+            augmented.append(snippet + noise)
+            aug_count += 1
+        
+        # Temporal shift
+        if random.random() < prob * 0.7 and aug_count < max_augs:
+            shift_amount = random.choice([-1, 1])
+            shifted = shift(snippet, (shift_amount, 0), mode='nearest')
+            augmented.append(shifted)
+            aug_count += 1
+        
+        # Scaling
+        if random.random() < prob * 0.6 and aug_count < max_augs:
+            scale = np.random.uniform(0.995, 1.005)
+            augmented.append(snippet * scale)
+            aug_count += 1
         
         return augmented
 
     def mine_from_dataframe(
         self,
         df: pd.DataFrame,
-        samples_per_pattern: int = 1000,
-        use_augmentation: bool = True
+        samples_per_pattern: int = 2000,
+        use_augmentation: bool = True,
+        augmentation_strength: str = 'medium',
+        min_pattern_quality: int = 100
     ) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """
-        Mine patterns from a DataFrame of OHLC data
+        Mine patterns from 15min candles
         
-        Args:
-            df: DataFrame with columns: open, high, low, close
-            samples_per_pattern: Target samples per pattern class
-            use_augmentation: Apply light augmentation
-            
         Returns:
-            X, y, pattern_map
+            X: Pattern samples (N, 15, 4)
+            y: Pattern labels (N,)
+            pattern_map: Pattern name to ID mapping
         """
         o = df['open'].values
         h = df['high'].values
@@ -184,37 +230,30 @@ class PatternMiner:
         c = df['close'].values
         
         if len(df) < self.seq_len * 2:
-            raise ValueError(f"Need at least {self.seq_len * 2} candles, got {len(df)}")
+            raise ValueError(f"Need at least {self.seq_len * 2} candles")
         
         X, y = [], []
-        pattern_id_map = {name: i+1 for i, name in enumerate(self.target_patterns.keys())}
+        pattern_id_map = self.get_pattern_map()
         pattern_counts = Counter()
         
-        logger.info(f"[HISTORICAL MINER] Mining from {len(df)} candles...")
+        logger.info(
+            f"[MINER] Mining from {len(df)} {self.timeframe} candles "
+            f"(quality ≥ {min_pattern_quality})..."
+        )
         
-        # Mine each pattern
         for name, func in self.target_patterns.items():
             pattern_id = pattern_id_map[name]
             found_count = 0
             
             try:
-                # Run TA-Lib pattern detection
                 result = func(o, h, l, c)
+                strong_indices = np.where(np.abs(result) >= min_pattern_quality)[0]
                 
-                # Get strong pattern occurrences
-                strong_indices = np.where(np.abs(result) >= 100)[0]
-                
-                logger.debug(f"[HISTORICAL MINER] {name}: found {len(strong_indices)} occurrences")
-                
-                # Collect samples
                 for idx in strong_indices:
-                    if idx < self.seq_len:
+                    if idx < self.seq_len or found_count >= samples_per_pattern:
                         continue
                     
-                    if found_count >= samples_per_pattern:
-                        break
-                    
-                    # Extract 15-candle snippet
+                    # Extract 15-candle snippet from 15min data
                     snippet = np.stack([
                         o[idx-self.seq_len+1 : idx+1],
                         h[idx-self.seq_len+1 : idx+1],
@@ -222,108 +261,44 @@ class PatternMiner:
                         c[idx-self.seq_len+1 : idx+1]
                     ], axis=1)
                     
-                    # Normalize (percentage change from first candle)
-                    if snippet[0, 0] > 0:
-                        snippet_norm = snippet / snippet[0, 0] - 1
-                        
-                        # Apply augmentation
-                        if use_augmentation:
-                            augmented = self.augment_pattern(snippet_norm)
-                            for aug in augmented:
-                                if found_count < samples_per_pattern:
-                                    X.append(aug)
-                                    y.append(pattern_id)
-                                    found_count += 1
-                        else:
-                            X.append(snippet_norm)
-                            y.append(pattern_id)
-                            found_count += 1
+                    if snippet[0, 0] <= 0:
+                        continue
+                    
+                    snippet_norm = snippet / snippet[0, 0] - 1
+                    
+                    if use_augmentation:
+                        augmented = self.augment_pattern(snippet_norm, augmentation_strength)
+                        for aug in augmented:
+                            if found_count < samples_per_pattern:
+                                X.append(aug)
+                                y.append(pattern_id)
+                                found_count += 1
+                    else:
+                        X.append(snippet_norm)
+                        y.append(pattern_id)
+                        found_count += 1
                 
                 pattern_counts[name] = found_count
-                logger.info(f"[HISTORICAL MINER] {name}: {found_count} samples")
+                logger.info(f"[MINER] {name}: {found_count} samples")
                 
             except Exception as e:
-                logger.warning(f"[HISTORICAL MINER] Error mining {name}: {e}")
+                logger.warning(f"[MINER] Error mining {name}: {e}")
         
-        logger.info(f"[HISTORICAL MINER] ✓ Total: {len(X)} pattern samples")
-        
+        logger.info(f"[MINER] ✓ Total: {len(X)} pattern samples from {self.timeframe} data")
         return np.array(X), np.array(y), pattern_id_map
-
-    def mine_patterns(
-        self,
-        csv_files: List[str] = None,
-        data_folder: str = None,
-        samples_per_pattern: int = 1000,
-        use_augmentation: bool = True,
-        add_synthetic_fallback: bool = True
-    ) -> Tuple[np.ndarray, np.ndarray, Dict]:
-        """
-        Main mining function - loads data and extracts patterns
-        
-        Args:
-            csv_files: List of CSV file paths (priority)
-            data_folder: Folder containing CSV files (loads all *.csv)
-            samples_per_pattern: Target samples per pattern
-            use_augmentation: Apply augmentation
-            add_synthetic_fallback: Add synthetic data if historical insufficient
-            
-        Returns:
-            X, y, pattern_map
-        """
-        # Determine data sources
-        sources = []
-        
-        if csv_files:
-            sources.extend(csv_files)
-        
-        if data_folder:
-            folder_path = Path(data_folder)
-            if folder_path.exists():
-                csv_files_in_folder = list(folder_path.glob("*.csv"))
-                sources.extend([str(f) for f in csv_files_in_folder])
-                logger.info(f"[HISTORICAL MINER] Found {len(csv_files_in_folder)} CSV files in {data_folder}")
-        
-        if not sources:
-            raise ValueError("No data sources provided. Specify csv_files or data_folder.")
-        
-        # Load all data
-        df = self.load_multiple_sources(sources)
-        
-        # Mine patterns
-        X, y, pattern_map = self.mine_from_dataframe(
-            df,
-            samples_per_pattern=samples_per_pattern,
-            use_augmentation=use_augmentation
-        )
-        
-        # Check if we got enough samples
-        class_counts = Counter(y)
-        min_samples = min(class_counts.values()) if class_counts else 0
-        
-        logger.info(f"[HISTORICAL MINER] Minimum samples per class: {min_samples}")
-        
-        # Add synthetic data as fallback if needed
-        if add_synthetic_fallback and min_samples < samples_per_pattern * 0.3:
-            logger.warning(f"[HISTORICAL MINER] Some patterns have < 30% target samples")
-            logger.warning(f"[HISTORICAL MINER] Consider adding more historical data or enabling synthetic fallback")
-        
-        return X, y, pattern_map
 
     def generate_noise_samples(
         self,
         df: pd.DataFrame,
         num_samples: int = 1000
     ) -> np.ndarray:
-        """
-        Generate 'no pattern' samples from historical data
-        Randomly sample periods without detected patterns
-        """
+        """Generate 'no pattern' samples from 15min data"""
         o = df['open'].values
         h = df['high'].values
         l = df['low'].values
         c = df['close'].values
         
-        # Detect ALL patterns
+        # Find all pattern occurrences
         all_pattern_indices = set()
         for func in self.target_patterns.values():
             try:
@@ -333,16 +308,23 @@ class PatternMiner:
             except:
                 pass
         
-        # Find indices WITHOUT patterns
-        no_pattern_indices = [i for i in range(self.seq_len, len(df)) 
-                            if i not in all_pattern_indices]
+        # Create buffer zones (±3 candles around patterns)
+        buffer_zone = set()
+        for idx in all_pattern_indices:
+            buffer_zone.update(range(max(0, idx-3), min(len(df), idx+4)))
+        
+        # Clean periods
+        no_pattern_indices = [
+            i for i in range(self.seq_len, len(df)) 
+            if i not in buffer_zone
+        ]
         
         if len(no_pattern_indices) < num_samples:
-            logger.warning(f"[HISTORICAL MINER] Only {len(no_pattern_indices)} no-pattern samples available")
             num_samples = len(no_pattern_indices)
         
-        # Randomly sample
-        selected_indices = random.sample(no_pattern_indices, num_samples)
+        # Sample with diversity
+        step = max(1, len(no_pattern_indices) // num_samples)
+        selected_indices = no_pattern_indices[::step][:num_samples]
         
         noise_X = []
         for idx in selected_indices:
@@ -357,60 +339,7 @@ class PatternMiner:
                 snippet_norm = snippet / snippet[0, 0] - 1
                 noise_X.append(snippet_norm)
         
-        logger.info(f"[HISTORICAL MINER] Generated {len(noise_X)} noise samples from clean periods")
-        
+        logger.info(
+            f"[MINER] Generated {len(noise_X)} noise samples from {self.timeframe} data"
+        )
         return np.array(noise_X)
-
-
-# ============================================================================
-# EXAMPLE USAGE
-# ============================================================================
-
-def example_usage():
-    """
-    Example: How to use the PatternMiner
-    """
-    
-    # Initialize miner
-    miner = PatternMiner(sequence_length=15)
-    
-    # OPTION 1: Single file
-    # X, y, pattern_map = miner.mine_patterns(
-    #     csv_files=['data/BTCUSDT_1h.csv'],
-    #     samples_per_pattern=1000
-    # )
-    
-    # OPTION 2: Multiple files
-    # X, y, pattern_map = miner.mine_patterns(
-    #     csv_files=[
-    #         'data/BTCUSDT_1h.csv',
-    #         'data/ETHUSDT_1h.csv',
-    #         'data/BNBUSDT_1h.csv'
-    #     ],
-    #     samples_per_pattern=500  # 500 per pattern per file
-    # )
-    
-    # OPTION 3: Entire folder (RECOMMENDED)
-    X, y, pattern_map = miner.mine_patterns(
-        data_folder='data/historical',  # All CSV files in this folder
-        samples_per_pattern=1000,
-        use_augmentation=True
-    )
-    
-    # Add noise class
-    df = miner.load_csv_data('data/BTCUSDT_1h.csv')
-    noise_X = miner.generate_noise_samples(df, num_samples=1000)
-    noise_y = np.zeros(len(noise_X), dtype=int)
-    
-    # Combine
-    X_combined = np.vstack([X, noise_X])
-    y_combined = np.concatenate([y, noise_y])
-    
-    print(f"Final dataset: {X_combined.shape}")
-    print(f"Pattern distribution: {Counter(y_combined)}")
-    
-    return X_combined, y_combined, pattern_map
-
-
-if __name__ == "__main__":
-    example_usage()

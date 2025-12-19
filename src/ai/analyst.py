@@ -1,48 +1,50 @@
 """
-The Analyst: Dynamic Support/Resistance Detection
-Uses DBSCAN + K-Means with ATR-based filtering
+COMPLETE DUAL TIMEFRAME TRADING SYSTEM
+- Analyst: Works on 4H candles for S/R detection
+- Sniper: Trains and predicts on 15min candles
+- Training Script: Handles both timeframes correctly
 """
 
 import numpy as np
-from sklearn.cluster import DBSCAN, KMeans
+import pandas as pd
 import logging
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
+from collections import Counter
+import pickle
 
 logger = logging.getLogger(__name__)
 
 
+# ==============================================================================
+# 1. ANALYST - Adapted for 4H Candles
+# ==============================================================================
+
 class DynamicAnalyst:
     """
-    Automatically identifies Support & Resistance levels
-    using volatility-adaptive clustering
+    Strategic Support/Resistance detection using 4H candles
+    Client Requirement: Must use 4H timeframe for structural analysis
     """
     
-    def __init__(self, atr_multiplier=2.0, min_samples=3):  # Changed: 1.5→2.0, 5→3
-        """
-        Args:
-            atr_multiplier: Wider noise filter (2.0x ATR instead of 1.5x)
-            min_samples: Lower threshold (3 instead of 5)
-        """
+    def __init__(self, atr_multiplier=2.0, min_samples=3, min_level_separation=0.5):
         self.atr_multiplier = atr_multiplier
         self.min_samples = min_samples
-        logger.info(f"[ANALYST] Initialized with ATR multiplier: {atr_multiplier}, min_samples: {min_samples}")
+        self.min_level_separation = min_level_separation
+        self.timeframe = '4H'  # Explicit timeframe tracking
+        
+        logger.info(
+            f"[ANALYST] Initialized for {self.timeframe} candles: "
+            f"ATR×{atr_multiplier}, min_samples={min_samples}"
+        )
 
     def calculate_atr(self, highs, lows, closes, period=14):
-        """
-        Calculate Average True Range (volatility measure)
-        
-        Args:
-            highs, lows, closes: Price arrays
-            period: Lookback period for ATR
-            
-        Returns:
-            float: Current ATR value
-        """
+        """Calculate ATR from 4H candles"""
         highs = np.array(highs)
         lows = np.array(lows)
         closes = np.array(closes)
 
         if len(closes) < period + 1:
-            return np.mean(highs - lows)  # Fallback for short data
+            return np.mean(highs - lows) if len(highs) > 0 else 0.0
 
         prev_closes = np.roll(closes, 1)
         prev_closes[0] = closes[0]
@@ -52,9 +54,21 @@ class DynamicAnalyst:
         tr3 = np.abs(lows - prev_closes)
         
         true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.mean(true_range[-period:])
+        return np.mean(true_range[-period:])
+
+    def _merge_close_levels(self, levels, min_distance):
+        """Merge levels that are too close together"""
+        if not levels or len(levels) == 1:
+            return levels
         
-        return atr
+        merged = [levels[0]]
+        for level in levels[1:]:
+            if abs(level - merged[-1]) < min_distance:
+                merged[-1] = (merged[-1] + level) / 2
+            else:
+                merged.append(level)
+        
+        return merged
 
     def get_support_resistance_levels(
         self, 
@@ -64,44 +78,93 @@ class DynamicAnalyst:
         closes, 
         n_levels=5
     ):
-        """IMPROVED: More robust level detection"""
+        """
+        Identify S/R levels from 4H pivots
         
-        # FIXED: Lower threshold from 5 to 3
+        Args:
+            pivot_points: Array of 4H pivot highs/lows
+            highs, lows, closes: Full 4H price history
+            n_levels: Target number of levels
+            
+        Returns:
+            List of S/R price levels (sorted)
+        """
+        from sklearn.cluster import DBSCAN, KMeans
+        
         if len(pivot_points) < self.min_samples:
-            logger.warning(f"[ANALYST] Insufficient pivots: {len(pivot_points)}")
+            logger.warning(
+                f"[ANALYST] Insufficient 4H pivots: {len(pivot_points)} "
+                f"(need {self.min_samples}+)"
+            )
             return []
 
-        # Calculate volatility-based clustering epsilon
+        # Calculate volatility from 4H candles
         current_atr = self.calculate_atr(highs, lows, closes)
-        dynamic_eps = current_atr * self.atr_multiplier  # Now 2.0x instead of 1.5x
+        dynamic_eps = current_atr * self.atr_multiplier
         
         if dynamic_eps <= 0:
-            dynamic_eps = np.std(pivot_points) * 0.15  # More lenient fallback
+            pivot_std = np.std(pivot_points)
+            dynamic_eps = pivot_std * 0.15 if pivot_std > 0 else 0.001
         
-        logger.debug(f"[ANALYST] ATR={current_atr:.2f}, epsilon={dynamic_eps:.2f}")
+        logger.debug(
+            f"[ANALYST] 4H ATR={current_atr:.2f}, epsilon={dynamic_eps:.2f}"
+        )
 
-        # DBSCAN filtering
+        # DBSCAN noise filtering
         X = pivot_points.reshape(-1, 1)
         db = DBSCAN(eps=dynamic_eps, min_samples=self.min_samples).fit(X)
         
         clean_mask = db.labels_ != -1
         clean_X = X[clean_mask]
 
-        # FIXED: Return raw pivots if clustering removes too much
-        if len(clean_X) < max(3, n_levels // 2):
-            logger.warning(f"[ANALYST] Clustering too aggressive ({len(clean_X)} points), using raw pivots")
-            return sorted(pivot_points.tolist())
+        # Fallback if clustering too aggressive
+        min_required = max(3, n_levels // 2)
+        if len(clean_X) < min_required:
+            logger.warning(
+                f"[ANALYST] Using quantile fallback (only {len(clean_X)} clean points)"
+            )
+            percentiles = np.linspace(10, 90, n_levels)
+            levels = list(np.percentile(pivot_points, percentiles))
+            return sorted(set(np.round(levels, 2)))
 
-        # K-means clustering
+        # K-Means clustering
         n_clusters = min(n_levels, len(clean_X))
-        kmeans = KMeans(
-            n_clusters=n_clusters, 
-            init='k-means++', 
-            n_init=10,
-            random_state=42
-        ).fit(clean_X)
         
-        levels = sorted(kmeans.cluster_centers_.flatten())
+        try:
+            kmeans = KMeans(
+                n_clusters=n_clusters, 
+                init='k-means++', 
+                n_init=10,
+                random_state=None
+            ).fit(clean_X)
+            
+            levels = sorted(kmeans.cluster_centers_.flatten())
+        except Exception as e:
+            logger.error(f"[ANALYST] K-Means failed: {e}")
+            return sorted(set(np.round(pivot_points, 2)))[:n_levels]
+
+        # Merge close levels
+        min_separation = current_atr * self.min_level_separation
+        levels = self._merge_close_levels(levels, min_separation)
         
-        logger.info(f"[ANALYST] Identified {len(levels)} S/R levels")
+        logger.info(
+            f"[ANALYST] ✓ Identified {len(levels)} S/R levels from 4H data "
+            f"(min separation: {min_separation:.2f})"
+        )
+        
         return levels
+
+    def is_near_level(self, current_price, level, threshold_percent=0.005):
+        """Check if price is near a 4H S/R level"""
+        distance = abs(current_price - level) / current_price
+        return distance < threshold_percent
+
+    def classify_levels(self, levels, current_price):
+        """Separate into support (below) and resistance (above)"""
+        support = [l for l in levels if l < current_price]
+        resistance = [l for l in levels if l > current_price]
+        
+        return {
+            'support': sorted(support, reverse=True),
+            'resistance': sorted(resistance)
+        }

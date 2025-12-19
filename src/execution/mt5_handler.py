@@ -13,6 +13,40 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 
+def count_mt5_positions(symbol: str, side: str = None) -> int:
+    """
+    Count actual open positions on MT5
+
+    Args:
+        symbol: MT5 symbol (e.g., "XAUUSD")
+        side: Optional filter - "long" or "short"
+
+    Returns:
+        Number of open positions
+    """
+    try:
+        mt5_positions = mt5.positions_get(symbol=symbol)
+
+        if mt5_positions is None:
+            return 0
+
+        if side is None:
+            return len(mt5_positions)
+
+        # Filter by side
+        count = 0
+        for pos in mt5_positions:
+            pos_side = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+            if pos_side == side:
+                count += 1
+
+        return count
+
+    except Exception as e:
+        logger.error(f"Error counting MT5 positions: {e}")
+        return 0
+
+
 class SizingMode:
     """Position sizing modes"""
 
@@ -312,17 +346,21 @@ class MT5ExecutionHandler:
     MT5 Execution Handler with Hybrid Position Sizing
     """
 
-    def __init__(self, config: Dict, portfolio_manager,data_manager=None):
+    def __init__(self, config: Dict, portfolio_manager, data_manager=None):
         self.config = config
         self.portfolio_manager = portfolio_manager
-        self.data_manager = data_manager 
+        self.data_manager = data_manager
         self.sizer = HybridPositionSizer(config, portfolio_manager)
 
         self.asset_config = config["assets"]["GOLD"]
         self.risk_config = config.get("risk_management", {})
         self.trading_config = config.get("trading", {})
+        self.mode = self.trading_config.get("mode", "paper")
 
-        self.symbol = self.asset_config["symbol"]
+        self.symbol = config["assets"]["GOLD"]["symbol"]
+        self.max_positions_per_asset = config.get("trading", {}).get(
+            "max_positions_per_asset", 3
+        )
 
         self.symbol_info = mt5.symbol_info(self.symbol)
         if self.symbol_info is None:
@@ -334,9 +372,9 @@ class MT5ExecutionHandler:
 
         logger.info("MT5ExecutionHandler with HybridPositionSizer initialized")
 
-        auto_sync_enabled = bool(self.trading_config.get("auto_sync_on_startup", False))
+        auto_sync_enabled = bool(self.trading_config.get("auto_sync_on_startup", True))
         import_enabled = bool(
-            self.config.get("portfolio", {}).get("import_existing_positions", False)
+            self.config.get("portfolio", {}).get("import_existing_positions", True)
         )
 
         if auto_sync_enabled and import_enabled:
@@ -355,143 +393,358 @@ class MT5ExecutionHandler:
 
         return (tick.ask + tick.bid) / 2
 
+    def can_open_mt5_position(self, symbol: str, side: str) -> Tuple[bool, str]:
+        """
+        Check if we can open a new position
+        Checks BOTH portfolio manager AND actual MT5 positions
+
+        Returns:
+            (can_open: bool, reason: str)
+        """
+        # Check 1: Portfolio manager limits
+        can_open_pm, pm_reason = self.portfolio_manager.can_open_position("GOLD", side)
+        if not can_open_pm:
+            return False, f"Portfolio limit: {pm_reason}"
+
+        # Check 2: Actual MT5 positions (CRITICAL CHECK)
+        mt5_count = count_mt5_positions(symbol, side)
+
+        if mt5_count >= self.max_positions_per_asset:
+            logger.warning(
+                f"[MT5] Cannot open {side.upper()} position: "
+                f"{mt5_count}/{self.max_positions_per_asset} positions already open on MT5"
+            )
+            return (
+                False,
+                f"MT5 has {mt5_count}/{self.max_positions_per_asset} {side.upper()} positions open",
+            )
+
+        # Check 3: Verify portfolio and MT5 are in sync
+        portfolio_count = self.portfolio_manager.get_asset_position_count("GOLD", side)
+        if portfolio_count != mt5_count:
+            logger.warning(
+                f"[SYNC] Position count mismatch: Portfolio={portfolio_count}, MT5={mt5_count}"
+            )
+            # Don't block, but log the discrepancy
+
+        return True, f"OK - {mt5_count}/{self.max_positions_per_asset} positions open"
+
     def execute_signal(
         self,
         signal: int,
         symbol: str = None,
-        asset: str = "GOLD",
+        asset_name: str = "GOLD",
         confidence_score: float = None,
         market_condition: str = None,
-        sizing_mode: str = SizingMode.AUTOMATED,
+        sizing_mode: str = "automated",
         manual_size_usd: float = None,
         override_reason: str = None,
     ) -> bool:
         """
-        Execute trading signal with hybrid position sizing
-        Args:
-            signal: 1 (BUY), -1 (SELL), 0 (HOLD)
-            symbol: Trading symbol
-            asset: Asset name
-            confidence_score: Signal confidence (0.0 to 1.0)
-            market_condition: "bullish", "bearish", "neutral", "uncertain"
-            sizing_mode: AUTOMATED, MANUAL_OVERRIDE, REDUCED_RISK, ELEVATED_RISK
-            manual_size_usd: Manual position size (only if sizing_mode=MANUAL_OVERRIDE)
-            override_reason: Reason for override
-        Returns:
-            True if execution successful, False otherwise
+        ✅ FIXED: Execute signal with proper multi-position handling
+        
+        CRITICAL FIXES:
+        1. SELL signal now closes ALL long positions (not just first)
+        2. BUY signal now closes ALL short positions (not just first)
+        3. After closing, verifies sync with MT5
         """
-        if symbol is None:
-            symbol = self.symbol
         try:
-            # Get current price
+            if symbol is None:
+                symbol = self.symbol
+
             current_price = self.get_current_price(symbol)
             if current_price == 0:
-                logger.error(f"{asset}: Failed to get current price")
+                logger.error(f"{asset_name}: Failed to get current price")
                 return False
 
-            # STEP 1: Get existing position (if any)
-            existing_position = self.portfolio_manager.get_position(asset)
+            # Get ALL existing positions for this asset
+            existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
+            
+            # Log current state
+            long_count = len([p for p in existing_positions if p.side == "long"])
+            short_count = len([p for p in existing_positions if p.side == "short"])
+            
+            logger.info(
+                f"\n{'='*80}\n"
+                f"[SIGNAL] {asset_name} Signal: {signal}\n"
+                f"[STATE] Current Positions: {long_count} LONG, {short_count} SHORT\n"
+                f"{'='*80}"
+            )
 
-            # STEP 2: Handle existing positions
-            if existing_position:
-                position_side = (
-                    existing_position.side
-                    if hasattr(existing_position, "side")
-                    else existing_position.get("side")
-                )
-                logger.debug(
-                    f"{asset}: Existing {position_side.upper()} position found, signal={signal}"
-                )
+            # === SCENARIO 1: SELL SIGNAL - Close ALL long positions ===
+            if signal == -1:
+                long_positions = [p for p in existing_positions if p.side == "long"]
 
-                # === CLOSE POSITION SCENARIOS ===
-                # Close long position on SELL signal
-                if signal == -1 and position_side == "long":
+                if long_positions:
                     logger.info(
-                        f"[SIGNAL] {asset}: SELL signal received - Closing LONG position"
+                        f"\n{'='*80}\n"
+                        f"📉 SELL SIGNAL - Closing ALL {len(long_positions)} LONG position(s)\n"
+                        f"{'='*80}"
                     )
-                    success = self._close_mt5_position(
-                        existing_position, current_price, asset, "sell_signal"
-                    )
-                    if not success:
-                        logger.error(f"[FAIL] Failed to close {asset} LONG position")
-                        return False
-                    return True
 
-                # Close short position on BUY signal
-                elif signal == 1 and position_side == "short":
-                    logger.info(
-                        f"[SIGNAL] {asset}: BUY signal received - Closing SHORT position"
-                    )
-                    success = self._close_mt5_position(
-                        existing_position, current_price, asset, "buy_signal"
-                    )
-                    if not success:
-                        logger.error(f"[FAIL] Failed to close {asset} SHORT position")
-                        return False
-                    return True
+                    closed_count = 0
+                    failed_count = 0
 
-                # HOLD signal - check SL/TP
-                elif signal == 0:
-                    should_close, close_reason = self._check_stop_loss_take_profit(
-                        existing_position, current_price
-                    )
-                    if should_close:
-                        logger.info(f"[AUTO-CLOSE] {asset}: {close_reason}")
-                        success = self._close_mt5_position(
-                            existing_position, current_price, asset, close_reason
+                    # ✅ FIX: Close ALL long positions, not just first
+                    for i, position in enumerate(long_positions, 1):
+                        logger.info(
+                            f"\n[{i}/{len(long_positions)}] Closing LONG position:\n"
+                            f"  Position ID: {position.position_id}\n"
+                            f"  MT5 Ticket:  {position.mt5_ticket}\n"
+                            f"  Entry:       ${position.entry_price:,.2f}\n"
+                            f"  Current:     ${current_price:,.2f}"
                         )
-                        if not success:
-                            logger.error(
-                                f"[FAIL] Failed to close {asset} position on {close_reason}"
-                            )
-                            return False
-                        return True
-                    else:
-                        logger.debug(f"{asset}: Holding position, no action needed")
-                        return False  # Return False for HOLD signals with no action
 
-                # Prevent duplicate positions
-                elif signal == 1 and position_side == "long":
+                        success = self._close_position(
+                            position=position,
+                            current_price=current_price,
+                            asset_name=asset_name,
+                            reason="sell_signal",
+                        )
+
+                        if success:
+                            closed_count += 1
+                            logger.info(f"  ✓ Position {position.position_id} closed")
+                        else:
+                            failed_count += 1
+                            logger.error(f"  ✗ Failed to close {position.position_id}")
+
                     logger.info(
-                        f"[SKIP] {asset}: BUY signal ignored - Already have LONG position"
+                        f"\n{'='*80}\n"
+                        f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
+                        f"{'='*80}\n"
                     )
-                    return False  # No trade executed
 
-                elif signal == -1 and position_side == "short":
+                    # ✅ FIX: Verify sync with MT5 after closing
+                    self._verify_position_sync(asset_name, symbol)
+
+                    return closed_count > 0
+
+                else:
+                    logger.debug(f"{asset_name}: SELL signal but no LONG positions to close")
+                    return False
+
+            # === SCENARIO 2: BUY SIGNAL - Close ALL short positions, then open long ===
+            elif signal == 1:
+                short_positions = [p for p in existing_positions if p.side == "short"]
+
+                # Close ALL short positions first
+                if short_positions:
                     logger.info(
-                        f"[SKIP] {asset}: SELL signal ignored - Already have SHORT position"
+                        f"\n{'='*80}\n"
+                        f"📈 BUY SIGNAL - Closing ALL {len(short_positions)} SHORT position(s) first\n"
+                        f"{'='*80}"
                     )
-                    return False  # No trade executed
 
-            # STEP 3: Open new position with HYBRID SIZING
-            if signal == 1:  # BUY signal
-                if self.portfolio_manager.has_position(asset, side="long"):
+                    closed_count = 0
+                    # ✅ FIX: Close ALL short positions, not just first
+                    for i, position in enumerate(short_positions, 1):
+                        logger.info(
+                            f"\n[{i}/{len(short_positions)}] Closing SHORT position:\n"
+                            f"  Position ID: {position.position_id}\n"
+                            f"  MT5 Ticket:  {position.mt5_ticket}"
+                        )
+
+                        success = self._close_position(
+                            position=position,
+                            current_price=current_price,
+                            asset_name=asset_name,
+                            reason="buy_signal",
+                        )
+
+                        if success:
+                            closed_count += 1
+
+                    logger.info(f"  ✓ Closed {closed_count}/{len(short_positions)} SHORT positions")
+
+                # Check if we can open new LONG position
+                can_open, reason = self.can_open_mt5_position(symbol, "long")
+
+                if not can_open:
                     logger.warning(
-                        f"[SKIP] {asset}: BUY signal - Position already exists"
+                        f"\n{'='*80}\n"
+                        f"⚠️  CANNOT OPEN NEW LONG POSITION\n"
+                        f"Reason: {reason}\n"
+                        f"{'='*80}\n"
                     )
-                    return False  # No trade executed
+                    
+                    # ✅ FIX: Verify sync even if we can't open
+                    self._verify_position_sync(asset_name, symbol)
+                    return False
 
-                logger.info(f"[SIGNAL] {asset}: BUY signal - Opening LONG position")
-                return self._open_mt5_position(
-                    signal,
-                    current_price,
-                    symbol,
-                    asset,
-                    confidence_score,
-                    market_condition,
-                    sizing_mode,
-                    manual_size_usd,
-                    override_reason,
+                logger.info(
+                    f"\n{'='*80}\n"
+                    f"📈 BUY SIGNAL - Opening new LONG position\n"
+                    f"Check: {reason}\n"
+                    f"{'='*80}\n"
                 )
 
-            elif signal == -1:  # SELL signal
-                logger.debug(f"{asset}: SELL signal - No position to close, no action")
-                return False  # No trade executed
+                success = self._open_mt5_position(
+                    signal=signal,
+                    current_price=current_price,
+                    symbol=symbol,
+                    asset=asset_name,
+                    confidence_score=confidence_score,
+                    market_condition=market_condition,
+                    sizing_mode=sizing_mode,
+                    manual_size_usd=manual_size_usd,
+                    override_reason=override_reason,
+                )
+                
+                # ✅ FIX: Verify sync after opening
+                if success:
+                    self._verify_position_sync(asset_name, symbol)
+                
+                return success
 
-            return False  # Default return for any other case
+            # === SCENARIO 3: HOLD SIGNAL ===
+            elif signal == 0:
+                if not existing_positions:
+                    logger.debug(f"{asset_name}: HOLD signal, no positions")
+                    return False
+
+                # Check SL/TP for all positions
+                positions_closed = False
+
+                for position in existing_positions:
+                    should_close, close_reason = self._check_stop_loss_take_profit(
+                        position, current_price
+                    )
+
+                    if should_close:
+                        logger.info(
+                            f"[AUTO-CLOSE] {asset_name} {position.position_id}: {close_reason}"
+                        )
+                        success = self._close_position(
+                            position, current_price, asset_name, close_reason
+                        )
+                        if success:
+                            positions_closed = True
+
+                # ✅ FIX: Verify sync if positions were closed
+                if positions_closed:
+                    self._verify_position_sync(asset_name, symbol)
+
+                return positions_closed
+
+            return False
 
         except Exception as e:
-            logger.error(f"Error executing {asset} signal: {e}", exc_info=True)
+            logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
+            return False
+
+    def _close_position(
+        self, position, current_price: float, asset_name: str, reason: str
+    ) -> bool:
+        """
+        Close a single position
+        Returns True if successful, False otherwise
+        """
+        try:
+            entry_price = position.entry_price
+            quantity = position.quantity
+            side = position.side
+            position_id = position.position_id
+            mt5_ticket = position.mt5_ticket
+
+            position_size_usd = quantity * entry_price
+
+            if side == "long":
+                pnl = (current_price - entry_price) * quantity
+            else:
+                pnl = (entry_price - current_price) * quantity
+
+            pnl_pct = (pnl / position_size_usd) * 100 if position_size_usd > 0 else 0
+
+            logger.info(
+                f"[CLOSE] {asset_name} {side.upper()} ({position_id})\n"
+                f"  Entry: ${entry_price:,.2f} → Exit: ${current_price:,.2f}\n"
+                f"  P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+                f"  Reason: {reason}"
+            )
+
+            # Close on MT5 first (if live mode)
+            mt5_closed = False
+            if self.mode.lower() != "paper" and mt5_ticket:
+                mt5_closed = self._close_mt5_order(mt5_ticket, asset_name, side)
+            else:
+                mt5_closed = True  # Paper mode or no ticket
+
+            # Close in portfolio manager
+            trade_result = self.portfolio_manager.close_position(
+                position_id=position_id, exit_price=current_price, reason=reason
+            )
+
+            if trade_result and mt5_closed:
+                logger.info(f"  ✓ Position {position_id} closed successfully")
+                return True
+            else:
+                logger.error(f"  ✗ Failed to close position {position_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error closing position: {e}", exc_info=True)
+            return False
+
+    def _close_mt5_order(self, ticket: int, asset: str, side: str) -> bool:
+        """
+        Close a specific MT5 order by ticket
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Find the position by ticket
+            mt5_positions = mt5.positions_get(ticket=ticket)
+
+            if mt5_positions is None or len(mt5_positions) == 0:
+                logger.warning(f"[MT5] Position ticket {ticket} not found")
+                return False
+
+            mt5_position = mt5_positions[0]
+
+            # Determine close order type
+            order_type = (
+                mt5.ORDER_TYPE_SELL
+                if mt5_position.type == mt5.POSITION_TYPE_BUY
+                else mt5.ORDER_TYPE_BUY
+            )
+
+            # Get current price
+            tick = mt5.symbol_info_tick(mt5_position.symbol)
+            close_price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+            # Build close request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": mt5_position.symbol,
+                "volume": mt5_position.volume,
+                "type": order_type,
+                "position": ticket,
+                "price": close_price,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": f"Close_{asset}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+
+            # Send order
+            result = mt5.order_send(request)
+
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"[MT5] ✓ Closed ticket {ticket} @ ${close_price:,.2f}")
+                return True
+            else:
+                error_msg = result.comment if result else "No result"
+                error_code = result.retcode if result else "N/A"
+                logger.error(
+                    f"[MT5] ✗ Failed to close ticket {ticket}: {error_msg} (code: {error_code})"
+                )
+                return False
+
+        except Exception as e:
+            logger.error(f"[MT5] Error closing ticket {ticket}: {e}")
             return False
 
     def _check_stop_loss_take_profit(
@@ -509,6 +762,54 @@ class MT5ExecutionHandler:
                 stop_loss = position.get("stop_loss")
                 take_profit = position.get("take_profit")
                 side = position.get("side")
+
+            price_tolerance = 0.01
+
+            if side == "long":
+                if stop_loss and current_price <= (stop_loss + price_tolerance):
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    return (
+                        True,
+                        f"stop_loss_hit (${current_price:.2f} <= ${stop_loss:.2f}, {pnl_pct:+.2f}%)",
+                    )
+
+                if take_profit and current_price >= (take_profit - price_tolerance):
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    return (
+                        True,
+                        f"take_profit_hit (${current_price:.2f} >= ${take_profit:.2f}, {pnl_pct:+.2f}%)",
+                    )
+
+            else:  # short
+                if stop_loss and current_price >= (stop_loss - price_tolerance):
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    return (
+                        True,
+                        f"stop_loss_hit (${current_price:.2f} >= ${stop_loss:.2f}, {pnl_pct:+.2f}%)",
+                    )
+
+                if take_profit and current_price <= (take_profit + price_tolerance):
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    return (
+                        True,
+                        f"take_profit_hit (${current_price:.2f} <= ${take_profit:.2f}, {pnl_pct:+.2f}%)",
+                    )
+
+            return False, ""
+
+        except Exception as e:
+            logger.error(f"Error checking SL/TP: {e}", exc_info=True)
+            return False, ""
+
+    def _check_stop_loss_take_profit(
+        self, position, current_price: float
+    ) -> Tuple[bool, str]:
+        """Check if stop-loss or take-profit is hit"""
+        try:
+            entry_price = position.entry_price
+            stop_loss = position.stop_loss
+            take_profit = position.take_profit
+            side = position.side
 
             price_tolerance = 0.01
 
@@ -765,31 +1066,35 @@ class MT5ExecutionHandler:
 
             try:
                 if self.data_manager is None:
-                    logger.warning("[DTM] data_manager not available, DTM disabled")
+                    logger.warning("[VTM] data_manager not available, VTM disabled")
                     ohlc_data = None
                 else:
-                    # Fetch recent OHLC data for DTM
+                    # Fetch recent OHLC data for VTM
                     end_time = datetime.now(timezone.utc)
                     start_time = end_time - timedelta(days=10)  # Get 10 days of data
-                    
+
                     df = self.data_manager.fetch_mt5_data(
                         symbol=symbol,
                         timeframe=self.config["assets"][asset].get("timeframe", "H1"),
                         start_date=start_time.strftime("%Y-%m-%d"),
                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                     )
-                    
-                    # Prepare OHLC arrays for DTM
+
+                    # Prepare OHLC arrays for VTM
                     ohlc_data = {
-                        'high': df['high'].values,
-                        'low': df['low'].values,
-                        'close': df['close'].values,
+                        "high": df["high"].values,
+                        "low": df["low"].values,
+                        "close": df["close"].values,
                     }
-                    
-                    logger.debug(f"[DTM] Prepared {len(df)} bars for dynamic management")
-                    
+
+                    logger.debug(
+                        f"[VTM] Prepared {len(df)} bars for dynamic management"
+                    )
+
             except Exception as e:
-                logger.warning(f"[DTM] Failed to fetch OHLC data: {e}, DTM disabled for this trade")
+                logger.warning(
+                    f"[VTM] Failed to fetch OHLC data: {e}, VTM disabled for this trade"
+                )
                 ohlc_data = None
 
             # Add position to portfolio manager
@@ -799,12 +1104,12 @@ class MT5ExecutionHandler:
                 side=position_side,
                 entry_price=execution_price,
                 position_size_usd=actual_position_size,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
+                stop_loss=None,
+                take_profit=None,
                 trailing_stop_pct=trailing_stop_pct,
                 mt5_ticket=result.order,
-                ohlc_data=ohlc_data,  # ✨ NEW: Pass OHLC for DTM
-                use_dynamic_management=True,  # ✨ NEW: Enable DTM
+                ohlc_data=ohlc_data,  # ✨ NEW: Pass OHLC for VTM
+                use_dynamic_management=True,  # ✨ NEW: Enable VTM
             )
 
             if not success:
@@ -822,73 +1127,113 @@ class MT5ExecutionHandler:
             logger.error(f"Error opening MT5 position: {e}", exc_info=True)
             return False
 
-    def check_and_update_positions_dtm(self, asset_name: str = "GOLD"):
+    def _verify_position_sync(self, asset_name: str, symbol: str):
         """
-        Check and update positions with DTM using fresh OHLC data
-        ✅ FIXED: Now updates with current price for intra-bar trailing
+        ✅ NEW: Verify portfolio and MT5 are in sync after trade execution
+        
+        This is called after:
+        - Opening new positions
+        - Closing positions
+        - Signal execution
+        
+        Logs detailed comparison and triggers re-sync if needed
         """
         try:
-            position = self.portfolio_manager.get_position(asset_name)
-            if not position:
-                return
+            import MetaTrader5 as mt5
             
-            # Get current price (real-time)
+            # Get portfolio positions
+            portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
+            portfolio_long = len([p for p in portfolio_positions if p.side == "long"])
+            portfolio_short = len([p for p in portfolio_positions if p.side == "short"])
+            
+            # Get MT5 positions
+            mt5_positions = mt5.positions_get(symbol=symbol)
+            mt5_long = 0
+            mt5_short = 0
+            
+            if mt5_positions:
+                for pos in mt5_positions:
+                    if pos.type == mt5.POSITION_TYPE_BUY:
+                        mt5_long += 1
+                    else:
+                        mt5_short += 1
+            
+            # Compare
+            sync_ok = (portfolio_long == mt5_long) and (portfolio_short == mt5_short)
+            
+            logger.info(
+                f"\n{'='*80}\n"
+                f"[SYNC CHECK] {asset_name}\n"
+                f"{'='*80}\n"
+                f"Portfolio:  {portfolio_long} LONG, {portfolio_short} SHORT (Total: {len(portfolio_positions)})\n"
+                f"MT5:        {mt5_long} LONG, {mt5_short} SHORT (Total: {len(mt5_positions) if mt5_positions else 0})\n"
+                f"Status:     {'✅ IN SYNC' if sync_ok else '⚠️  OUT OF SYNC'}\n"
+                f"{'='*80}"
+            )
+            
+            # If out of sync, trigger re-sync
+            if not sync_ok:
+                logger.warning(
+                    f"[SYNC] Mismatch detected! Triggering automatic re-sync..."
+                )
+                self.sync_positions_with_mt5(asset_name, symbol)
+            
+            return sync_ok
+            
+        except Exception as e:
+            logger.error(f"[SYNC CHECK] Error: {e}")
+            return False
+
+    def check_and_update_positions_VTM(self, asset_name: str = "GOLD"):
+        """Check and update ALL positions for an asset with VTM"""
+        try:
+            # Get ALL positions for this asset
+            positions = self.portfolio_manager.get_asset_positions(asset_name)
+
+            if not positions:
+                return False
+
             current_price = self.get_current_price()
             if current_price is None:
                 logger.warning(f"Could not get price for {asset_name}")
-                return
-            
-            # ✅ NEW: Update DTM with current price FIRST (for intra-bar trailing)
-            if position.trade_manager:
-                exit_signal = position.trade_manager.update_with_current_price(current_price)
-                
-                if exit_signal:
-                    logger.info(f"[DTM] {asset_name} triggered {exit_signal.upper()} @ ${current_price:,.2f}")
-                    self._close_position(position, current_price, asset_name, f"dtm_{exit_signal}")
-                    return True
-            
-            # Fetch latest candle data (for bar-close updates)
-            try:
-                end_time = datetime.now(timezone.utc)
-                start_time = end_time - timedelta(hours=24)
-                
-                df = self.data_manager.fetch_binance_data(
-                    symbol=self.symbol,
-                    interval=self.config["assets"][asset_name].get("interval", "1h"),
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                
-                if len(df) > 0:
-                    latest_bar = df.iloc[-1]
-                    
-                    # Update position with new bar (on bar close)
-                    exit_signal = position.update_with_new_bar(
-                        high=latest_bar['high'],
-                        low=latest_bar['low'],
-                        close=latest_bar['close']
+                return False
+
+            positions_closed = False
+
+            # Check each position individually
+            for position in positions:
+                # Update VTM with current price (intra-bar trailing)
+                if position.trade_manager:
+                    exit_signal = position.trade_manager.update_with_current_price(
+                        current_price
                     )
-                    
-                    # If DTM signals exit
+
                     if exit_signal:
-                        logger.info(f"[DTM] {asset_name}: {exit_signal.upper()} signal received")
-                        self._close_position(position, current_price, asset_name, f"dtm_{exit_signal}")
-                        return True
-            
-            except Exception as e:
-                logger.debug(f"[DTM] Error fetching OHLC: {e}")
-            
-            # Fallback: check traditional SL/TP
-            should_close, reason = self._check_stop_loss_take_profit(position, current_price)
-            if should_close:
-                logger.info(f"[AUTO-CLOSE] {asset_name}: {reason}")
-                self._close_position(position, current_price, asset_name, reason)
-                return True
-            
-            return False
+                        logger.info(
+                            f"[VTM] {asset_name} {position.position_id} triggered "
+                            f"{exit_signal.upper()} @ ${current_price:,.2f}"
+                        )
+                        self._close_position(
+                            position, current_price, asset_name, f"VTM_{exit_signal}"
+                        )
+                        positions_closed = True
+                        continue
+
+                # Fallback: check traditional SL/TP
+                should_close, reason = self._check_stop_loss_take_profit(
+                    position, current_price
+                )
+                if should_close:
+                    logger.info(
+                        f"[AUTO-CLOSE] {asset_name} {position.position_id}: {reason}"
+                    )
+                    self._close_position(position, current_price, asset_name, reason)
+                    positions_closed = True
+
+            return positions_closed
 
         except Exception as e:
-            logger.error(f"Error checking DTM positions: {e}", exc_info=True)
+            logger.error(f"Error checking VTM positions: {e}", exc_info=True)
             return False
 
     def _emergency_close_mt5_position(
@@ -929,15 +1274,15 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Emergency close error: {e}", exc_info=True)
 
-    def check_and_update_positions(self, asset_name: str = "BTC"):
+    def check_and_update_positions(self, asset_name: str = "GOLD"):
         """
         Actively check and update all positions
-        NOW WITH DTM SUPPORT
+        NOW WITH VTM SUPPORT
         """
         try:
-            # Use DTM version if available
-            if hasattr(self, "check_and_update_positions_dtm"):
-                return self.check_and_update_positions_dtm(asset_name)
+            # Use VTM version if available
+            if hasattr(self, "check_and_update_positions_VTM"):
+                return self.check_and_update_positions_VTM(asset_name)
 
             # Fallback to original implementation
             position = self.portfolio_manager.get_position(asset_name)
@@ -960,130 +1305,332 @@ class MT5ExecutionHandler:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
     def sync_positions_with_mt5(self, asset: str = "GOLD", symbol: str = None) -> bool:
-        """Sync portfolio manager with actual MT5 positions"""
-
+        """
+        ✅ FIXED: Check config settings correctly for position import
+        """
         if symbol is None:
             symbol = self.symbol
 
         try:
-            logger.info(f"[SYNC] Starting position sync for {asset} (MT5)...")
-
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[SYNC] Starting position sync for {asset}")
+            logger.info(f"{'='*80}")
+            
+            # Get MT5 positions
             mt5_positions = mt5.positions_get(symbol=symbol)
-            portfolio_position = self.portfolio_manager.get_position(asset)
+            mt5_count = len(mt5_positions) if mt5_positions else 0
+            
+            # Get portfolio positions
+            portfolio_positions = self.portfolio_manager.get_asset_positions(asset)
+            portfolio_count = len(portfolio_positions)
+            
+            # Count by side
+            mt5_long = sum(1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_BUY)
+            mt5_short = sum(1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_SELL)
+            portfolio_long = sum(1 for p in portfolio_positions if p.side == "long")
+            portfolio_short = sum(1 for p in portfolio_positions if p.side == "short")
+        
+            logger.info(f"[SYNC] Position Count Comparison:")
+            logger.info(f"  MT5:       {mt5_long} LONG, {mt5_short} SHORT (Total: {mt5_count})")
+            logger.info(f"  Portfolio: {portfolio_long} LONG, {portfolio_short} SHORT (Total: {portfolio_count})")
+        
+            if mt5_positions:
+                logger.info(f"\n[SYNC] MT5 Positions:")
+                for i, pos in enumerate(mt5_positions, 1):
+                    side = "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
+                    logger.info(
+                        f"  [{i}] {side} | Ticket: {pos.ticket} | "
+                        f"Entry: ${pos.price_open:,.2f} | Volume: {pos.volume:.2f}"
+                    )
+                        
+            if portfolio_positions:
+                logger.info(f"\n[SYNC] Portfolio Positions:")
+                for i, pos in enumerate(portfolio_positions, 1):
+                    logger.info(
+                        f"  [{i}] {pos.side.upper()} | ID: {pos.position_id} | "
+                        f"Ticket: {pos.mt5_ticket} | Entry: ${pos.entry_price:,.2f}"
+                    )
 
             if self.symbol_info is None:
-                logger.warning(
-                    f"[SYNC] Symbol info for {symbol} unavailable; skipping MT5 sync."
-                )
+                logger.warning(f"[SYNC] Symbol info for {symbol} unavailable; skipping MT5 sync.")
                 return True
 
-            if mt5_positions and len(mt5_positions) > 0 and not portfolio_position:
+            logger.info(f"[SYNC] Found {mt5_count} MT5 position(s) and {portfolio_count} portfolio position(s)")
+
+            # ================================================================
+            # SCENARIO 1: MT5 has positions, portfolio is empty → IMPORT
+            # ================================================================
+            if mt5_count > 0 and portfolio_count == 0:
+                # ✅ FIX: Check config correctly (use self.config, not a different object)
                 import_enabled = bool(
-                    self.config.get("portfolio", {}).get(
-                        "import_existing_positions", False
-                    )
+                    self.config.get("portfolio", {}).get("import_existing_positions", False)
                 )
+                
+                # ✅ DEBUG: Log what we found in config
+                logger.info(f"[SYNC] Config check:")
+                logger.info(f"  portfolio.import_existing_positions = {import_enabled}")
+                logger.info(f"  trading.auto_sync_on_startup = {self.config.get('trading', {}).get('auto_sync_on_startup', False)}")
+
                 if import_enabled:
-                    logger.info(
-                        f"[SYNC] Importing {len(mt5_positions)} MT5 position(s) for {asset}..."
-                    )
+                    logger.info(f"[SYNC] ✅ Import ENABLED - Importing {mt5_count} MT5 position(s) WITH VTM...")
+
+                    # ✅ Fetch OHLC data ONCE for all imports
+                    ohlc_data = None
+                    try:
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=10)
+
+                        df = self.data_manager.fetch_mt5_data(
+                            symbol=symbol,
+                            timeframe=self.config["assets"][asset].get("timeframe", "H1"),
+                            start_date=start_time.strftime("%Y-%m-%d"),
+                            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+
+                        if len(df) > 50:
+                            ohlc_data = {
+                                "high": df["high"].values,
+                                "low": df["low"].values,
+                                "close": df["close"].values,
+                            }
+                            logger.info(f"[VTM] ✅ Fetched {len(df)} bars for dynamic management")
+                        else:
+                            logger.warning(f"[VTM] ⚠️ Insufficient data ({len(df)} bars), VTM disabled")
+
+                    except Exception as e:
+                        logger.error(f"[VTM] ❌ Failed to fetch OHLC: {e}")
+                        ohlc_data = None
+
+                    imported_count = 0
                     for pos in mt5_positions:
-                        pos_type = (
-                            "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                        )
+                        pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+
                         logger.info(
-                            f"  → Importing MT5 {pos_type}: entry={pos.price_open:.5f}, "
-                            f"current={pos.price_current:.5f}, volume={pos.volume:.2f}, "
-                            f"profit={pos.profit:.2f}"
+                            f"\n  → Importing MT5 {pos_type}: ticket={pos.ticket}, "
+                            f"entry=${pos.price_open:.2f}, current=${pos.price_current:.2f}"
                         )
+
+                        # Check if we can import
+                        can_import, reason = self.portfolio_manager.can_open_position(asset, pos_type)
+                        if not can_import:
+                            logger.warning(f"[SYNC] ⚠️ Cannot import position: {reason}")
+                            continue
+
+                        # ✅ Import with VTM support
                         success = self.portfolio_manager.add_position(
                             asset=asset,
                             symbol=symbol,
                             side=pos_type,
                             entry_price=pos.price_open,
-                            position_size_usd=pos.volume
-                            * pos.price_open
-                            * self.symbol_info.trade_contract_size,
-                            stop_loss=None,
-                            take_profit=None,
-                            trailing_stop_pct=None,
+                            position_size_usd=(
+                                pos.volume * pos.price_open * self.symbol_info.trade_contract_size
+                            ),
+                            stop_loss=pos.sl if pos.sl > 0 else None,
+                            take_profit=pos.tp if pos.tp > 0 else None,
+                            trailing_stop_pct=self.config["assets"][asset].get("risk", {}).get("trailing_stop_pct"),
+                            mt5_ticket=pos.ticket,
+                            ohlc_data=ohlc_data,  # ✅ Pass OHLC for VTM
+                            use_dynamic_management=True,  # ✅ Enable VTM
+                            entry_time=datetime.fromtimestamp(pos.time),  # ✅ Preserve entry time
                         )
-                        if success:
-                            logger.info(
-                                f"[SYNC] ✓ Imported {asset} {pos_type} position"
-                            )
-                        else:
-                            logger.error(
-                                f"[SYNC] ✗ Failed to import {asset} {pos_type} position"
-                            )
-                else:
-                    logger.info(
-                        f"[SYNC] Detected MT5 positions for {asset} but auto-import is disabled.\n"
-                        f"  MT5 Positions Count: {len(mt5_positions)}\n"
-                        f"  To enable import on startup, set trading.auto_sync_on_startup = true "
-                        f"AND portfolio.import_existing_positions = true in config."
-                    )
-                    for pos in mt5_positions:
-                        pos_type = (
-                            "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
-                        )
-                        logger.info(
-                            f"  → MT5 {pos_type}: entry={pos.price_open:.5f}, "
-                            f"current={pos.price_current:.5f}, volume={pos.volume:.2f}, "
-                            f"profit={pos.profit:.2f}"
-                        )
-                return True
 
-            if portfolio_position and (not mt5_positions or len(mt5_positions) == 0):
+                        if success:
+                            imported_count += 1
+                            
+                            # Get the imported position to check VTM status
+                            imported_positions = self.portfolio_manager.get_asset_positions(asset)
+                            if imported_positions:
+                                imported_pos = imported_positions[-1]  # Get last added
+                                if imported_pos.trade_manager:
+                                    logger.info(
+                                        f"[VTM] ✅ VTM ACTIVE for imported position\n"
+                                        f"      Ticket: {pos.ticket}\n"
+                                        f"      Entry: ${imported_pos.entry_price:,.2f}\n"
+                                        f"      SL: ${imported_pos.stop_loss:,.2f}\n"
+                                        f"      TP: ${imported_pos.take_profit:,.2f}"
+                                    )
+                                else:
+                                    logger.warning(f"[VTM] ⚠️ VTM not initialized for ticket {pos.ticket}")
+                        else:
+                            logger.error(f"[SYNC] ❌ Failed to import {asset} {pos_type} position")
+
+                    logger.info(
+                        f"\n{'='*80}\n"
+                        f"[SYNC] Import complete: {imported_count}/{mt5_count} positions imported\n"
+                        f"{'='*80}"
+                    )
+                    
+                    # Verify VTM status after import
+                    if imported_count > 0:
+                        self._verify_vtm_status_after_sync(asset)
+                    
+                    return True
+
+                else:
+                    # ✅ Clearer message when import is disabled
+                    logger.warning(
+                        f"\n{'='*80}\n"
+                        f"[SYNC] ⚠️ IMPORT DISABLED IN CONFIG\n"
+                        f"{'='*80}\n"
+                        f"Found {mt5_count} MT5 position(s) but import is disabled.\n"
+                        f"\n"
+                        f"Current settings:\n"
+                        f"  portfolio.import_existing_positions = {import_enabled}\n"
+                        f"  trading.auto_sync_on_startup = {self.config.get('trading', {}).get('auto_sync_on_startup', False)}\n"
+                        f"\n"
+                        f"These positions will NOT be managed by the bot.\n"
+                        f"Bot will only manage NEW positions it opens.\n"
+                        f"{'='*80}"
+                    )
+                    
+                    # Show what's on MT5
+                    for pos in mt5_positions:
+                        pos_type = "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
+                        logger.info(
+                            f"  → MT5 {pos_type}: ticket={pos.ticket}, entry=${pos.price_open:.2f}, "
+                            f"current=${pos.price_current:.2f}, volume={pos.volume:.2f}, profit=${pos.profit:.2f}"
+                        )
+                    
+                    return True
+
+            # ================================================================
+            # SCENARIO 2: Portfolio has positions, MT5 is empty → CLOSE ALL
+            # ================================================================
+            if portfolio_count > 0 and mt5_count == 0:
                 logger.warning(
-                    f"[SYNC] Portfolio shows {asset} position but MT5 has no matching positions.\n"
-                    f"  → Removing from portfolio (likely closed manually in MT5)."
+                    f"\n{'='*80}\n"
+                    f"[SYNC] ⚠️ POSITION MISMATCH\n"
+                    f"{'='*80}\n"
+                    f"Portfolio shows {portfolio_count} position(s) but MT5 has 0.\n"
+                    f"Positions were likely closed manually in MT5.\n"
+                    f"Removing positions from portfolio...\n"
+                    f"{'='*80}"
                 )
+
                 current_price = self.get_current_price(self.symbol)
-                trade_result = self.portfolio_manager.close_position(
-                    asset=asset, exit_price=current_price, reason="sync_missing_mt5"
+                closed_count = 0
+
+                for position in portfolio_positions:
+                    trade_result = self.portfolio_manager.close_position(
+                        position_id=position.position_id,
+                        exit_price=current_price,
+                        reason="sync_missing_mt5",
+                    )
+                    if trade_result:
+                        closed_count += 1
+                        logger.info(f"  ✅ Removed position {position.position_id}")
+
+                logger.info(
+                    f"\n[SYNC] Cleanup complete: {closed_count}/{portfolio_count} positions removed\n"
                 )
-                if trade_result:
-                    logger.info(f"[SYNC] ✓ Removed {asset} position from portfolio")
+                return closed_count == portfolio_count
+
+            # ================================================================
+            # SCENARIO 3: Both have positions → VALIDATE & RECONCILE
+            # ================================================================
+            if mt5_count > 0 and portfolio_count > 0:
+                logger.info(f"[SYNC] Validating {portfolio_count} portfolio vs {mt5_count} MT5 positions...")
+
+                # Build MT5 position map
+                mt5_by_ticket = {pos.ticket: pos for pos in mt5_positions}
+                
+                # Check portfolio positions
+                positions_to_remove = []
+                for pos in portfolio_positions:
+                    if pos.mt5_ticket and pos.mt5_ticket not in mt5_by_ticket:
+                        logger.warning(
+                            f"[SYNC] ⚠️ Portfolio position {pos.position_id} (ticket={pos.mt5_ticket}) "
+                            f"not found in MT5 → Marking for removal"
+                        )
+                        positions_to_remove.append(pos)
+
+                # Remove orphaned positions
+                if positions_to_remove:
+                    current_price = self.get_current_price(self.symbol)
+                    for pos in positions_to_remove:
+                        self.portfolio_manager.close_position(
+                            position_id=pos.position_id,
+                            exit_price=current_price,
+                            reason="sync_mt5_ticket_missing",
+                        )
+                        logger.info(f"  ✅ Removed orphaned position {pos.position_id}")
+
+                # Final validation
+                remaining_portfolio_count = self.portfolio_manager.get_asset_position_count(asset)
+
+                if remaining_portfolio_count == mt5_count:
+                    logger.info(
+                        f"\n{'='*80}\n"
+                        f"[SYNC] ✅ {asset} positions in sync ({remaining_portfolio_count} positions)\n"
+                        f"{'='*80}"
+                    )
+                    self._verify_vtm_status_after_sync(asset)
                     return True
                 else:
-                    logger.error(
-                        f"[SYNC] ✗ Failed to remove {asset} position from portfolio"
+                    logger.warning(
+                        f"[SYNC] ⚠️ Count mismatch after sync: Portfolio={remaining_portfolio_count}, MT5={mt5_count}"
                     )
                     return False
 
-            if mt5_positions and len(mt5_positions) > 0 and portfolio_position:
-                mt5_pos = mt5_positions[0]
-                mt5_side = "long" if mt5_pos.type == mt5.POSITION_TYPE_BUY else "short"
-                portfolio_side = getattr(
-                    portfolio_position,
-                    "side",
-                    (
-                        portfolio_position.get("side")
-                        if isinstance(portfolio_position, dict)
-                        else None
-                    ),
-                )
-
-                if mt5_side != portfolio_side:
-                    logger.error(
-                        f"[SYNC] MISMATCH: MT5 has {mt5_side.upper()} but portfolio has {portfolio_side}.\n"
-                        f"  → Closing portfolio position to avoid mismatch."
-                    )
-                    current_price = self.get_current_price(self.symbol)
-                    self.portfolio_manager.close_position(
-                        asset, current_price, "sync_mismatch_mt5"
-                    )
-                    return True
-                else:
-                    logger.info(
-                        f"[SYNC] ✓ {asset} positions already in sync ({mt5_side.upper()})"
-                    )
-                    return True
-
-            logger.info(f"[SYNC] ✓ No positions for {asset} in MT5 or portfolio")
+            # ================================================================
+            # SCENARIO 4: Both empty → All good
+            # ================================================================
+            logger.info(f"[SYNC] ✅ No positions for {asset} in MT5 or portfolio")
             return True
 
         except Exception as e:
-            logger.error(f"[SYNC] Error syncing MT5 positions: {e}", exc_info=True)
+            logger.error(f"[SYNC] ❌ Error syncing MT5 positions: {e}", exc_info=True)
             return False
+
+        
+    def _verify_vtm_status_after_sync(self, asset: str):
+        """Verify VTM is working after position sync"""
+        try:
+            positions = self.portfolio_manager.get_asset_positions(asset)
+            
+            if not positions:
+                return
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[VTM VERIFICATION] Checking {len(positions)} position(s)...")
+            logger.info(f"{'='*80}")
+            
+            vtm_active_count = 0
+            vtm_missing_count = 0
+            
+            for pos in positions:
+                if pos.trade_manager:
+                    vtm_active_count += 1
+                    try:
+                        status = pos.get_vtm_status()
+                        logger.info(
+                            f"\n✅ {pos.position_id}: VTM ACTIVE\n"
+                            f"   Ticket:  {pos.mt5_ticket}\n"
+                            f"   Entry:   ${status['entry_price']:,.2f}\n"
+                            f"   Current: ${status['current_price']:,.2f}\n"
+                            f"   P&L:     {status['pnl_pct']:+.2f}%\n"
+                            f"   SL:      ${status['stop_loss']:,.2f}\n"
+                            f"   TP:      ${status.get('take_profit', 0):,.2f}\n"
+                            f"   Locked:  {'Yes' if status['profit_locked'] else 'No'}"
+                        )
+                    except Exception as e:
+                        logger.error(f"   Error getting VTM status: {e}")
+                else:
+                    vtm_missing_count += 1
+                    logger.warning(
+                        f"\n⚠️ {pos.position_id}: VTM NOT ACTIVE\n"
+                        f"   Ticket:  {pos.mt5_ticket}\n"
+                        f"   Entry:   ${pos.entry_price:,.2f}\n"
+                        f"   → Using static SL/TP instead"
+                    )
+            
+            logger.info(
+                f"\n{'='*80}\n"
+                f"[VTM VERIFICATION] Summary:\n"
+                f"  Active:  {vtm_active_count}/{len(positions)}\n"
+                f"  Missing: {vtm_missing_count}/{len(positions)}\n"
+                f"{'='*80}\n"
+            )
+            
+        except Exception as e:
+            logger.error(f"[VTM VERIFICATION] ❌ Error: {e}")

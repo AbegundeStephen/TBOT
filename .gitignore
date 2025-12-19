@@ -41,3 +41,8 @@ EOF
 models/training_metadata.json
 
 data/
+
+models/ai/*.weights.h5
+models/ai/*_config.pkl
+models/ai/*_history.png
+models/ai/*_mapping.pkl

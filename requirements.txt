@@ -40,3 +40,18 @@ python-telegram-bot>=20.7
 python-telegram-bot[job-queue]>=20.7
 tensorflow==2.20.0
 ccxt==4.5.26
+
+
+# ✨ NEW: Database (Supabase)
+supabase>=2.0.0
+
+# Dashboard Web Server
+# --------------------
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Production Server (Optional)
+# ----------------------------
+gunicorn>=21.2.0  # For production deployment
+mplfinance>=0.12.10
+
