@@ -1291,11 +1291,11 @@ class TradingTelegramBot:
                 await self._send_presets_message(query)
             elif callback_data == "signals":
                 await self._send_signals_message(query)
-            elif callback_data == "stats":  # ✅ ADD THIS
+            elif callback_data == "stats":  #
                 await self._send_stats_message(query)
-            elif callback_data == "regimes":  # ✅ ADD THIS
+            elif callback_data == "regimes":  
                 await self._send_regimes_message(query)
-            elif callback_data == "overrides":  # ✅ ADD THIS
+            elif callback_data == "overrides":  
                 await self._send_overrides_message(query)
             else:
                 await query.edit_message_text(f"⚠️ Unknown command: {callback_data}")

@@ -559,8 +559,6 @@ class AIValidatorTuner:
 def integrate_ai_monitoring(trading_bot):
     """
     Example of how to integrate monitoring into TradingBot
-    
-    Add this to your TradingBot class:
     """
     if hasattr(trading_bot, 'ai_validator') and trading_bot.ai_validator:
         # Create monitor

@@ -1063,7 +1063,7 @@ class PortfolioManager:
             "total_value": total_value,
             "capital": self.current_capital,
             "equity": self.equity,
-            "cash": self.current_capital,  # ✅ ADD THIS for /status command
+            "cash": self.current_capital,  
             "total_exposure": total_exposure,
             "open_positions": len(self.positions),
             "daily_pnl": daily_pnl,
@@ -1082,12 +1082,12 @@ class PortfolioManager:
                     "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
                     "pnl": pos.get_pnl(current_prices.get(pos.asset, pos.entry_price)),
                     "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
-                    "stop_loss": pos.stop_loss,  # ✅ ADD THIS
-                    "take_profit": pos.take_profit,  # ✅ ADD THIS
+                    "stop_loss": pos.stop_loss,  
+                    "take_profit": pos.take_profit,  
                     "mt5_ticket": pos.mt5_ticket,
-                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,  # ✅ ADD THIS
+                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,  
                     "binance_order_id": pos.binance_order_id,
-                    "binance_profit": pos.binance_profit if pos.binance_order_id else None,  # ✅ ADD THIS
+                    "binance_profit": pos.binance_profit if pos.binance_order_id else None,  
                 }
                 for pos in self.positions.values()
             },
