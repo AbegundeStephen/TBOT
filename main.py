@@ -1875,7 +1875,7 @@ class TradingBot:
     def _fetch_4h_data(self, asset_name: str) -> pd.DataFrame:
         """
         Helper method to fetch 4H data for S/R analysis
-        Add this as a method to your TradingBot class
+   
         """
         try:
             asset_cfg = self.config["assets"][asset_name]
@@ -1986,7 +1986,7 @@ class TradingBot:
     def _fetch_current_data(self, asset_name: str) -> pd.DataFrame:
         """
         Helper to fetch current 15min data for chart generation
-        Add this method to TradingBot class
+   
         """
         try:
             asset_cfg = self.config["assets"][asset_name]

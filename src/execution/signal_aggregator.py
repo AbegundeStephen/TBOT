@@ -30,7 +30,7 @@ class PerformanceWeightedAggregator:
         ai_validator=None,
         enable_ai_circuit_breaker: bool = False,
         enable_detailed_logging: bool = False,
-        strong_signal_bypass_threshold: float = 0.70,  # ADD THIS PARAMETER
+        strong_signal_bypass_threshold: float = 0.70,  
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -80,7 +80,7 @@ class PerformanceWeightedAggregator:
                 "tf_signals_checked": 0,
                 "tf_approved": 0,
                 "tf_rejected": 0,
-                "bypassed_strong_signal": 0,  # ADD THIS
+                "bypassed_strong_signal": 0, 
             }
 
             # Circuit breaker configuration
@@ -91,7 +91,7 @@ class PerformanceWeightedAggregator:
             self.ai_bypass_cooldown = 0
 
             logger.info(f"[AGGREGATOR] AI circuit breaker: {'ENABLED' if enable_ai_circuit_breaker else 'DISABLED'}")
-            logger.info(f"[AGGREGATOR] Strong signal bypass: {self.strong_signal_bypass:.2%}")  # ADD THIS
+            logger.info(f"[AGGREGATOR] Strong signal bypass: {self.strong_signal_bypass:.2%}")  
             logger.info(f"[AGGREGATOR] Detailed logging: {'ENABLED' if self.detailed_logging else 'DISABLED'}")
 
         # Strategy weights
