@@ -53,5 +53,6 @@ flask-cors>=4.0.0
 # Production Server (Optional)
 # ----------------------------
 gunicorn>=21.2.0  # For production deployment
-mplfinance>=0.12.10
+mplfinance==0.12.10b0
+
 
