@@ -84,7 +84,7 @@ class PatternMiner:
             df = pd.read_csv(filepath)
             df.columns = df.columns.str.lower()
 
-            # Handle timestamps - FIXED to handle both string and numeric formats
+            # Handle timestamps -  to handle both string and numeric formats
             if "timestamp" in df.columns:
                 # Try parsing as datetime string first
                 df["date"] = pd.to_datetime(df["timestamp"], errors="coerce")

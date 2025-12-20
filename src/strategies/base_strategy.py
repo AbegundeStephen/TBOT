@@ -225,7 +225,7 @@ class BaseStrategy(ABC):
         """
         Generate trade signal WITH RAW CONFIDENCE SCORE
 
-        CRITICAL: NO FILTERING HERE - Let aggregator decide!
+         NO FILTERING HERE - Let aggregator decide!
 
         Returns: (signal, confidence)
         - signal: 1 (BUY), -1 (SELL), 0 (HOLD)

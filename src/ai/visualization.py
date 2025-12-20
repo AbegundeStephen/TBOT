@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Decision Visualization System - FIXED
+AI Decision Visualization System - 
 Generates detailed charts showing:
 - Candlestick patterns with 15min data
 - Support/Resistance levels from 4H analysis
@@ -84,7 +84,7 @@ class AIVisualizationGenerator:
             BytesIO buffer containing the chart image
         """
         try:
-            # Create figure with explicit spacing (FIXED: prevents tight_layout warning)
+            # Create figure with explicit spacing ( prevents tight_layout warning)
             fig = plt.figure(figsize=(16, 12))
             gs = fig.add_gridspec(
                 4,
@@ -117,7 +117,7 @@ class AIVisualizationGenerator:
             ax_ai = fig.add_subplot(gs[3, 1])
             self._plot_ai_validation(ax_ai, details)
 
-            # Add title with timestamp (FIXED: No unicode emoji)
+            # Add title with timestamp ( No unicode emoji)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             signal_type = "BUY" if signal == 1 else "SELL" if signal == -1 else "HOLD"
             signal_color = (
@@ -135,7 +135,7 @@ class AIVisualizationGenerator:
                 color=signal_color,
             )
 
-            # FIXED: Don't use tight_layout (already handled by gridspec)
+            #  Don't use tight_layout (already handled by gridspec)
 
             # Save to buffer
             buf = io.BytesIO()
@@ -788,7 +788,7 @@ class AIVisualizationGenerator:
 
     def _plot_ai_validation(self, ax, details: Dict):
         """
-        FIXED: AI validation summary with comprehensive data display
+         AI validation summary with comprehensive data display
         """
         try:
             ax.axis("off")

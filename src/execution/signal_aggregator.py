@@ -8,6 +8,7 @@ IMPROVEMENTS:
 - AI performance tracking
 - Graceful degradation if AI fails
 """
+
 import pandas as pd
 import logging
 from typing import Dict, Tuple, Optional
@@ -16,10 +17,12 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
+
 class PerformanceWeightedAggregator:
     """
     Multi-Strategy Aggregator with AI validation and safety features
     """
+
     def __init__(
         self,
         mean_reversion_strategy,
@@ -30,7 +33,7 @@ class PerformanceWeightedAggregator:
         ai_validator=None,
         enable_ai_circuit_breaker: bool = False,
         enable_detailed_logging: bool = False,
-        strong_signal_bypass_threshold: float = 0.70,  
+        strong_signal_bypass_threshold: float = 0.70,
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -40,7 +43,7 @@ class PerformanceWeightedAggregator:
         # Initialize regime tracking
         self.previous_regime = None
         self.regime_initialized = False
-        
+
         # ADD THESE TWO LINES
         self.detailed_logging = enable_detailed_logging
         self.strong_signal_bypass = strong_signal_bypass_threshold
@@ -56,20 +59,24 @@ class PerformanceWeightedAggregator:
                 # Validate AI is properly initialized
                 assert hasattr(ai_validator, "sniper"), "Sniper not initialized"
                 assert hasattr(ai_validator.sniper, "model"), "Model not loaded"
-                assert hasattr(ai_validator, "pattern_id_map"), "Pattern mapping missing"
+                assert hasattr(
+                    ai_validator, "pattern_id_map"
+                ), "Pattern mapping missing"
                 assert len(ai_validator.pattern_id_map) > 0, "Pattern mapping empty"
 
                 self.ai_validator = ai_validator
                 self.ai_enabled = True
 
                 logger.info(f"[AGGREGATOR] AI validation: ✓ ENABLED")
-                logger.info(f"[AGGREGATOR] Patterns loaded: {len(ai_validator.pattern_id_map)}")
+                logger.info(
+                    f"[AGGREGATOR] Patterns loaded: {len(ai_validator.pattern_id_map)}"
+                )
 
             except (AssertionError, AttributeError) as e:
                 logger.error(f"[AGGREGATOR] AI validation setup failed: {e}")
                 logger.warning("[AGGREGATOR] Continuing without AI validation")
                 self.ai_validator = None
-                self.ai_enabled = False  # FIXED: Should be False when validator fails
+                self.ai_enabled = False  #  Should be False when validator fails
 
         # AI statistics tracking
         if self.ai_enabled:
@@ -80,7 +87,7 @@ class PerformanceWeightedAggregator:
                 "tf_signals_checked": 0,
                 "tf_approved": 0,
                 "tf_rejected": 0,
-                "bypassed_strong_signal": 0, 
+                "bypassed_strong_signal": 0,
             }
 
             # Circuit breaker configuration
@@ -90,9 +97,15 @@ class PerformanceWeightedAggregator:
             self.ai_bypass_threshold = 0.85
             self.ai_bypass_cooldown = 0
 
-            logger.info(f"[AGGREGATOR] AI circuit breaker: {'ENABLED' if enable_ai_circuit_breaker else 'DISABLED'}")
-            logger.info(f"[AGGREGATOR] Strong signal bypass: {self.strong_signal_bypass:.2%}")  
-            logger.info(f"[AGGREGATOR] Detailed logging: {'ENABLED' if self.detailed_logging else 'DISABLED'}")
+            logger.info(
+                f"[AGGREGATOR] AI circuit breaker: {'ENABLED' if enable_ai_circuit_breaker else 'DISABLED'}"
+            )
+            logger.info(
+                f"[AGGREGATOR] Strong signal bypass: {self.strong_signal_bypass:.2%}"
+            )
+            logger.info(
+                f"[AGGREGATOR] Detailed logging: {'ENABLED' if self.detailed_logging else 'DISABLED'}"
+            )
 
         # Strategy weights
         if self.asset_type == "BTC":
@@ -168,7 +181,9 @@ class PerformanceWeightedAggregator:
         logger.info("📊 STRATEGY ROLES:")
         logger.info("   Mean Reversion:   DECISION MAKER (weight: 0.50)")
         logger.info("   Trend Following:  DECISION MAKER (weight: 0.50)")
-        logger.info(f"   EMA 50/{'200' if self.asset_type == 'BTC' else '100'}:       REGIME DETECTOR")
+        logger.info(
+            f"   EMA 50/{'200' if self.asset_type == 'BTC' else '100'}:       REGIME DETECTOR"
+        )
         logger.info("=" * 80)
         logger.info("")
 
@@ -228,8 +243,12 @@ class PerformanceWeightedAggregator:
                 logger.warning("")
                 logger.warning("=" * 70)
                 logger.warning("⚠️  AI CIRCUIT BREAKER TRIGGERED")
-                logger.warning(f"   Rejection rate: {rejection_rate:.0%} (threshold: {self.ai_bypass_threshold:.0%})")
-                logger.warning(f"   AI validation temporarily DISABLED for next 10 signals")
+                logger.warning(
+                    f"   Rejection rate: {rejection_rate:.0%} (threshold: {self.ai_bypass_threshold:.0%})"
+                )
+                logger.warning(
+                    f"   AI validation temporarily DISABLED for next 10 signals"
+                )
                 logger.warning("=" * 70)
                 logger.warning("")
                 self.ai_bypass_active = True
@@ -253,7 +272,9 @@ class PerformanceWeightedAggregator:
         try:
             MIN_DATA_POINTS = 50
             if len(df) < MIN_DATA_POINTS:
-                logger.warning(f"Insufficient data for regime detection: {len(df)} rows")
+                logger.warning(
+                    f"Insufficient data for regime detection: {len(df)} rows"
+                )
                 self.stats["regime_detection_failures"] += 1
 
                 #  Better fallback logic
@@ -263,13 +284,19 @@ class PerformanceWeightedAggregator:
 
                 # Emergency fallback: simple momentum check
                 if len(df) >= 20:
-                    recent_momentum = (df["close"].iloc[-1] - df["close"].iloc[-20]) / df["close"].iloc[-20]
+                    recent_momentum = (
+                        df["close"].iloc[-1] - df["close"].iloc[-20]
+                    ) / df["close"].iloc[-20]
                     emergency_regime = recent_momentum > 0
-                    logger.info(f"[REGIME] Emergency mode: {'BULL' if emergency_regime else 'BEAR'} (20-day momentum: {recent_momentum:.2%})")
+                    logger.info(
+                        f"[REGIME] Emergency mode: {'BULL' if emergency_regime else 'BEAR'} (20-day momentum: {recent_momentum:.2%})"
+                    )
                     return emergency_regime, 0.3
 
                 # Last resort: default to BEAR (conservative)
-                logger.warning("[REGIME] Insufficient data - defaulting to BEAR (conservative)")
+                logger.warning(
+                    "[REGIME] Insufficient data - defaulting to BEAR (conservative)"
+                )
                 return False, 0.3
 
             # Generate features
@@ -277,7 +304,9 @@ class PerformanceWeightedAggregator:
             if features_df.empty or len(features_df) < MIN_DATA_POINTS:
                 logger.warning(f"EMA features insufficient: {len(features_df)} rows")
                 self.stats["regime_detection_failures"] += 1
-                fallback_regime = self.previous_regime if self.previous_regime is not None else False
+                fallback_regime = (
+                    self.previous_regime if self.previous_regime is not None else False
+                )
                 return fallback_regime, 0.3
 
             latest = features_df.iloc[-1]
@@ -298,15 +327,25 @@ class PerformanceWeightedAggregator:
             if pd.isna(ema_fast) or pd.isna(ema_slow):
                 logger.warning("Invalid EMA values")
                 self.stats["regime_detection_failures"] += 1
-                fallback_regime = self.previous_regime if self.previous_regime is not None else False
+                fallback_regime = (
+                    self.previous_regime if self.previous_regime is not None else False
+                )
                 return fallback_regime, 0.3
 
             # Calculate supporting indicators
             close_prices = features_df["close"].values
 
             # Multi-timeframe momentum
-            ret_20 = (close_prices[-1] - close_prices[-20]) / close_prices[-20] if len(close_prices) >= 20 else 0.0
-            ret_50 = (close_prices[-1] - close_prices[-50]) / close_prices[-50] if len(close_prices) >= 50 else 0.0
+            ret_20 = (
+                (close_prices[-1] - close_prices[-20]) / close_prices[-20]
+                if len(close_prices) >= 20
+                else 0.0
+            )
+            ret_50 = (
+                (close_prices[-1] - close_prices[-50]) / close_prices[-50]
+                if len(close_prices) >= 50
+                else 0.0
+            )
 
             # Volatility
             if len(close_prices) >= 21:
@@ -369,14 +408,18 @@ class PerformanceWeightedAggregator:
                     # Currently BULLISH - need clear bearish signals to flip
                     if bearish_score > bullish_score + 2:
                         is_bull = False
-                        logger.info(f"   🔄 Regime flip: BULL→BEAR (scores: bull={bullish_score}, bear={bearish_score})")
+                        logger.info(
+                            f"   🔄 Regime flip: BULL→BEAR (scores: bull={bullish_score}, bear={bearish_score})"
+                        )
                     else:
                         is_bull = True
                 else:
                     # Currently BEARISH - need clear bullish signals to flip
                     if bullish_score > bearish_score + 2:
                         is_bull = True
-                        logger.info(f"   🔄 Regime flip: BEAR→BULL (scores: bull={bullish_score}, bear={bearish_score})")
+                        logger.info(
+                            f"   🔄 Regime flip: BEAR→BULL (scores: bull={bullish_score}, bear={bearish_score})"
+                        )
                     else:
                         is_bull = False
 
@@ -399,11 +442,17 @@ class PerformanceWeightedAggregator:
                 regime_name = "🚀 BULL MARKET" if is_bull else "🐻 BEAR MARKET"
                 logger.info("")
                 logger.info("=" * 70)
-                logger.info(f"⚡ REGIME CHANGE #{self.stats['regime_changes']} → {regime_name}")
-                logger.info(f"   EMA Fast: ${ema_fast:.2f} | Slow: ${ema_slow:.2f} | Diff: {ema_diff_pct:.2f}%")
+                logger.info(
+                    f"⚡ REGIME CHANGE #{self.stats['regime_changes']} → {regime_name}"
+                )
+                logger.info(
+                    f"   EMA Fast: ${ema_fast:.2f} | Slow: ${ema_slow:.2f} | Diff: {ema_diff_pct:.2f}%"
+                )
                 logger.info(f"   Momentum: 20d={ret_20:.2%} | 50d={ret_50:.2%}")
                 logger.info(f"   Scores: Bull={bullish_score} | Bear={bearish_score}")
-                logger.info(f"   ADX: {adx:.1f} | MACD: {macd_hist:.3f} | RSI: {rsi:.1f}")
+                logger.info(
+                    f"   ADX: {adx:.1f} | MACD: {macd_hist:.3f} | RSI: {rsi:.1f}"
+                )
                 logger.info(f"   Confidence: {confidence:.2f}")
                 logger.info("=" * 70)
                 logger.info("")
@@ -414,7 +463,9 @@ class PerformanceWeightedAggregator:
                 logger.info("=" * 70)
                 logger.info(f"🎬 INITIAL REGIME → {regime_name}")
                 logger.info(f"   Scores: Bull={bullish_score} | Bear={bearish_score}")
-                logger.info(f"   EMA Diff: {ema_diff_pct:.2f}% | Momentum: {ret_20:.2%}")
+                logger.info(
+                    f"   EMA Diff: {ema_diff_pct:.2f}% | Momentum: {ret_20:.2%}"
+                )
                 logger.info(f"   Confidence: {confidence:.2f}")
                 logger.info("=" * 70)
                 logger.info("")
@@ -432,10 +483,14 @@ class PerformanceWeightedAggregator:
         except Exception as e:
             logger.error(f"Error detecting regime: {e}", exc_info=True)
             self.stats["regime_detection_failures"] += 1
-            fallback_regime = self.previous_regime if self.previous_regime is not None else False
+            fallback_regime = (
+                self.previous_regime if self.previous_regime is not None else False
+            )
             return fallback_regime, 0.3
 
-    def calculate_regime_adjusted_thresholds(self, is_bull: bool, regime_confidence: float) -> Tuple[float, float]:
+    def calculate_regime_adjusted_thresholds(
+        self, is_bull: bool, regime_confidence: float
+    ) -> Tuple[float, float]:
         """
         Dynamically adjust thresholds based on regime strength
         """
@@ -461,54 +516,58 @@ class PerformanceWeightedAggregator:
 
         # Log significant changes
         if abs(adjusted_buy - base_buy) > 0.05:
-            logger.debug(f"[THRESHOLD] Buy: {base_buy:.2f}→{adjusted_buy:.2f} ({'BULL' if is_bull else 'BEAR'}, conf:{regime_confidence:.2f})")
+            logger.debug(
+                f"[THRESHOLD] Buy: {base_buy:.2f}→{adjusted_buy:.2f} ({'BULL' if is_bull else 'BEAR'}, conf:{regime_confidence:.2f})"
+            )
 
         return adjusted_buy, adjusted_sell
 
-    def _format_ai_validation_for_viz(self, final_signal: int, details: dict, df: pd.DataFrame) -> dict:
+    def _format_ai_validation_for_viz(
+        self, final_signal: int, details: dict, df: pd.DataFrame
+    ) -> dict:
         """
         CRITICAL FIX: Format AI validation results for visualization
         Call this AFTER AI validation completes
-        
+
         Args:
             final_signal: Final signal after AI validation
             details: Signal details dict
             df: Market data
-            
+
         Returns:
             Formatted AI validation data ready for visualization
         """
         try:
             # Initialize with safe defaults
             viz_data = {
-                'pattern_detected': False,
-                'validation_passed': False,
-                'pattern_name': 'None',
-                'pattern_id': None,
-                'pattern_confidence': 0.0,
-                'top3_patterns': [],
-                'top3_confidences': [],
-                'sr_analysis': {
-                    'near_sr_level': False,
-                    'level_type': 'none',
-                    'nearest_level': None,
-                    'distance_pct': None,
-                    'levels': [],
-                    'total_levels_found': 0
+                "pattern_detected": False,
+                "validation_passed": False,
+                "pattern_name": "None",
+                "pattern_id": None,
+                "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
+                "sr_analysis": {
+                    "near_sr_level": False,
+                    "level_type": "none",
+                    "nearest_level": None,
+                    "distance_pct": None,
+                    "levels": [],
+                    "total_levels_found": 0,
                 },
-                'action': 'none',
-                'rejection_reasons': [],
-                'error': None
+                "action": "none",
+                "rejection_reasons": [],
+                "error": None,
             }
-            
+
             # Check if AI validator exists and was used
             if not self.ai_validator or not self.ai_enabled:
-                viz_data['action'] = 'ai_disabled'
+                viz_data["action"] = "ai_disabled"
                 return viz_data
-                
+
             # Get current price for S/R analysis
-            current_price = float(df['close'].iloc[-1])
-            
+            current_price = float(df["close"].iloc[-1])
+
             # ================================================================
             # STEP 1: Get S/R Analysis from AI Validator
             # ================================================================
@@ -517,22 +576,22 @@ class PerformanceWeightedAggregator:
                     df=df,
                     current_price=current_price,
                     signal=final_signal,
-                    threshold=self.ai_validator.current_sr_threshold
+                    threshold=self.ai_validator.current_sr_threshold,
                 )
-                
-                viz_data['sr_analysis'] = {
-                    'near_sr_level': sr_result.get('near_level', False),
-                    'level_type': sr_result.get('level_type', 'none'),
-                    'nearest_level': sr_result.get('nearest_level'),
-                    'distance_pct': sr_result.get('distance_pct'),
-                    'levels': sr_result.get('all_levels', [])[:5],  # Top 5 levels
-                    'total_levels_found': len(sr_result.get('all_levels', []))
+
+                viz_data["sr_analysis"] = {
+                    "near_sr_level": sr_result.get("near_level", False),
+                    "level_type": sr_result.get("level_type", "none"),
+                    "nearest_level": sr_result.get("nearest_level"),
+                    "distance_pct": sr_result.get("distance_pct"),
+                    "levels": sr_result.get("all_levels", [])[:5],  # Top 5 levels
+                    "total_levels_found": len(sr_result.get("all_levels", [])),
                 }
-                
+
             except Exception as e:
                 logger.error(f"[VIZ] S/R analysis failed: {e}")
-                viz_data['error'] = f"S/R error: {str(e)}"
-            
+                viz_data["error"] = f"S/R error: {str(e)}"
+
             # ================================================================
             # STEP 2: Get Pattern Detection from AI Validator
             # ================================================================
@@ -540,104 +599,117 @@ class PerformanceWeightedAggregator:
                 pattern_result = self.ai_validator._check_pattern(
                     df=df,
                     signal=final_signal,
-                    min_confidence=self.ai_validator.current_pattern_threshold
+                    min_confidence=self.ai_validator.current_pattern_threshold,
                 )
-                
-                viz_data['pattern_detected'] = pattern_result.get('pattern_name', True)
-                viz_data['pattern_name'] = pattern_result.get('pattern_name', 'None')
-                viz_data['pattern_id'] = pattern_result.get('pattern_id')
-                viz_data['pattern_confidence'] = pattern_result.get('confidence', 0.0)
-                
+
+                viz_data["pattern_detected"] = pattern_result.get("pattern_name", True)
+                viz_data["pattern_name"] = pattern_result.get("pattern_name", "None")
+                viz_data["pattern_id"] = pattern_result.get("pattern_id")
+                viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
+
                 # Get top 3 patterns if available
-                if hasattr(self.ai_validator, 'sniper') and self.ai_validator.sniper:
+                if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
                     try:
                         # Get last 15 candles for pattern detection
-                        snippet = df[['open', 'high', 'low', 'close']].iloc[-15:].values
+                        snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
                         first_open = snippet[0, 0]
-                        
+
                         if first_open > 0:
                             snippet_norm = snippet / first_open - 1
                             snippet_input = snippet_norm.reshape(1, 15, 4)
-                            
+
                             # Get predictions
                             predictions = self.ai_validator.sniper.model.predict(
-                                snippet_input, 
-                                verbose=0
+                                snippet_input, verbose=0
                             )[0]
-                            
+
                             # Get top 3
                             top3_indices = predictions.argsort()[-3:][::-1]
                             top3_confidences = predictions[top3_indices]
-                            
+
                             # Map to pattern names
                             top3_patterns = []
                             for idx in top3_indices:
-                                pattern_name = self.ai_validator.reverse_pattern_map.get(
-                                    idx, 
-                                    f"Pattern_{idx}"
+                                pattern_name = (
+                                    self.ai_validator.reverse_pattern_map.get(
+                                        idx, f"Pattern_{idx}"
+                                    )
                                 )
                                 top3_patterns.append(pattern_name)
-                            
-                            viz_data['top3_patterns'] = top3_patterns
-                            viz_data['top3_confidences'] = top3_confidences.tolist()
-                            
+
+                            viz_data["top3_patterns"] = top3_patterns
+                            viz_data["top3_confidences"] = top3_confidences.tolist()
+
                     except Exception as e:
                         logger.debug(f"[VIZ] Top3 patterns failed: {e}")
-                
+
             except Exception as e:
                 logger.error(f"[VIZ] Pattern detection failed: {e}")
-                viz_data['error'] = f"Pattern error: {str(e)}"
-            
+                viz_data["error"] = f"Pattern error: {str(e)}"
+
             # ================================================================
             # STEP 3: Determine Validation Status
             # ================================================================
-            
+
             # Check if signal was modified by AI
-            original_signal = details.get('original_signal', final_signal)
-            
+            original_signal = details.get("original_signal", final_signal)
+
             if final_signal == 0 and original_signal != 0:
                 # AI rejected the signal
-                viz_data['validation_passed'] = False
-                viz_data['action'] = 'rejected'
-                
+                viz_data["validation_passed"] = False
+                viz_data["action"] = "rejected"
+
                 # Collect rejection reasons
                 reasons = []
-                if not viz_data['sr_analysis']['near_sr_level']:
-                    reasons.append('No nearby S/R level')
-                if not viz_data['pattern_detected']:
-                    reasons.append('No pattern detected')
-                if viz_data['pattern_confidence'] < self.ai_validator.current_pattern_threshold:
-                    reasons.append(f"Low confidence ({viz_data['pattern_confidence']:.1%})")
-                    
-                viz_data['rejection_reasons'] = reasons
-                
+                if not viz_data["sr_analysis"]["near_sr_level"]:
+                    reasons.append("No nearby S/R level")
+                if not viz_data["pattern_detected"]:
+                    reasons.append("No pattern detected")
+                if (
+                    viz_data["pattern_confidence"]
+                    < self.ai_validator.current_pattern_threshold
+                ):
+                    reasons.append(
+                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
+                    )
+
+                viz_data["rejection_reasons"] = reasons
+
             elif final_signal != 0:
                 # Signal was approved (or bypassed)
-                viz_data['validation_passed'] = True
-                
+                viz_data["validation_passed"] = True
+
                 # Check if it was a bypass
-                if details.get('ai_bypassed', False):
-                    viz_data['action'] = 'bypassed'
-                elif details.get('signal_quality', 0) >= self.strong_signal_bypass:
-                    viz_data['action'] = 'bypassed_strong_signal'
+                if details.get("ai_bypassed", False):
+                    viz_data["action"] = "bypassed"
+                elif details.get("signal_quality", 0) >= self.strong_signal_bypass:
+                    viz_data["action"] = "bypassed_strong_signal"
                 else:
-                    viz_data['action'] = 'approved'
+                    viz_data["action"] = "approved"
             else:
                 # HOLD signal
-                viz_data['action'] = 'hold'
-            
+                viz_data["action"] = "hold"
+
             return viz_data
-            
+
         except Exception as e:
             logger.error(f"[VIZ] AI formatting failed: {e}", exc_info=True)
             return {
-                'pattern_detected': False,
-                'validation_passed': False,
-                'error': str(e),
-                'action': 'error'
+                "pattern_detected": False,
+                "validation_passed": False,
+                "error": str(e),
+                "action": "error",
             }
-            
-    def _calculate_score(self, target_signal: int, mr_signal: int, mr_conf: float, tf_signal: int, tf_conf: float, is_bull: bool) -> Tuple[float, str, int]:
+
+    def _calculate_score(
+        self,
+        target_signal: int,
+        mr_signal: int,
+        mr_conf: float,
+        tf_signal: int,
+        tf_conf: float,
+        is_bull: bool,
+    ) -> Tuple[float, str, int]:
         """Calculate aggregated score"""
         components = []
         total_score = 0.0
@@ -655,12 +727,16 @@ class PerformanceWeightedAggregator:
             agreement_count += 1
         elif mr_signal == 0:
             effective_conf = max(mr_conf, min_conf)
-            contribution = (effective_conf * hold_contrib) * self.weights["mean_reversion"]
+            contribution = (effective_conf * hold_contrib) * self.weights[
+                "mean_reversion"
+            ]
             total_score += contribution
             components.append(f"MR_hold:{contribution:.3f}")
         else:
             effective_conf = max(mr_conf, min_conf)
-            penalty = (effective_conf * opposition_penalty) * self.weights["mean_reversion"]
+            penalty = (effective_conf * opposition_penalty) * self.weights[
+                "mean_reversion"
+            ]
             total_score -= penalty
             components.append(f"MR_oppose:-{penalty:.3f}")
 
@@ -673,12 +749,16 @@ class PerformanceWeightedAggregator:
             agreement_count += 1
         elif tf_signal == 0:
             effective_conf = max(tf_conf, min_conf)
-            contribution = (effective_conf * hold_contrib) * self.weights["trend_following"]
+            contribution = (effective_conf * hold_contrib) * self.weights[
+                "trend_following"
+            ]
             total_score += contribution
             components.append(f"TF_hold:{contribution:.3f}")
         else:
             effective_conf = max(tf_conf, min_conf)
-            penalty = (effective_conf * opposition_penalty) * self.weights["trend_following"]
+            penalty = (effective_conf * opposition_penalty) * self.weights[
+                "trend_following"
+            ]
             total_score -= penalty
             components.append(f"TF_oppose:-{penalty:.3f}")
 
@@ -764,16 +844,18 @@ class PerformanceWeightedAggregator:
                                 "regime": "bull" if is_bull else "bear",
                                 "regime_confidence": regime_conf,
                                 "asset": self.asset_type,
-                                "signal_quality": signal_quality  # ✓ Now defined
+                                "signal_quality": signal_quality,  # ✓ Now defined
                             },
-                            df=df
+                            df=df,
                         )
 
                         if validated_mr == 0 and mr_signal != 0:
                             # AI rejected
                             self.ai_stats["mr_rejected"] += 1
                             self.ai_rejection_window.append(True)
-                            logger.debug(f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}")
+                            logger.debug(
+                                f"[AI] MR {mr_signal} rejected: {mr_details.get('ai_validation', 'unknown')}"
+                            )
                             mr_signal = 0
                             mr_conf = 0.0
                         else:
@@ -792,23 +874,27 @@ class PerformanceWeightedAggregator:
                                 "regime": "bull" if is_bull else "bear",
                                 "regime_confidence": regime_conf,
                                 "asset": self.asset_type,
-                                "signal_quality": signal_quality  # ✓ Now defined
+                                "signal_quality": signal_quality,  # ✓ Now defined
                             },
-                            df=df
+                            df=df,
                         )
 
                         if validated_tf == 0 and tf_signal != 0:
                             # AI rejected
                             self.ai_stats["tf_rejected"] += 1
                             self.ai_rejection_window.append(True)
-                            logger.debug(f"[AI] TF {tf_signal} rejected: {tf_details.get('ai_validation', 'unknown')}")
+                            logger.debug(
+                                f"[AI] TF {tf_signal} rejected: {tf_details.get('ai_validation', 'unknown')}"
+                            )
                             tf_signal = 0
                             tf_conf = 0.0
                         else:
                             self.ai_stats["tf_approved"] += 1
                             self.ai_rejection_window.append(False)
             else:
-                logger.debug("[AI] Validator not initialized or disabled, skipping AI validation.")
+                logger.debug(
+                    "[AI] Validator not initialized or disabled, skipping AI validation."
+                )
 
             # STEP 4: Calculate scores
             buy_score, buy_explanation, buy_agreement = self._calculate_score(
@@ -821,16 +907,18 @@ class PerformanceWeightedAggregator:
             )
 
             sell_score, sell_explanation, sell_agreement = self._calculate_score(
-            target_signal=-1,
-            mr_signal=mr_signal,
-            mr_conf=mr_conf,
-            tf_signal=tf_signal,
-            tf_conf=tf_conf,
-            is_bull=is_bull,
-        )
+                target_signal=-1,
+                mr_signal=mr_signal,
+                mr_conf=mr_conf,
+                tf_signal=tf_signal,
+                tf_conf=tf_conf,
+                is_bull=is_bull,
+            )
 
-                # STEP 5: Dynamic thresholds
-            adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+            # STEP 5: Dynamic thresholds
+            adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(
+                is_bull, regime_conf
+            )
 
             base_buy_thresh = self.config["buy_threshold"]
             base_sell_thresh = self.config["sell_threshold"]
@@ -844,7 +932,9 @@ class PerformanceWeightedAggregator:
                 reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
             elif sell_score >= adj_sell_thresh and sell_score > buy_score:
                 final_signal = -1
-                reasoning = f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
+                reasoning = (
+                    f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
+                )
             else:
                 final_signal = 0
                 reasoning = f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
@@ -914,33 +1004,43 @@ class PerformanceWeightedAggregator:
                 if mr_original != mr_signal or tf_original != tf_signal:
                     details["ai_modified"] = True
                     details["ai_changes"] = {
-                        "mr": f"{mr_original}→{mr_signal}" if mr_original != mr_signal else "unchanged",
-                        "tf": f"{tf_original}→{tf_signal}" if tf_original != tf_signal else "unchanged"
+                        "mr": (
+                            f"{mr_original}→{mr_signal}"
+                            if mr_original != mr_signal
+                            else "unchanged"
+                        ),
+                        "tf": (
+                            f"{tf_original}→{tf_signal}"
+                            if tf_original != tf_signal
+                            else "unchanged"
+                        ),
                     }
-                
+
                 # ✅ CRITICAL FIX: Format AI validation data for visualization
                 try:
                     ai_viz_data = self._format_ai_validation_for_viz(
-                        final_signal=final_signal,
-                        details=details.copy(),
-                        df=df
+                        final_signal=final_signal, details=details.copy(), df=df
                     )
-                    details['ai_validation'] = ai_viz_data
-                    
+                    details["ai_validation"] = ai_viz_data
+
                     if self.detailed_logging:
-                        logger.info(f"[AI VIZ] Pattern: {ai_viz_data.get('pattern_name', 'N/A')}")
-                        logger.info(f"[AI VIZ] Confidence: {ai_viz_data.get('pattern_confidence', 0):.2%}")
-                        logger.info(f"[AI VIZ] Action: {ai_viz_data.get('action', 'N/A')}")
-                        
+                        logger.info(
+                            f"[AI VIZ] Pattern: {ai_viz_data.get('pattern_name', 'N/A')}"
+                        )
+                        logger.info(
+                            f"[AI VIZ] Confidence: {ai_viz_data.get('pattern_confidence', 0):.2%}"
+                        )
+                        logger.info(
+                            f"[AI VIZ] Action: {ai_viz_data.get('action', 'N/A')}"
+                        )
+
                 except Exception as e:
                     logger.error(f"[AI VIZ] Formatting failed: {e}")
-                    details['ai_validation'] = {
-                        'pattern_detected': False,
-                        'validation_passed': False,
-                        'error': str(e)
+                    details["ai_validation"] = {
+                        "pattern_detected": False,
+                        "validation_passed": False,
+                        "error": str(e),
                     }
-
-
 
             return final_signal, details
 
@@ -953,43 +1053,41 @@ class PerformanceWeightedAggregator:
                 "signal_quality": 0.0,
                 "final_signal": 0,
             }
-            
-            
+
     def _calculate_ai_impact(self, ai_stats: dict) -> dict:
-            """Calculate AI validation impact on trading"""
-            total_checks = ai_stats.get("total_checks", 0)
-            if total_checks == 0:
-                return {"message": "No AI checks performed"}
-            
-            approved = ai_stats.get("approved", 0)
-            rejected = ai_stats.get("rejected", 0)
-            bypassed_strong = ai_stats.get("bypassed_strong_signal", 0)
-            bypassed_breaker = ai_stats.get("bypassed_circuit_breaker", 0)
-            
-            effective_signals = approved + bypassed_strong + bypassed_breaker
-            filter_rate = (rejected / total_checks) * 100 if total_checks > 0 else 0
-            
-            return {
-                "total_signals_checked": total_checks,
-                "effective_signals": effective_signals,
-                "filtered_signals": rejected,
-                "filter_rate": f"{filter_rate:.1f}%",
-                "strong_signal_bypasses": bypassed_strong,
-                "circuit_breaker_bypasses": bypassed_breaker,
-                "net_approval_rate": f"{(effective_signals/total_checks)*100:.1f}%",
-                "assessment": self._assess_ai_performance(filter_rate)
-            }
-        
+        """Calculate AI validation impact on trading"""
+        total_checks = ai_stats.get("total_checks", 0)
+        if total_checks == 0:
+            return {"message": "No AI checks performed"}
+
+        approved = ai_stats.get("approved", 0)
+        rejected = ai_stats.get("rejected", 0)
+        bypassed_strong = ai_stats.get("bypassed_strong_signal", 0)
+        bypassed_breaker = ai_stats.get("bypassed_circuit_breaker", 0)
+
+        effective_signals = approved + bypassed_strong + bypassed_breaker
+        filter_rate = (rejected / total_checks) * 100 if total_checks > 0 else 0
+
+        return {
+            "total_signals_checked": total_checks,
+            "effective_signals": effective_signals,
+            "filtered_signals": rejected,
+            "filter_rate": f"{filter_rate:.1f}%",
+            "strong_signal_bypasses": bypassed_strong,
+            "circuit_breaker_bypasses": bypassed_breaker,
+            "net_approval_rate": f"{(effective_signals/total_checks)*100:.1f}%",
+            "assessment": self._assess_ai_performance(filter_rate),
+        }
+
     def _assess_ai_performance(self, filter_rate: float) -> str:
-            """Assess if AI filtering is appropriate"""
-            if filter_rate > 75:
-                return "⚠️ OVER-FILTERING: AI rejecting too many signals"
-            elif filter_rate > 50:
-                return "⚠️ HIGH FILTERING: AI may be too strict"
-            elif filter_rate > 25:
-                return "✓ BALANCED: AI filtering is reasonable"
-            elif filter_rate > 10:
-                return "✓ LIGHT FILTERING: AI approving most signals"
-            else:
-                return "ℹ️ MINIMAL FILTERING: AI rarely rejecting signals"
-        
+        """Assess if AI filtering is appropriate"""
+        if filter_rate > 75:
+            return "⚠️ OVER-FILTERING: AI rejecting too many signals"
+        elif filter_rate > 50:
+            return "⚠️ HIGH FILTERING: AI may be too strict"
+        elif filter_rate > 25:
+            return "✓ BALANCED: AI filtering is reasonable"
+        elif filter_rate > 10:
+            return "✓ LIGHT FILTERING: AI approving most signals"
+        else:
+            return "ℹ️ MINIMAL FILTERING: AI rarely rejecting signals"

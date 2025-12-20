@@ -585,8 +585,8 @@ if __name__ == "__main__":
     WHAT CHANGES:
     
     ✅ BEFORE (Simple):
-       - Fixed % stop loss (e.g., -2%)
-       - Fixed % take profit (e.g., +8%)
+       -  % stop loss (e.g., -2%)
+       -  % take profit (e.g., +8%)
        - All-or-nothing exits
        - No partial profits
        - No trailing stops
