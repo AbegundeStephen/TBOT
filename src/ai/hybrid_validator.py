@@ -787,7 +787,7 @@ class HybridSignalValidator:
         logger.info("🔄 AI circuit breaker reset - validation RE-ENABLED")
 
     def _update_sr_levels(self, df: pd.DataFrame):
-        """IMPROVED: More robust S/R level extraction"""
+        """ More robust S/R level extraction"""
         pivots = self._extract_pivots(df, window=7)
 
         # FIXED: Lower threshold from 5 to 3 pivots
@@ -854,7 +854,7 @@ class HybridSignalValidator:
             )
 
     def _extract_pivots(self, df: pd.DataFrame, window=7) -> np.ndarray:
-        """IMPROVED: Extract more pivots with lower window"""
+        """ Extract more pivots with lower window"""
         highs = df["high"].values
         lows = df["low"].values
         pivots = []

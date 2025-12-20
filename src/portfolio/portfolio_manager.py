@@ -1138,7 +1138,7 @@ NEW CODE:
         stop_loss=stop_loss,
         take_profit=take_profit,
         trailing_stop_pct=trailing_stop_pct,
-        mt5_ticket=result.order,  # ← ADD THIS LINE to track MT5 ticket
+        mt5_ticket=result.order,  
     )
 
 Then in your main trading loop, call update_mt5_positions_profit() regularly:
