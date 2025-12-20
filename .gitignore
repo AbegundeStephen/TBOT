@@ -32,7 +32,6 @@ logs/*
 
 # Backtest results
 backtest_results/
-*.html
 
 # OS
 .DS_Store
