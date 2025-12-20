@@ -330,7 +330,7 @@ class AIVisualizationGenerator:
         self, ax, df_4h: pd.DataFrame, current_price: float, details: Dict
     ):
         """
-        Plot Support/Resistance levels with defensive checks
+        Plot Support/Resistance levels as trend chart with overlaid S/R lines
         """
         try:
             # ✅ FIX: Defensive extraction of AI details
@@ -347,7 +347,7 @@ class AIVisualizationGenerator:
                     fontsize=12,
                 )
                 ax.set_title(
-                    "4H Support/Resistance Levels", fontsize=11, fontweight="bold"
+                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
                 )
                 return
 
@@ -362,7 +362,7 @@ class AIVisualizationGenerator:
                     fontsize=12,
                 )
                 ax.set_title(
-                    "4H Support/Resistance Levels", fontsize=11, fontweight="bold"
+                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
                 )
                 return
 
@@ -379,27 +379,185 @@ class AIVisualizationGenerator:
                     fontsize=12,
                 )
                 ax.set_title(
-                    "4H Support/Resistance Levels", fontsize=11, fontweight="bold"
+                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
                 )
+                return
+
+            # Check if we have 4H dataframe
+            if df_4h is None or len(df_4h) == 0:
+                # Fallback to bar chart if no 4H data
+                self._plot_sr_levels_bars(ax, sr_analysis, current_price)
                 return
 
             levels = sr_analysis.get("levels", [])
 
-            # Sort levels
+            # Take last 60 candles for clarity
+            df_plot = df_4h.tail(60).copy()
+
+            if len(df_plot) < 10:
+                # Not enough data, use bar chart
+                self._plot_sr_levels_bars(ax, sr_analysis, current_price)
+                return
+
+            # Plot price line (close prices)
+            x_range = range(len(df_plot))
+            closes = df_plot["close"].values
+
+            # Main price line
+            ax.plot(
+                x_range,
+                closes,
+                color="cyan",
+                linewidth=2,
+                alpha=0.8,
+                label="4H Close",
+                zorder=5,
+            )
+
+            # Fill between high/low for context
+            highs = df_plot["high"].values
+            lows = df_plot["low"].values
+            ax.fill_between(x_range, lows, highs, color="gray", alpha=0.15, zorder=1)
+
+            # Get price range for visualization
+            price_min = df_plot[["high", "low"]].values.min()
+            price_max = df_plot[["high", "low"]].values.max()
+            price_range = price_max - price_min
+            buffer = price_range * 0.1
+
+            # Plot S/R levels as horizontal lines
+            for level in levels:
+                # Only show levels within visible range
+                if price_min - buffer <= level <= price_max + buffer:
+                    if level < current_price:
+                        # Support
+                        ax.axhline(
+                            y=level,
+                            color="lime",
+                            linestyle="--",
+                            linewidth=2,
+                            alpha=0.7,
+                            label=f"Support: ${level:,.2f}",
+                            zorder=3,
+                        )
+                    else:
+                        # Resistance
+                        ax.axhline(
+                            y=level,
+                            color="red",
+                            linestyle="--",
+                            linewidth=2,
+                            alpha=0.7,
+                            label=f"Resistance: ${level:,.2f}",
+                            zorder=3,
+                        )
+
+            # Mark current price with prominent line
+            ax.axhline(
+                y=current_price,
+                color="white",
+                linestyle="-",
+                linewidth=2.5,
+                alpha=0.9,
+                label=f"Current: ${current_price:,.2f}",
+                zorder=10,
+            )
+
+            # Mark nearest level if available
+            if sr_analysis.get("near_sr_level"):
+                nearest = sr_analysis.get("nearest_level")
+                if nearest and price_min - buffer <= nearest <= price_max + buffer:
+                    level_type = sr_analysis.get("level_type", "Level")
+                    ax.axhline(
+                        y=nearest,
+                        color="orange",
+                        linestyle=":",
+                        linewidth=3,
+                        alpha=0.9,
+                        label=f"Nearest {level_type}: ${nearest:,.2f}",
+                        zorder=8,
+                    )
+
+                    # Highlight zone around nearest level
+                    zone_size = price_range * 0.01  # 1% zone
+                    ax.axhspan(
+                        nearest - zone_size,
+                        nearest + zone_size,
+                        color="orange",
+                        alpha=0.15,
+                        zorder=2,
+                    )
+
+            # Set axis limits
+            ax.set_xlim(-1, len(df_plot))
+            ax.set_ylim(price_min - buffer, price_max + buffer)
+
+            # Labels and styling
+            ax.set_xlabel("4H Candles (Recent 60)", fontsize=10)
+            ax.set_ylabel("Price ($)", fontsize=10)
+            ax.set_title(
+                "4H S/R Analysis - Analyst View", fontsize=11, fontweight="bold"
+            )
+            ax.legend(loc="best", fontsize=8, framealpha=0.9)
+            ax.grid(True, alpha=0.3, which="both")
+
+            # Add distance info box
+            distance_pct = sr_analysis.get("distance_pct", 0)
+            if isinstance(distance_pct, (int, float)) and distance_pct > 0:
+                level_type = sr_analysis.get("level_type", "Level")
+                info_text = (
+                    f"Distance to {level_type}: {distance_pct:.2f}%\n"
+                    f"Total levels found: {len(levels)}"
+                )
+                ax.text(
+                    0.02,
+                    0.98,
+                    info_text,
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=9,
+                    bbox=dict(
+                        boxstyle="round",
+                        facecolor="black",
+                        edgecolor="orange",
+                        alpha=0.8,
+                        linewidth=2,
+                    ),
+                )
+
+        except Exception as e:
+            logger.error(f"[VIZ] S/R plot error: {e}", exc_info=True)
+            ax.text(
+                0.5,
+                0.5,
+                f"Error displaying S/R levels",
+                ha="center",
+                va="center",
+                fontsize=10,
+            )
+            ax.set_title(
+                "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
+            )
+
+    def _plot_sr_levels_bars(self, ax, sr_analysis: Dict, current_price: float):
+        """
+        Fallback: Plot S/R levels as horizontal bars (original method)
+        Used when 4H dataframe is not available
+        """
+        try:
+            levels = sr_analysis.get("levels", [])
             levels_sorted = sorted(levels)
 
             # Create horizontal bar chart
             y_positions = range(len(levels_sorted))
             colors = []
-            labels = []
 
             for level in levels_sorted:
                 if level < current_price:
                     colors.append("lime")  # Support
-                    labels.append(f"Support: ${level:,.2f}")
                 else:
                     colors.append("red")  # Resistance
-                    labels.append(f"Resistance: ${level:,.2f}")
 
             ax.barh(
                 y_positions, levels_sorted, color=colors, alpha=0.7, edgecolor="white"
@@ -414,7 +572,7 @@ class AIVisualizationGenerator:
                 label=f"Current: ${current_price:,.2f}",
             )
 
-            # Mark nearest level if available
+            # Mark nearest level
             if sr_analysis.get("near_sr_level"):
                 nearest = sr_analysis.get("nearest_level")
                 if nearest:
@@ -429,34 +587,12 @@ class AIVisualizationGenerator:
             ax.set_yticks(y_positions)
             ax.set_yticklabels([f"L{i+1}" for i in y_positions])
             ax.set_xlabel("Price Level ($)", fontsize=10)
-            ax.set_title("4H Support/Resistance Levels", fontsize=11, fontweight="bold")
+            ax.set_title("4H S/R Levels (Bar View)", fontsize=11, fontweight="bold")
             ax.legend(loc="best", fontsize=8)
             ax.grid(True, alpha=0.3, axis="x")
 
-            # Add distance info
-            distance_pct = sr_analysis.get("distance_pct", 0)
-            if isinstance(distance_pct, (int, float)) and distance_pct > 0:
-                ax.text(
-                    0.02,
-                    0.98,
-                    f"Distance to nearest: {distance_pct:.2f}%",
-                    transform=ax.transAxes,
-                    va="top",
-                    fontsize=9,
-                    bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
-                )
-
         except Exception as e:
-            logger.error(f"[VIZ] S/R plot error: {e}", exc_info=True)
-            ax.text(
-                0.5,
-                0.5,
-                f"Error displaying S/R levels",
-                ha="center",
-                va="center",
-                fontsize=10,
-            )
-            ax.set_title("4H Support/Resistance Levels", fontsize=11, fontweight="bold")
+            logger.error(f"[VIZ] S/R bar plot error: {e}")
 
     def _plot_pattern_analysis(self, ax, df: pd.DataFrame, details: Dict):
         """
