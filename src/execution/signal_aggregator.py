@@ -247,7 +247,7 @@ class PerformanceWeightedAggregator:
 
     def _detect_regime(self, df: pd.DataFrame) -> Tuple[bool, float]:
         """
-        Multi-factor regime detection with improved cold-start handling
+        Multi-factor regime detection with  cold-start handling
         Returns: (is_bull, confidence)
         """
         try:
@@ -256,7 +256,7 @@ class PerformanceWeightedAggregator:
                 logger.warning(f"Insufficient data for regime detection: {len(df)} rows")
                 self.stats["regime_detection_failures"] += 1
 
-                # IMPROVED: Better fallback logic
+                #  Better fallback logic
                 if self.previous_regime is not None:
                     # Use previous regime
                     return self.previous_regime, 0.3
@@ -543,7 +543,7 @@ class PerformanceWeightedAggregator:
                     min_confidence=self.ai_validator.current_pattern_threshold
                 )
                 
-                viz_data['pattern_detected'] = pattern_result.get('pattern_confirmed', False)
+                viz_data['pattern_detected'] = pattern_result.get('pattern_name', True)
                 viz_data['pattern_name'] = pattern_result.get('pattern_name', 'None')
                 viz_data['pattern_id'] = pattern_result.get('pattern_id')
                 viz_data['pattern_confidence'] = pattern_result.get('confidence', 0.0)

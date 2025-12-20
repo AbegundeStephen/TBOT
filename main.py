@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main Trading Bot - IMPROVED STABILITY VERSION
+Main Trading Bot -  STABILITY VERSION
 Enhanced error handling, network resilience, and Telegram thread management
 """
 
@@ -51,12 +51,15 @@ from src.ai import (
     AIValidatorMonitor,
     AIValidatorTuner,
 )
-from src.database.database_manager import TradingDatabaseManager, calculate_daily_summary_from_trades
+from src.database.database_manager import (
+    TradingDatabaseManager,
+    calculate_daily_summary_from_trades,
+)
 from src.ai.visualization import (
     AIVisualizationGenerator,
     TelegramChartSender,
     create_visualization_system,
-    should_send_chart
+    should_send_chart,
 )
 
 import pickle
@@ -74,7 +77,7 @@ def setup_logging(config):
 
     Path(log_file).parent.mkdir(exist_ok=True)
 
-    # ✨ IMPROVED: Add log rotation
+    # ✨  Add log rotation
     from logging.handlers import RotatingFileHandler
 
     file_handler = RotatingFileHandler(
@@ -101,7 +104,7 @@ logger = logging.getLogger(__name__)
 
 
 class TradingBot:
-    """Main trading bot with improved stability and error recovery"""
+    """Main trading bot with  stability and error recovery"""
 
     def __init__(self, config_path: str = "config/config.json"):
         logger.info("=" * 70)
@@ -170,7 +173,7 @@ class TradingBot:
         self._last_successful_cycle = None
         self._consecutive_errors = 0
         self._max_consecutive_errors = 5
-        
+
         # ✨ NEW: Portfolio snapshot tracking
         self._last_snapshot_time = None
         self._snapshot_interval = self.config.get("database", {}).get(
@@ -223,19 +226,19 @@ class TradingBot:
 
         if self.config.get("database", {}).get("enabled", False):
             try:
-                
+
                 db_config = self.config["database"]
                 self.db_manager = TradingDatabaseManager(
                     supabase_url=db_config["supabase_url"],
-                    supabase_key=db_config["supabase_key"]
+                    supabase_key=db_config["supabase_key"],
                 )
-                
+
                 logger.info("[DB] ✓ Connected to Supabase")
-                
+
                 # Test connection
-                self.db_manager.supabase.table('trades').select('id').limit(1).execute()
+                self.db_manager.supabase.table("trades").select("id").limit(1).execute()
                 logger.info("[DB] ✓ Connection test passed")
-                
+
             except Exception as e:
                 logger.error(f"[DB] Failed to initialize: {e}")
                 logger.warning("[DB] Continuing without database logging")
@@ -251,46 +254,48 @@ class TradingBot:
 
         try:
             import MetaTrader5 as mt5
+
             mt5_handler = mt5 if mt5_initialized else None
         except ImportError:
             mt5_handler = None
             logger.warning("[WARN] MetaTrader5 not available")
 
         try:
-            
+
             self.portfolio_manager = PortfolioManager(
                 config=self.config,
                 mt5_handler=mt5_handler,
                 binance_client=self.data_manager.binance_client,
             )
-            
+
             # ✨ CRITICAL FIX: Link database to portfolio
             if self.db_manager:
                 self.portfolio_manager.db_manager = self.db_manager
                 logger.info("[DB] ✓ Database linked to portfolio manager")
-            
+
             logger.info(
                 f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
             )
             logger.info(f"     Capital: ${self.portfolio_manager.current_capital:,.2f}")
-            
+
             # ✨ Log system startup to database
             if self.db_manager:
                 self.db_manager.log_system_event(
-                    event_type='startup',
-                    severity='info',
-                    message='Trading bot started',
-                    component='main',
+                    event_type="startup",
+                    severity="info",
+                    message="Trading bot started",
+                    component="main",
                     metadata={
-                        'mode': self.portfolio_manager.mode,
-                        'initial_capital': self.portfolio_manager.initial_capital,
-                        'assets_enabled': [
-                            asset for asset, cfg in self.config["assets"].items()
+                        "mode": self.portfolio_manager.mode,
+                        "initial_capital": self.portfolio_manager.initial_capital,
+                        "assets_enabled": [
+                            asset
+                            for asset, cfg in self.config["assets"].items()
                             if cfg.get("enabled", False)
-                        ]
-                    }
+                        ],
+                    },
                 )
-                
+
         except Exception as e:
             logger.error(f"[FAIL] Portfolio Manager initialization failed: {e}")
             raise
@@ -305,21 +310,21 @@ class TradingBot:
             and self.data_manager.binance_client is not None
         ):
             try:
-                
+
                 self.binance_handler = BinanceExecutionHandler(
                     config=self.config,
                     client=self.data_manager.binance_client,
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
                 )
-                
+
                 # ✨ Link database to handler
                 if self.db_manager:
                     self.binance_handler.db_manager = self.db_manager
                     logger.info("[DB] ✓ Database linked to Binance handler")
-                
+
                 logger.info("[OK] Binance Execution Handler initialized")
-                
+
             except Exception as e:
                 logger.error(f"[FAIL] Binance handler: {e}")
                 self.binance_handler = None
@@ -327,20 +332,20 @@ class TradingBot:
 
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
-                
+
                 self.mt5_handler = MT5ExecutionHandler(
                     config=self.config,
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
                 )
-                
+
                 # ✨ Link database to handler
                 if self.db_manager:
                     self.mt5_handler.db_manager = self.db_manager
                     logger.info("[DB] ✓ Database linked to MT5 handler")
-                
+
                 logger.info("[OK] MT5 Execution Handler initialized")
-                
+
             except Exception as e:
                 logger.error(f"[FAIL] MT5 handler: {e}")
                 self.mt5_handler = None
@@ -498,9 +503,7 @@ class TradingBot:
                 num_classes = config.get("num_classes", len(pattern_map))
 
                 self.sniper = OHLCSniper(
-                    input_shape=(15, 4),
-                    num_classes=num_classes,
-                    dropout_rate=0.3
+                    input_shape=(15, 4), num_classes=num_classes, dropout_rate=0.3
                 )
 
                 logger.info(f"[AI] Sniper created ({num_classes} classes)")
@@ -542,7 +545,7 @@ class TradingBot:
                 return False
 
             # Initialize monitoring (optional)
-            try:        
+            try:
                 self.ai_monitor = AIValidatorMonitor(self.ai_validator)
                 self.ai_tuner = AIValidatorTuner(self.ai_validator)
 
@@ -557,7 +560,9 @@ class TradingBot:
             logger.info("✅ AI Layer READY")
             logger.info("  Analyst:   4H S/R detection")
             logger.info("  Sniper:    15min patterns")
-            logger.info(f"  Status:    {'ENABLED' if self.params.use_ai_validation else 'DISABLED'}")
+            logger.info(
+                f"  Status:    {'ENABLED' if self.params.use_ai_validation else 'DISABLED'}"
+            )
             logger.info("=" * 70)
 
             return True
@@ -565,17 +570,16 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[AI] Initialization failed: {e}", exc_info=True)
             logger.error("[AI] AI layer DISABLED")
-            
+
             # Reset all AI components
             self.analyst = None
             self.sniper = None
             self.ai_validator = None
             self.ai_monitor = None
             self.ai_tuner = None
-            
+
             return False
-        
-        
+
     def _initialize_aggregators(self):
         """Initialize signal aggregators with AUTO-PRESET support"""
         logger.info("\n" + "-" * 70)
@@ -842,7 +846,6 @@ class TradingBot:
             sys.exit(1)
 
         logger.info(f"\n[OK] Loaded {loaded}/{expected} strategy models")
-        
 
         # ✨ FIXED: Try to initialize AI (non-fatal)
         ai_success = False
@@ -858,7 +861,6 @@ class TradingBot:
             self.analyst = None
             self.sniper = None
             self.ai_validator = None
-            
 
         # Initialize aggregators
         self._initialize_aggregators()
@@ -870,7 +872,7 @@ class TradingBot:
                 logger.info("[AI] Detailed logging enabled")
             except Exception as e:
                 logger.warning(f"[AI] Logging config failed: {e}")
-                
+
         if self.ai_validator and self.telegram_bot and self.analyst and self.sniper:
             try:
                 logger.info("[VIZ] Initializing AI visualization system...")
@@ -878,14 +880,14 @@ class TradingBot:
                     telegram_bot=self.telegram_bot,
                     analyst=self.analyst,
                     sniper=self.sniper,
-                    ai_validator=self.ai_validator
+                    ai_validator=self.ai_validator,
                 )
-                
+
                 if self.chart_sender:
                     logger.info("[VIZ] ✅ Visualization system ready")
                 else:
                     logger.warning("[VIZ] ⚠️ Visualization system failed")
-                    
+
             except Exception as e:
                 logger.error(f"[VIZ] Initialization error: {e}")
                 self.chart_sender = None
@@ -893,11 +895,7 @@ class TradingBot:
             logger.info("[VIZ] Skipping visualization (AI or Telegram not available)")
             self.chart_sender = None
 
-                
-        
-
-
-    # ✨ NEW: Improved Telegram thread management
+    # ✨ NEW:  Telegram thread management
     def _start_telegram_with_monitoring(self):
         """Start Telegram bot with health monitoring and auto-restart"""
         max_restart_interval = 300  # 5 minutes
@@ -1070,7 +1068,7 @@ class TradingBot:
         except Exception as e:
             logger.debug(f"[TELEGRAM] Notification error: {e}")
 
-    # ✨ IMPROVED: Trading cycle with better error handling
+    # ✨  Trading cycle with better error handling
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
@@ -1096,8 +1094,7 @@ class TradingBot:
                 for name, cfg in self.config["assets"].items()
                 if cfg.get("enabled", False)
             ]
-            
-            
+
             for asset_name in enabled:
                 try:
                     asset_cfg = self.config["assets"][asset_name]
@@ -1212,15 +1209,17 @@ class TradingBot:
                     self.trade_asset(asset_name)
                     time.sleep(2)
                 except Exception as e:
-                    logger.error(f"[ERROR] {asset_name} trade failed: {e}", exc_info=True)
-                    
+                    logger.error(
+                        f"[ERROR] {asset_name} trade failed: {e}", exc_info=True
+                    )
+
                     # ✨ Log error to database
                     if self.db_manager:
                         self.db_manager.log_system_event(
-                            event_type='error',
-                            severity='error',
-                            message=f'{asset_name} trading error: {str(e)}',
-                            component='trade_execution'
+                            event_type="error",
+                            severity="error",
+                            message=f"{asset_name} trading error: {str(e)}",
+                            component="trade_execution",
                         )
 
             # Get portfolio status
@@ -1244,13 +1243,13 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[ERROR] Cycle failed: {e}", exc_info=True)
             self._consecutive_errors += 1
-            
+
             if self.db_manager:
                 self.db_manager.log_system_event(
-                    event_type='error',
-                    severity='critical',
-                    message=f'Trading cycle error: {str(e)}',
-                    component='main'
+                    event_type="error",
+                    severity="critical",
+                    message=f"Trading cycle error: {str(e)}",
+                    component="main",
                 )
                 time.sleep(300)
 
@@ -1343,46 +1342,46 @@ class TradingBot:
         logger.info(f"Total Value:    ${status.get('total_value', 0):,.2f}")
         logger.info(f"Cash:           ${status.get('capital', 0):,.2f}")
         logger.info(f"Exposure:       ${status.get('total_exposure', 0):,.2f}")
-        
+
         # ✅ NEW: Per-asset position counts
-        asset_counts = status.get('asset_position_counts', {})
-        asset_details = status.get('asset_positions_detail', {})
-        max_per_asset = status.get('max_positions_per_asset', 3)
-        
+        asset_counts = status.get("asset_position_counts", {})
+        asset_details = status.get("asset_positions_detail", {})
+        max_per_asset = status.get("max_positions_per_asset", 3)
+
         logger.info(f"\n[POSITION COUNTS] (Max: {max_per_asset} per asset per side)")
         for asset, counts in asset_counts.items():
-            long_count = counts['long']
-            short_count = counts['short']
-            total_count = counts['total']
-            
+            long_count = counts["long"]
+            short_count = counts["short"]
+            total_count = counts["total"]
+
             # Get position IDs for this asset
             details = asset_details.get(asset, {})
-            long_ids = details.get('long_ids', [])
-            short_ids = details.get('short_ids', [])
-            long_tickets = details.get('long_tickets', [])
-            short_tickets = details.get('short_tickets', [])
-            
+            long_ids = details.get("long_ids", [])
+            short_ids = details.get("short_ids", [])
+            long_tickets = details.get("long_tickets", [])
+            short_tickets = details.get("short_tickets", [])
+
             logger.info(f"\n{asset}:")
             logger.info(f"  LONG:  {long_count}/{max_per_asset}")
             if long_ids:
                 logger.info(f"    IDs:     {', '.join(long_ids)}")
             if long_tickets:
                 logger.info(f"    Tickets: {', '.join(map(str, long_tickets))}")
-                
+
             logger.info(f"  SHORT: {short_count}/{max_per_asset}")
             if short_ids:
                 logger.info(f"    IDs:     {', '.join(short_ids)}")
             if short_tickets:
                 logger.info(f"    Tickets: {', '.join(map(str, short_tickets))}")
-                
+
             logger.info(f"  TOTAL: {total_count}/{max_per_asset * 2}")
-        
+
         # Daily P&L
         daily_pnl = status.get("daily_pnl", 0)
         daily_pnl_color = "+" if daily_pnl >= 0 else ""
         logger.info(f"\n[P&L]")
         logger.info(f"Daily P&L:      {daily_pnl_color}${daily_pnl:,.2f}")
-        
+
         realized_pnl = status.get("realized_pnl_today", 0)
         realized_color = "+" if realized_pnl >= 0 else ""
         logger.info(f"Realized P&L:   {realized_color}${realized_pnl:,.2f}")
@@ -1401,20 +1400,21 @@ class TradingBot:
                 current = pos_data.get("current_price", 0)
                 pnl = pos_data.get("pnl", 0)
                 pnl_pct = pos_data.get("pnl_pct", 0) * 100
-                
+
                 pnl_color = "+" if pnl >= 0 else ""
 
                 logger.info(f"\n{position_id} ({asset} {side}):")
                 logger.info(f"  Entry:   ${entry:,.2f}")
                 logger.info(f"  Current: ${current:,.2f}")
-                logger.info(f"  P&L:     {pnl_color}${pnl:,.2f} ({pnl_color}{pnl_pct:.2f}%)")
-                
+                logger.info(
+                    f"  P&L:     {pnl_color}${pnl:,.2f} ({pnl_color}{pnl_pct:.2f}%)"
+                )
+
                 if pos_data.get("mt5_ticket"):
                     logger.info(f"  MT5:     Ticket {pos_data['mt5_ticket']}")
 
         logger.info(f"\n{'-' * 70}")
-    
-    
+
     def reset_daily_counters(self):
         """Reset daily trading counters"""
         current_date = datetime.now().date()
@@ -1607,45 +1607,49 @@ class TradingBot:
                 return
 
             signal, details = aggregator.get_aggregated_signal(df)
-            
-            if details.get('ai_validation'):
-                ai_viz = details['ai_validation']
+
+            if details.get("ai_validation"):
+                ai_viz = details["ai_validation"]
                 logger.info(f"\n[AI VALIDATION]")
                 logger.info(f"  Pattern:  {ai_viz.get('pattern_name', 'N/A')}")
                 logger.info(f"  Conf:     {ai_viz.get('pattern_confidence', 0):.2%}")
-                logger.info(f"  S/R:      {'Yes' if ai_viz.get('sr_analysis', {}).get('near_sr_level') else 'No'}")
-                logger.info(f"  Result:   {ai_viz.get('action', 'N/A').upper()}")
-            
-            signal_id = None
-            if self.db_manager and self.config.get("database", {}).get("log_all_signals", True):
-                try:
-                    signal_id, is_new = self.db_manager.insert_signal(
-                    asset=asset_name,
-                    signal=signal,
-                    signal_quality=details.get('signal_quality', 0),
-                    regime=details.get('regime', 'UNKNOWN'),
-                    regime_confidence=details.get('regime_confidence', 0),
-                    mr_signal=details.get('mr_signal', 0),
-                    mr_confidence=details.get('mr_confidence', 0),
-                    tf_signal=details.get('tf_signal', 0),
-                    tf_confidence=details.get('tf_confidence', 0),
-                    ema_signal=details.get('ema_signal'),
-                    ema_confidence=details.get('ema_confidence'),
-                    buy_score=details.get('buy_score'),
-                    sell_score=details.get('sell_score'),
-                    reasoning=details.get('reasoning'),
-                    price=current_price,
-                    ai_validated=details.get('ai_validated', False),
-                    ai_modified=details.get('ai_modified', False),
-                    ai_details=details.get('ai_validation'),
-                    executed=False
+                logger.info(
+                    f"  S/R:      {'Yes' if ai_viz.get('sr_analysis', {}).get('near_sr_level') else 'No'}"
                 )
+                logger.info(f"  Result:   {ai_viz.get('action', 'N/A').upper()}")
+
+            signal_id = None
+            if self.db_manager and self.config.get("database", {}).get(
+                "log_all_signals", True
+            ):
+                try:
+                    signal_id, is_new = self.db_manager.insert_signal_smart(
+                        asset=asset_name,
+                        signal=signal,
+                        signal_quality=details.get("signal_quality", 0),
+                        regime=details.get("regime", "UNKNOWN"),
+                        regime_confidence=details.get("regime_confidence", 0),
+                        mr_signal=details.get("mr_signal", 0),
+                        mr_confidence=details.get("mr_confidence", 0),
+                        tf_signal=details.get("tf_signal", 0),
+                        tf_confidence=details.get("tf_confidence", 0),
+                        ema_signal=details.get("ema_signal"),
+                        ema_confidence=details.get("ema_confidence"),
+                        buy_score=details.get("buy_score"),
+                        sell_score=details.get("sell_score"),
+                        reasoning=details.get("reasoning"),
+                        price=current_price,
+                        ai_validated=details.get("ai_validated", False),
+                        ai_modified=details.get("ai_modified", False),
+                        ai_details=details.get("ai_validation"),
+                        executed=False,
+                    )
                 except Exception as e:
                     logger.error(f"[DB] Signal insert error: {e}")
 
             else:
                 signal_id = None
-            
+
             # Log signals
             logger.info(f"\n[SIGNAL] Strategy Analysis:")
             logger.info(
@@ -1660,7 +1664,7 @@ class TradingBot:
                 f"  EMA Regime:       {details.get('regime', 'N/A'):>2} "
                 f"(confidence: {details.get('regime_confidence', 0):.3f})"
             )
-            
+
             # Check if AI modified anything
             if details.get("ai_modified", False):
                 logger.info(f"\n[AI] Signal modifications:")
@@ -1680,7 +1684,6 @@ class TradingBot:
             logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
             logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
             logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
-            
 
             # Skip if HOLD signal
             if signal == 0:
@@ -1737,9 +1740,11 @@ class TradingBot:
                 # Send visualization chart
                 if self.chart_sender:
                     try:
-                        logger.info(f"[VIZ] Trade executed, sending chart for {asset_name}...")
+                        logger.info(
+                            f"[VIZ] Trade executed, sending chart for {asset_name}..."
+                        )
                         df_4h = self._fetch_4h_data(asset_name)
-                        
+
                         self._send_telegram_notification(
                             self.chart_sender.send_decision_chart(
                                 asset_name=asset_name,
@@ -1747,34 +1752,38 @@ class TradingBot:
                                 df_4h=df_4h,
                                 signal=signal,
                                 details=details,
-                                current_price=current_price
+                                current_price=current_price,
                             )
                         )
-                        logger.info(f"[VIZ] ✓ Chart sent for executed {asset_name} trade")
+                        logger.info(
+                            f"[VIZ] ✓ Chart sent for executed {asset_name} trade"
+                        )
                     except Exception as e:
                         logger.error(f"[VIZ] Chart error: {e}")
-                        
+
                         # Update counters
                     self.trade_count_today += 1
                     self.last_trade_times[asset_name] = datetime.now()
-                    
+
                 # ✨ NEW: Update signal as executed
                 if self.db_manager and signal_id:
                     # Get the trade_id from portfolio manager
                     try:
-                # Get trade ID from portfolio
+                        # Get trade ID from portfolio
                         position = self.portfolio_manager.get_position(asset_name)
-                        if position and hasattr(position, 'position_id'):
-                            db_trade = self.db_manager.get_trade_by_position_id(position.position_id)
+                        if position and hasattr(position, "position_id"):
+                            db_trade = self.db_manager.get_trade_by_position_id(
+                                position.position_id
+                            )
                             if db_trade:
                                 self.db_manager.update_signal_execution(
                                     signal_id=signal_id,
                                     executed=True,
-                                    trade_id=db_trade['id']
+                                    trade_id=db_trade["id"],
                                 )
                     except Exception as e:
                         logger.error(f"[DB] Signal update error: {e}")
-                            
+
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
                 signal_type = "BUY" if signal == 1 else "SELL"
@@ -1847,12 +1856,12 @@ class TradingBot:
             logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
             if self.db_manager:
                 self.db_manager.log_system_event(
-                    event_type='error',
-                    severity='error',
-                    message=f'{asset_name} trading error: {str(e)}',
-                    component='trade_execution'
+                    event_type="error",
+                    severity="error",
+                    message=f"{asset_name} trading error: {str(e)}",
+                    component="trade_execution",
                 )
-                
+
             if self.telegram_bot and self._telegram_ready.is_set():
                 try:
                     self._send_telegram_notification(
@@ -1872,51 +1881,53 @@ class TradingBot:
             asset_cfg = self.config["assets"][asset_name]
             symbol = asset_cfg.get("symbol")
             exchange = asset_cfg.get("exchange", "binance")
-            
+
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=30)
-            
+
             if exchange == "binance":
                 df = self.data_manager.fetch_binance_data(
                     symbol=symbol,
                     interval="4h",
                     start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
             else:
                 df = self.data_manager.fetch_mt5_data(
                     symbol=symbol,
                     timeframe="H4",
                     start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
-            
+
             return self.data_manager.clean_data(df)
-            
+
         except Exception as e:
             logger.error(f"[VIZ] Failed to fetch 4H data: {e}")
             # Return empty dataframe as fallback
             return pd.DataFrame()
 
-    
-                
     def _maybe_take_portfolio_snapshot(self):
         """Take periodic portfolio snapshots"""
         try:
             now = datetime.now()
-            
+
             # Check if snapshot is due
-            if self._last_snapshot_time is None or \
-               (now - self._last_snapshot_time).total_seconds() >= self._snapshot_interval:
-                
+            if (
+                self._last_snapshot_time is None
+                or (now - self._last_snapshot_time).total_seconds()
+                >= self._snapshot_interval
+            ):
+
                 # Get current prices
                 current_prices = {}
                 for asset_name in ["BTC", "GOLD"]:
                     if not self.config["assets"][asset_name].get("enabled", False):
                         continue
-                    
+
                     handler = (
-                        self.binance_handler if asset_name == "BTC" 
+                        self.binance_handler
+                        if asset_name == "BTC"
                         else self.mt5_handler
                     )
                     if handler:
@@ -1924,21 +1935,21 @@ class TradingBot:
                             current_prices[asset_name] = handler.get_current_price()
                         except:
                             pass
-                
+
                 # Get portfolio status
                 status = self.portfolio_manager.get_portfolio_status(current_prices)
-                
+
                 # Insert snapshot
                 if self.db_manager:
                     self.db_manager.insert_portfolio_snapshot(
-                        total_value=status['total_value'],
-                        cash=status['capital'],
-                        equity=status['equity'],
-                        total_exposure=status['total_exposure'],
-                        open_positions=status['open_positions'],
-                        unrealized_pnl=status['total_unrealized_pnl'],
-                        realized_pnl_today=status['realized_pnl_today'],
-                        positions_detail=status.get('positions')
+                        total_value=status["total_value"],
+                        cash=status["capital"],
+                        equity=status["equity"],
+                        total_exposure=status["total_exposure"],
+                        open_positions=status["open_positions"],
+                        unrealized_pnl=status["total_unrealized_pnl"],
+                        realized_pnl_today=status["realized_pnl_today"],
+                        positions_detail=status.get("positions"),
                     )
 
                     self._last_snapshot_time = now
@@ -1946,8 +1957,7 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"[DB] Snapshot error: {e}")
-            
-        
+
     def toggle_ai_validation(self, enable: bool):
         """Toggle AI validation on/off"""
         if hasattr(self, "ai_validator") and self.ai_validator is not None:
@@ -1972,7 +1982,7 @@ class TradingBot:
                 )
         except Exception as e:
             logger.debug(f"Trade log error: {e}")
-            
+
     def _fetch_current_data(self, asset_name: str) -> pd.DataFrame:
         """
         Helper to fetch current 15min data for chart generation
@@ -1982,35 +1992,35 @@ class TradingBot:
             asset_cfg = self.config["assets"][asset_name]
             symbol = asset_cfg.get("symbol")
             exchange = asset_cfg.get("exchange", "binance")
-            
+
             end_time = datetime.now(timezone.utc)
-            
+
             # Fetch appropriate data
             if exchange == "binance":
                 interval = asset_cfg.get("interval", "15m")
                 lookback = 15 if interval == "15m" else 60
                 start_time = end_time - timedelta(days=lookback)
-                
+
                 df = self.data_manager.fetch_binance_data(
                     symbol=symbol,
                     interval=interval,
                     start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
             else:
                 timeframe = asset_cfg.get("timeframe", "M15")
                 lookback = 25 if timeframe == "M15" else 75
                 start_time = end_time - timedelta(days=lookback)
-                
+
                 df = self.data_manager.fetch_mt5_data(
                     symbol=symbol,
                     timeframe=timeframe,
                     start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
-            
+
             return self.data_manager.clean_data(df)
-            
+
         except Exception as e:
             logger.error(f"[VIZ] Failed to fetch current data for {asset_name}: {e}")
             return pd.DataFrame()
@@ -2037,9 +2047,10 @@ class TradingBot:
             self.portfolio_manager.update_positions(current_prices)
             status = self.portfolio_manager.get_portfolio_status(current_prices)
             exposure_pct = (
-            status["total_exposure"] / status["equity"]
-            if status["equity"] > 0 else 0
-        )
+                status["total_exposure"] / status["equity"]
+                if status["equity"] > 0
+                else 0
+            )
 
             logger.info("\n" + "=" * 70)
             logger.info("DETAILED P&L REPORT")
@@ -2088,7 +2099,7 @@ class TradingBot:
             logger.info(
                 f"  Exposure:     ${status['total_exposure']:,.2f} ({exposure_pct:.1%})"
             )
-            #logger.info(f"  Drawdown:     {status['drawdown']:.2%}")
+            # logger.info(f"  Drawdown:     {status['drawdown']:.2%}")
             logger.info(f"  Open Pos:     {status['open_positions']}")
             logger.info(f"  Total Trades: {status['total_trades']}")
             logger.info("=" * 70 + "\n")
@@ -2325,21 +2336,20 @@ class TradingBot:
                 calculate_daily_summary_from_trades(self.db_manager, datetime.now())
 
                 self.db_manager.log_system_event(
-                    event_type='shutdown',
-                    severity='info',
-                    message='Trading bot stopped',
-                    component='main',
+                    event_type="shutdown",
+                    severity="info",
+                    message="Trading bot stopped",
+                    component="main",
                     metadata={
-                        'final_capital': self.portfolio_manager.current_capital,
-                        'open_positions': self.portfolio_manager.get_open_positions_count()
-                    }
+                        "final_capital": self.portfolio_manager.current_capital,
+                        "open_positions": self.portfolio_manager.get_open_positions_count(),
+                    },
                 )
 
                 logger.info("[DB] ✓ Final updates complete")
 
             except Exception as e:
                 logger.error(f"[DB] Shutdown error: {e}")
-
 
         self.is_running = False
         self._main_loop_running = False
@@ -2410,6 +2420,8 @@ class TradingBot:
 
 
 import requests
+
+
 def start_dashboard_server():
     """
     ✅ FIXED: Start dashboard server without blocking
@@ -2421,7 +2433,7 @@ def start_dashboard_server():
 
         # Use the absolute path to server.py
         server_path = Path("src/dashboard/server.py").resolve()
-        
+
         if not server_path.exists():
             logger.error(f"[DASHBOARD] Server file not found: {server_path}")
             return None
@@ -2435,7 +2447,7 @@ def start_dashboard_server():
             stderr=None,  # Inherits parent's stderr
             cwd=Path("src/dashboard").resolve(),
             # ✅ FIX 2: Start new process group (optional, for better isolation)
-            start_new_session=True if sys.platform != 'win32' else False
+            start_new_session=True if sys.platform != "win32" else False,
         )
 
         # Give server time to start
@@ -2446,23 +2458,29 @@ def start_dashboard_server():
         max_retries = 5
         for attempt in range(1, max_retries + 1):
             try:
-                response = requests.get('http://localhost:5000/api/health', timeout=2)
+                response = requests.get("http://localhost:5000/api/health", timeout=2)
                 if response.status_code == 200:
                     logger.info("[DASHBOARD] ✅ Server is responding")
                     logger.info("[DASHBOARD] 📊 Dashboard: http://localhost:5000")
-                    logger.info("[DASHBOARD] 🔍 Health:    http://localhost:5000/api/health")
+                    logger.info(
+                        "[DASHBOARD] 🔍 Health:    http://localhost:5000/api/health"
+                    )
                     logger.info("=" * 70)
                     return server_process
             except requests.exceptions.RequestException:
                 if attempt < max_retries:
-                    logger.info(f"[DASHBOARD] Waiting for server... ({attempt}/{max_retries})")
+                    logger.info(
+                        f"[DASHBOARD] Waiting for server... ({attempt}/{max_retries})"
+                    )
                     time.sleep(2)
                 else:
                     logger.warning("[DASHBOARD] ⚠️ Server may not be fully ready")
-        
+
         # Check if process is still running
         if server_process.poll() is None:
-            logger.info("[DASHBOARD] ✅ Web dashboard available at http://localhost:5000")
+            logger.info(
+                "[DASHBOARD] ✅ Web dashboard available at http://localhost:5000"
+            )
             logger.info("=" * 70)
             return server_process
         else:
@@ -2473,56 +2491,58 @@ def start_dashboard_server():
         logger.error(f"[DASHBOARD] Error starting server: {e}")
         return None
 
+
 def start_dashboard_server_threaded():
     """
     Alternative: Run Flask in thread instead of subprocess
     More reliable for development, no subprocess buffering issues
     """
+
     def run_flask():
         import sys
+
         sys.path.insert(0, str(Path("src/dashboard").resolve()))
-        
+
         try:
             from server import app
-            
+
             logger.info("=" * 70)
             logger.info("🚀 Dashboard Server (Thread Mode)")
             logger.info("📊 http://localhost:5000")
             logger.info("=" * 70)
-            
+
             app.run(
-                host='0.0.0.0',
+                host="0.0.0.0",
                 port=5000,
                 debug=False,
                 threaded=True,
-                use_reloader=False
+                use_reloader=False,
             )
         except Exception as e:
             logger.error(f"[DASHBOARD] Error: {e}")
-    
+
     try:
         dashboard_thread = threading.Thread(
-            target=run_flask,
-            daemon=True,
-            name="DashboardServer"
+            target=run_flask, daemon=True, name="DashboardServer"
         )
         dashboard_thread.start()
-        
+
         time.sleep(3)
-        
+
         try:
-            response = requests.get('http://localhost:5000/api/health', timeout=2)
+            response = requests.get("http://localhost:5000/api/health", timeout=2)
             if response.status_code == 200:
                 logger.info("[DASHBOARD] ✅ Server ready at http://localhost:5000")
         except:
             logger.info("[DASHBOARD] Starting... check http://localhost:5000")
-        
+
         return dashboard_thread
-        
+
     except Exception as e:
         logger.error(f"[DASHBOARD] Error: {e}")
         return None
-    
+
+
 # Modify the main() function
 def main():
     """Main entry point"""
@@ -2566,45 +2586,45 @@ def main():
         print("\nRun: python train.py")
         print("=" * 70)
         sys.exit(1)
-        
+
     ai_model = Path("models/ai/sniper_dual_timeframe_v1.weights.h5")
     if not ai_model.exists():
-            print("=" * 70)
-            print("⚠️  AI MODEL NOT FOUND (Optional)")
-            print("=" * 70)
-            print(f"  Missing: {ai_model}")
-            print("\nBot will run WITHOUT AI validation.")
-            print("To enable AI:")
-            print("  1. Run: python model_diagnostic.py")
-            print("  2. Then: python train_dual_timeframe.py")
-            print("=" * 70)
-            time.sleep(3)
+        print("=" * 70)
+        print("⚠️  AI MODEL NOT FOUND (Optional)")
+        print("=" * 70)
+        print(f"  Missing: {ai_model}")
+        print("\nBot will run WITHOUT AI validation.")
+        print("To enable AI:")
+        print("  1. Run: python model_diagnostic.py")
+        print("  2. Then: python train_dual_timeframe.py")
+        print("=" * 70)
+        time.sleep(3)
 
     # ✨ NEW: Start dashboard server
     server_process = None
     server_thread = None
-    
+
     if config.get("dashboard", {}).get("enabled", True):
         # Try subprocess first
         server_process = start_dashboard_server()
-        
+
         # If subprocess fails, try threaded approach
         if not server_process:
             logger.warning("[DASHBOARD] Subprocess failed, trying thread mode...")
             server_thread = start_dashboard_server_threaded()
-    
+
     try:
         bot = TradingBot()
-        
+
         if bot.db_manager:
             bot.portfolio_manager.db_manager = bot.db_manager
-            
+
             # Also pass to all positions
             for position in bot.portfolio_manager.positions.values():
                 position.db_manager = bot.db_manager
-                
+
         bot.start()
-        
+
     except KeyboardInterrupt:
         logger.info("\n[!] KeyboardInterrupt")
     except Exception as e:
@@ -2621,7 +2641,7 @@ def main():
             except subprocess.TimeoutExpired:
                 logger.warning("[DASHBOARD] Force killing server...")
                 server_process.kill()
-                
+
         if server_thread:
             logger.info("[DASHBOARD] Thread will terminate with main process")
 

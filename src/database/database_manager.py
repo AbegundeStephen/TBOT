@@ -32,6 +32,9 @@ class TradingDatabaseManager:
             self.supabase: Client = create_client(supabase_url, supabase_key)
             logger.info("[DB] ✓ Connected to Supabase")
             
+            self._last_signals: Dict[str, Dict] = {}
+
+            
             # Test connection
             self._test_connection()
             
@@ -136,7 +139,7 @@ class TradingDatabaseManager:
                     if metadata:
                         existing_meta = json.loads(existing_trade['metadata']) if existing_trade.get('metadata') else {}
                         existing_meta.update(metadata)
-                        update_data['metadata'] = json.dumps(existing_meta)
+                        update_data['metadata'] = self._serialize_safely(existing_meta)
                     
                     result = self.supabase.table('trades').update(update_data).eq('id', trade_id).execute()
                     
@@ -167,7 +170,7 @@ class TradingDatabaseManager:
                 'vtm_enabled': vtm_enabled,
                 'entry_time': datetime.now(timezone.utc).isoformat(),
                 'status': 'open',
-                'metadata': json.dumps(metadata) if metadata else None
+                'metadata': self._serialize_safely(metadata) if metadata else None
             }
             
             result = self.supabase.table('trades').insert(trade_data).execute()
@@ -213,9 +216,9 @@ class TradingDatabaseManager:
                 if existing.data and existing.data[0].get('metadata'):
                     existing_meta = json.loads(existing.data[0]['metadata'])
                     existing_meta.update(metadata)
-                    update_data['metadata'] = json.dumps(existing_meta)
+                    update_data['metadata'] = self._serialize_safely(existing_meta)
                 else:
-                    update_data['metadata'] = json.dumps(metadata)
+                    update_data['metadata'] = self._serialize_safely(metadata)
             
             result = self.supabase.table('trades').update(update_data).eq('id', trade_id).execute()
             
@@ -249,7 +252,7 @@ class TradingDatabaseManager:
                 'new_value': float(new_value) if new_value else None,
                 'current_price': float(current_price) if current_price else None,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                'metadata': json.dumps(metadata) if metadata else None
+                'metadata': self._serialize_safely(metadata) if metadata else None
             }
             
             result = self.supabase.table('vtm_events').insert(event_data).execute()
@@ -356,10 +359,9 @@ class TradingDatabaseManager:
                 'price': float(price) if price else None,
                 'ai_validated': ai_validated,
                 'ai_modified': ai_modified,
-                'ai_details': json.dumps(ai_details) if ai_details else None,
-                'executed': executed,
+                'ai_details': self._serialize_safely(ai_details) if ai_details else None,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                'metadata': json.dumps(metadata) if metadata else None
+                'metadata': self._serialize_safely(metadata) if metadata else None
             }
             
             # Check if signal has changed (unless force_insert is True)
@@ -447,7 +449,7 @@ class TradingDatabaseManager:
                 'ending_capital': float(ending_capital),
                 'btc_trades': btc_trades,
                 'gold_trades': gold_trades,
-                'metadata': json.dumps(metadata) if metadata else None
+                'metadata': self._serialize_safely(metadata) if metadata else None
             }
             
             if existing.data and len(existing.data) > 0:
@@ -494,7 +496,7 @@ class TradingDatabaseManager:
                 'open_positions': open_positions,
                 'unrealized_pnl': float(unrealized_pnl),
                 'realized_pnl_today': float(realized_pnl_today),
-                'positions_detail': json.dumps(positions_detail) if positions_detail else None
+                'positions_detail': self._serialize_safely(positions_detail) if positions_detail else None
             }
             
             result = self.supabase.table('portfolio_snapshots').insert(snapshot_data).execute()
@@ -528,7 +530,7 @@ class TradingDatabaseManager:
                 'severity': severity,
                 'message': message,
                 'component': component,
-                'metadata': json.dumps(metadata) if metadata else None
+                'metadata': self._serialize_safely(metadata) if metadata else None
             }
             
             result = self.supabase.table('system_events').insert(event_data).execute()
@@ -665,6 +667,30 @@ class TradingDatabaseManager:
         logger.debug(f"[DB] Signal unchanged for {asset}, skipping insert")
         return False
     
+    def _serialize_safely(self, obj: Any) -> str:
+        """
+        Safely serialize objects to JSON, handling problematic types
+        """
+        def convert(item):
+            if isinstance(item, (datetime, )):
+                return item.isoformat()
+            elif isinstance(item, (Decimal,)):
+                return float(item)
+            elif isinstance(item, dict):
+                return {k: convert(v) for k, v in item.items()}
+            elif isinstance(item, (list, tuple)):
+                return [convert(i) for i in item]
+            elif isinstance(item, (int, float, str, bool, type(None))):
+                return item
+            else:
+                return str(item)
+        
+        try:
+            converted = convert(obj)
+            return json.dumps(converted)
+        except Exception as e:
+            logger.warning(f"[DB] JSON serialization fallback: {e}")
+            return json.dumps(str(obj))
     
     def get_recent_signals(self, asset: Optional[str] = None, limit: int = 10) -> List[Dict]:
         """Get recent signals"""

@@ -1,5 +1,5 @@
 """
-IMPROVED Production Training Script - Fixes for 14% accuracy issue
+ Production Training Script - Fixes for 14% accuracy issue
 Key improvements:
 1. Better class balancing with capped weights
 2. Stronger pattern filtering (min 50 samples)
@@ -450,7 +450,7 @@ class DualTimeframeTradingBot:
 
         # Initialize components
         self.analyst = DynamicAnalyst(atr_multiplier=2.0)
-        
+
         # DON'T initialize Sniper yet - wait for load_model
         self.sniper = None
         self.pattern_map = None
@@ -461,36 +461,35 @@ class DualTimeframeTradingBot:
         self.last_4h_update = None
 
         logger.info(
-            "[BOT] Initialized\n" "  Analyst: 4H candles\n" "  Sniper: 15min candles (pending model load)"
+            "[BOT] Initialized\n"
+            "  Analyst: 4H candles\n"
+            "  Sniper: 15min candles (pending model load)"
         )
 
     def load_model(self, model_path: str, mapping_path: str):
         """Load trained model and pattern mapping"""
-        
+
         # Load pattern mapping first to get the correct number of classes
         with open(mapping_path, "rb") as f:
             self.pattern_map = pickle.load(f)
-        
+
         self.reverse_map = {v: k for k, v in self.pattern_map.items()}
         num_classes = len(self.pattern_map)
-        
+
         logger.info(f"[BOT] Pattern mapping loaded: {num_classes} classes")
         logger.info(f"[BOT] Patterns: {list(self.pattern_map.keys())}")
-        
+
         # NOW initialize Sniper with correct number of classes
         self.sniper = OHLCSniper(
-            input_shape=(15, 4), 
-            num_classes=num_classes,
-            dropout_rate=0.3
+            input_shape=(15, 4), num_classes=num_classes, dropout_rate=0.3
         )
-        
+
         # Load weights
         self.sniper.load_model(model_path)
-        
+
         logger.info(f"[BOT] ✅ Model loaded successfully")
         logger.info(f"[BOT]   Classes: {num_classes}")
         logger.info(f"[BOT]   Patterns: {', '.join(self.pattern_map.keys())}")
-
 
     def _extract_pivots_4h(self, df_4h: pd.DataFrame, window: int = 5) -> np.ndarray:
         """Extract pivots from 4H data"""
@@ -508,7 +507,7 @@ class DualTimeframeTradingBot:
                 pivots.append(lows[i])
 
         return np.array(pivots)
-    
+
     def analyze_market(
         self,
         df_4h: pd.DataFrame,
@@ -526,7 +525,7 @@ class DualTimeframeTradingBot:
         Returns:
             Trading signal dict or None
         """
-        
+
         if self.sniper is None:
             raise RuntimeError("Model not loaded! Call load_model() first.")
 

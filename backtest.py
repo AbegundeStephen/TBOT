@@ -188,13 +188,16 @@ class MLStrategy(bt.Strategy):
         ("aggregator_preset", "balanced"),
         ("use_trailing_stop", True),
         ("exit_on_opposite_signal", True),
-        # ==== IMPROVED AI VALIDATION PARAMETERS ====
+        # ====  AI VALIDATION PARAMETERS ====
         ("use_ai_validation", True),
         ("ai_sr_threshold", 0.015),  # 1.5% (was 0.05 = 5%!)
         ("ai_pattern_confidence", 0.50),
         ("ai_enable_adaptive", True),
         ("ai_strong_signal_bypass", 0.85),  # 70% (must match aggregator)
-        ("ai_circuit_breaker_threshold", 0.70),  # NEW: Control circuit breaker  # NEW: Bypass AI for strong signals
+        (
+            "ai_circuit_breaker_threshold",
+            0.70,
+        ),  # NEW: Control circuit breaker  # NEW: Bypass AI for strong signals
     )
 
     def __init__(self):
@@ -315,7 +318,7 @@ class MLStrategy(bt.Strategy):
         logger.info(f"=" * 70)
 
     def _initialize_ai_layer(self):
-        """Initialize AI validation layer with improved settings"""
+        """Initialize AI validation layer with  settings"""
         try:
             models_dir = Path("models/ai")
             model_path = models_dir / "sniper_dual_timeframe_v1.weights.h5"
@@ -334,7 +337,7 @@ class MLStrategy(bt.Strategy):
                 ai_config = pickle.load(f)
 
             logger.info(f"[AI] Loaded {len(pattern_map)} patterns")
-            #logger.info(f"[AI] Model accuracy: {ai_config['validation_accuracy']:.2%}")
+            # logger.info(f"[AI] Model accuracy: {ai_config['validation_accuracy']:.2%}")
 
             # Initialize components
             analyst = DynamicAnalyst(atr_multiplier=1.5, min_samples=5)
@@ -343,7 +346,7 @@ class MLStrategy(bt.Strategy):
             )
             sniper.load_model(str(model_path))
 
-                # ===== USE IMPROVED VALIDATOR =====
+            # ===== USE  VALIDATOR =====
             validator = HybridSignalValidator(
                 analyst=analyst,
                 sniper=sniper,
@@ -369,43 +372,45 @@ class MLStrategy(bt.Strategy):
 
             self.ai_validator = validator
             self._diagnose_sr_levels()
-            
+
             return validator
 
         except Exception as e:
             logger.error(f"[AI] Failed to initialize: {e}")
             logger.warning("[AI] Backtesting WITHOUT AI validation")
             return None
-        
+
     def _diagnose_sr_levels(self):
         """NEW: Check if S/R levels are being generated"""
         logger.info("=" * 70)
         logger.info("🔍 S/R LEVEL DIAGNOSTIC")
         logger.info("=" * 70)
-        
+
         # Get first 200 bars to test
         if len(self.data) >= 200:
-            test_df = pd.DataFrame({
-                'open': [x for x in self.data.open.get(size=200)],
-                'high': [x for x in self.data.high.get(size=200)],
-                'low': [x for x in self.data.low.get(size=200)],
-                'close': [x for x in self.data.close.get(size=200)],
-                'volume': [x for x in self.data.volume.get(size=200)],
-            })
-            
+            test_df = pd.DataFrame(
+                {
+                    "open": [x for x in self.data.open.get(size=200)],
+                    "high": [x for x in self.data.high.get(size=200)],
+                    "low": [x for x in self.data.low.get(size=200)],
+                    "close": [x for x in self.data.close.get(size=200)],
+                    "volume": [x for x in self.data.volume.get(size=200)],
+                }
+            )
+
             # Force S/R update
             self.ai_validator._update_sr_levels(test_df)
-            
+
             # Check results
-            levels = self.ai_validator.sr_cache.get('levels', [])
-            pivot_count = self.ai_validator.sr_cache.get('pivot_count', 0)
-            
+            levels = self.ai_validator.sr_cache.get("levels", [])
+            pivot_count = self.ai_validator.sr_cache.get("pivot_count", 0)
+
             logger.info(f"Test Data: 200 bars")
             logger.info(f"Pivots Found: {pivot_count}")
             logger.info(f"S/R Levels Generated: {len(levels)}")
-            
+
             if levels:
-                current_price = test_df['close'].iloc[-1]
+                current_price = test_df["close"].iloc[-1]
                 logger.info(f"Current Price: ${current_price:.2f}")
                 logger.info(f"S/R Levels:")
                 for i, level in enumerate(levels[:5], 1):
@@ -414,9 +419,8 @@ class MLStrategy(bt.Strategy):
             else:
                 logger.warning("⚠️  NO S/R LEVELS GENERATED!")
                 logger.warning("This will cause AI to reject ALL signals!")
-                
-        logger.info("=" * 70)
 
+        logger.info("=" * 70)
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -907,15 +911,13 @@ Examples:
         help="Disable AI validation layer",
     )
     parser.add_argument(
-            "--diagnose",
-            action="store_true",
-            help="Enable full diagnostic logging"
-        )
-        
+        "--diagnose", action="store_true", help="Enable full diagnostic logging"
+    )
+
     args = parser.parse_args()
     if args.diagnose:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logger.info("🔍 DIAGNOSTIC MODE ENABLED")
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.info("🔍 DIAGNOSTIC MODE ENABLED")
     run_backtest(
         asset_key=args.asset, aggregator_preset=args.preset, use_ai=not args.no_ai
     )

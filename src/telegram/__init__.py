@@ -215,7 +215,7 @@ class TradingTelegramBot:
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
 
     async def initialize(self):
-        """Initialize with improved error handling and retry logic"""
+        """Initialize with  error handling and retry logic"""
         request = HTTPXRequest(
             read_timeout=60,
             write_timeout=60,
@@ -229,7 +229,7 @@ class TradingTelegramBot:
 
                 logger.info("[TELEGRAM] Building application...")
 
-                # ✨ IMPROVED: Longer timeouts and connection pooling
+                # ✨  Longer timeouts and connection pooling
                 self.application = (
                     Application.builder()
                     .token(self.token)
@@ -253,7 +253,7 @@ class TradingTelegramBot:
 
                 logger.info("[TELEGRAM] Starting update polling...")
 
-                # ✨ IMPROVED: Better polling configuration
+                # ✨  Better polling configuration
                 await self.application.updater.start_polling(
                     poll_interval=2.0,  # Increased from 1.0 for stability
                     timeout=60,  # Increased from 30
@@ -434,7 +434,7 @@ class TradingTelegramBot:
 
     async def run_polling(self):
         """
-        ✨ IMPROVED: Keep the bot running with clean cancellation handling
+        ✨  Keep the bot running with clean cancellation handling
         """
         try:
             logger.info("[TELEGRAM] Starting polling loop...")
@@ -1657,7 +1657,7 @@ class TradingTelegramBot:
 
     async def send_notification(self, message: str, disable_preview: bool = True):
         """
-        ✨ IMPROVED: Send notification with retry logic and error handling
+        ✨  Send notification with retry logic and error handling
         """
         # If not ready, queue the message
         if not self._is_ready:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Improved Training Script - Generates More Actionable Signals
+ Training Script - Generates More Actionable Signals
 Properly loads config.json values
 NOW WITH EMA STRATEGY INTEGRATION
 """
