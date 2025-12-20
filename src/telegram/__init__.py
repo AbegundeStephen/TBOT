@@ -777,7 +777,7 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_status_message: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /positions command - FIXED VERSION"""
+        """Handle /positions command -  VERSION"""
         try:
             # Fetch latest prices
             current_prices = {}
@@ -902,7 +902,7 @@ class TradingTelegramBot:
             await update.message.reply_text("❌ Error fetching positions.")
 
     async def cmd_VTM_status(self, update, context):
-        """Show Dynamic Trade Manager status - FIXED"""
+        """Show Dynamic Trade Manager status - """
         try:
             if not self.trading_bot:
                 await update.message.reply_text("⚠️ Trading bot not connected")
@@ -916,8 +916,8 @@ class TradingTelegramBot:
 
             msg = "🎯 <b>DYNAMIC TRADE MANAGER STATUS</b>\n\n"
 
-            for position_id, position in positions.items():  # ✅ FIXED: iterate over items()
-                vtm_status = position.get_vtm_status()  # ✅ FIXED: correct method name
+            for position_id, position in positions.items():  # ✅  iterate over items()
+                vtm_status = position.get_vtm_status()  # ✅  correct method name
 
                 if vtm_status:
                     side_emoji = "🟢" if vtm_status["side"] == "long" else "🔴"
@@ -1864,7 +1864,7 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_status_message: {e}")
 
     async def _send_positions_message(self, query):
-        """Send positions message (for callback) - FIXED VERSION"""
+        """Send positions message (for callback) -  VERSION"""
         try:
             # Fetch current prices
             current_prices = {}

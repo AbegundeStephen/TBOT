@@ -42,7 +42,9 @@ class Position:
         self.entry_price = entry_price
         self.quantity = quantity
         self.entry_time = entry_time
-        self.position_id = position_id or f"{asset}_{side}_{int(entry_time.timestamp())}"
+        self.position_id = (
+            position_id or f"{asset}_{side}_{int(entry_time.timestamp())}"
+        )
         self.stop_loss = stop_loss
         self.take_profit = take_profit
         self.trailing_stop_pct = trailing_stop_pct
@@ -60,13 +62,17 @@ class Position:
         self.session_start_time = None
         self.session_start_equity = None
         self.session_start_capital = None
-        
+
         self.db_trade_id = None
         self.db_manager = None
 
         # ✅ CRITICAL FIX: Initialize VTM
         self.trade_manager = None
-        if use_dynamic_management and ohlc_data is not None and account_balance is not None:
+        if (
+            use_dynamic_management
+            and ohlc_data is not None
+            and account_balance is not None
+        ):
             try:
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
@@ -84,7 +90,11 @@ class Position:
 
                 # Use VTM-calculated stops if available
                 self.stop_loss = self.trade_manager.initial_stop_loss
-                self.take_profit = self.trade_manager.take_profit_levels[0] if self.trade_manager.take_profit_levels else take_profit
+                self.take_profit = (
+                    self.trade_manager.take_profit_levels[0]
+                    if self.trade_manager.take_profit_levels
+                    else take_profit
+                )
 
                 logger.info(
                     f"[VTM] ✓ Initialized for {asset} {side.upper()} (Position {self.position_id})\n"
@@ -93,73 +103,70 @@ class Position:
                 )
             except Exception as e:
                 logger.error(f"[VTM] Failed to initialize: {e}", exc_info=True)
-                
+
                 self.trade_manager = None
                 self.trade_manager = None
-                
+
     def update_with_new_bar(self, high: float, low: float, close: float):
-            """
-            ✅ CORRECTED: Update position with new OHLC bar
-            Calls VTM's update method and handles exit signals properly
-            """
-            if self.trade_manager:
-                try:
-                    old_stop = self.current_stop_loss
-                    # ✅ Call VTM's update method (returns Dict or None)
-                    exit_info = self.trade_manager.update_with_new_bar(
-                        new_high=high,
-                        new_low=low,
-                        new_close=close
-                    )
-                    
-                    # ✨ NEW: Log VTM events
-                    if self.db_manager and self.db_trade_id:
-                        # Log stop updates
-                        if self.current_stop_loss != old_stop:
-                            self.db_manager.update_trade_vtm_event(
-                                trade_id=self.db_trade_id,
-                                event_type='stop_updated',
-                                old_value=old_stop,
-                                new_value=self.current_stop_loss,
-                                current_price=close
-                            )
-                        
+        """
+        ✅ CORRECTED: Update position with new OHLC bar
+        Calls VTM's update method and handles exit signals properly
+        """
+        if self.trade_manager:
+            try:
+                old_stop = self.current_stop_loss
+                # ✅ Call VTM's update method (returns Dict or None)
+                exit_info = self.trade_manager.update_with_new_bar(
+                    new_high=high, new_low=low, new_close=close
+                )
 
-                    if exit_info:
-                        
-                        # ✅ Extract exit reason from ExitReason enum
-                        reason = exit_info['reason']
+                # ✨ NEW: Log VTM events
+                if self.db_manager and self.db_trade_id:
+                    # Log stop updates
+                    if self.current_stop_loss != old_stop:
                         self.db_manager.update_trade_vtm_event(
-                        trade_id=self.db_trade_id,
-                        event_type=exit_info['reason'].value,
-                        current_price=exit_info['price'],
-                        metadata={'size': exit_info['size']}
-                    )
-                        
-                        # Convert enum to string for compatibility
-                        if isinstance(reason, reason):
-                            exit_signal = reason.value
-                        else:
-                            exit_signal = str(reason)
-                        
-                        logger.info(
-                            f"[VTM] {self.asset} exit triggered: {exit_signal} "
-                            f"@ ${exit_info['price']:,.2f}"
+                            trade_id=self.db_trade_id,
+                            event_type="stop_updated",
+                            old_value=old_stop,
+                            new_value=self.current_stop_loss,
+                            current_price=close,
                         )
-                        return exit_signal
-                    
-                    # ✅ Update position's SL/TP with VTM's current levels
-                    # (VTM may trail stops or move to break-even)
-                    self.stop_loss = self.trade_manager.current_stop_loss
-                    
-                    return None
 
-                except Exception as e:
-                    logger.error(f"[VTM] Error updating {self.asset}: {e}", exc_info=True)
-                    return None
-            
-            return None
-        
+                if exit_info:
+
+                    # ✅ Extract exit reason from ExitReason enum
+                    reason = exit_info["reason"]
+                    self.db_manager.update_trade_vtm_event(
+                        trade_id=self.db_trade_id,
+                        event_type=exit_info["reason"].value,
+                        current_price=exit_info["price"],
+                        metadata={"size": exit_info["size"]},
+                    )
+
+                    # Convert enum to string for compatibility
+                    if isinstance(reason, reason):
+                        exit_signal = reason.value
+                    else:
+                        exit_signal = str(reason)
+
+                    logger.info(
+                        f"[VTM] {self.asset} exit triggered: {exit_signal} "
+                        f"@ ${exit_info['price']:,.2f}"
+                    )
+                    return exit_signal
+
+                # ✅ Update position's SL/TP with VTM's current levels
+                # (VTM may trail stops or move to break-even)
+                self.stop_loss = self.trade_manager.current_stop_loss
+
+                return None
+
+            except Exception as e:
+                logger.error(f"[VTM] Error updating {self.asset}: {e}", exc_info=True)
+                return None
+
+        return None
+
     def update_with_current_price(self, current_price: float):
         """
         ✅ NEW: Real-time intra-bar update (for trailing stops)
@@ -168,111 +175,135 @@ class Position:
         if self.trade_manager:
             try:
                 exit_info = self.trade_manager.update_with_current_price(current_price)
-                
+
                 if exit_info:
-                    reason = exit_info['reason']
-                    exit_signal = reason.value if isinstance(reason, reason) else str(reason)
-                    
+                    reason = exit_info["reason"]
+                    exit_signal = (
+                        reason.value if isinstance(reason, reason) else str(reason)
+                    )
+
                     logger.info(
                         f"[VTM] {self.asset} real-time exit: {exit_signal} "
                         f"@ ${current_price:,.2f}"
                     )
                     return exit_signal
-                
+
                 # Update position's stop loss (may have trailed)
                 self.stop_loss = self.trade_manager.current_stop_loss
-                
+
                 return None
-                
+
             except Exception as e:
                 logger.error(f"[VTM] Real-time update error: {e}")
                 return None
-        
+
         return None
 
-
     def should_close(self, current_price: float) -> Tuple[bool, str]:
-            """
-            ✅ CORRECTED: Check if position should close
-            Prioritizes VTM exit signals over traditional SL/TP
-            """
-            # 1. Check VTM first (if active)
-            if self.trade_manager:
-                exit_info = self.trade_manager.check_exit(current_price)
-                if exit_info:
-                    reason = exit_info['reason']
-                    exit_signal = reason.value if isinstance(reason, reason) else str(reason)
-                    return True, f"vtm_{exit_signal}"
+        """
+        ✅ CORRECTED: Check if position should close
+        Prioritizes VTM exit signals over traditional SL/TP
+        """
+        # 1. Check VTM first (if active)
+        if self.trade_manager:
+            exit_info = self.trade_manager.check_exit(current_price)
+            if exit_info:
+                reason = exit_info["reason"]
+                exit_signal = (
+                    reason.value if isinstance(reason, reason) else str(reason)
+                )
+                return True, f"vtm_{exit_signal}"
 
-            # 2. Fallback to traditional SL/TP (if no VTM)
-            if self.stop_loss:
-                if self.side == "long" and current_price <= self.stop_loss:
-                    return True, "stop_loss"
-                elif self.side == "short" and current_price >= self.stop_loss:
-                    return True, "stop_loss"
+        # 2. Fallback to traditional SL/TP (if no VTM)
+        if self.stop_loss:
+            if self.side == "long" and current_price <= self.stop_loss:
+                return True, "stop_loss"
+            elif self.side == "short" and current_price >= self.stop_loss:
+                return True, "stop_loss"
 
-            if self.take_profit:
-                if self.side == "long" and current_price >= self.take_profit:
-                    return True, "take_profit"
-                elif self.side == "short" and current_price <= self.take_profit:
-                    return True, "take_profit"
+        if self.take_profit:
+            if self.side == "long" and current_price >= self.take_profit:
+                return True, "take_profit"
+            elif self.side == "short" and current_price <= self.take_profit:
+                return True, "take_profit"
 
-            # 3. Traditional trailing stop (only if no VTM)
-            if not self.trade_manager:
-                trail_stop = self.update_trailing_stop(current_price)
-                if trail_stop:
-                    if self.side == "long" and current_price <= trail_stop:
-                        return True, "trailing_stop"
-                    elif self.side == "short" and current_price >= trail_stop:
-                        return True, "trailing_stop"
+        # 3. Traditional trailing stop (only if no VTM)
+        if not self.trade_manager:
+            trail_stop = self.update_trailing_stop(current_price)
+            if trail_stop:
+                if self.side == "long" and current_price <= trail_stop:
+                    return True, "trailing_stop"
+                elif self.side == "short" and current_price >= trail_stop:
+                    return True, "trailing_stop"
 
-            return False, ""
-
+        return False, ""
 
     def get_vtm_status(self) -> Optional[Dict]:
         """Get current VTM status for monitoring"""
         if not self.trade_manager:
             return None
-            
+
         try:
             levels = self.trade_manager.get_current_levels()
-            
-            current_price = levels['current_price']
-            stop_loss = levels['stop_loss']
-            next_target = levels['next_target']
-            
+
+            current_price = levels["current_price"]
+            stop_loss = levels["stop_loss"]
+            next_target = levels["next_target"]
+
             # Calculate distances
             if self.side == "long":
-                distance_to_sl_pct = ((current_price - stop_loss) / current_price) * 100 if current_price > 0 else 0
-                distance_to_tp_pct = ((next_target - current_price) / current_price * 100) if next_target else 0
+                distance_to_sl_pct = (
+                    ((current_price - stop_loss) / current_price) * 100
+                    if current_price > 0
+                    else 0
+                )
+                distance_to_tp_pct = (
+                    ((next_target - current_price) / current_price * 100)
+                    if next_target
+                    else 0
+                )
             else:
-                distance_to_sl_pct = ((stop_loss - current_price) / current_price) * 100 if current_price > 0 else 0
-                distance_to_tp_pct = ((current_price - next_target) / current_price * 100) if next_target else 0
-            
+                distance_to_sl_pct = (
+                    ((stop_loss - current_price) / current_price) * 100
+                    if current_price > 0
+                    else 0
+                )
+                distance_to_tp_pct = (
+                    ((current_price - next_target) / current_price * 100)
+                    if next_target
+                    else 0
+                )
+
             return {
-                'side': self.side,
-                'entry_price': levels['entry_price'],
-                'current_price': current_price,
-                'pnl_pct': levels['pnl_pct'],
-                'stop_loss': stop_loss,
-                'take_profit': next_target if next_target else levels['all_targets'][-1] if levels['all_targets'] else None,
-                'distance_to_sl_pct': distance_to_sl_pct,
-                'distance_to_tp_pct': distance_to_tp_pct,
-                'profit_locked': getattr(self.trade_manager, 'early_profit_locked', False),
-                'bars_in_trade': levels['bars_in_trade'],
-                'partials_hit': levels['partials_hit'],
-                'runner_active': levels['runner_active'],
-                'update_count': levels['bars_in_trade'],
-                'last_update': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "side": self.side,
+                "entry_price": levels["entry_price"],
+                "current_price": current_price,
+                "pnl_pct": levels["pnl_pct"],
+                "stop_loss": stop_loss,
+                "take_profit": (
+                    next_target
+                    if next_target
+                    else levels["all_targets"][-1] if levels["all_targets"] else None
+                ),
+                "distance_to_sl_pct": distance_to_sl_pct,
+                "distance_to_tp_pct": distance_to_tp_pct,
+                "profit_locked": getattr(
+                    self.trade_manager, "early_profit_locked", False
+                ),
+                "bars_in_trade": levels["bars_in_trade"],
+                "partials_hit": levels["partials_hit"],
+                "runner_active": levels["runner_active"],
+                "update_count": levels["bars_in_trade"],
+                "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         except Exception as e:
             logger.error(f"Error getting VTM status: {e}")
             return None
-    
+
     def get_position_value(self, current_price: float) -> float:
         """Get current position value in USD"""
         return self.quantity * current_price
-    
+
     def get_pnl(self, current_price: float) -> float:
         """Get current profit/loss"""
         if self.side == "long":
@@ -301,7 +332,6 @@ class Position:
         position_value = self.entry_price * self.quantity
         return self.get_pnl(current_price) / position_value if position_value > 0 else 0
 
-    
     def update_trailing_stop(self, current_price: float) -> Optional[float]:
         """Update trailing stop (only used if VTM is disabled)"""
         if self.trailing_stop_pct is None:
@@ -347,10 +377,14 @@ class PortfolioManager:
     Tracks real-time MT5 profit for accurate P&L
     """
 
-    def __init__(self, config: Dict, mt5_handler=None, binance_client=None, db_manager=None):
+    def __init__(
+        self, config: Dict, mt5_handler=None, binance_client=None, db_manager=None
+    ):
         self.config = config
         self.portfolio_config = config["portfolio"]
-        self.max_positions_per_asset = config.get("trading", {}).get("max_positions_per_asset", 3)
+        self.max_positions_per_asset = config.get("trading", {}).get(
+            "max_positions_per_asset", 3
+        )
 
         self.mt5_handler = mt5_handler
         self.binance_client = binance_client
@@ -399,42 +433,43 @@ class PortfolioManager:
                 total_capital += binance_balance
 
         return total_capital if total_capital > 0 else self.paper_capital
-    
+
     def _fetch_mt5_balance(self) -> Optional[float]:
         """Fetch MT5 account balance"""
         try:
             import MetaTrader5 as mt5
+
             account_info = mt5.account_info()
             return account_info.equity if account_info else None
         except Exception as e:
             logger.error(f"[MT5] Error fetching balance: {e}")
             return None
-        
+
     def _fetch_binance_balance(self) -> Optional[float]:
-            """Fetch Binance account balance"""
-            try:
-                if not self.binance_client:
-                    return None
-
-                account = self.binance_client.get_account()
-                total_balance = 0.0
-
-                for balance in account["balances"]:
-                    asset = balance["asset"]
-                    total = float(balance["free"]) + float(balance["locked"])
-
-                    if total > 0:
-                        if asset == "USDT":
-                            total_balance += total
-                        elif asset == "BTC":
-                            ticker = self.binance_client.get_symbol_ticker(symbol="BTCUSDT")
-                            btc_price = float(ticker["price"])
-                            total_balance += total * btc_price
-
-                return total_balance
-            except Exception as e:
-                logger.error(f"[BINANCE] Error fetching balance: {e}")
+        """Fetch Binance account balance"""
+        try:
+            if not self.binance_client:
                 return None
+
+            account = self.binance_client.get_account()
+            total_balance = 0.0
+
+            for balance in account["balances"]:
+                asset = balance["asset"]
+                total = float(balance["free"]) + float(balance["locked"])
+
+                if total > 0:
+                    if asset == "USDT":
+                        total_balance += total
+                    elif asset == "BTC":
+                        ticker = self.binance_client.get_symbol_ticker(symbol="BTCUSDT")
+                        btc_price = float(ticker["price"])
+                        total_balance += total * btc_price
+
+            return total_balance
+        except Exception as e:
+            logger.error(f"[BINANCE] Error fetching balance: {e}")
+            return None
 
     def refresh_capital(self) -> bool:
         """Refresh capital from exchanges"""
@@ -584,7 +619,11 @@ class PortfolioManager:
             )
             return False
 
-        drawdown = (self.peak_equity - self.equity) / self.peak_equity if self.peak_equity > 0 else 0
+        drawdown = (
+            (self.peak_equity - self.equity) / self.peak_equity
+            if self.peak_equity > 0
+            else 0
+        )
         max_drawdown = self.portfolio_config["max_drawdown"]
 
         if drawdown >= max_drawdown:
@@ -592,38 +631,37 @@ class PortfolioManager:
             return False
 
         return True
-    
+
     def get_asset_positions(self, asset: str, side: str = None) -> List[Position]:
         """
         Get all positions for a specific asset
-        
+
         Args:
             asset: Asset name (e.g., "BTC", "GOLD")
             side: Optional side filter ("long" or "short")
-        
+
         Returns:
             List of Position objects
         """
         positions = [pos for pos in self.positions.values() if pos.asset == asset]
-        
+
         if side:
             positions = [pos for pos in positions if pos.side == side]
-        
+
         return positions
 
     def get_asset_position_count(self, asset: str, side: str = None) -> int:
         """
         Count open positions for an asset
-        
+
         Args:
             asset: Asset name
             side: Optional side filter
-        
+
         Returns:
             Number of open positions
         """
         return len(self.get_asset_positions(asset, side))
-
 
     def check_correlation(self, asset1: str, asset2: str) -> float:
         """Calculate correlation between two assets"""
@@ -665,17 +703,19 @@ class PortfolioManager:
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """
         Check if we can open a new position for the asset
-        
+
         Returns:
             Tuple of (can_open: bool, reason: str)
         """
         current_count = self.get_asset_position_count(asset, side)
-        
-        if current_count >= self.max_positions_per_asset:
-            return False, f"Maximum {self.max_positions_per_asset} {side.upper()} positions reached for {asset} ({current_count} open)"
-        
-        return True, "OK"
 
+        if current_count >= self.max_positions_per_asset:
+            return (
+                False,
+                f"Maximum {self.max_positions_per_asset} {side.upper()} positions reached for {asset} ({current_count} open)",
+            )
+
+        return True, "OK"
 
     def add_position(
         self,
@@ -724,7 +764,7 @@ class PortfolioManager:
         )
 
         self.positions[position.position_id] = position
-        
+
         # Database logging
         if self.db_manager:
             try:
@@ -743,19 +783,19 @@ class PortfolioManager:
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
                     metadata={
-                        'trailing_stop_pct': trailing_stop_pct,
-                        'entry_time': position.entry_time.isoformat()
-                    }
+                        "trailing_stop_pct": trailing_stop_pct,
+                        "entry_time": position.entry_time.isoformat(),
+                    },
                 )
-                
+
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
-                
+
                 if is_new:
                     print(f"New trade created: {trade_id}")
                 else:
                     print(f"Existing trade updated/found: {trade_id}")
-                
+
             except Exception as e:
                 logger.error(f"[DB] Error logging trade entry: {e}")
 
@@ -774,7 +814,6 @@ class PortfolioManager:
             logger.info(f"  └─ VTM: ACTIVE")
 
         return True
-
 
     def update_positions_with_ohlc(self, ohlc_data_dict: dict):
         """
@@ -822,11 +861,15 @@ class PortfolioManager:
         return len(positions_to_close)
 
     def close_position(
-        self, asset: str = None, position_id: str = None, exit_price: float = None, reason: str = "manual"
+        self,
+        asset: str = None,
+        position_id: str = None,
+        exit_price: float = None,
+        reason: str = "manual",
     ) -> Optional[Dict]:
         """
         Close a specific position
-        
+
         Args:
             asset: Asset name (for backward compatibility, closes first position)
             position_id: Specific position ID to close
@@ -883,17 +926,24 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "entry_time": position.entry_time,
             "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
+            "holding_time": (datetime.now() - position.entry_time).total_seconds()
+            / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
             "binance_order_id": position.binance_order_id,
         }
 
         # ✨ NEW: Log trade exit to database
-        if self.db_manager and hasattr(position, 'db_trade_id') and position.db_trade_id:
+        if (
+            self.db_manager
+            and hasattr(position, "db_trade_id")
+            and position.db_trade_id
+        ):
             try:
-                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
-                
+                holding_time = (
+                    datetime.now() - position.entry_time
+                ).total_seconds() / 3600
+
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,
@@ -902,11 +952,9 @@ class PortfolioManager:
                     pnl_pct=pnl_pct,
                     holding_time_hours=holding_time,
                     final_quantity=position.quantity,
-                    metadata={
-                        'exit_time': datetime.now().isoformat()
-                    }
+                    metadata={"exit_time": datetime.now().isoformat()},
                 )
-                
+
             except Exception as e:
                 logger.error(f"[DB] Error logging trade exit: {e}")
 
@@ -965,27 +1013,27 @@ class PortfolioManager:
         return len(self.positions)
 
     def get_position(self, asset: str, position_id: str = None) -> Optional[Position]:
-            """
-            Get position(s) for an asset
-            
-            Args:
-                asset: Asset name
-                position_id: Optional specific position ID
-            
-            Returns:
-                Position object if position_id provided, otherwise first position for asset
-            """
-            if position_id:
-                return self.positions.get(position_id)
-            
-            # Return first position for asset (for backward compatibility)
-            positions = self.get_asset_positions(asset)
-            return positions[0] if positions else None
+        """
+        Get position(s) for an asset
+
+        Args:
+            asset: Asset name
+            position_id: Optional specific position ID
+
+        Returns:
+            Position object if position_id provided, otherwise first position for asset
+        """
+        if position_id:
+            return self.positions.get(position_id)
+
+        # Return first position for asset (for backward compatibility)
+        positions = self.get_asset_positions(asset)
+        return positions[0] if positions else None
 
     def has_position(self, asset: str, side: str = None) -> bool:
         """
         Check if we have any open positions for an asset
-        
+
         Args:
             asset: Asset symbol
             side: Optional side filter ('long' or 'short')
@@ -1004,36 +1052,48 @@ class PortfolioManager:
         self.session_start_capital = self.current_capital
         self.realized_pnl_today = 0.0
         logger.info(f"Trading session started at {self.session_start_time}")
-        
+
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
         """Get portfolio status with accurate position counts per asset"""
         if current_prices is None:
-            current_prices = {pos.asset: pos.entry_price for pos in self.positions.values()}
+            current_prices = {
+                pos.asset: pos.entry_price for pos in self.positions.values()
+            }
 
         total_exposure = 0.0
         total_unrealized_pnl = 0.0
 
-        # ✅ FIXED: Count positions per asset correctly
+        # ✅  Count positions per asset correctly
         asset_position_counts = {}
         asset_positions_detail = {}
-        
+
         for asset in ["BTC", "GOLD"]:
             # Get all positions for this asset
-            long_positions = [p for p in self.positions.values() if p.asset == asset and p.side == "long"]
-            short_positions = [p for p in self.positions.values() if p.asset == asset and p.side == "short"]
-            
+            long_positions = [
+                p
+                for p in self.positions.values()
+                if p.asset == asset and p.side == "long"
+            ]
+            short_positions = [
+                p
+                for p in self.positions.values()
+                if p.asset == asset and p.side == "short"
+            ]
+
             asset_position_counts[asset] = {
                 "long": len(long_positions),
                 "short": len(short_positions),
-                "total": len(long_positions) + len(short_positions)
+                "total": len(long_positions) + len(short_positions),
             }
-            
+
             # Detailed info for debugging
             asset_positions_detail[asset] = {
                 "long_ids": [p.position_id for p in long_positions],
                 "short_ids": [p.position_id for p in short_positions],
                 "long_tickets": [p.mt5_ticket for p in long_positions if p.mt5_ticket],
-                "short_tickets": [p.mt5_ticket for p in short_positions if p.mt5_ticket]
+                "short_tickets": [
+                    p.mt5_ticket for p in short_positions if p.mt5_ticket
+                ],
             }
 
         # Calculate exposures and P&L
@@ -1050,7 +1110,7 @@ class PortfolioManager:
                 total_unrealized_pnl += pos.get_pnl(current_price)
 
         total_value = self.current_capital + total_unrealized_pnl
-        
+
         # Calculate daily P&L
         if self.session_start_equity is not None:
             current_equity = self.current_capital + total_unrealized_pnl
@@ -1063,7 +1123,7 @@ class PortfolioManager:
             "total_value": total_value,
             "capital": self.current_capital,
             "equity": self.equity,
-            "cash": self.current_capital,  
+            "cash": self.current_capital,
             "total_exposure": total_exposure,
             "open_positions": len(self.positions),
             "daily_pnl": daily_pnl,
@@ -1079,15 +1139,20 @@ class PortfolioManager:
                     "entry_price": pos.entry_price,
                     "quantity": pos.quantity,
                     "current_price": current_prices.get(pos.asset, pos.entry_price),
-                    "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
+                    "current_value": pos.quantity
+                    * current_prices.get(pos.asset, pos.entry_price),
                     "pnl": pos.get_pnl(current_prices.get(pos.asset, pos.entry_price)),
-                    "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
-                    "stop_loss": pos.stop_loss,  
-                    "take_profit": pos.take_profit,  
+                    "pnl_pct": pos.get_pnl_pct(
+                        current_prices.get(pos.asset, pos.entry_price)
+                    ),
+                    "stop_loss": pos.stop_loss,
+                    "take_profit": pos.take_profit,
                     "mt5_ticket": pos.mt5_ticket,
-                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,  
+                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
                     "binance_order_id": pos.binance_order_id,
-                    "binance_profit": pos.binance_profit if pos.binance_order_id else None,  
+                    "binance_profit": (
+                        pos.binance_profit if pos.binance_order_id else None
+                    ),
                 }
                 for pos in self.positions.values()
             },

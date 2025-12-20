@@ -28,7 +28,7 @@ The Production VTM is an **intelligent trade management system** that automates 
 ### What Makes It "Veteran"?
 - **Not a rookie system** - Avoids tight stops that get you shaken out
 - **Based on actual market structure** - Finds real support/resistance (pivot points)
-- **Lets winners run** - Uses partials + trailing stops instead of fixed targets
+- **Lets winners run** - Uses partials + trailing stops instead of  targets
 - **Asset-aware** - BTC needs 8-15% stops, GOLD needs 2-5% stops
 - **Production-ready** - Real-time updates, comprehensive logging, error handling
 

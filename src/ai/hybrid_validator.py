@@ -1,5 +1,5 @@
 """
-FIXED AI Signal Validator with Realistic S/R Thresholds
+ AI Signal Validator with Realistic S/R Thresholds
 ========================================================
 Key fixes:
 1. Base S/R threshold: 0.5% → 2.5% (5x more realistic)
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class HybridSignalValidator:
     """
-    AI-powered signal validation with FIXED realistic thresholds
+    AI-powered signal validation with  realistic thresholds
     """
 
     # Pattern classifications
@@ -62,7 +62,7 @@ class HybridSignalValidator:
         analyst,
         sniper,
         pattern_id_map,
-        sr_threshold_pct=0.020,  # FIXED: 2.5% instead of 0.5%
+        sr_threshold_pct=0.020,  #  2.5% instead of 0.5%
         pattern_confidence_min=0.44,
         use_ai_validation=True,
         enable_adaptive_thresholds=True,
@@ -86,8 +86,8 @@ class HybridSignalValidator:
         self.sniper = sniper
         self.pattern_id_map = pattern_id_map
         self.reverse_pattern_map = {v: k for k, v in pattern_id_map.items()}
-        # CRITICAL: Update pattern mapping to include Noise
-        #self._update_pattern_mapping()
+        #  Update pattern mapping to include Noise
+        # self._update_pattern_mapping()
 
         # Configuration
         self.base_sr_threshold = sr_threshold_pct
@@ -155,14 +155,12 @@ class HybridSignalValidator:
         """Log initialization details"""
         logger.info("")
         logger.info("=" * 70)
-        logger.info("🤖 FIXED AI SIGNAL VALIDATOR (Realistic Thresholds)")
+        logger.info("🤖  AI SIGNAL VALIDATOR (Realistic Thresholds)")
         logger.info("=" * 70)
         logger.info(
             f"  Status:           {'ENABLED' if self.use_ai_validation else 'DISABLED'}"
         )
-        logger.info(
-            f"  Base S/R:         {self.base_sr_threshold:.2%} (FIXED: was 0.5%)"
-        )
+        logger.info(f"  Base S/R:         {self.base_sr_threshold:.2%} ( was 0.5%)")
         logger.info(f"  Base Pattern:     {self.base_pattern_confidence:.0%}")
         logger.info(f"  Adaptive:         {'ON' if self.enable_adaptive else 'OFF'}")
         logger.info(f"  Strong Bypass:    {self.strong_signal_bypass:.0%}")
@@ -176,7 +174,7 @@ class HybridSignalValidator:
         self, signal: int, signal_details: dict, df: pd.DataFrame
     ) -> Tuple[int, dict]:
         """
-        Main validation with FIXED realistic thresholds
+        Main validation with  realistic thresholds
         """
         validation_start = datetime.now()
         self.stats["total_checks"] += 1
@@ -248,7 +246,7 @@ class HybridSignalValidator:
                 return result
 
         # ============================================================
-        # LAYER 2: Adaptive Threshold Adjustment (FIXED)
+        # LAYER 2: Adaptive Threshold Adjustment ()
         # ============================================================
         if self.enable_adaptive:
             self._update_adaptive_thresholds_fixed(df, signal_details, strategy)
@@ -263,7 +261,7 @@ class HybridSignalValidator:
             )
 
         # ============================================================
-        # LAYER 3: Support/Resistance Check (FIXED DIRECTIONAL LOGIC)
+        # LAYER 3: Support/Resistance Check ( DIRECTIONAL LOGIC)
         # ============================================================
         current_price = float(df["close"].iloc[-1])
         sr_result = self._check_support_resistance_fixed(
@@ -335,7 +333,7 @@ class HybridSignalValidator:
         self, df: pd.DataFrame, signal_details: dict, strategy: str
     ):
         """
-        FIXED: More realistic adaptive threshold adjustments
+        More realistic adaptive threshold adjustments
         """
         regime = signal_details.get("regime", "BEAR")
         regime_confidence = signal_details.get("regime_confidence", 0.5)
@@ -353,7 +351,7 @@ class HybridSignalValidator:
         old_pattern = self.current_pattern_threshold
 
         # ============================================================
-        # S/R THRESHOLD ADJUSTMENT (FIXED)
+        # S/R THRESHOLD ADJUSTMENT ()
         # ============================================================
 
         # Base: 2.5%
@@ -461,7 +459,7 @@ class HybridSignalValidator:
         self, df: pd.DataFrame, current_price: float, signal: int, threshold: float
     ) -> dict:
         """
-        FIXED: Directional S/R logic
+         Directional S/R logic
         BUY needs support BELOW, SELL needs resistance ABOVE
         """
         # Update S/R levels if cache stale
@@ -488,7 +486,7 @@ class HybridSignalValidator:
             }
 
         # ============================================================
-        # DIRECTIONAL LOGIC (FIXED)
+        # DIRECTIONAL LOGIC ()
         # ============================================================
 
         if signal == 1:  # BUY signal
@@ -787,10 +785,10 @@ class HybridSignalValidator:
         logger.info("🔄 AI circuit breaker reset - validation RE-ENABLED")
 
     def _update_sr_levels(self, df: pd.DataFrame):
-        """ More robust S/R level extraction"""
+        """More robust S/R level extraction"""
         pivots = self._extract_pivots(df, window=7)
 
-        # FIXED: Lower threshold from 5 to 3 pivots
+        #  Lower threshold from 5 to 3 pivots
         if len(pivots) < 3:
             logger.warning(
                 f"[SR UPDATE] Only {len(pivots)} pivots - using price quantiles as fallback"
@@ -819,7 +817,7 @@ class HybridSignalValidator:
                 n_levels=7,
             )
 
-            # FIXED: If clustering fails, use pivots directly
+            #  If clustering fails, use pivots directly
             if not levels:
                 logger.warning(
                     "[SR UPDATE] Clustering returned no levels - using raw pivots"
@@ -854,12 +852,12 @@ class HybridSignalValidator:
             )
 
     def _extract_pivots(self, df: pd.DataFrame, window=7) -> np.ndarray:
-        """ Extract more pivots with lower window"""
+        """Extract more pivots with lower window"""
         highs = df["high"].values
         lows = df["low"].values
         pivots = []
 
-        # FIXED: Try smaller window if too few pivots
+        #  Try smaller window if too few pivots
         for window_size in [window, 5, 3]:
             pivots = []
 
@@ -882,7 +880,7 @@ class HybridSignalValidator:
 
     def _resolve_pattern_name(self, pattern_id: int) -> str:
         """
-        FIXED: Multi-stage pattern name resolution
+         Multi-stage pattern name resolution
 
         Tries multiple lookup strategies to find the pattern name
         """
@@ -932,7 +930,7 @@ class HybridSignalValidator:
         self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60
     ) -> dict:
         """
-        FIXED: Pattern confirmation with proper noise handling
+        Pattern confirmation with proper noise handling
         """
         try:
             # Get last 15 candles for pattern detection
@@ -1149,7 +1147,7 @@ class HybridSignalValidator:
 
     def _update_pattern_mapping(self):
         """
-        CRITICAL: Ensure pattern mapping includes Noise class
+         Ensure pattern mapping includes Noise class
         Call this in __init__ after loading the model
         """
         try:

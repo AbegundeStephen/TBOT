@@ -124,7 +124,7 @@ class OHLCSniper:
 
         optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-        # FIXED: Use SparseTopKCategoricalAccuracy for sparse labels
+        #  Use SparseTopKCategoricalAccuracy for sparse labels
         model.compile(
             optimizer=optimizer,
             loss="sparse_categorical_crossentropy",
