@@ -628,7 +628,7 @@ class TradingBot:
         AGGREGATOR_PRESETS = {
     "BTC": {
         "conservative": {
-            "buy_threshold": 0.35,
+            "buy_threshold": 0.32,
             "sell_threshold": 0.40,
             "two_strategy_bonus": 0.18,
             "three_strategy_bonus": 0.20,
@@ -699,7 +699,7 @@ class TradingBot:
     },
     "GOLD": {
         "conservative": {
-            "buy_threshold": 0.38,
+            "buy_threshold": 0.33,
             "sell_threshold": 0.42,
             "two_strategy_bonus": 0.18,
             "three_strategy_bonus": 0.25,
