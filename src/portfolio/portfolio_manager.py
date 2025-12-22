@@ -414,6 +414,8 @@ class PortfolioManager:
 
         if not self.is_paper_mode:
             logger.info("✓ Using LIVE account balances from exchanges")
+        else:
+            logger.info("✓ Using PAPER account balances from exchanges")
 
     def _fetch_total_capital(self) -> float:
         """Fetch total available capital from exchanges"""
@@ -603,33 +605,110 @@ class PortfolioManager:
         logger.info(f"{asset} calculated position size: ${position_size:,.2f}")
         return position_size
 
-    def check_portfolio_limits(self, new_position_usd: float) -> bool:
-        """Check if adding a new position would violate portfolio limits"""
-        current_exposure = sum(
-            pos.quantity * pos.entry_price for pos in self.positions.values()
-        )
-
+    def check_portfolio_limits(self, new_position_usd: float, new_side: str = None, asset: str = None) -> bool:
+        """
+        ✅ FIXED: Check portfolio limits with proper hedging support
+        
+        Args:
+            new_position_usd: Size of new position in USD
+            new_side: "long" or "short" (for hedging calculation)
+            asset: Asset name (to check per-asset hedging)
+        
+        Returns:
+            True if within limits, False otherwise
+        """
+        
+        # Get limits
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
         max_exposure_usd = self.current_capital * max_exposure_pct
-
-        if current_exposure + new_position_usd > max_exposure_usd:
-            logger.warning(
-                f"Portfolio exposure limit: "
-                f"${current_exposure + new_position_usd:,.2f} > ${max_exposure_usd:,.2f}"
+        
+        # Calculate current exposures
+        long_exposure = sum(
+            pos.quantity * pos.entry_price 
+            for pos in self.positions.values() 
+            if pos.side == "long"
+        )
+        
+        short_exposure = sum(
+            pos.quantity * pos.entry_price 
+            for pos in self.positions.values() 
+            if pos.side == "short"
+        )
+        
+        current_gross_exposure = long_exposure + short_exposure
+        current_net_exposure = abs(long_exposure - short_exposure)
+        
+        # ✅ Check if hedging is allowed
+        allow_hedging = self.config.get("trading", {}).get(
+            "allow_simultaneous_long_short", False
+        )
+        
+        # ✅ If we have asset info, check if it's a hedge
+        is_hedge = False
+        if asset and new_side:
+            opposite_side = "short" if new_side == "long" else "long"
+            opposite_positions = [
+                p for p in self.positions.values() 
+                if p.asset == asset and p.side == opposite_side
+            ]
+            is_hedge = len(opposite_positions) > 0
+        
+        # ✅ Calculate new exposure based on whether we allow hedging
+        if allow_hedging and (is_hedge or new_side):
+            # Use NET exposure for hedged strategies
+            if new_side == "long":
+                new_net_exposure = abs((long_exposure + new_position_usd) - short_exposure)
+            elif new_side == "short":
+                new_net_exposure = abs(long_exposure - (short_exposure + new_position_usd))
+            else:
+                new_net_exposure = current_net_exposure + new_position_usd
+            
+            if new_net_exposure > max_exposure_usd:
+                logger.warning(
+                    f"Portfolio NET exposure limit exceeded:\n"
+                    f"  Current Long:  ${long_exposure:,.2f}\n"
+                    f"  Current Short: ${short_exposure:,.2f}\n"
+                    f"  Current Net:   ${current_net_exposure:,.2f}\n"
+                    f"  New {new_side or 'position'}: ${new_position_usd:,.2f}\n"
+                    f"  New Net:       ${new_net_exposure:,.2f}\n"
+                    f"  Limit:         ${max_exposure_usd:,.2f}"
+                )
+                return False
+            
+            logger.info(
+                f"[EXPOSURE] NET: ${new_net_exposure:,.2f} / ${max_exposure_usd:,.2f} "
+                f"({new_net_exposure/max_exposure_usd*100:.1f}%)"
+                f"{' [HEDGE]' if is_hedge else ''}"
             )
-            return False
-
+        
+        else:
+            # Use GROSS exposure for directional strategies
+            new_gross_exposure = current_gross_exposure + new_position_usd
+            
+            if new_gross_exposure > max_exposure_usd:
+                logger.warning(
+                    f"Portfolio GROSS exposure limit: "
+                    f"${new_gross_exposure:,.2f} > ${max_exposure_usd:,.2f}"
+                )
+                return False
+            
+            logger.info(
+                f"[EXPOSURE] GROSS: ${new_gross_exposure:,.2f} / ${max_exposure_usd:,.2f} "
+                f"({new_gross_exposure/max_exposure_usd*100:.1f}%)"
+            )
+        
+        # Check drawdown limit
         drawdown = (
             (self.peak_equity - self.equity) / self.peak_equity
             if self.peak_equity > 0
             else 0
         )
         max_drawdown = self.portfolio_config["max_drawdown"]
-
+        
         if drawdown >= max_drawdown:
             logger.warning(f"Max drawdown: {drawdown:.2%} >= {max_drawdown:.2%}")
             return False
-
+        
         return True
 
     def get_asset_positions(self, asset: str, side: str = None) -> List[Position]:
@@ -701,20 +780,19 @@ class PortfolioManager:
         return False
 
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
-        """
-        Check if we can open a new position for the asset
-
-        Returns:
-            Tuple of (can_open: bool, reason: str)
-        """
+        """Check both long and short separately"""
         current_count = self.get_asset_position_count(asset, side)
-
+        
         if current_count >= self.max_positions_per_asset:
-            return (
-                False,
-                f"Maximum {self.max_positions_per_asset} {side.upper()} positions reached for {asset} ({current_count} open)",
-            )
-
+            return False, f"Max {side} positions reached"
+        
+        # Check if opposite side exists (if simultaneous trading disabled)
+        if not self.config.get("trading", {}).get("allow_simultaneous_long_short", False):
+            opposite_side = "short" if side == "long" else "long"
+            opposite_count = self.get_asset_position_count(asset, opposite_side)
+            if opposite_count > 0:
+                return False, f"Have opposite {opposite_side} position"
+        
         return True, "OK"
 
     def add_position(
@@ -731,28 +809,33 @@ class PortfolioManager:
         binance_order_id: int = None,
         ohlc_data: dict = None,
         use_dynamic_management: bool = True,
-        entry_time: datetime = None,  # ✅ NEW: Allow passing entry_time for imports
+        entry_time: datetime = None,
     ) -> bool:
         """Add a new position to the portfolio"""
-
+        
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
             logger.warning(f"Cannot open position: {reason}")
             return False
-
-        if not self.check_portfolio_limits(position_size_usd):
-            logger.warning(f"Portfolio limits exceeded for {asset}")
+        
+        # ✅ CRITICAL FIX: Pass side AND asset for proper hedging check
+        if not self.check_portfolio_limits(
+            new_position_usd=position_size_usd,
+            new_side=side,
+            asset=asset
+        ):
+            logger.warning(f"Portfolio limits exceeded for {asset} {side.upper()}")
             return False
-
+        
         quantity = position_size_usd / entry_price
-
+        
         position = Position(
             asset=asset,
             symbol=symbol,
             side=side,
             entry_price=entry_price,
             quantity=quantity,
-            entry_time=entry_time or datetime.now(),  # ✅ Use provided or current time
+            entry_time=entry_time or datetime.now(),
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop_pct=trailing_stop_pct,
@@ -762,9 +845,9 @@ class PortfolioManager:
             account_balance=self.current_capital,
             use_dynamic_management=use_dynamic_management,
         )
-
+        
         self.positions[position.position_id] = position
-
+        
         # Database logging
         if self.db_manager:
             try:
@@ -787,32 +870,32 @@ class PortfolioManager:
                         "entry_time": position.entry_time.isoformat(),
                     },
                 )
-
+                
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
-
+                
                 if is_new:
-                    print(f"New trade created: {trade_id}")
+                    logger.debug(f"[DB] New trade created: {trade_id}")
                 else:
-                    print(f"Existing trade updated/found: {trade_id}")
-
+                    logger.debug(f"[DB] Existing trade updated: {trade_id}")
+            
             except Exception as e:
                 logger.error(f"[DB] Error logging trade entry: {e}")
-
+        
         current_count = self.get_asset_position_count(asset, side)
         logger.info(
             f"✓ Position #{current_count} opened: {asset} {side.upper()} "
             f"@ ${entry_price:,.2f} | Size: ${position_size_usd:,.2f} "
             f"| ID: {position.position_id}"
         )
-
+        
         if mt5_ticket:
             logger.info(f"  └─ MT5 Ticket: {mt5_ticket}")
         if binance_order_id:
             logger.info(f"  └─ Binance Order ID: {binance_order_id}")
         if position.trade_manager:
             logger.info(f"  └─ VTM: ACTIVE")
-
+        
         return True
 
     def update_positions_with_ohlc(self, ohlc_data_dict: dict):

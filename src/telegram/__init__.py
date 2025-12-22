@@ -69,7 +69,7 @@ class SignalMonitoringIntegration:
             "regime": details.get("regime"),
             "is_bull": details.get("is_bull_market"),
             "quality": details.get("signal_quality", 0),
-            "reasoning": details.get("reasoning"),
+            "reasoning": details.get("reasoning"),  # Can be None
             "mr_signal": details.get("mean_reversion_signal"),
             "mr_conf": details.get("mean_reversion_confidence", 0),
             "tf_signal": details.get("trend_following_signal"),
@@ -95,7 +95,9 @@ class SignalMonitoringIntegration:
             )
             self.regime_tracking[asset]["change_count"] += 1
 
-        if "override" in entry["reasoning"].lower():
+        # Gracefully handle None for reasoning
+        reasoning = entry.get("reasoning", "").lower() if entry.get("reasoning") is not None else ""
+        if "override" in reasoning:
             self.override_tracking[asset].append(
                 {
                     "timestamp": timestamp,
@@ -104,6 +106,7 @@ class SignalMonitoringIntegration:
                     "quality": entry["quality"],
                 }
             )
+
 
     def get_last_signals(self, asset: str, n: int = 5) -> List[Dict]:
         """Get last N signals for an asset"""
