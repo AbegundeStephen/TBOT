@@ -433,7 +433,7 @@ class TrendFollowingStrategy(BaseStrategy):
             logger.info(f"  Filtered: {filtered_by_4h} signals")
             logger.info(f"  Boosted: {boosted_by_4h} signals")
 
-        if total_signals > 36:
+        if total_signals > 60:
             logger.warning(
                 f"  ⚠ Too many signals ({total_signals:.1f}%) - tighten thresholds"
             )

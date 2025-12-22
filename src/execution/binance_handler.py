@@ -4,6 +4,7 @@ ENHANCED: Track Binance order IDs for accurate P&L tracking
 """
 
 import logging
+import time
 from binance.client import Client
 from binance.enums import (
     SIDE_BUY,
@@ -15,6 +16,7 @@ from binance.enums import (
 from typing import Dict, Optional, Tuple
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from src.execution.binance_futures import BinanceFuturesHandler
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +328,7 @@ class BinanceExecutionHandler:
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
         )
+        self.is_paper_mode = self.mode.lower() == "paper"
 
         logger.info(
             f"BinanceExecutionHandler with HybridPositionSizer initialized - Mode: {self.mode.upper()}"
@@ -382,6 +385,38 @@ class BinanceExecutionHandler:
             True,
             f"OK - {portfolio_count}/{self.max_positions_per_asset} positions open",
         )
+        
+        
+    def can_open_position_side(self, asset_name: str, side: str) -> Tuple[bool, str]:
+        """
+        Check if we can open a position on a specific SIDE
+        
+        Args:
+            asset_name: Asset name (e.g., "BTC")
+            side: "long" or "short"
+        
+        Returns:
+            Tuple of (can_open: bool, reason: str)
+        """
+        # Check if shorts are allowed in config
+        if side == "short":
+            allow_shorts = self.config["assets"][asset_name].get("allow_shorts", False)
+            if not allow_shorts:
+                return False, f"Short trading disabled for {asset_name} in config"
+
+        # Check portfolio manager limits
+        can_open_pm, pm_reason = self.portfolio_manager.can_open_position(asset_name, side)
+        if not can_open_pm:
+            return False, f"Portfolio limit: {pm_reason}"
+
+        # Check max positions per side
+        current_count = self.portfolio_manager.get_asset_position_count(asset_name, side)
+        max_per_asset = self.max_positions_per_asset
+        
+        if current_count >= max_per_asset:
+            return False, f"Already have {current_count}/{max_per_asset} {side.upper()} positions"
+
+        return True, f"OK - {current_count}/{max_per_asset} {side.upper()} positions open"
 
     def get_current_price(self, symbol: str = None) -> Optional[float]:
         """Get current market price"""
@@ -407,12 +442,30 @@ class BinanceExecutionHandler:
         override_reason: str = None,
     ) -> bool:
         """
-        Execute trading signal with  logic:
-        1. Checks actual Binance balance before opening
-        2. Closes ALL positions on opposite signals
+        ✅ BINANCE TWO-WAY TRADING: Execute trading signal
+        
+        Signal Logic:
+        - BUY (+1):  Close ALL shorts → Open long
+        - SELL (-1): Close ALL longs  → Open short
+        - HOLD (0):  Check SL/TP only
+        
+        Args:
+            signal: +1 (BUY), -1 (SELL), 0 (HOLD)
+            current_price: Current market price
+            asset_name: Asset name (e.g., "BTC")
+            confidence_score: Signal confidence (0-1)
+            market_condition: Market regime
+            sizing_mode: Position sizing mode
+            manual_size_usd: Manual position size override
+            override_reason: Reason for manual override
+        
+        Returns:
+            True if action taken, False otherwise
         """
         try:
-            # Get current price if not provided
+            # ============================================================
+            # STEP 1: Get current price
+            # ============================================================
             if current_price is None:
                 current_price = self.get_current_price()
 
@@ -420,26 +473,43 @@ class BinanceExecutionHandler:
                 logger.error(f"{asset_name}: Invalid price: {current_price}")
                 return False
 
-            # Get existing positions from portfolio
+            # ============================================================
+            # STEP 2: Get existing positions
+            # ============================================================
             existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
+            
+            long_positions = [p for p in existing_positions if p.side == "long"]
+            short_positions = [p for p in existing_positions if p.side == "short"]
 
-            # === SCENARIO 1: SELL SIGNAL - Close ALL long positions ===
+            logger.info(
+                f"\n{'='*80}\n"
+                f"[SIGNAL] {asset_name} Signal: {signal:+2d}\n"
+                f"[STATE] Current Positions: {len(long_positions)} LONG, {len(short_positions)} SHORT\n"
+                f"{'='*80}"
+            )
+
+            # ============================================================
+            # SCENARIO 1: SELL SIGNAL (-1) → Close longs, Open short
+            # ============================================================
             if signal == -1:
-                long_positions = [p for p in existing_positions if p.side == "long"]
-
+                # Step 1: Close ALL long positions
                 if long_positions:
                     logger.info(
                         f"\n{'='*80}\n"
                         f"📉 SELL SIGNAL - Closing {len(long_positions)} LONG position(s)\n"
                         f"{'='*80}"
                     )
-
+                    
                     closed_count = 0
                     failed_count = 0
 
                     for i, position in enumerate(long_positions, 1):
                         logger.info(
-                            f"\n[{i}/{len(long_positions)}] Closing position {position.position_id}..."
+                            f"\n[{i}/{len(long_positions)}] Closing LONG position:\n"
+                            f"  Position ID: {position.position_id}\n"
+                            f"  Order ID:    {position.binance_order_id}\n"
+                            f"  Entry:       ${position.entry_price:,.2f}\n"
+                            f"  Current:     ${current_price:,.2f}"
                         )
 
                         success = self._close_position(
@@ -451,14 +521,10 @@ class BinanceExecutionHandler:
 
                         if success:
                             closed_count += 1
-                            logger.info(
-                                f"  ✓ Position {position.position_id} closed successfully"
-                            )
+                            logger.info(f"  ✓ Position {position.position_id} closed")
                         else:
                             failed_count += 1
-                            logger.error(
-                                f"  ✗ Failed to close position {position.position_id}"
-                            )
+                            logger.error(f"  ✗ Failed to close {position.position_id}")
 
                     logger.info(
                         f"\n{'='*80}\n"
@@ -466,29 +532,63 @@ class BinanceExecutionHandler:
                         f"{'='*80}\n"
                     )
 
-                    return closed_count > 0
-
                 else:
-                    logger.debug(
-                        f"{asset_name}: SELL signal but no LONG positions to close"
+                    logger.debug(f"{asset_name}: SELL signal but no LONG positions to close")
+
+                # Step 2: Check if we can open SHORT
+                can_open, reason = self.can_open_position_side(asset_name, "short")
+                
+                if not can_open:
+                    logger.warning(
+                        f"\n{'='*80}\n"
+                        f"⚠️  CANNOT OPEN SHORT POSITION\n"
+                        f"Reason: {reason}\n"
+                        f"{'='*80}\n"
                     )
-                    return False
+                    # Return True if we closed positions, False if nothing happened
+                    return len(long_positions) > 0
 
-            # === SCENARIO 2: BUY SIGNAL - Close shorts (if any) then open long ===
+                # Step 3: Open SHORT position
+                logger.info(
+                    f"\n{'='*80}\n"
+                    f"📉 SELL SIGNAL - Opening new SHORT position\n"
+                    f"Check: {reason}\n"
+                    f"{'='*80}\n"
+                )
+
+                return self._open_position(
+                    signal=-1,
+                    current_price=current_price,
+                    asset_name=asset_name,
+                    confidence_score=confidence_score,
+                    market_condition=market_condition,
+                    sizing_mode=sizing_mode,
+                    manual_size_usd=manual_size_usd,
+                    override_reason=override_reason,
+                )
+
+            # ============================================================
+            # SCENARIO 2: BUY SIGNAL (+1) → Close shorts, Open long
+            # ============================================================
             elif signal == 1:
-                short_positions = [p for p in existing_positions if p.side == "short"]
-
+                # Step 1: Close ALL short positions
                 if short_positions:
                     logger.info(
                         f"\n{'='*80}\n"
-                        f"📈 BUY SIGNAL - Closing {len(short_positions)} SHORT position(s) first\n"
+                        f"📈 BUY SIGNAL - Closing {len(short_positions)} SHORT position(s)\n"
                         f"{'='*80}"
                     )
 
                     closed_count = 0
+                    failed_count = 0
+
                     for i, position in enumerate(short_positions, 1):
                         logger.info(
-                            f"\n[{i}/{len(short_positions)}] Closing SHORT position {position.position_id}..."
+                            f"\n[{i}/{len(short_positions)}] Closing SHORT position:\n"
+                            f"  Position ID: {position.position_id}\n"
+                            f"  Order ID:    {position.binance_order_id}\n"
+                            f"  Entry:       ${position.entry_price:,.2f}\n"
+                            f"  Current:     ${current_price:,.2f}"
                         )
 
                         success = self._close_position(
@@ -500,24 +600,33 @@ class BinanceExecutionHandler:
 
                         if success:
                             closed_count += 1
+                            logger.info(f"  ✓ Position {position.position_id} closed")
+                        else:
+                            failed_count += 1
+                            logger.error(f"  ✗ Failed to close {position.position_id}")
 
                     logger.info(
-                        f"  ✓ Closed {closed_count}/{len(short_positions)} SHORT positions"
+                        f"\n{'='*80}\n"
+                        f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
+                        f"{'='*80}\n"
                     )
 
-                # Now check if we can open a new LONG position
-                # 🔥 CRITICAL FIX: Check actual Binance balance
-                can_open, reason = self.can_open_binance_position(asset_name, "long")
+                else:
+                    logger.debug(f"{asset_name}: BUY signal but no SHORT positions to close")
+
+                # Step 2: Check if we can open LONG
+                can_open, reason = self.can_open_position_side(asset_name, "long")
 
                 if not can_open:
                     logger.warning(
                         f"\n{'='*80}\n"
-                        f"⚠️  CANNOT OPEN NEW LONG POSITION\n"
+                        f"⚠️  CANNOT OPEN LONG POSITION\n"
                         f"Reason: {reason}\n"
                         f"{'='*80}\n"
                     )
-                    return False
+                    return len(short_positions) > 0
 
+                # Step 3: Open LONG position
                 logger.info(
                     f"\n{'='*80}\n"
                     f"📈 BUY SIGNAL - Opening new LONG position\n"
@@ -526,7 +635,7 @@ class BinanceExecutionHandler:
                 )
 
                 return self._open_position(
-                    signal=signal,
+                    signal=1,
                     current_price=current_price,
                     asset_name=asset_name,
                     confidence_score=confidence_score,
@@ -536,7 +645,9 @@ class BinanceExecutionHandler:
                     override_reason=override_reason,
                 )
 
-            # === SCENARIO 3: HOLD SIGNAL - Check SL/TP for all positions ===
+            # ============================================================
+            # SCENARIO 3: HOLD SIGNAL (0) → Check SL/TP for all positions
+            # ============================================================
             elif signal == 0:
                 if not existing_positions:
                     logger.debug(f"{asset_name}: HOLD signal, no positions")
@@ -602,114 +713,148 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"Error checking SL/TP: {e}")
             return False, ""
-
-    def _close_position(
-        self, position, current_price: float, asset_name: str, reason: str
-    ) -> bool:
-        """
-        Close a single position
-        Returns True if successful, False otherwise
-        """
-        try:
-            entry_price = position.entry_price
-            quantity = position.quantity
-            side = position.side
-            position_id = position.position_id
-            binance_order_id = position.binance_order_id
-
-            position_size_usd = quantity * entry_price
-
-            if side == "long":
-                pnl = (current_price - entry_price) * quantity
-            else:
-                pnl = (entry_price - current_price) * quantity
-
-            pnl_pct = (pnl / position_size_usd) * 100 if position_size_usd > 0 else 0
-
-            logger.info(
-                f"[CLOSE] {asset_name} {side.upper()} ({position_id})\n"
-                f"  Entry: ${entry_price:,.2f} → Exit: ${current_price:,.2f}\n"
-                f"  Quantity: {quantity:.8f} BTC\n"
-                f"  P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
-                f"  Reason: {reason}"
-            )
-
-            # Close on Binance first (if live mode)
-            binance_closed = False
-            if self.mode.lower() != "paper":
-                binance_closed = self._close_binance_order(
-                    quantity=quantity, asset_name=asset_name, order_id=binance_order_id
-                )
-            else:
-                binance_closed = True  # Paper mode
-
-            # Close in portfolio manager
-            trade_result = self.portfolio_manager.close_position(
-                position_id=position_id, exit_price=current_price, reason=reason
-            )
-
-            if trade_result and binance_closed:
-                logger.info(f"  ✓ Position {position_id} closed successfully")
-                return True
-            else:
-                logger.error(f"  ✗ Failed to close position {position_id}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error closing position: {e}", exc_info=True)
-            return False
-
+        
+        
     def _close_binance_order(
         self, quantity: float, asset_name: str, order_id: int = None
     ) -> bool:
         """
-        Close position by selling on Binance
-
+        Close position on Binance (SPOT or simulated SHORT)
+        
         Args:
-            quantity: Amount of BTC to sell
-            asset_name: Asset name for logging
-            order_id: Optional order ID for tracking
-
+            quantity: Amount to sell/buy back
+            asset_name: Asset name
+            order_id: Original order ID (optional, for tracking)
+        
         Returns:
             True if successful, False otherwise
         """
         try:
-            logger.info(f"[BINANCE] Selling {quantity:.8f} BTC...")
-
-            # Round quantity to 8 decimals (BTC precision)
-            quantity = round(quantity, 8)
-
-            # Place market sell order
-            order = self.client.order_market_sell(symbol=self.symbol, quantity=quantity)
-
-            if order and order.get("status") in ["FILLED", "PARTIALLY_FILLED"]:
-                executed_qty = float(order.get("executedQty", 0))
-                fills = order.get("fills", [])
-
-                avg_price = 0.0
-                if fills:
-                    total_value = sum(
-                        float(fill["price"]) * float(fill["qty"]) for fill in fills
-                    )
-                    total_qty = sum(float(fill["qty"]) for fill in fills)
-                    avg_price = total_value / total_qty if total_qty > 0 else 0
-
+            # ✅ PAPER MODE: Simulate close without actual API call
+            if self.is_paper_mode:
                 logger.info(
-                    f"[BINANCE] ✓ Sold {executed_qty:.8f} BTC @ ${avg_price:,.2f}\n"
-                    f"  Order ID: {order.get('orderId')}\n"
-                    f"  Status: {order.get('status')}"
+                    f"[PAPER] Simulated close of {quantity:.8f} {self.symbol} "
+                    f"(Order ID: {order_id})"
                 )
                 return True
+            
+            # LIVE MODE: Execute actual close
+            # For SPOT LONG positions: Market SELL
+            order = self.client.order_market_sell(
+                symbol=self.symbol, 
+                quantity=quantity
+            )
+            
+            logger.info(
+                f"[BINANCE] ✓ Position closed: {quantity:.8f} {self.symbol}\n"
+                f"  Order ID: {order.get('orderId')}\n"
+                f"  Status: {order.get('status')}"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"[BINANCE] Error closing position: {e}")
+            return False
+        
+    def integrate_futures_into_handler(handler):
+        """
+        Integrate Futures API into existing BinanceExecutionHandler
+        
+        Usage:
+            from binance_futures_short import integrate_futures_into_handler
+            integrate_futures_into_handler(binance_handler)
+        """
+        
+        # Check if Futures is enabled
+        futures_enabled = handler.config.get("assets", {}).get("BTC", {}).get("enable_futures", False)
+        
+        if not futures_enabled:
+            logger.warning("[FUTURES] Futures trading disabled in config")
+            return False
+        
+        try:
+            # Initialize Futures handler
+            handler.futures_handler = BinanceFuturesHandler(
+                client=handler.client,
+                symbol=handler.symbol
+            )
+            
+            # Set leverage and margin type
+            leverage = handler.config.get("assets", {}).get("BTC", {}).get("leverage", 10)
+            margin_type = handler.config.get("assets", {}).get("BTC", {}).get("margin_type", "CROSSED")
+            
+            handler.futures_handler.set_leverage(leverage)
+            handler.futures_handler.set_margin_type(margin_type)
+            
+            logger.info("[FUTURES] ✓ Futures handler integrated")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[FUTURES] Integration failed: {e}")
+            return False
+        
+    def _round_quantity_precision(self, quantity: float, symbol: str = "BTCUSDT", is_futures: bool = False) -> float:
+        """
+        Round quantity to the correct precision for Binance (spot or futures).
+        """
+        try:
+            if is_futures:
+                # Futures: 3 decimal places for BTCUSDT
+                rounded_qty = round(quantity, 3)
             else:
-                logger.error(
-                    f"[BINANCE] ✗ Sell order failed or pending\n"
-                    f"  Status: {order.get('status') if order else 'No response'}"
-                )
-                return False
+                # Spot: 6 decimal places for BTCUSDT
+                rounded_qty = round(quantity, 6)
+
+            logger.info(f"[PRECISION] Rounded quantity: {quantity} → {rounded_qty}")
+            return rounded_qty
 
         except Exception as e:
-            logger.error(f"[BINANCE] Error selling {asset_name}: {e}")
-            return False
+            logger.error(f"Error rounding quantity precision: {e}")
+            return quantity
+    
+    
+    def _round_quantity(self, quantity: float, symbol: str = "BTCUSDT", is_futures: bool = False) -> float:
+        """
+        Round quantity to the correct lot size step and precision for Binance.
+        """
+        try:
+            # Round to correct precision first
+            if is_futures:
+                quantity = round(quantity, 3)  # Futures: 3 decimal places
+            else:
+                quantity = round(quantity, 6)  # Spot: 6 decimal places
+
+            # Get symbol info from Binance
+            if is_futures:
+                exchange_info = self.client.futures_exchange_info()
+            else:
+                exchange_info = self.client.get_exchange_info()
+
+            for s in exchange_info["symbols"]:
+                if s["symbol"] == symbol:
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                            min_qty = float(f["minQty"])
+                            max_qty = float(f["maxQty"])
+
+                            logger.info(
+                                f"[LOT_SIZE] {symbol} | Min: {min_qty} | Max: {max_qty} | Step: {step_size}"
+                            )
+
+                            # Round to the nearest step size
+                            rounded_qty = round(quantity / step_size) * step_size
+                            rounded_qty = max(min_qty, min(rounded_qty, max_qty))
+                            return rounded_qty
+
+            logger.warning(f"Could not find LOT_SIZE filter for {symbol}")
+            return quantity
+
+        except Exception as e:
+            logger.error(f"Error rounding quantity: {e}")
+            return quantity
+
+
 
     def _open_position(
         self,
@@ -722,13 +867,19 @@ class BinanceExecutionHandler:
         manual_size_usd: float = None,
         override_reason: str = None,
     ) -> bool:
-        """Open new position with hybrid sizing"""
+        """
+        Open LONG or SHORT position using Binance Futures API if available, otherwise fall back to spot.
+        """
         try:
+            # ============================================================
+            # STEP 1: Determine side from signal
+            # ============================================================
             side = "long" if signal == 1 else "short"
+            logger.info(f"[OPEN] Opening {side.upper()} position for {asset_name}")
 
-            # Position sizing
-            from binance_handler import PositionSizingRequest  # Adjust import
-
+            # ============================================================
+            # STEP 2: Calculate position size
+            # ============================================================
             sizing_request = PositionSizingRequest(
                 asset=asset_name,
                 current_price=current_price,
@@ -741,81 +892,147 @@ class BinanceExecutionHandler:
                 max_override_pct=2.0,
             )
 
-            position_size_usd, sizing_metadata = self.sizer.calculate_size(
-                sizing_request
-            )
+            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
+
+            # Apply short size reduction if configured
+            if side == "short":
+                short_config = self.config.get("portfolio", {}).get("short_position_sizing", {})
+                use_reduced = short_config.get("use_reduced_size_for_shorts", False)
+                multiplier = short_config.get("short_size_multiplier", 0.8)
+                if use_reduced and multiplier < 1.0:
+                    logger.info(f"[SHORT] Applying {multiplier}x size reduction")
+                    position_size_usd *= multiplier
 
             if position_size_usd <= 0:
-                logger.warning(f"{asset_name}: Invalid size: ${position_size_usd:.2f}")
+                logger.warning(f"{asset_name}: Invalid position size: ${position_size_usd:.2f}")
                 return False
 
+            # ============================================================
+            # STEP 3: Calculate quantity
+            # ============================================================
             quantity = position_size_usd / current_price
-            quantity = round(quantity, 8)  # BTC precision
+           # Round to correct precision (spot or futures)
+           # Round to correct precision and lot size
+            is_futures = hasattr(self, "futures_handler") and self.config.get("binance", {}).get("enable_futures", False)
+            quantity = self._round_quantity(quantity, self.symbol, is_futures)
 
             MIN_BTC = 0.00001
             if quantity < MIN_BTC:
-                logger.warning(f"{asset_name}: Quantity {quantity:.8f} below minimum")
+                logger.warning(f"{asset_name}: Quantity {quantity:.8f} below minimum {MIN_BTC}")
                 return False
 
-            # Calculate SL/TP
+            # ============================================================
+            # STEP 4: Calculate Stop Loss & Take Profit
+            # ============================================================
             risk = self.asset_config.get("risk", {})
-            stop_loss_pct = risk.get("stop_loss_pct", 0.05)
-            take_profit_pct = risk.get("take_profit_pct", 0.10)
-            trailing_stop_pct = risk.get("trailing_stop_pct", 0.03)
 
-            if signal == 1:
+            if side == "long":
+                stop_loss_pct = risk.get("stop_loss_pct", 0.05)
+                take_profit_pct = risk.get("take_profit_pct", 0.10)
+                trailing_stop_pct = risk.get("trailing_stop_pct", 0.03)
                 stop_loss = current_price * (1 - stop_loss_pct)
                 take_profit = current_price * (1 + take_profit_pct)
-            else:
+            else:  # SHORT
+                stop_loss_pct = risk.get("stop_loss_pct_short", risk.get("stop_loss_pct", 0.04))
+                take_profit_pct = risk.get("take_profit_pct_short", risk.get("take_profit_pct", 0.08))
+                trailing_stop_pct = risk.get("trailing_stop_pct_short", risk.get("trailing_stop_pct", 0.025))
                 stop_loss = current_price * (1 + stop_loss_pct)
                 take_profit = current_price * (1 - take_profit_pct)
 
             logger.info(
-                f"[OPEN] BUY {quantity:.8f} {self.symbol} @ ${current_price:,.2f}\n"
+                f"[OPEN] {side.upper()} {quantity:.8f} {self.symbol} @ ${current_price:,.2f}\n"
                 f"  Size: ${position_size_usd:,.2f}\n"
                 f"  Mode: {sizing_mode} | Confidence: {confidence_score}\n"
-                f"  SL: ${stop_loss:,.2f} ({stop_loss_pct:.1%})\n"
-                f"  TP: ${take_profit:,.2f} ({take_profit_pct:.1%})"
+                f"  SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}"
             )
 
-            # Execute on Binance (if live mode)
+            # ============================================================
+            # STEP 5: Execute on Binance (Futures or Spot)
+            # ============================================================
             order_id = None
-            if self.mode.lower() != "paper":
-                try:
-                    order = self.client.order_market_buy(
-                        symbol=self.symbol, quantity=quantity
-                    )
-                    order_id = order.get("orderId")
-                    logger.info(f"[BINANCE] ✓ Order placed: ID={order_id}")
-                except Exception as e:
-                    logger.error(f"[BINANCE] Order failed: {e}")
-                    return False
 
-            # Get OHLC for VTM
+            # Try Futures first if enabled
+            if hasattr(self, "futures_handler"):
+                try:
+                    if side == "long":
+                        order = self.futures_handler.open_long_position(
+                            quantity=quantity,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit
+                        )
+                    else:
+                        order = self.futures_handler.open_short_position(
+                            quantity=quantity,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit
+                        )
+
+                    if order:
+                        order_id = order.get("orderId")
+                        logger.info(f"[FUTURES] ✓ {side.upper()} position opened via Futures")
+                    else:
+                        logger.warning(f"[FUTURES] Failed to open {side.upper()} position, falling back to spot")
+
+                except Exception as e:
+                    logger.warning(f"[FUTURES] Error opening {side.upper()}: {e}, falling back to spot")
+
+            # Fall back to spot if Futures fails or is not available
+            if not order_id:
+                if not self.is_paper_mode:
+                    try:
+                        if side == "long":
+                            order = self.client.order_market_buy(
+                                symbol=self.symbol,
+                                quantity=quantity
+                            )
+                            order_id = order.get("orderId")
+                            logger.info(f"[SPOT] ✓ LONG position opened via Spot")
+                        else:  # SHORT
+                            logger.error(
+                                f"[SPOT] ❌ SHORT positions require Binance Futures API\n"
+                                f"  Current mode: SPOT (only supports LONG)\n"
+                                f"  Asset: {asset_name} will only trade LONG positions in live mode."
+                            )
+                            return False
+                    except Exception as e:
+                        logger.error(f"[SPOT] Order execution failed: {e}")
+                        return False
+                else:
+                    # Paper mode: simulate order execution
+                    order_id = f"PAPER_{side.upper()}_{int(time.time())}"
+                    logger.info(
+                        f"[PAPER] ✓ Simulated {side.upper()} order\n"
+                        f"  Order ID: {order_id}\n"
+                        f"  Quantity: {quantity:.8f} {self.symbol}\n"
+                        f"  Entry: ${current_price:,.2f}"
+                    )
+
+            # ============================================================
+            # STEP 6: Fetch OHLC data for VTM
+            # ============================================================
             ohlc_data = None
             if self.data_manager:
                 try:
                     end_time = datetime.now(timezone.utc)
                     start_time = end_time - timedelta(days=10)
-
                     df = self.data_manager.fetch_binance_data(
                         symbol=self.symbol,
                         interval=self.asset_config.get("interval", "1h"),
                         start_date=start_time.strftime("%Y-%m-%d"),
                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                     )
-
                     if len(df) > 0:
                         ohlc_data = {
                             "high": df["high"].values,
                             "low": df["low"].values,
                             "close": df["close"].values,
                         }
-                        logger.info(f"[VTM] Prepared {len(df)} bars")
                 except Exception as e:
                     logger.warning(f"[VTM] OHLC fetch failed: {e}")
 
-            # Add to portfolio
+            # ============================================================
+            # STEP 7: Add position to Portfolio Manager
+            # ============================================================
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
@@ -827,25 +1044,116 @@ class BinanceExecutionHandler:
                 trailing_stop_pct=trailing_stop_pct,
                 binance_order_id=order_id,
                 ohlc_data=ohlc_data,
-                account_balance=self.portfolio_manager.current_capital,
                 use_dynamic_management=True,
             )
 
             if success:
-                logger.info(f"[OK] {asset_name} position opened successfully")
+                logger.info(f"[OK] {asset_name} {side.upper()} position opened successfully")
                 if order_id:
-                    logger.info(f"  └─ Binance Order ID: {order_id}")
+                    logger.info(f"  └─ Order ID: {order_id}")
                 if ohlc_data:
                     logger.info(f"  └─ VTM: ACTIVE")
+                if self.is_paper_mode:
+                    logger.info(f"  └─ Mode: PAPER (simulated)")
                 return True
             else:
-                logger.error(f"[FAIL] Portfolio rejected position")
-                # If live mode, we should reverse the Binance order here
+                logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")
                 return False
 
         except Exception as e:
-            logger.error(f"Error opening position: {e}", exc_info=True)
+            logger.error(f"[OPEN] Error opening {asset_name} position: {e}", exc_info=True)
             return False
+
+        
+    def _close_position(
+        self, position, current_price: float, asset_name: str, reason: str
+    ) -> bool:
+        """
+        Close a LONG or SHORT position using Binance Futures API if available, otherwise fall back to spot.
+        """
+        try:
+            side = position.side
+            quantity = position.quantity
+            binance_order_id = position.binance_order_id
+
+            logger.info(f"[CLOSE] Closing {side.upper()} position for {asset_name}")
+
+            # Try Futures first if enabled
+            if hasattr(self, "futures_handler"):
+                try:
+                    if side == "long":
+                        success = self.futures_handler.close_long_position(
+                            quantity=quantity,
+                            order_id=binance_order_id
+                        )
+                    else:
+                        success = self.futures_handler.close_short_position(
+                            quantity=quantity,
+                            order_id=binance_order_id
+                        )
+
+                    if success:
+                        logger.info(f"[FUTURES] ✓ {side.upper()} position closed via Futures")
+                    else:
+                        logger.warning(f"[FUTURES] Failed to close {side.upper()} position, falling back to spot")
+                        success = False
+
+                except Exception as e:
+                    logger.warning(f"[FUTURES] Error closing {side.upper()}: {e}, falling back to spot")
+                    success = False
+
+            # Fall back to spot if Futures fails or is not available
+            if not hasattr(self, "futures_handler") or not success:
+                if not self.is_paper_mode:
+                    try:
+                        if side == "long":
+                            order = self.client.order_market_sell(
+                                symbol=self.symbol,
+                                quantity=quantity
+                            )
+                            logger.info(f"[SPOT] ✓ LONG position closed via Spot")
+                            success = True
+                        else:  # SHORT
+                            logger.error(
+                                f"[SPOT] ❌ SHORT positions require Binance Futures API\n"
+                                f"  Current mode: SPOT (only supports LONG)\n"
+                                f"  Asset: {asset_name} will only trade LONG positions in live mode."
+                            )
+                            success = False
+                    except Exception as e:
+                        logger.error(f"[SPOT] Error closing position: {e}")
+                        success = False
+                else:
+                    # Paper mode: simulate close
+                    logger.info(
+                        f"[PAPER] ✓ Simulated close of {side.upper()} position\n"
+                        f"  Order ID: {binance_order_id}"
+                    )
+                    success = True
+
+            # Close in portfolio manager
+            if success:
+                trade_result = self.portfolio_manager.close_position(
+                    position_id=position.position_id,
+                    exit_price=current_price,
+                    reason=reason
+                )
+
+                if trade_result:
+                    logger.info(f"[OK] {side.upper()} position closed successfully")
+                    return True
+                else:
+                    logger.error(f"[FAIL] Portfolio close failed for {side.upper()}")
+                    return False
+            else:
+                logger.error(f"[FAIL] Failed to close {side.upper()} position")
+                return False
+
+        except Exception as e:
+            logger.error(f"[CLOSE] Error closing position: {e}", exc_info=True)
+            return False
+
+
 
     def check_and_update_positions_VTM(self, asset_name: str = "BTC"):
         """Check and update ALL positions for an asset with VTM"""

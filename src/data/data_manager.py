@@ -24,7 +24,7 @@ class DataManager:
         self.mt5_initialized = False
 
     def initialize_binance(self) -> bool:
-        """Initialize Binance API connection"""
+        """Initialize Binance API connection with dynamic API base URL."""
         try:
             api_config = self.config["api"]["binance"]
             api_key = api_config.get("api_key", "")
@@ -36,16 +36,26 @@ class DataManager:
                 logger.warning("Binance API keys not configured, using public API only")
                 self.binance_client = Client("", "")
             else:
+                # Check if Futures trading is enabled
+                enable_futures = self.config.get("assets", {}).get("BTC", {}).get("enable_futures", False)
+
                 if api_config.get("testnet", True):
-                    self.binance_client = Client(
-                        api_key, api_secret, testnet=True, tld="com"
-                    )
-                    self.binance_client.API_URL = api_config.get(
-                        "api_base", "https://testnet.binance.vision/api"
-                    )
+                    # Set the API base URL based on whether Futures is enabled
+                    if enable_futures:
+                        api_base = api_config.get("futures_api_base", "https://testnet.binancefuture.com")
+                        logger.info(f"Using Futures Testnet API: {api_base}")
+                        self.binance_client = Client(api_key, api_secret, testnet=True, tld="com")
+                        self.binance_client.API_URL = api_base
+                    else:
+                        api_base = api_config.get("api_base", "https://testnet.binance.vision/api")
+                        logger.info(f"Using Spot Testnet API: {api_base}")
+                        self.binance_client = Client(api_key, api_secret, testnet=True, tld="com")
+                        self.binance_client.API_URL = api_base
                 else:
+                    # Live trading
                     self.binance_client = Client(api_key, api_secret)
 
+            # Verify the connection
             self.binance_client.ping()
             logger.info("Binance API initialized successfully")
             return True
@@ -56,6 +66,7 @@ class DataManager:
         except Exception as e:
             logger.error(f"Failed to initialize Binance API: {e}")
             return False
+
 
     def initialize_mt5(self) -> bool:
         """Initialize MT5 connection with detailed diagnostics"""
