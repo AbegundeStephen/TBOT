@@ -357,7 +357,9 @@ class BinanceExecutionHandler:
 
         # Check 2: Actual Binance balance (CRITICAL CHECK)
         # Note: For Binance spot, we estimate positions from balance
-        estimated_positions, total_qty = count_binance_positions(self.client, "BTC")
+        estimated_positions, total_qty = SizingMode.count_binance_positions(
+            self.client, "BTC"
+        )
 
         # Get portfolio count for comparison
         portfolio_count = self.portfolio_manager.get_asset_position_count(asset, side)
