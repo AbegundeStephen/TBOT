@@ -17,6 +17,7 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.execution.binance_futures import BinanceFuturesHandler
+from src.global_error_handler import handle_errors, ErrorSeverity
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +323,8 @@ class BinanceExecutionHandler:
         self.asset_config = config["assets"]["BTC"]
         self.risk_config = config["risk_management"]
         self.trading_config = config["trading"]
+        self.error_handler = None
+        self.trading_bot = None 
 
         self.symbol = self.asset_config["symbol"]
         self.mode = self.trading_config.get("mode", "paper")
@@ -442,6 +445,7 @@ class BinanceExecutionHandler:
         sizing_mode: str = SizingMode.AUTOMATED,
         manual_size_usd: float = None,
         override_reason: str = None,
+        signal_details: Dict = None,
     ) -> bool:
         """
         ✅ BINANCE TWO-WAY TRADING: Execute trading signal
@@ -460,6 +464,12 @@ class BinanceExecutionHandler:
             sizing_mode: Position sizing mode
             manual_size_usd: Manual position size override
             override_reason: Reason for manual override
+            
+        signal_details: Dict containing:
+            - aggregator_mode: 'council' or 'performance'
+            - mode_confidence: 0-1
+            - regime_analysis: Market conditions
+            - All other signal metadata
         
         Returns:
             True if action taken, False otherwise
@@ -478,8 +488,7 @@ class BinanceExecutionHandler:
             # ============================================================
             # STEP 2: Get existing positions
             # ============================================================
-            existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
-            
+            existing_positions = self.portfolio_manager.get_asset_positions(asset_name)      
             long_positions = [p for p in existing_positions if p.side == "long"]
             short_positions = [p for p in existing_positions if p.side == "short"]
 
@@ -489,6 +498,13 @@ class BinanceExecutionHandler:
                 f"[STATE] Current Positions: {len(long_positions)} LONG, {len(short_positions)} SHORT\n"
                 f"{'='*80}"
             )
+            
+            # ✅ Log hybrid mode if present
+            if signal_details and signal_details.get('aggregator_mode'):
+                logger.info(
+                    f"\n[HYBRID] Mode: {signal_details['aggregator_mode'].upper()} "
+                    f"({signal_details.get('mode_confidence', 0):.0%} confidence)"
+                )
 
             # ============================================================
             # SCENARIO 1: SELL SIGNAL (-1) → Close longs, Open short
@@ -567,6 +583,7 @@ class BinanceExecutionHandler:
                     sizing_mode=sizing_mode,
                     manual_size_usd=manual_size_usd,
                     override_reason=override_reason,
+                    signal_details=signal_details
                 )
 
             # ============================================================
@@ -645,6 +662,7 @@ class BinanceExecutionHandler:
                     sizing_mode=sizing_mode,
                     manual_size_usd=manual_size_usd,
                     override_reason=override_reason,
+                    signal_details=signal_details
                 )
 
             # ============================================================
@@ -868,9 +886,17 @@ class BinanceExecutionHandler:
         sizing_mode: str = SizingMode.AUTOMATED,
         manual_size_usd: float = None,
         override_reason: str = None,
+        signal_details: Dict = None,
+        
     ) -> bool:
         """
-        Open LONG or SHORT position using Binance Futures API if available, otherwise fall back to spot.
+        Open LONG or SHORT position with hybrid-aware VTM
+        
+        Args:
+        signal_details: MUST contain:
+            - aggregator_mode: 'council' or 'performance'
+            - mode_confidence: 0-1
+            - regime_analysis: Market conditions
         """
         try:
             # ============================================================
@@ -926,7 +952,7 @@ class BinanceExecutionHandler:
             # ============================================================
             # STEP 4: Calculate Stop Loss & Take Profit
             # ============================================================
-            risk = self.asset_config.get("risk", {})
+            """ risk = self.asset_config.get("risk", {})
 
             if side == "long":
                 stop_loss_pct = risk.get("stop_loss_pct", 0.05)
@@ -940,13 +966,14 @@ class BinanceExecutionHandler:
                 trailing_stop_pct = risk.get("trailing_stop_pct_short", risk.get("trailing_stop_pct", 0.025))
                 stop_loss = current_price * (1 + stop_loss_pct)
                 take_profit = current_price * (1 - take_profit_pct)
-
+ """
             logger.info(
                 f"[OPEN] {side.upper()} {quantity:.8f} {self.symbol} @ ${current_price:,.2f}\n"
                 f"  Size: ${position_size_usd:,.2f}\n"
                 f"  Mode: {sizing_mode} | Confidence: {confidence_score}\n"
-                f"  SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}"
+                f"  ⚠️  VTM will calculate TP/SL based on market structure"
             )
+
 
             # ============================================================
             # STEP 5: Execute on Binance (Futures or Spot)
@@ -959,14 +986,14 @@ class BinanceExecutionHandler:
                     if side == "long":
                         order = self.futures_handler.open_long_position(
                             quantity=quantity,
-                            stop_loss=stop_loss,
-                            take_profit=take_profit
+                            stop_loss=None,
+                            take_profit=None
                         )
                     else:
                         order = self.futures_handler.open_short_position(
                             quantity=quantity,
-                            stop_loss=stop_loss,
-                            take_profit=take_profit
+                            stop_loss=None,
+                            take_profit=None
                         )
 
                     if order:
@@ -1041,12 +1068,14 @@ class BinanceExecutionHandler:
                 side=side,
                 entry_price=current_price,
                 position_size_usd=position_size_usd,
-                stop_loss=None,
-                take_profit=None,
-                trailing_stop_pct=trailing_stop_pct,
+                stop_loss=None, # ❌ VTM will calculate
+                take_profit=None, # ❌ VTM will calculate
+                trailing_stop_pct=None, # ❌ VTM will manage
                 binance_order_id=order_id,
                 ohlc_data=ohlc_data,
-                use_dynamic_management=True,
+                use_dynamic_management=True, # ✅ Enable VTM
+                signal_details=signal_details, # ✅ Pass hybrid context
+
             )
 
             if success:
@@ -1240,12 +1269,14 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
-    def sync_positions_with_binance(
-        self, asset_name: str = "BTC", symbol: str = None
-    ) -> bool:
-        """Sync portfolio with actual Binance holdings (multi-position aware)"""
+    def sync_positions_with_binance(self, asset_name: str = "BTC", symbol: str = None) -> bool:
+        """
+        ✅ COMPLETE FIX: Sync portfolio with Binance holdings (multi-position aware + VTM)
+        Just copy-paste this entire method to replace your existing one in binance_handler.py
+        """
         if symbol is None:
             symbol = self.symbol
+        
         try:
             logger.info(f"[SYNC] Starting position sync for {asset_name}...")
             account = self.client.get_account()
@@ -1262,34 +1293,36 @@ class BinanceExecutionHandler:
             current_price = self.get_current_price(symbol)
             MIN_BTC_BALANCE = 0.0001
 
-            # Calculate total portfolio quantity for this asset
+            # Calculate total portfolio quantity
             portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
+
             # ================================================================
             # SCENARIO 1: Binance has BTC, portfolio is empty → IMPORT WITH VTM
             # ================================================================
-
             if btc_balance > MIN_BTC_BALANCE and not portfolio_positions:
                 import_enabled = bool(
-                    self.config.get("portfolio", {}).get(
-                        "import_existing_positions", False
-                    )
+                    self.config.get("portfolio", {}).get("import_existing_positions", False)
                 )
+                
                 if import_enabled:
                     logger.info(
                         f"[SYNC] BTC balance {btc_balance:.8f} detected.\n"
                         f"  → Importing as LONG position WITH VTM support..."
                     )
-                    # ✅  Fetch OHLC data for VTM
+                    
+                    # ============================================================
+                    # STEP 1: Fetch OHLC data for VTM
+                    # ============================================================
                     ohlc_data = None
+                    df = None
+                    
                     try:
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10)
 
                         df = self.data_manager.fetch_binance_data(
                             symbol=symbol,
-                            interval=self.config["assets"][asset_name].get(
-                                "interval", "1h"
-                            ),
+                            interval=self.config["assets"][asset_name].get("interval", "1h"),
                             start_date=start_time.strftime("%Y-%m-%d"),
                             end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                         )
@@ -1300,17 +1333,109 @@ class BinanceExecutionHandler:
                                 "low": df["low"].values,
                                 "close": df["close"].values,
                             }
-                            logger.info(
-                                f"[VTM] Fetched {len(df)} bars for dynamic management"
-                            )
+                            logger.info(f"[VTM] Fetched {len(df)} bars for dynamic management")
                         else:
-                            logger.warning(
-                                f"[VTM] Insufficient data ({len(df)} bars), VTM disabled"
-                            )
+                            logger.warning(f"[VTM] Insufficient data ({len(df)} bars), VTM disabled")
 
                     except Exception as e:
                         logger.error(f"[VTM] Failed to fetch OHLC: {e}")
                         ohlc_data = None
+                        df = None
+
+                    # ============================================================
+                    # STEP 2: Get REAL market analysis from HybridAggregatorSelector
+                    # ============================================================
+                    signal_details_base = None
+
+                    if df is not None and len(df) > 200:
+                        try:
+                            logger.info(f"[HYBRID] Analyzing market for imported BTC position...")
+
+                            # Try to get hybrid selector from parent bot
+                            hybrid_selector = None
+                            if hasattr(self, 'trading_bot') and hasattr(self.trading_bot, 'hybrid_selector'):
+                                hybrid_selector = self.trading_bot.hybrid_selector
+                                logger.info(f"[HYBRID] Using existing hybrid_selector from bot")
+                            else:
+                                # Create temporary instance
+                                from src.execution.hybrid_aggregator_selector import HybridAggregatorSelector
+                                hybrid_selector = HybridAggregatorSelector(
+                                    self.data_manager,
+                                    self.config,
+                                )
+                                logger.info(f"[HYBRID] Created temporary hybrid_selector")
+
+                            # Get current market analysis
+                            mode_info = hybrid_selector.get_optimal_mode(asset_name, df)
+                            analysis = mode_info['analysis']
+
+                            # Build REAL signal_details from market analysis
+                            signal_details_base = {
+                                'imported': True,
+                                'import_time': datetime.now().isoformat(),
+                                
+                                # Real aggregator mode
+                                'aggregator_mode': mode_info['mode'],
+                                'mode_confidence': mode_info['confidence'],
+                                
+                                # Real regime analysis
+                                'regime_analysis': {
+                                    'regime_type': analysis['regime_type'],
+                                    'trend_strength': analysis['trend']['strength'],
+                                    'trend_direction': analysis['trend']['direction'],
+                                    'adx': analysis['trend']['adx'],
+                                    'volatility_regime': analysis['volatility']['regime'],
+                                    'volatility_ratio': analysis['volatility']['ratio'],
+                                    'price_clarity': analysis['price_action']['clarity'],
+                                    'indecision_pct': analysis['price_action']['indecision_pct'],
+                                    'momentum_aligned': analysis['momentum_aligned'],
+                                    'at_key_level': analysis['at_key_level'],
+                                },
+                                
+                                'signal_quality': mode_info['confidence'],
+                                'reasoning': f"BTC position imported from Binance - {analysis['reasoning']}",
+                            }
+
+                            logger.info(f"[HYBRID] ✅ Market analysis complete:")
+                            logger.info(f"  Mode:       {mode_info['mode'].upper()}")
+                            logger.info(f"  Confidence: {mode_info['confidence']:.0%}")
+                            logger.info(f"  Regime:     {analysis['regime_type']}")
+                            logger.info(f"  Trend:      {analysis['trend']['strength']} / {analysis['trend']['direction']}")
+                            logger.info(f"  Volatility: {analysis['volatility']['regime']}")
+
+                        except Exception as e:
+                            logger.error(f"[HYBRID] ❌ Analysis failed: {e}")
+                            signal_details_base = None
+
+                    # Fallback if hybrid analysis fails
+                    if signal_details_base is None:
+                        logger.warning(f"[HYBRID] Using fallback signal_details (no market analysis)")
+                        signal_details_base = {
+                            'imported': True,
+                            'import_time': datetime.now().isoformat(),
+                            'aggregator_mode': 'unknown',
+                            'mode_confidence': 0.5,
+                            'regime_analysis': {
+                                'regime_type': 'unknown',
+                                'trend_strength': 'unknown',
+                                'trend_direction': 'unknown',
+                                'adx': 20.0,
+                                'volatility_regime': 'normal',
+                                'volatility_ratio': 1.0,
+                                'price_clarity': 'unknown',
+                                'indecision_pct': 0.0,
+                                'momentum_aligned': False,
+                                'at_key_level': False,
+                            },
+                            'signal_quality': 0.5,
+                            'reasoning': 'BTC position imported from Binance - market analysis unavailable',
+                        }
+
+                    # ============================================================
+                    # STEP 3: Get actual account balance
+                    # ============================================================
+                    account_balance = self.portfolio_manager.current_capital
+                    logger.info(f"[BINANCE] Account capital: ${account_balance:,.2f}")
 
                     position_size_usd = btc_balance * current_price
 
@@ -1323,33 +1448,32 @@ class BinanceExecutionHandler:
                         position_size_usd=position_size_usd,
                         stop_loss=None,
                         take_profit=None,
-                        trailing_stop_pct=self.config["assets"][asset_name]
-                        .get("risk", {})
-                        .get("trailing_stop_pct"),
+                        trailing_stop_pct=self.config["assets"][asset_name].get("risk", {}).get("trailing_stop_pct"),
                         binance_order_id=None,
-                        ohlc_data=ohlc_data,  # ✅ Pass OHLC for VTM
-                        use_dynamic_management=True,  # ✅ Enable VTM
-                        entry_time=datetime.now(),  # Use current time for external holdings
+                        ohlc_data=ohlc_data,
+                        use_dynamic_management=True,
+                        entry_time=datetime.now(),
+                        signal_details=signal_details_base,
+                        account_balance=account_balance,
                     )
 
                     if success:
-                        logger.info(
-                            f"[SYNC] ✓ Imported {btc_balance:.8f} BTC as LONG position"
-                        )
+                        logger.info(f"[SYNC] ✓ Imported {btc_balance:.8f} BTC as LONG position")
 
                         # Verify VTM status
                         imported_pos = self.portfolio_manager.get_position(asset_name)
                         if imported_pos and imported_pos.trade_manager:
+                            vtm_status = imported_pos.get_vtm_status()
                             logger.info(
-                                f"[VTM] ✓ VTM ACTIVE for imported position\n"
-                                f"      Entry: ${imported_pos.entry_price:,.2f}\n"
-                                f"      SL: ${imported_pos.stop_loss:,.2f}\n"
-                                f"      TP: ${imported_pos.take_profit:,.2f}"
+                                f"[VTM] ✓ VTM ACTIVE for imported BTC position\n"
+                                f"      Mode:    {signal_details_base['aggregator_mode'].upper()}\n"
+                                f"      Regime:  {signal_details_base['regime_analysis']['regime_type']}\n"
+                                f"      Entry:   ${vtm_status['entry_price']:,.2f}\n"
+                                f"      SL:      ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
+                                f"      TP:      ${vtm_status['take_profit']:,.2f} (VTM calculated)"
                             )
                         else:
-                            logger.warning(
-                                f"[VTM] ⚠️ VTM not initialized for imported position"
-                            )
+                            logger.warning(f"[VTM] ⚠️ VTM not initialized for imported BTC position")
 
                         return True
                     else:
@@ -1378,6 +1502,7 @@ class BinanceExecutionHandler:
                         reason="sync_missing_binance",
                     )
                 return True
+
             # ================================================================
             # SCENARIO 3: Both have positions → VALIDATE
             # ================================================================
@@ -1415,6 +1540,50 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"[SYNC] Error: {e}", exc_info=True)
             return False
+
+
+    def _verify_vtm_status_after_sync(self, asset: str):
+        """
+        ✅ Verify VTM is working after position sync
+        (Same method for both MT5 and Binance - add to binance_handler.py if missing)
+        """
+        try:
+            positions = self.portfolio_manager.get_asset_positions(asset)
+
+            if not positions:
+                return
+
+            logger.info(f"\n[VTM VERIFICATION] Checking {len(positions)} position(s)...")
+
+            vtm_active_count = 0
+            vtm_missing_count = 0
+
+            for pos in positions:
+                if pos.trade_manager:
+                    vtm_active_count += 1
+                    status = pos.get_vtm_status()
+                    logger.info(
+                        f"  ✓ {pos.position_id}: VTM ACTIVE\n"
+                        f"    Entry: ${status['entry_price']:,.2f} | Current: ${status['current_price']:,.2f}\n"
+                        f"    SL: ${status['stop_loss']:,.2f} | TP: ${status['take_profit']:,.2f}\n"
+                        f"    Profit Locked: {status['profit_locked']}"
+                    )
+                else:
+                    vtm_missing_count += 1
+                    logger.warning(
+                        f"  ⚠️ {pos.position_id}: VTM NOT ACTIVE\n"
+                        f"    Entry: ${pos.entry_price:,.2f}\n"
+                        f"    Using static SL/TP instead"
+                    )
+
+            logger.info(
+                f"\n[VTM VERIFICATION] Summary:\n"
+                f"  Active:  {vtm_active_count}/{len(positions)}\n"
+                f"  Missing: {vtm_missing_count}/{len(positions)}"
+            )
+
+        except Exception as e:
+            logger.error(f"[VTM VERIFICATION] Error: {e}")
 
     def _verify_vtm_status_after_sync(self, asset: str):
         """

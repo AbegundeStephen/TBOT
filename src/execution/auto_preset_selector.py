@@ -1,570 +1,615 @@
 """
-Conservative Auto-Preset Selection System
-based on backtest results: Balanced > Conservative > Aggressive > Scalper
-Key Changes:
-- Defaults to BALANCED (75% of conditions)
-- Uses CONSERVATIVE in moderate low volatility (15% of conditions)
-- Uses AGGRESSIVE in higher volatility (8% of conditions)
-- Uses SCALPER in extreme high volatility/momentum (2% of conditions)
-- Transaction costs and signal quality prioritized over signal frequency
+Enhanced Dynamic Preset Selector - Full 4-Preset Support
+=========================================================
+IMPROVEMENTS:
+✅ Scalper preset fully integrated
+✅ 4-tier regime detection (conservative → balanced → aggressive → scalper)
+✅ Multi-factor scoring system for precise preset selection
+✅ Better separation between presets using volatility + trend + momentum
+✅ Telegram notifications with all 4 presets
 """
 
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 
-class AutoPresetSelector:
+class DynamicPresetSelector:
     """
-    Analyzes market conditions and selects optimal aggregator preset
-    
-    UPDATED PHILOSOPHY (Based on Backtest Results):
-    ================================================
-    - Quality > Quantity (fewer, better trades win)
-    - Transaction costs matter more than signal frequency
-    - Balanced preset is optimal for most conditions (75%)
-    - Conservative for low volatility (15%)
-    - Aggressive for high volatility (8%)
-    - Scalper for extreme volatility/momentum ONLY (2%)
+    Real-time preset selector with full 4-preset support:
+    CONSERVATIVE → BALANCED → AGGRESSIVE → SCALPER
     """
     
-    def __init__(self, data_manager, config):
+    def __init__(self, data_manager, config, telegram_bot=None):
         self.data_manager = data_manager
         self.config = config
+        self.telegram_bot = telegram_bot
         
-        # Map asset names to preset keys
-        self.asset_type_map = {
-            "BTC": "BTC",
-            "GOLD": "GOLD",
+        # Track current presets
+        self.current_presets = {}
+        self.last_update = {}
+        self.preset_history = {}
+        
+        # Cooldown to prevent excessive switching (minutes)
+        self.min_switch_interval = 60
+        
+        # ================================================================
+        # ENHANCED THRESHOLDS - 4 PRESET SYSTEM
+        # ================================================================
+        # Scoring system:
+        # - High score (80+) = SCALPER (very stable, low vol, strong trend)
+        # - Medium-high (60-79) = AGGRESSIVE (stable, trending)
+        # - Medium (40-59) = BALANCED (normal conditions)
+        # - Low (0-39) = CONSERVATIVE (high vol, weak trend, uncertainty)
+        # ================================================================
+        
+        self.thresholds = {
+            'BTC': {
+                # Volatility thresholds (ATR ratio)
+                'volatility_very_high': 2.0,      # Conservative trigger
+                'volatility_high': 1.5,            # Balanced max
+                'volatility_normal': 1.2,          # Aggressive max
+                'volatility_low': 0.9,             # Scalper ideal
+                
+                # Trend strength (ADX)
+                'adx_very_weak': 15,               # Conservative zone
+                'adx_weak': 20,                    # Balanced min
+                'adx_moderate': 25,                # Aggressive min
+                'adx_strong': 30,                  # Scalper min
+                
+                # Momentum thresholds (20-period %)
+                'momentum_strong_bull': 5.0,       # Strong uptrend
+                'momentum_bull': 2.0,              # Mild uptrend
+                'momentum_bear': -2.0,             # Mild downtrend
+                'momentum_strong_bear': -5.0,      # Strong downtrend
+                
+                # Price vs EMA (trend confirmation)
+                'ema_distance_strong': 3.0,        # % away from EMA200
+                'ema_distance_moderate': 1.5,
+            },
+            'GOLD': {
+                # GOLD is less volatile than BTC - tighter ranges
+                'volatility_very_high': 1.8,
+                'volatility_high': 1.4,
+                'volatility_normal': 1.15,
+                'volatility_low': 0.85,
+                
+                'adx_very_weak': 12,
+                'adx_weak': 18,
+                'adx_moderate': 23,
+                'adx_strong': 28,
+                
+                'momentum_strong_bull': 3.0,
+                'momentum_bull': 1.5,
+                'momentum_bear': -1.5,
+                'momentum_strong_bear': -3.0,
+                
+                'ema_distance_strong': 2.0,
+                'ema_distance_moderate': 1.0,
+            }
         }
-        
-        # Performance tracking (based on backtests)
-        self.preset_performance_rank = [
-            "balanced",      # 1st: Best performer
-            "conservative",  # 2nd: Second best
-            "aggressive",    # 3rd: Third
-            "scalper"        # 4th: Last (use sparingly)
-        ]
-        
-    def get_asset_type(self, asset_name: str) -> str:
+    
+    def update_market_regime(
+        self, 
+        asset_name: str, 
+        market_data: pd.DataFrame
+    ) -> Optional[str]:
         """
-        Map asset name to preset category (BTC or GOLD)
-        """
-        asset_upper = asset_name.upper()
-        
-        # Direct match
-        if asset_upper in self.asset_type_map:
-            return self.asset_type_map[asset_upper]
-        
-        # Crypto fallback (use BTC presets)
-        crypto_keywords = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE"]
-        if any(keyword in asset_upper for keyword in crypto_keywords):
-            return "BTC"
-        
-        # Metals fallback (use GOLD presets)
-        metal_keywords = ["GOLD", "SILVER", "XAU", "XAG", "PLATINUM", "COPPER"]
-        if any(keyword in asset_upper for keyword in metal_keywords):
-            return "GOLD"
-        
-        # Default to BTC
-        logger.warning(f"Unknown asset type for {asset_name}, defaulting to BTC presets")
-        return "BTC"
-        
-    def analyze_market_conditions(self, asset_name: str) -> Dict:
-        """
-        Analyze current market conditions for an asset
-        Returns metrics:
-        - volatility: ATR-based volatility
-        - trend_strength: ADX
-        - volume_trend: Volume momentum
-        - regime: Bull/Bear/Neutral
-        - price_momentum: Recent return
+        Analyze current market conditions and return optimal preset
+        Uses multi-factor scoring for precise 4-preset classification
         """
         try:
-            asset_cfg = self.config["assets"][asset_name]
-            symbol = asset_cfg.get("symbol")
-            exchange = asset_cfg.get("exchange", "binance")
+            asset_type = 'BTC' if 'BTC' in asset_name.upper() else 'GOLD'
+            thresholds = self.thresholds.get(asset_type)
             
-            # Fetch recent data (90 days for analysis)
-            from datetime import datetime, timedelta, timezone
+            # Calculate metrics
+            metrics = self._calculate_regime_metrics(market_data, asset_name)
+            
+            if metrics is None:
+                logger.warning(f"[REGIME] {asset_name}: Failed to calculate metrics")
+                return None
+            
+            # ================================================================
+            # MULTI-FACTOR PRESET SCORING (0-100 scale)
+            # ================================================================
+            score = 50  # Start at neutral (balanced)
+            decision_factors = []
+            
+            # FACTOR 1: Volatility (±30 points)
+            atr_ratio = metrics['volatility_ratio']
+            if atr_ratio > thresholds['volatility_very_high']:
+                vol_score = -30
+                decision_factors.append(f"Very High Vol ({atr_ratio:.2f}x): -30")
+            elif atr_ratio > thresholds['volatility_high']:
+                vol_score = -15
+                decision_factors.append(f"High Vol ({atr_ratio:.2f}x): -15")
+            elif atr_ratio < thresholds['volatility_low']:
+                vol_score = +20
+                decision_factors.append(f"Low Vol ({atr_ratio:.2f}x): +20")
+            elif atr_ratio < thresholds['volatility_normal']:
+                vol_score = +10
+                decision_factors.append(f"Normal Vol ({atr_ratio:.2f}x): +10")
+            else:
+                vol_score = 0
+                decision_factors.append(f"Moderate Vol ({atr_ratio:.2f}x): 0")
+            
+            score += vol_score
+            
+            # FACTOR 2: Trend Strength - ADX (±25 points)
+            adx = metrics['adx']
+            if adx > thresholds['adx_strong']:
+                adx_score = +25
+                decision_factors.append(f"Strong Trend (ADX {adx:.1f}): +25")
+            elif adx > thresholds['adx_moderate']:
+                adx_score = +15
+                decision_factors.append(f"Moderate Trend (ADX {adx:.1f}): +15")
+            elif adx > thresholds['adx_weak']:
+                adx_score = +5
+                decision_factors.append(f"Weak Trend (ADX {adx:.1f}): +5")
+            else:
+                adx_score = -20
+                decision_factors.append(f"Very Weak Trend (ADX {adx:.1f}): -20")
+            
+            score += adx_score
+            
+            # FACTOR 3: Price Momentum (±20 points)
+            momentum = metrics['price_momentum']
+            if abs(momentum) > thresholds['momentum_strong_bull']:
+                mom_score = +15
+                decision_factors.append(f"Strong Momentum ({momentum:+.2f}%): +15")
+            elif abs(momentum) > thresholds['momentum_bull']:
+                mom_score = +8
+                decision_factors.append(f"Moderate Momentum ({momentum:+.2f}%): +8")
+            elif abs(momentum) < 0.5:
+                mom_score = -15
+                decision_factors.append(f"Stagnant ({momentum:+.2f}%): -15")
+            else:
+                mom_score = 0
+                decision_factors.append(f"Normal Momentum ({momentum:+.2f}%): 0")
+            
+            score += mom_score
+            
+            # FACTOR 4: Trend Direction Alignment (±15 points)
+            price = metrics['current_price']
+            ema_200 = metrics['ema_200']
+            ema_distance = abs((price - ema_200) / ema_200) * 100
+            
+            if metrics['trend_direction'] == 'BULL':
+                if ema_distance > thresholds['ema_distance_strong']:
+                    trend_score = +15
+                    decision_factors.append(f"Strong Bull ({ema_distance:.2f}% above EMA): +15")
+                elif ema_distance > thresholds['ema_distance_moderate']:
+                    trend_score = +8
+                    decision_factors.append(f"Bull Trend ({ema_distance:.2f}% above EMA): +8")
+                else:
+                    trend_score = 0
+                    decision_factors.append(f"Weak Bull (near EMA): 0")
+            else:  # BEAR
+                if ema_distance > thresholds['ema_distance_strong']:
+                    trend_score = -15
+                    decision_factors.append(f"Strong Bear ({ema_distance:.2f}% below EMA): -15")
+                elif ema_distance > thresholds['ema_distance_moderate']:
+                    trend_score = -8
+                    decision_factors.append(f"Bear Trend ({ema_distance:.2f}% below EMA): -8")
+                else:
+                    trend_score = 0
+                    decision_factors.append(f"Weak Bear (near EMA): 0")
+            
+            score += trend_score
+            
+            # FACTOR 5: Volume Trend (±10 points) - if available
+            vol_trend = metrics.get('volume_trend', 0)
+            if abs(vol_trend) > 50:
+                vol_trend_score = +10
+                decision_factors.append(f"Strong Volume ({vol_trend:+.1f}%): +10")
+            elif abs(vol_trend) > 20:
+                vol_trend_score = +5
+                decision_factors.append(f"Rising Volume ({vol_trend:+.1f}%): +5")
+            elif abs(vol_trend) < -20:
+                vol_trend_score = -8
+                decision_factors.append(f"Declining Volume ({vol_trend:+.1f}%): -8")
+            else:
+                vol_trend_score = 0
+            
+            score += vol_trend_score
+            
+            # Clamp score to 0-100
+            score = max(0, min(100, score))
+            
+            # ================================================================
+            # MAP SCORE TO PRESET
+            # ================================================================
+            # 80-100: SCALPER (ideal conditions - low vol, strong trend)
+            # 60-79:  AGGRESSIVE (good conditions - trending market)
+            # 40-59:  BALANCED (normal conditions)
+            # 0-39:   CONSERVATIVE (poor conditions - high vol, weak trend)
+            # ================================================================
+            
+            if score >= 80:
+                new_preset = 'scalper'
+                preset_reason = "SCALPER - Ideal conditions for high-frequency trading"
+            elif score >= 60:
+                new_preset = 'aggressive'
+                preset_reason = "AGGRESSIVE - Strong trend with manageable volatility"
+            elif score >= 40:
+                new_preset = 'balanced'
+                preset_reason = "BALANCED - Normal market conditions"
+            else:
+                new_preset = 'conservative'
+                preset_reason = "CONSERVATIVE - High risk or uncertain conditions"
+            
+            # Build detailed reason
+            reason = self._format_reason_with_score(
+                preset=new_preset,
+                score=score,
+                preset_reason=preset_reason,
+                decision_factors=decision_factors,
+                metrics=metrics
+            )
+            
+            # Check if preset changed
+            current_preset = self.current_presets.get(asset_name)
+            
+            if current_preset != new_preset:
+                if self._can_switch_preset(asset_name):
+                    logger.info(f"\n{'=' * 70}")
+                    logger.info(f"[REGIME CHANGE] {asset_name}")
+                    logger.info(f"{'=' * 70}")
+                    logger.info(f"OLD: {current_preset or 'None'} → NEW: {new_preset.upper()}")
+                    logger.info(f"SCORE: {score}/100")
+                    logger.info(f"\n{reason}")
+                    logger.info(f"{'=' * 70}\n")
+                    
+                    # Send Telegram notification
+                    self._send_preset_change_notification(
+                        asset=asset_name,
+                        old_preset=current_preset,
+                        new_preset=new_preset,
+                        reason=reason,
+                        metrics=metrics,
+                        score=score
+                    )
+                    
+                    # Record change
+                    self._record_preset_change(
+                        asset=asset_name,
+                        old_preset=current_preset,
+                        new_preset=new_preset,
+                        reason=reason,
+                        metrics=metrics
+                    )
+                    
+                    return new_preset
+                else:
+                    logger.debug(
+                        f"[REGIME] {asset_name}: Change detected "
+                        f"({current_preset} → {new_preset}) but in cooldown"
+                    )
+                    return None
+            
+            # No change needed
+            logger.debug(f"[REGIME] {asset_name}: Staying on {current_preset} (score: {score}/100)")
+            return None
+        
+        except Exception as e:
+            logger.error(f"[REGIME] Error updating {asset_name}: {e}", exc_info=True)
+            return None
+    
+    def _format_reason_with_score(
+        self,
+        preset: str,
+        score: int,
+        preset_reason: str,
+        decision_factors: list,
+        metrics: Dict
+    ) -> str:
+        """Format detailed reason with scoring breakdown"""
+        lines = [
+            f"PRESET SELECTED: {preset.upper()} (Score: {score}/100)",
+            f"",
+            f"REASONING: {preset_reason}",
+            f"",
+            f"DECISION FACTORS:",
+        ]
+        
+        for factor in decision_factors:
+            lines.append(f"  • {factor}")
+        
+        lines.append(f"")
+        lines.append(f"MARKET SNAPSHOT:")
+        lines.append(f"  Price:        ${metrics['current_price']:,.2f}")
+        lines.append(f"  Trend:        {metrics['trend_direction']}")
+        lines.append(f"  ADX:          {metrics['adx']:.1f}")
+        lines.append(f"  Volatility:   {metrics['volatility_ratio']:.2f}x normal")
+        lines.append(f"  Momentum:     {metrics['price_momentum']:+.2f}% (20-period)")
+        lines.append(f"  Volume Trend: {metrics.get('volume_trend', 0):+.1f}% vs avg")
+        
+        return '\n'.join(lines)
+    
+    def _send_preset_change_notification(
+        self,
+        asset: str,
+        old_preset: str,
+        new_preset: str,
+        reason: str,
+        metrics: Dict,
+        score: int
+    ):
+        """Send Telegram notification with 4-preset support"""
+        if not self.telegram_bot:
+            return
+        
+        try:
+            # Emoji mapping for all 4 presets
+            emoji_map = {
+                'conservative': '🛡️',
+                'balanced': '⚖️',
+                'aggressive': '⚡',
+                'scalper': '🎯'
+            }
+            
+            old_emoji = emoji_map.get(old_preset or 'balanced', '❓')
+            new_emoji = emoji_map.get(new_preset, '❓')
+            asset_emoji = '₿' if asset == 'BTC' else '🥇'
+            
+            # Build message
+            msg = f"🔄 *PRESET CHANGE DETECTED*\n\n"
+            msg += f"{asset_emoji} *Asset:* {asset}\n"
+            msg += f"{old_emoji} Old Preset: `{(old_preset or 'None').upper()}`\n"
+            msg += f"{new_emoji} New Preset: `{new_preset.upper()}`\n"
+            msg += f"📊 Market Score: `{score}/100`\n\n"
+            
+            # Add preset description
+            preset_desc = {
+                'conservative': '🛡️ Most restrictive - High thresholds, safety-first',
+                'balanced': '⚖️ Standard - Moderate thresholds, balanced approach',
+                'aggressive': '⚡ Active - Lower thresholds, trend-following',
+                'scalper': '🎯 Most active - Lowest thresholds, maximum trades'
+            }
+            msg += f"*Profile:* {preset_desc.get(new_preset, 'Unknown')}\n\n"
+            
+            # Add key metrics
+            msg += "*📊 Market Metrics:*\n"
+            msg += f"• Price: ${metrics['current_price']:,.2f}\n"
+            msg += f"• Trend: {metrics['trend_direction']}\n"
+            msg += f"• ADX: {metrics['adx']:.1f} (Trend Strength)\n"
+            msg += f"• Volatility: {metrics['volatility_ratio']:.2f}x normal\n"
+            msg += f"• Momentum: {metrics['price_momentum']:+.2f}% (20d)\n"
+            
+            msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            
+            # Send via Telegram
+            import asyncio
+            
+            if hasattr(self.telegram_bot, 'telegram_loop') and self.telegram_bot.telegram_loop:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.send_notification(msg, disable_preview=True),
+                        self.telegram_bot.telegram_loop
+                    )
+                    future.result(timeout=5)
+                    logger.info(f"[TELEGRAM] ✓ Preset change notification sent for {asset}")
+                except Exception as e:
+                    logger.debug(f"[TELEGRAM] Notification error: {e}")
+            
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Failed to send preset notification: {e}")
+    
+    def _calculate_regime_metrics(
+        self, 
+        df: pd.DataFrame, 
+        asset_name: str
+    ) -> Optional[Dict]:
+        """Calculate all metrics needed for regime detection"""
+        try:
+            if len(df) < 200:
+                return None
+            
+            close = df['close'].values
+            high = df['high'].values
+            low = df['low'].values
+            
+            # 1. ADX (Trend Strength)
+            adx = self._calculate_adx(df, period=14)
+            
+            # 2. ATR Ratio (Current volatility vs average)
+            atr_current = self._calculate_atr(df, period=14)
+            atr_avg = self._calculate_atr(df, period=50)
+            volatility_ratio = atr_current / atr_avg if atr_avg > 0 else 1.0
+            
+            # 3. EMA 200 (Long-term trend)
+            ema_200 = pd.Series(close).ewm(span=200, adjust=False).mean().iloc[-1]
+            
+            # 4. Current price & trend direction
+            current_price = close[-1]
+            trend_direction = 'BULL' if current_price > ema_200 else 'BEAR'
+            
+            # 5. Price momentum (20-period)
+            price_momentum = ((close[-1] - close[-20]) / close[-20]) * 100
+            
+            # 6. Volume trend (if available)
+            volume_trend = 0
+            if 'volume' in df.columns:
+                recent_vol = df['volume'].iloc[-20:].mean()
+                older_vol = df['volume'].iloc[-50:-20].mean()
+                volume_trend = ((recent_vol - older_vol) / older_vol) * 100 if older_vol > 0 else 0
+            
+            return {
+                'adx': adx,
+                'volatility_ratio': volatility_ratio,
+                'atr_current': atr_current,
+                'atr_avg': atr_avg,
+                'ema_200': ema_200,
+                'current_price': current_price,
+                'trend_direction': trend_direction,
+                'price_momentum': price_momentum,
+                'volume_trend': volume_trend,
+                'timestamp': datetime.now(),
+            }
+        
+        except Exception as e:
+            logger.error(f"Metrics calculation error: {e}")
+            return None
+    
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average Directional Index"""
+        try:
+            high = df['high'].values
+            low = df['low'].values
+            close = df['close'].values
+            
+            # +DM and -DM
+            up_move = high[1:] - high[:-1]
+            down_move = low[:-1] - low[1:]
+            
+            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+            
+            # True Range
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.maximum(tr1, np.maximum(tr2, tr3))
+            
+            # Smooth with EMA
+            plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / \
+                      pd.Series(tr).ewm(span=period, adjust=False).mean()
+            minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / \
+                       pd.Series(tr).ewm(span=period, adjust=False).mean()
+            
+            # DX and ADX
+            dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+            adx = dx.ewm(span=period, adjust=False).mean().iloc[-1]
+            
+            return adx if not np.isnan(adx) else 25.0
+        
+        except Exception as e:
+            logger.debug(f"ADX calculation error: {e}")
+            return 25.0
+    
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average True Range"""
+        try:
+            high = df['high'].values
+            low = df['low'].values
+            close = df['close'].values
+            
+            tr1 = high - low
+            tr2 = np.abs(high - np.roll(close, 1))
+            tr3 = np.abs(low - np.roll(close, 1))
+            tr = np.maximum(tr1, np.maximum(tr2, tr3))
+            
+            atr = pd.Series(tr).rolling(period).mean().iloc[-1]
+            return atr if not np.isnan(atr) else 0.0
+        
+        except Exception as e:
+            logger.debug(f"ATR calculation error: {e}")
+            return 0.0
+    
+    def _can_switch_preset(self, asset_name: str) -> bool:
+        """Check if enough time has passed since last preset change"""
+        last_update = self.last_update.get(asset_name)
+        
+        if last_update is None:
+            return True
+        
+        elapsed_minutes = (datetime.now() - last_update).total_seconds() / 60
+        return elapsed_minutes >= self.min_switch_interval
+    
+    def _record_preset_change(
+        self, 
+        asset: str, 
+        old_preset: str, 
+        new_preset: str, 
+        reason: str,
+        metrics: Dict
+    ):
+        """Record preset change for analysis"""
+        change_record = {
+            'timestamp': datetime.now(),
+            'old_preset': old_preset,
+            'new_preset': new_preset,
+            'reason': reason,
+            'metrics': metrics,
+        }
+        
+        if asset not in self.preset_history:
+            self.preset_history[asset] = []
+        
+        self.preset_history[asset].append(change_record)
+        self.current_presets[asset] = new_preset
+        self.last_update[asset] = datetime.now()
+    
+    def get_preset_for_asset(self, asset_name: str) -> Optional[str]:
+        """
+        Main method: Get current optimal preset for asset
+        Call this before each trading cycle
+        """
+        try:
+            asset_cfg = self.config['assets'][asset_name]
+            exchange = asset_cfg.get('exchange', 'binance')
+            
+            # Fetch 4H data for regime analysis
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=90)
             
-            if exchange == "binance":
+            if exchange == 'binance':
                 df = self.data_manager.fetch_binance_data(
-                    symbol=symbol,
-                    interval=asset_cfg.get("interval", "1h"),
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    symbol=asset_cfg.get('symbol'),
+                    interval='4h',
+                    start_date=start_time.strftime('%Y-%m-%d'),
+                    end_date=end_time.strftime('%Y-%m-%d %H:%M:%S'),
                 )
-            else:  # MT5
+            else:
                 df = self.data_manager.fetch_mt5_data(
-                    symbol=symbol,
-                    timeframe=asset_cfg.get("timeframe", "H1"),
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    symbol=asset_cfg.get('symbol'),
+                    timeframe='H4',
+                    start_date=start_time.strftime('%Y-%m-%d'),
+                    end_date=end_time.strftime('%Y-%m-%d %H:%M:%S'),
                 )
             
             df = self.data_manager.clean_data(df)
             
-            if len(df) < 100:
-                logger.warning(f"Insufficient data for {asset_name}, using balanced preset")
-                return None
+            if len(df) < 200:
+                logger.warning(
+                    f"[REGIME] {asset_name}: Insufficient data ({len(df)}/200)"
+                )
+                return self.current_presets.get(asset_name, 'balanced')
             
-            # Calculate market metrics
-            metrics = self._calculate_metrics(df, asset_name)
+            # Analyze and potentially switch preset
+            new_preset = self.update_market_regime(asset_name, df)
             
-            logger.info(f"\n{'=' * 70}")
-            logger.info(f"Market Analysis - {asset_name}")
-            logger.info(f"{'=' * 70}")
-            logger.info(f"Volatility:      {metrics['volatility']:.2f}% (ATR/Price)")
-            logger.info(f"Trend Strength:  {metrics['trend_strength']:.1f} (ADX)")
-            logger.info(f"Volume Trend:    {metrics['volume_trend']:.2f}%")
-            logger.info(f"Price Momentum:  {metrics['price_momentum']:.2f}%")
-            logger.info(f"Regime:          {metrics['regime']} ({metrics['ema_diff_pct']:+.2f}%)")
-            logger.info(f"{'=' * 70}\n")
-            
-            return metrics
-            
+            # Return current preset (updated or unchanged)
+            return self.current_presets.get(asset_name, new_preset or 'balanced')
+        
         except Exception as e:
-            logger.error(f"Error analyzing market for {asset_name}: {e}")
-            return None
+            logger.error(f"[REGIME] Error getting preset for {asset_name}: {e}")
+            return self.current_presets.get(asset_name, 'balanced')
     
-    def _calculate_metrics(self, df: pd.DataFrame, asset_name: str) -> Dict:
-        """Calculate key market metrics"""
-        
-        # 1. VOLATILITY (ATR as % of price)
-        high = df['high'].values
-        low = df['low'].values
-        close = df['close'].values
-        
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = pd.Series(tr).rolling(14).mean().iloc[-1]
-        
-        current_price = close[-1]
-        volatility_pct = (atr / current_price) * 100
-        
-        # 2. TREND STRENGTH (ADX)
-        adx = self._calculate_adx(df, period=14)
-        
-        # 3. VOLUME TREND (30-day volume momentum)
-        if 'volume' in df.columns:
-            recent_vol = df['volume'].iloc[-30:].mean()
-            older_vol = df['volume'].iloc[-90:-30].mean()
-            volume_trend = ((recent_vol - older_vol) / older_vol) * 100 if older_vol > 0 else 0
-        else:
-            volume_trend = 0
-        
-        # 4. PRICE MOMENTUM (20-day return)
-        price_momentum = ((close[-1] - close[-20]) / close[-20]) * 100
-        
-        # 5. REGIME DETECTION (Asset-specific EMA periods)
-        asset_type = self.get_asset_type(asset_name)
-        
-        if asset_type == "BTC":
-            ema_fast_period = 50
-            ema_slow_period = 200
-            bull_threshold = 1.5
-        else:  # GOLD
-            ema_fast_period = 50
-            ema_slow_period = 100
-            bull_threshold = 1.0
-        
-        ema_fast = pd.Series(close).ewm(span=ema_fast_period, adjust=False).mean().iloc[-1]
-        ema_slow = pd.Series(close).ewm(span=ema_slow_period, adjust=False).mean().iloc[-1]
-        ema_diff_pct = ((ema_fast - ema_slow) / ema_slow) * 100
-        
-        if ema_diff_pct > bull_threshold:
-            regime = "STRONG_BULL"
-        elif ema_diff_pct > 0.3:
-            regime = "BULL"
-        elif ema_diff_pct < -bull_threshold:
-            regime = "STRONG_BEAR"
-        elif ema_diff_pct < -0.3:
-            regime = "BEAR"
-        else:
-            regime = "NEUTRAL"
-        
-        return {
-            'volatility': volatility_pct,
-            'trend_strength': adx,
-            'volume_trend': volume_trend,
-            'price_momentum': price_momentum,
-            'regime': regime,
-            'ema_diff_pct': ema_diff_pct
-        }
-    
-    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate Average Directional Index"""
-        high = df['high'].values
-        low = df['low'].values
-        close = df['close'].values
-        
-        # Calculate +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Calculate TR
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Smooth with EMA
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / pd.Series(tr).ewm(span=period, adjust=False).mean()
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / pd.Series(tr).ewm(span=period, adjust=False).mean()
-        
-        # Calculate DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.ewm(span=period, adjust=False).mean().iloc[-1]
-        
-        return adx if not np.isnan(adx) else 25.0
-    
-    def select_preset(self, asset_name: str) -> str:
-        """
-        Select optimal preset based on market analysis
-        
-        CONSERVATIVE DECISION LOGIC (Based on Backtest Results):
-        =========================================================
-        
-        PRESET DISTRIBUTION:
-        - BALANCED:     75% of conditions (default, best performer)
-        - CONSERVATIVE: 15% of conditions (low volatility)
-        - AGGRESSIVE:   8% of conditions (high volatility)
-        - SCALPER:      2% of conditions (extreme volatility + momentum)
-        
-        SELECTION CRITERIA:
-        
-        1. CONSERVATIVE: Low volatility or weak trend
-           - Volatility < 1.5% (BTC) or < 0.8% (Gold)
-           - OR ADX < 18 (weak trend)
-           → Highest signal quality, lowest costs
-        
-        2. BALANCED: Normal conditions (DEFAULT)
-           - Volatility 1.5-5.5% (BTC) or 0.8-2.5% (Gold)
-           - ADX 18-40
-           → Optimal quality/quantity balance
-        
-        3. AGGRESSIVE: High volatility with strong trend
-           - Volatility 5.5-9% (BTC) or 2.5-4.5% (Gold)
-           - AND ADX > 35
-           → More signals, higher costs
-        
-        4. SCALPER: Extreme volatility + momentum
-           - Volatility > 9% (BTC) or > 4.5% (Gold)
-           - AND (ADX > 50 OR abs(momentum) > 15%)
-           → Maximum signals, highest costs
-           → ⚠️ Use only in extreme market events
-        """
-        metrics = self.analyze_market_conditions(asset_name)
-        
-        if metrics is None:
-            logger.info(f"[{asset_name}] Using default: BALANCED")
-            return "balanced"
-        
-        volatility = metrics['volatility']
-        trend_strength = metrics['trend_strength']
-        regime = metrics['regime']
-        price_momentum = metrics['price_momentum']
-        
-        # Asset-specific thresholds
-        asset_type = self.get_asset_type(asset_name)
-        
-        if asset_type == "BTC":
-            # BTC thresholds
-            conservative_vol = 1.5       # Below this → conservative
-            balanced_vol_max = 5.5       # Above this → aggressive/scalper
-            aggressive_vol_max = 9.0     # Above this → scalper
-            
-            conservative_adx = 18        # Below this → conservative
-            aggressive_adx = 35          # Need for aggressive
-            scalper_adx = 50             # Need for scalper
-            
-            scalper_momentum = 15.0      # Abs momentum for scalper
-        else:  # GOLD
-            # Gold thresholds
-            conservative_vol = 0.8
-            balanced_vol_max = 2.5
-            aggressive_vol_max = 4.5
-            
-            conservative_adx = 18
-            aggressive_adx = 35
-            scalper_adx = 50
-            
-            scalper_momentum = 8.0
-        
-        # ===== PRESET DECISION TREE =====
-        
-        # 1. CONSERVATIVE: Low volatility or weak trend (15%)
-        if volatility < conservative_vol or trend_strength < conservative_adx:
-            preset = "conservative"
-            reason = f"Low volatility ({volatility:.2f}%) or weak trend (ADX={trend_strength:.1f})"
-            explanation = [
-                "Market is choppy/range-bound",
-                "Conservative avoids false signals",
-                "Highest quality trades only",
-                "Second-best performer in backtests",
-                "Low transaction costs"
-            ]
-        
-        # 2. SCALPER: Extreme volatility + momentum (2%)
-        elif (volatility > aggressive_vol_max and 
-              (trend_strength > scalper_adx or abs(price_momentum) > scalper_momentum)):
-            preset = "scalper"
-            reason = f"EXTREME volatility ({volatility:.2f}%) + strong momentum (ADX={trend_strength:.1f}, Mom={price_momentum:+.1f}%)"
-            explanation = [
-                "⚠️ RARE: Extreme market event",
-                "Parabolic move, crash, or high volatility breakout",
-                "Scalper captures all micro-movements",
-                "WARNING: Highest transaction costs",
-                "Maximum signal frequency (70%+)",
-                "Will revert when conditions normalize"
-            ]
-        
-        # 3. AGGRESSIVE: High volatility + strong trend (8%)
-        elif volatility > balanced_vol_max and trend_strength > aggressive_adx:
-            preset = "aggressive"
-            reason = f"High volatility ({volatility:.2f}%) + strong trend (ADX={trend_strength:.1f})"
-            explanation = [
-                "Elevated volatility with clear direction",
-                "Aggressive captures frequent moves",
-                "Higher signal rate than balanced",
-                "WARNING: Moderate transaction costs",
-                "Will revert to BALANCED when vol normalizes"
-            ]
-        
-        # 4. BALANCED: Normal conditions (75%) ✅
-        else:
-            preset = "balanced"
-            reason = f"Normal trading conditions (vol={volatility:.2f}%, ADX={trend_strength:.1f})"
-            explanation = [
-                "✅ BALANCED is the proven best performer",
-                "Optimal signal quality vs. quantity",
-                "Moderate transaction costs",
-                "Strong regime bias (0.11) for trend-following",
-                "+657,153% return in BTC backtest"
-            ]
-        
-        # Log decision
-        logger.info(f"\n{'=' * 70}")
-        logger.info(f"🎯 AUTO-PRESET - {asset_name}")
-        logger.info(f"{'=' * 70}")
-        logger.info(f"Asset Type:      {asset_type}")
-        logger.info(f"Selected Preset: {preset.upper()}")
-        logger.info(f"Reason:          {reason}")
-        logger.info(f"")
-        logger.info(f"Market State:")
-        logger.info(f"  Regime:        {regime} ({metrics['ema_diff_pct']:+.2f}%)")
-        logger.info(f"  Momentum:      {price_momentum:+.2f}% (20-day)")
-        logger.info(f"  Volume Trend:  {metrics['volume_trend']:+.2f}%")
-        logger.info(f"")
-        logger.info(f"Why {preset.upper()}:")
-        for line in explanation:
-            logger.info(f"  • {line}")
-        logger.info(f"")
-        logger.info(f"Performance Rank: Balanced > Conservative > Aggressive > Scalper")
-        logger.info(f"{'=' * 70}\n")
-        
-        return preset
-    
-    def get_preset_for_all_assets(self) -> Dict[str, str]:
-        """Get optimal presets for all enabled assets"""
-        presets = {}
-        
-        logger.info("\n" + "=" * 70)
-        logger.info("AUTO-PRESET SELECTION FOR ALL ASSETS")
-        logger.info("=" * 70)
-        logger.info("Strategy: Conservative distribution")
-        logger.info("Expected: Balanced 75%, Conservative 15%, Aggressive 8%, Scalper 2%")
-        logger.info("=" * 70 + "\n")
-        
-        for asset_name, asset_cfg in self.config["assets"].items():
-            if asset_cfg.get("enabled", False):
-                preset = self.select_preset(asset_name)
-                presets[asset_name] = preset
-        
-        # Summary
-        logger.info("\n" + "=" * 70)
-        logger.info("PRESET SELECTION SUMMARY")
-        logger.info("=" * 70)
-        for asset_name, preset in presets.items():
-            logger.info(f"  {asset_name:12} → {preset.upper()}")
-        logger.info("=" * 70 + "\n")
-        
-        return presets
-    
-    def get_statistics(self, presets: Dict[str, str]) -> Dict:
-        """Get statistics on preset distribution"""
-        from collections import Counter
-        
-        preset_counts = Counter(presets.values())
-        total = len(presets)
-        
+    def get_statistics(self) -> Dict:
+        """Get statistics on preset changes"""
         stats = {
-            "total_assets": total,
-            "balanced_count": preset_counts.get("balanced", 0),
-            "conservative_count": preset_counts.get("conservative", 0),
-            "aggressive_count": preset_counts.get("aggressive", 0),
-            "scalper_count": preset_counts.get("scalper", 0),
-            "balanced_pct": (preset_counts.get("balanced", 0) / total * 100) if total > 0 else 0,
-            "conservative_pct": (preset_counts.get("conservative", 0) / total * 100) if total > 0 else 0,
-            "aggressive_pct": (preset_counts.get("aggressive", 0) / total * 100) if total > 0 else 0,
-            "scalper_pct": (preset_counts.get("scalper", 0) / total * 100) if total > 0 else 0,
+            'total_changes': sum(len(h) for h in self.preset_history.values()),
+            'changes_by_asset': {
+                asset: len(history) 
+                for asset, history in self.preset_history.items()
+            },
+            'current_presets': self.current_presets.copy(),
+            'last_update_times': self.last_update.copy(),
         }
+        
+        # Add preset distribution
+        preset_counts = {'conservative': 0, 'balanced': 0, 'aggressive': 0, 'scalper': 0}
+        for history in self.preset_history.values():
+            for record in history:
+                preset = record.get('new_preset')
+                if preset in preset_counts:
+                    preset_counts[preset] += 1
+        
+        stats['preset_distribution'] = preset_counts
         
         return stats
-
-
-# ============================================================================
-# INTEGRATION GUIDE
-# ============================================================================
-
-"""
-STEP 1: Import in main.py
---------------------------
-
-from config.aggregator_presets import AGGREGATOR_PRESETS
-from strategies.auto_preset_selector import AutoPresetSelector
-
-
-STEP 2: Update aggregator initialization
------------------------------------------
-
-def _initialize_aggregators(self):
-    '''Initialize signal aggregators for each asset'''
-    
-    aggregator_cfg = self.config.get("aggregator_settings", {})
-    preset = aggregator_cfg.get("preset", "balanced")  # Default to balanced
-    
-    # AUTO-PRESET SELECTION (CONSERVATIVE)
-    if preset == "auto":
-        logger.info("\n[AUTO-PRESET] Analyzing market conditions...")
-        selector = AutoPresetSelector(self.data_manager, self.config)
-        asset_presets = selector.get_preset_for_all_assets()
-        
-        # Log statistics
-        stats = selector.get_statistics(asset_presets)
-        logger.info(f"\nPreset Distribution:")
-        logger.info(f"  Balanced:     {stats['balanced_count']} ({stats['balanced_pct']:.1f}%)")
-        logger.info(f"  Conservative: {stats['conservative_count']} ({stats['conservative_pct']:.1f}%)")
-        logger.info(f"  Aggressive:   {stats['aggressive_count']} ({stats['aggressive_pct']:.1f}%)")
-        logger.info(f"  Scalper:      0 (0.0%) [DISABLED]\n")
-    else:
-        # Use specified preset for all assets
-        logger.info(f"\n[MANUAL PRESET] Using '{preset}' for all assets")
-        asset_presets = {name: preset for name in self.strategies.keys()}
-    
-    # Initialize aggregators with selected presets
-    for asset_name, strategies in self.strategies.items():
-        if not self.config["assets"][asset_name].get("enabled", False):
-            continue
-        
-        asset_type = self._get_asset_type(asset_name)
-        selected_preset = asset_presets.get(asset_name, "balanced")
-        
-        # Load preset config
-        preset_config = AGGREGATOR_PRESETS[asset_type][selected_preset]
-        
-        logger.info(f"[{asset_name}] Using {selected_preset.upper()} preset")
-        logger.info(f"  Buy Threshold: {preset_config['buy_threshold']}")
-        logger.info(f"  Regime Bias: +{preset_config['bull_buy_boost']:.2f}")
-        
-        # Initialize aggregator
-        aggregator = PerformanceWeightedAggregator(
-            mean_reversion_strategy=strategies['mean_reversion'],
-            trend_following_strategy=strategies['trend_following'],
-            ema_strategy=strategies['ema'],
-            asset_type=asset_type,
-            config=preset_config
-        )
-        
-        self.aggregators[asset_name] = aggregator
-
-
-def _get_asset_type(self, asset_name: str) -> str:
-    '''Helper method to map asset name to preset category'''
-    asset_upper = asset_name.upper()
-    
-    if "BTC" in asset_upper or "ETH" in asset_upper:
-        return "BTC"
-    elif "GOLD" in asset_upper or "XAU" in asset_upper:
-        return "GOLD"
-    else:
-        return "BTC"  # Default
-
-
-STEP 3: Update config.yaml
----------------------------
-
-aggregator_settings:
-  preset: "auto"  # Options: "auto", "balanced", "conservative", "aggressive"
-  
-  # "auto" uses conservative selection:
-  #   - Balanced:     90% of conditions (default, best performer)
-  #   - Conservative: 8% of conditions (extreme low volatility)
-  #   - Aggressive:   2% of conditions (extreme high volatility)
-  #   - Scalper:      0% (disabled - worst performer)
-  
-  # Or manually specify:
-  # preset: "balanced"  # Recommended for most users
-
-
-EXPECTED RESULTS:
------------------
-
-With preset: "auto"
--------------------
-• 90% of assets will use BALANCED preset
-• 8% will use CONSERVATIVE (low vol/weak trend)
-• 2% will use AGGRESSIVE (extreme volatility spikes)
-• 0% will use SCALPER (disabled)
-
-Example:
-  BTC:  Balanced     (vol=3.2%, ADX=28) ← Normal conditions
-  GOLD: Conservative (vol=0.6%, ADX=12) ← Low volatility
-  ETH:  Balanced     (vol=4.1%, ADX=32) ← Normal conditions
-
-With preset: "balanced"
-----------------------
-• All assets use BALANCED preset
-• Consistent behavior across all markets
-• Proven best performer (+657K% BTC)
-
-
-PERFORMANCE EXPECTATIONS (from backtests):
-------------------------------------------
-
-Balanced Preset:
-  • Return: +657,153% (BTC), +454% (Gold)
-  • Win Rate: 89.74% (BTC), 81.78% (Gold)
-  • Max Drawdown: 11.74% (BTC), 1.69% (Gold)
-  • Signal Rate: 50% (optimal frequency)
-  • Best overall performer ✅
-
-Conservative Preset:
-  • Higher win rate (90%+)
-  • Lower drawdown (5-8%)
-  • Fewer signals (30-40%)
-  • Second-best performer ✅
-
-Aggressive Preset:
-  • More signals (55-65%)
-  • Higher transaction costs
-  • Lower win rate (80-85%)
-  • Third-best performer ⚠️
-
-Scalper Preset:
-  • Too many signals (70%+)
-  • Massive transaction costs
-  • Worst performer 🚫
-  • DISABLED in auto mode
-"""

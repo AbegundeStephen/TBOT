@@ -26,10 +26,11 @@ class Position:
         entry_price: float,
         quantity: float,
         entry_time: datetime,
+        signal_details: dict = None,
         position_id: str = None,
-        stop_loss: float = None,
-        take_profit: float = None,
-        trailing_stop_pct: float = None,
+        stop_loss: float = None, # ❌ IGNORED by VTM
+        take_profit: float = None, # ❌ IGNORED by VTM
+        trailing_stop_pct: float = None, # ❌ IGNORED by VTM
         mt5_ticket: int = None,
         binance_order_id: int = None,
         ohlc_data: dict = None,
@@ -45,9 +46,9 @@ class Position:
         self.position_id = (
             position_id or f"{asset}_{side}_{int(entry_time.timestamp())}"
         )
-        self.stop_loss = stop_loss
-        self.take_profit = take_profit
-        self.trailing_stop_pct = trailing_stop_pct
+        self.stop_loss = None
+        self.take_profit = None
+        self.trailing_stop_pct = None
         self.highest_price = entry_price if side == "long" else entry_price
         self.lowest_price = entry_price if side == "short" else entry_price
 
@@ -68,12 +69,59 @@ class Position:
 
         # ✅ CRITICAL FIX: Initialize VTM
         self.trade_manager = None
-        if (
-            use_dynamic_management
-            and ohlc_data is not None
-            and account_balance is not None
-        ):
+        if use_dynamic_management and ohlc_data:
             try:
+                # ✅ Extract hybrid context from signal_details
+                hybrid_mode = signal_details.get('aggregator_mode')
+                mode_confidence = signal_details.get('mode_confidence', 0.5)
+                regime_analysis = signal_details.get('regime_analysis', {})
+                
+                # Get regime details
+                trend_strength = regime_analysis.get('trend_strength', 'weak')
+                volatility_regime = regime_analysis.get('volatility_regime', 'normal')
+                price_clarity = regime_analysis.get('price_clarity', 'mixed')
+                momentum_aligned = regime_analysis.get('momentum_aligned', False)
+                at_key_level = regime_analysis.get('at_key_level', False)
+                
+                logger.info(f"\n[VTM+HYBRID] Initializing with intelligent context:")
+                logger.info(f"  Mode:        {hybrid_mode or 'N/A'}")
+                logger.info(f"  Confidence:  {mode_confidence:.2%}")
+                logger.info(f"  Trend:       {trend_strength}")
+                logger.info(f"  Volatility:  {volatility_regime}")
+                logger.info(f"  Clarity:     {price_clarity}")
+                
+                # --------------------------------------------------------
+                # Adjust VTM parameters based on hybrid intelligence
+                # --------------------------------------------------------
+                account_risk = 0.015  # Base 1.5%
+                early_lock_threshold_pct = 0.01  # Base 1%
+                
+                # Council + strong trend = More aggressive
+                if hybrid_mode == 'council' and trend_strength == 'strong':
+                    account_risk *= 1.2  # 1.5% → 1.8%
+                    early_lock_threshold_pct = 0.008  # Lock @ 0.8%
+                    logger.info("  → Council strong trend: Risk↑ Lock↓")
+                
+                # Performance + choppy = More conservative
+                elif hybrid_mode == 'performance' and volatility_regime == 'high':
+                    account_risk *= 0.8  # 1.5% → 1.2%
+                    early_lock_threshold_pct = 0.007  # Lock @ 0.7%
+                    logger.info("  → Performance choppy: Risk↓ Lock↓")
+                
+                # High confidence boost
+                if mode_confidence > 0.75 and momentum_aligned:
+                    account_risk *= 1.1
+                    logger.info(f"  → High confidence ({mode_confidence:.0%}): Risk↑")
+                
+                # Noisy price = Reduce risk
+                if price_clarity == 'noisy':
+                    account_risk *= 0.85
+                    logger.info("  → Noisy price: Risk↓")
+                
+                # Enforce bounds
+                account_risk = max(0.008, min(account_risk, 0.025))
+                
+                # ✅ Initialize VTM with optimized parameters
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
                     side=side,
@@ -81,31 +129,50 @@ class Position:
                     high=ohlc_data["high"],
                     low=ohlc_data["low"],
                     close=ohlc_data["close"],
-                    account_balance=account_balance,
-                    account_risk=0.015,
+                    account_balance=account_balance or 10000,  # Fallback
+                    account_risk=account_risk,  # ✅ Adjusted
                     atr_period=14,
                     enable_early_profit_lock=True,
-                    early_lock_threshold_pct=0.01,
+                    early_lock_threshold_pct=early_lock_threshold_pct,  # ✅ Adjusted
+                    signal_details=signal_details,
                 )
-
-                # Use VTM-calculated stops if available
+                
+                # ✅ Use VTM's calculated levels (overrides any passed values)
                 self.stop_loss = self.trade_manager.initial_stop_loss
                 self.take_profit = (
                     self.trade_manager.take_profit_levels[0]
                     if self.trade_manager.take_profit_levels
-                    else take_profit
+                    else None
                 )
-
-                logger.info(
-                    f"[VTM] ✓ Initialized for {asset} {side.upper()} (Position {self.position_id})\n"
-                    f"      Profile: {self.trade_manager.profile['name']}\n"
-                    f"      SL: ${self.stop_loss:,.2f} | TP: ${self.take_profit:,.2f}"
-                )
+                
+                logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
+                logger.info(f"  Account Risk: {account_risk:.3f}")
+                logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
+                logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
+                logger.info(f"  Take Profit:  ${self.take_profit:,.2f}")
+                
             except Exception as e:
-                logger.error(f"[VTM] Failed to initialize: {e}", exc_info=True)
-
+                logger.error(f"[VTM] Initialization failed: {e}", exc_info=True)
                 self.trade_manager = None
-                self.trade_manager = None
+                
+                # ✅ Fallback to basic levels if VTM fails
+                if stop_loss:
+                    self.stop_loss = stop_loss
+                if take_profit:
+                    self.take_profit = take_profit
+                if trailing_stop_pct:
+                    self.trailing_stop_pct = trailing_stop_pct
+        
+        else:
+            # ✅ No VTM - use passed levels
+            logger.debug(f"[VTM] Not initialized (missing OHLC or signal_details)")
+            
+            if stop_loss:
+                self.stop_loss = stop_loss
+            if take_profit:
+                self.take_profit = take_profit
+            if trailing_stop_pct:
+                self.trailing_stop_pct = trailing_stop_pct
 
     def update_with_new_bar(self, high: float, low: float, close: float):
         """
@@ -802,16 +869,26 @@ class PortfolioManager:
         side: str,
         entry_price: float,
         position_size_usd: float,
-        stop_loss: float = None,
-        take_profit: float = None,
-        trailing_stop_pct: float = None,
+        stop_loss: float = None,  # ❌ IGNORED - VTM calculates
+        take_profit: float = None,  # ❌ IGNORED - VTM calculates
+        trailing_stop_pct: float = None,  # ❌ IGNORED - VTM manages
         mt5_ticket: int = None,
         binance_order_id: int = None,
         ohlc_data: dict = None,
         use_dynamic_management: bool = True,
         entry_time: datetime = None,
+        signal_details: dict = None, 
     ) -> bool:
-        """Add a new position to the portfolio"""
+        """
+        Add a new position with hybrid aware VTM support
+        
+        Args:
+        signal_details: MUST contain hybrid context:
+            - aggregator_mode: 'council' or 'performance'
+            - mode_confidence: 0-1
+            - regime_analysis: dict with market conditions
+        
+        """
         
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
@@ -836,9 +913,10 @@ class PortfolioManager:
             entry_price=entry_price,
             quantity=quantity,
             entry_time=entry_time or datetime.now(),
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            trailing_stop_pct=trailing_stop_pct,
+            signal_details=signal_details,  # ✅ Pass hybrid context
+            stop_loss=None,  # VTM will set
+            take_profit=None, # ❌ VTM will set
+            trailing_stop_pct=None, # ❌ VTM will manage
             mt5_ticket=mt5_ticket,
             binance_order_id=binance_order_id,
             ohlc_data=ohlc_data,

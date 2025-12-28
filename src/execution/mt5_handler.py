@@ -80,6 +80,8 @@ class PositionSizingRequest:
         self.market_condition = market_condition or "neutral"
         self.override_reason = override_reason
         self.max_override_pct = max_override_pct
+        self.error_handler = None
+        self.trading_bot = None 
 
 
 class HybridPositionSizer:
@@ -579,8 +581,15 @@ class MT5ExecutionHandler:
             
             if self.mode.lower() != "paper":
                 try:
+                    if not self._is_trading_allowed(symbol):
+                        logger.error(f"[MT5] ✗ Trading not allowed for {symbol} (market closed or trading disabled)")
+                        return False
                     # Get current price for execution
                     tick = mt5.symbol_info_tick(symbol)
+                    if tick is None:
+                        logger.error(f"[MT5] ✗ Cannot get tick for {symbol} (market may be closed)")
+                        return False
+                    
                     execution_price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
                     # Build MT5 order request
@@ -590,25 +599,50 @@ class MT5ExecutionHandler:
                         "volume": volume_lots,
                         "type": order_type,
                         "price": execution_price,
-                        "sl": stop_loss,
-                        "tp": take_profit,
+                        "sl": stop_loss,  # 0 =no SL (VTM manages)
+                        "tp": take_profit,# 0 = no TP (VTM manages)
                         "deviation": 20,
                         "magic": 234000,
                         "comment": f"Signal_{signal}_{asset}_{sizing_mode}",
                         "type_time": mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
                     }
+                    
+                    logger.info(f"[MT5] Sending order request:")
+                    logger.info(f"  Symbol:  {request['symbol']}")
+                    logger.info(f"  Type:    {order_type} ({'BUY' if order_type == mt5.ORDER_TYPE_BUY else 'SELL'})")
+                    logger.info(f"  Volume:  {request['volume']:.2f} lots")
+                    logger.info(f"  Price:   ${request['price']:,.2f}")
+                    logger.info(f"  SL:      ${request['sl']:,.2f} (0 = VTM managed)")
+                    logger.info(f"  TP:      ${request['tp']:,.2f} (0 = VTM managed)")
 
                     # Send order to MT5
                     result = mt5.order_send(request)
 
-                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        error_msg = result.comment if result else "No result"
-                        error_code = result.retcode if result else "N/A"
+                    if result is None:
+                        last_error = mt5.last_error()
                         logger.error(
-                            f"[MT5] ✗ {side.upper()} order failed: {error_msg} (code: {error_code})"
+                            f"[MT5] ✗ order_send() returned None!\n"
+                            f"  Last Error: {last_error}\n"
+                            f"  This usually means:\n"
+                            f"    - Market is closed\n"
+                            f"    - Symbol not available\n"
+                            f"    - Connection lost\n"
+                            f"  Check MT5 terminal and market hours."
                         )
                         return False
+                    
+                    if result.retcode != mt5.TRADE_RETCODE_DONE:
+                        error_msg = result.comment if result else "Unknown"
+                        error_code = result.retcode if result else "N/A"
+                        logger.error(
+                            f"[MT5] ✗ {side.upper()} order failed!\n"
+                            f"  Error Code: {error_code}\n"
+                            f"  Message:    {error_msg}\n"
+                            f"  Retcode Meaning: {self._get_retcode_meaning(error_code)}"
+                        )
+                        return False
+
 
                     mt5_ticket = result.order
                     logger.info(f"[MT5] ✓ {side.upper()} order placed: Ticket #{mt5_ticket}")
@@ -664,6 +698,7 @@ class MT5ExecutionHandler:
                 mt5_ticket=mt5_ticket,  # ✅ MT5-specific
                 ohlc_data=ohlc_data,
                 use_dynamic_management=True,
+                signal_details=signal_details,
             )
 
             if not success:
@@ -700,6 +735,7 @@ class MT5ExecutionHandler:
         sizing_mode: str = "automated",
         manual_size_usd: float = None,
         override_reason: str = None,
+        signal_details: Dict = None,
     ) -> bool:
         """
         ✅ MT5 TWO-WAY TRADING: Execute trading signal
@@ -748,6 +784,12 @@ class MT5ExecutionHandler:
                 f"[STATE] Current Positions: {len(long_positions)} LONG, {len(short_positions)} SHORT\n"
                 f"{'='*80}"
             )
+            
+            if signal_details and signal_details.get('aggregator_mode'):
+                logger.info(
+                    f"\n[HYBRID] Mode: {signal_details['aggregator_mode'].upper()} "
+                    f"({signal_details.get('mode_confidence', 0):.0%} confidence)"
+                )
 
             # ============================================================
             # SCENARIO 1: SELL SIGNAL (-1) → Close longs, Open short
@@ -832,6 +874,7 @@ class MT5ExecutionHandler:
                     sizing_mode=sizing_mode,
                     manual_size_usd=manual_size_usd,
                     override_reason=override_reason,
+                    signal_details=signal_details
                 )
 
                 # Verify sync after opening
@@ -1365,17 +1408,50 @@ class MT5ExecutionHandler:
         sizing_mode: str = SizingMode.AUTOMATED,
         manual_size_usd: float = None,
         override_reason: str = None,
+        signal_details: Dict = None,
     ) -> bool:
-        """Open new MT5 position with hybrid sizing"""
+        """
+        ✅ MT5 TWO-WAY TRADING with VTM Dynamic Management
+        
+        CHANGES:
+        - Stop Loss = None (VTM will calculate based on market structure)
+        - Take Profit = None (VTM will calculate based on market structure)
+        - Trailing Stop = Managed by VTM (not MT5 native)
+        
+        Args:
+            signal: +1 for LONG, -1 for SHORT
+            current_price: Entry price
+            symbol: MT5 symbol (e.g., "XAUUSD")
+            asset: Asset name (e.g., "GOLD")
+            confidence_score: Signal confidence (0-1)
+            market_condition: Market regime
+            sizing_mode: Position sizing mode
+            manual_size_usd: Manual position size override
+            override_reason: Reason for manual override
+            signal_details: Hybrid aggregator context
+        
+        Returns:
+            True if position opened successfully, False otherwise
+        """
         try:
-            can_open, reason = self.portfolio_manager.can_open_position(
-                asset, "long" if signal == 1 else "short"
-            )
+            import MetaTrader5 as mt5
+            
+            # ============================================================
+            # STEP 1: Determine side from signal
+            # ============================================================
+            side = "long" if signal == 1 else "short"
+            
+            logger.info(f"[MT5] Opening {side.upper()} position for {asset}")
+
+            # Check if we can open this position
+            can_open, reason = self.portfolio_manager.can_open_position(asset, side)
             if not can_open:
                 logger.warning(f"[SKIP] Cannot open {asset} position: {reason}")
-                return True
+                return False
 
-            # ========== HYBRID POSITION SIZING ==========
+            # ============================================================
+            # STEP 2: Calculate position size
+            # ============================================================
             sizing_request = PositionSizingRequest(
                 asset=asset,
                 current_price=current_price,
@@ -1388,86 +1464,129 @@ class MT5ExecutionHandler:
                 max_override_pct=2.0,
             )
 
-            position_size_usd, sizing_metadata = self.sizer.calculate_size(
-                sizing_request
-            )
-            # ==========================================
+            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
+            
+            # Apply short size reduction if configured
+            if side == "short":
+                short_config = self.config.get("portfolio", {}).get("short_position_sizing", {})
+                use_reduced = short_config.get("use_reduced_size_for_shorts", False)
+                multiplier = short_config.get("short_size_multiplier", 0.8)
+                
+                if use_reduced and multiplier < 1.0:
+                    logger.info(f"[SHORT] Applying {multiplier}x size reduction")
+                    position_size_usd *= multiplier
 
             if position_size_usd <= 0:
                 logger.error(f"{asset}: Invalid position size calculated")
                 return False
 
-            # Calculate volume in lots
+            # ============================================================
+            # STEP 3: Calculate volume in lots (MT5-specific)
+            # ============================================================
             contract_size = self.symbol_info.trade_contract_size
             volume_lots = position_size_usd / (current_price * contract_size)
 
             volume_step = self.symbol_info.volume_step
             volume_lots = round(volume_lots / volume_step) * volume_step
 
+            # Apply min/max limits
             volume_lots = max(self.symbol_info.volume_min, volume_lots)
             volume_lots = min(self.symbol_info.volume_max, volume_lots)
 
             actual_position_size = volume_lots * current_price * contract_size
 
-            # Determine order type and side
-            order_type = mt5.ORDER_TYPE_BUY if signal == 1 else mt5.ORDER_TYPE_SELL
-            position_side = "long" if signal == 1 else "short"
+            # ============================================================
+            # STEP 4: Determine order type (BUY or SELL)
+            # ============================================================
+            order_type = mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL
+            position_side = side
 
-            # Calculate SL/TP
+            # ============================================================
+            # STEP 5: ❌ DO NOT CALCULATE SL/TP - Let VTM handle it!
+            # ============================================================
+            # OLD CODE (Removed):
+            # risk = self.asset_config.get("risk", {})
+            # stop_loss_pct = risk.get("stop_loss_pct", 0.03)
+            # stop_loss = current_price * (1 - stop_loss_pct)
+            # take_profit = current_price * (1 + take_profit_pct)
+            
+            # ✅ NEW: VTM will calculate SL/TP based on market structure
+            stop_loss = 0  # MT5 requires a value, 0 = no SL set
+            take_profit = 0  # MT5 requires a value, 0 = no TP set
+            
+            # Get trailing stop config (VTM will use this)
             risk = self.asset_config.get("risk", {})
-            stop_loss_pct = risk.get("stop_loss_pct", 0.03)
-            take_profit_pct = risk.get("take_profit_pct", 0.08)
-            trailing_stop_pct = risk.get("trailing_stop_pct", 0.02)
-
-            if signal == 1:  # BUY/Long
-                stop_loss = current_price * (1 - stop_loss_pct)
-                take_profit = current_price * (1 + take_profit_pct)
-            else:  # SELL/Short
-                stop_loss = current_price * (1 + stop_loss_pct)
-                take_profit = current_price * (1 - take_profit_pct)
+            if side == "long":
+                trailing_stop_pct = risk.get("trailing_stop_pct", 0.02)
+            else:
+                trailing_stop_pct = risk.get("trailing_stop_pct_short", risk.get("trailing_stop_pct", 0.018))
 
             logger.info(
-                f"[OPEN] {'BUY' if signal == 1 else 'SELL'} {volume_lots:.2f} lots {symbol} @ ${current_price:,.2f}"
+                f"[OPEN] {side.upper()} {volume_lots:.2f} lots {symbol} @ ${current_price:,.2f}\n"
+                f"  Size: ${actual_position_size:,.2f}\n"
+                f"  Mode: {sizing_mode} | Confidence: {confidence_score}\n"
+                f"  ⚠️  VTM will calculate TP/SL based on market structure\n"
+                f"  Trailing: {trailing_stop_pct:.2%} (VTM managed)"
             )
-            logger.info(f"   Size: ${actual_position_size:,.2f}")
-            logger.info(f"   Mode: {sizing_mode} | Confidence: {confidence_score}")
-            logger.info(f"   SL: ${stop_loss:,.2f} ({stop_loss_pct:.1%})")
-            logger.info(f"   TP: ${take_profit:,.2f} ({take_profit_pct:.1%})")
 
-            tick = mt5.symbol_info_tick(symbol)
-            execution_price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+            # ============================================================
+            # STEP 6: Execute on MT5
+            # ============================================================
+            mt5_ticket = None
+            
+            if self.mode.lower() != "paper":
+                try:
+                    # Get current price for execution
+                    tick = mt5.symbol_info_tick(symbol)
+                    execution_price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": volume_lots,
-                "type": order_type,
-                "price": execution_price,
-                "sl": stop_loss,
-                "tp": take_profit,
-                "deviation": 20,
-                "magic": 234000,
-                "comment": f"Signal_{signal}_{asset}_{sizing_mode}",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
+                    # Build MT5 order request WITHOUT SL/TP
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": symbol,
+                        "volume": volume_lots,
+                        "type": order_type,
+                        "price": execution_price,
+                        "sl": stop_loss,  # 0 = no SL (VTM manages)
+                        "tp": take_profit,  # 0 = no TP (VTM manages)
+                        "deviation": 20,
+                        "magic": 234000,
+                        "comment": f"Signal_{signal}_{asset}_{sizing_mode}",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
 
-            result = mt5.order_send(request)
+                    # Send order to MT5
+                    result = mt5.order_send(request)
 
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                error_msg = result.comment if result else "No result"
-                error_code = result.retcode if result else "N/A"
-                logger.error(f"[FAIL] Order failed: {error_msg} (code: {error_code})")
-                return False
+                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                        error_msg = result.comment if result else "No result"
+                        error_code = result.retcode if result else "N/A"
+                        logger.error(
+                            f"[MT5] ✗ {side.upper()} order failed: {error_msg} (code: {error_code})"
+                        )
+                        return False
 
+                    mt5_ticket = result.order
+                    logger.info(f"[MT5] ✓ {side.upper()} order placed: Ticket #{mt5_ticket}")
+                
+                except Exception as e:
+                    logger.error(f"[MT5] Order execution failed: {e}")
+                    return False
+
+            # ============================================================
+            # STEP 7: Fetch OHLC data for VTM (CRITICAL for dynamic SL/TP)
+            # ============================================================
+            ohlc_data = None
+            
             try:
                 if self.data_manager is None:
                     logger.warning("[VTM] data_manager not available, VTM disabled")
-                    ohlc_data = None
                 else:
-                    # Fetch recent OHLC data for VTM
+                    from datetime import datetime, timedelta, timezone
+                    
                     end_time = datetime.now(timezone.utc)
-                    start_time = end_time - timedelta(days=10)  # Get 10 days of data
+                    start_time = end_time - timedelta(days=10)
 
                     df = self.data_manager.fetch_mt5_data(
                         symbol=symbol,
@@ -1476,51 +1595,87 @@ class MT5ExecutionHandler:
                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                     )
 
-                    # Prepare OHLC arrays for VTM
-                    ohlc_data = {
-                        "high": df["high"].values,
-                        "low": df["low"].values,
-                        "close": df["close"].values,
-                    }
-
-                    logger.debug(
-                        f"[VTM] Prepared {len(df)} bars for dynamic management"
-                    )
+                    if len(df) > 50:  # Need sufficient data for VTM
+                        ohlc_data = {
+                            "high": df["high"].values,
+                            "low": df["low"].values,
+                            "close": df["close"].values,
+                        }
+                        logger.debug(f"[VTM] Prepared {len(df)} bars for dynamic management")
+                    else:
+                        logger.warning(f"[VTM] Insufficient data ({len(df)} bars), using fallback SL/TP")
 
             except Exception as e:
-                logger.warning(
-                    f"[VTM] Failed to fetch OHLC data: {e}, VTM disabled for this trade"
-                )
-                ohlc_data = None
+                logger.warning(f"[VTM] Failed to fetch OHLC data: {e}, VTM disabled for this trade")
 
-            # Add position to portfolio manager
+            # ============================================================
+            # STEP 8: Add position to Portfolio Manager WITH VTM
+            # ============================================================
             success = self.portfolio_manager.add_position(
                 asset=asset,
                 symbol=symbol,
                 side=position_side,
-                entry_price=execution_price,
+                entry_price=execution_price if mt5_ticket else current_price,
                 position_size_usd=actual_position_size,
-                stop_loss=None,
-                take_profit=None,
-                trailing_stop_pct=trailing_stop_pct,
-                mt5_ticket=result.order,
-                ohlc_data=ohlc_data,  # ✨ NEW: Pass OHLC for VTM
-                use_dynamic_management=True,  # ✨ NEW: Enable VTM
+                stop_loss=None,  # ✅ VTM will calculate
+                take_profit=None,  # ✅ VTM will calculate
+                trailing_stop_pct=trailing_stop_pct,  # ✅ VTM will use this
+                mt5_ticket=mt5_ticket,
+                ohlc_data=ohlc_data,  # ✅ CRITICAL: Pass OHLC for VTM
+                use_dynamic_management=True,  # ✅ Enable VTM
+                signal_details=signal_details,  # ✅ Pass hybrid context
             )
 
             if not success:
                 logger.error(f"[FAIL] Portfolio Manager rejected {asset} position")
-                logger.warning("Attempting to close unwanted MT5 position...")
-                self._emergency_close_mt5_position(symbol, volume_lots, order_type)
+                
+                # Emergency: Close unwanted MT5 position
+                if mt5_ticket:
+                    logger.warning(f"[MT5] Attempting to close unwanted position #{mt5_ticket}...")
+                    self._emergency_close_mt5_position(symbol, volume_lots, order_type)
+                
                 return False
 
-            logger.info(
-                f"[OK] {'BUY' if signal == 1 else 'SELL'} {asset} - Position opened successfully"
-            )
+            # ============================================================
+            # STEP 9: Verify VTM initialized correctly
+            # ============================================================
+            positions = self.portfolio_manager.get_asset_positions(asset)
+            if positions:
+                new_position = positions[-1]  # Get the position we just added
+                
+                if new_position.trade_manager:
+                    vtm_status = new_position.get_vtm_status()
+                    logger.info(
+                        f"\n{'='*80}\n"
+                        f"[VTM] ✅ ACTIVE for {side.upper()} position\n"
+                        f"{'='*80}\n"
+                        f"  Ticket:  #{mt5_ticket}\n"
+                        f"  Entry:   ${vtm_status['entry_price']:,.2f}\n"
+                        f"  SL:      ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
+                        f"  TP:      ${vtm_status.get('take_profit', 0):,.2f} (VTM calculated)\n"
+                        f"  Trailing: {trailing_stop_pct:.2%} (VTM managed)\n"
+                        f"  Mode:     Dynamic (market structure based)\n"
+                        f"{'='*80}"
+                    )
+                else:
+                    logger.warning(
+                        f"[VTM] ⚠️ NOT INITIALIZED for {side.upper()} position\n"
+                        f"  Ticket: #{mt5_ticket}\n"
+                        f"  → Using fallback static SL/TP"
+                    )
+
+            logger.info(f"[OK] {side.upper()} {asset} position opened successfully")
+            if mt5_ticket:
+                logger.info(f"  └─ MT5 Ticket: #{mt5_ticket}")
+            if ohlc_data:
+                logger.info(f"  └─ VTM: ACTIVE (dynamic SL/TP)")
+            else:
+                logger.warning(f"  └─ VTM: DISABLED (static SL/TP fallback)")
+            
             return True
 
         except Exception as e:
-            logger.error(f"Error opening MT5 position: {e}", exc_info=True)
+            logger.error(f"[MT5] Error opening {asset} position: {e}", exc_info=True)
             return False
 
     
@@ -1655,14 +1810,17 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
+    
     def sync_positions_with_mt5(self, asset: str = "GOLD", symbol: str = None) -> bool:
         """
-        ✅  Check config settings correctly for position import
+        ✅ COMPLETE FIX: Import positions WITH real market analysis for VTM
+        Just copy-paste this entire method to replace your existing one
         """
         if symbol is None:
             symbol = self.symbol
 
         try:
+            import MetaTrader5 as mt5
             logger.info(f"\n{'='*80}")
             logger.info(f"[SYNC] Starting position sync for {asset}")
             logger.info(f"{'='*80}")
@@ -1676,22 +1834,14 @@ class MT5ExecutionHandler:
             portfolio_count = len(portfolio_positions)
 
             # Count by side
-            mt5_long = sum(
-                1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_BUY
-            )
-            mt5_short = sum(
-                1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_SELL
-            )
+            mt5_long = sum(1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_BUY)
+            mt5_short = sum(1 for p in (mt5_positions or []) if p.type == mt5.POSITION_TYPE_SELL)
             portfolio_long = sum(1 for p in portfolio_positions if p.side == "long")
             portfolio_short = sum(1 for p in portfolio_positions if p.side == "short")
 
             logger.info(f"[SYNC] Position Count Comparison:")
-            logger.info(
-                f"  MT5:       {mt5_long} LONG, {mt5_short} SHORT (Total: {mt5_count})"
-            )
-            logger.info(
-                f"  Portfolio: {portfolio_long} LONG, {portfolio_short} SHORT (Total: {portfolio_count})"
-            )
+            logger.info(f"  MT5:       {mt5_long} LONG, {mt5_short} SHORT (Total: {mt5_count})")
+            logger.info(f"  Portfolio: {portfolio_long} LONG, {portfolio_short} SHORT (Total: {portfolio_count})")
 
             if mt5_positions:
                 logger.info(f"\n[SYNC] MT5 Positions:")
@@ -1711,49 +1861,38 @@ class MT5ExecutionHandler:
                     )
 
             if self.symbol_info is None:
-                logger.warning(
-                    f"[SYNC] Symbol info for {symbol} unavailable; skipping MT5 sync."
-                )
+                logger.warning(f"[SYNC] Symbol info for {symbol} unavailable; skipping MT5 sync.")
                 return True
 
-            logger.info(
-                f"[SYNC] Found {mt5_count} MT5 position(s) and {portfolio_count} portfolio position(s)"
-            )
+            logger.info(f"[SYNC] Found {mt5_count} MT5 position(s) and {portfolio_count} portfolio position(s)")
 
             # ================================================================
             # SCENARIO 1: MT5 has positions, portfolio is empty → IMPORT
             # ================================================================
             if mt5_count > 0 and portfolio_count == 0:
-                # ✅ FIX: Check config correctly (use self.config, not a different object)
                 import_enabled = bool(
-                    self.config.get("portfolio", {}).get(
-                        "import_existing_positions", False
-                    )
+                    self.config.get("portfolio", {}).get("import_existing_positions", False)
                 )
 
-                # ✅ DEBUG: Log what we found in config
                 logger.info(f"[SYNC] Config check:")
                 logger.info(f"  portfolio.import_existing_positions = {import_enabled}")
-                logger.info(
-                    f"  trading.auto_sync_on_startup = {self.config.get('trading', {}).get('auto_sync_on_startup', False)}"
-                )
 
                 if import_enabled:
-                    logger.info(
-                        f"[SYNC] ✅ Import ENABLED - Importing {mt5_count} MT5 position(s) WITH VTM..."
-                    )
+                    logger.info(f"[SYNC] ✅ Import ENABLED - Importing {mt5_count} MT5 position(s) WITH VTM...")
 
-                    # ✅ Fetch OHLC data ONCE for all imports
+                    # ============================================================
+                    # STEP 1: Fetch OHLC data for VTM
+                    # ============================================================
                     ohlc_data = None
+                    df = None
+
                     try:
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10)
 
                         df = self.data_manager.fetch_mt5_data(
                             symbol=symbol,
-                            timeframe=self.config["assets"][asset].get(
-                                "timeframe", "H1"
-                            ),
+                            timeframe=self.config["assets"][asset].get("timeframe", "H1"),
                             start_date=start_time.strftime("%Y-%m-%d"),
                             end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                         )
@@ -1764,86 +1903,185 @@ class MT5ExecutionHandler:
                                 "low": df["low"].values,
                                 "close": df["close"].values,
                             }
-                            logger.info(
-                                f"[VTM] ✅ Fetched {len(df)} bars for dynamic management"
-                            )
+                            logger.info(f"[VTM] ✅ Fetched {len(df)} bars for dynamic management")
                         else:
-                            logger.warning(
-                                f"[VTM] ⚠️ Insufficient data ({len(df)} bars), VTM disabled"
-                            )
+                            logger.warning(f"[VTM] ⚠️ Insufficient data ({len(df)} bars), VTM will be limited")
 
                     except Exception as e:
                         logger.error(f"[VTM] ❌ Failed to fetch OHLC: {e}")
                         ohlc_data = None
+                        df = None
 
+                    # ============================================================
+                    # STEP 2: Get REAL market analysis from HybridAggregatorSelector
+                    # ============================================================
+                    signal_details_base = None
+
+                    if df is not None and len(df) > 200:
+                        try:
+                            logger.info(f"[HYBRID] Analyzing market for imported positions...")
+
+                            # Try to get hybrid selector from parent bot
+                            hybrid_selector = None
+                            if hasattr(self, 'trading_bot') and hasattr(self.trading_bot, 'hybrid_selector'):
+                                hybrid_selector = self.trading_bot.hybrid_selector
+                                logger.info(f"[HYBRID] Using existing hybrid_selector from bot")
+                            else:
+                                # Create temporary instance
+                                from src.execution.hybrid_aggregator_selector import HybridAggregatorSelector
+                                hybrid_selector = HybridAggregatorSelector(
+                                    self.data_manager,
+                                    self.config,
+                                )
+                                logger.info(f"[HYBRID] Created temporary hybrid_selector")
+
+                            # Get current market analysis
+                            mode_info = hybrid_selector.get_optimal_mode(asset, df)
+                            analysis = mode_info['analysis']
+
+                            # Build REAL signal_details from market analysis
+                            signal_details_base = {
+                                'imported': True,
+                                'import_time': datetime.now().isoformat(),
+                                
+                                # Real aggregator mode
+                                'aggregator_mode': mode_info['mode'],
+                                'mode_confidence': mode_info['confidence'],
+                                
+                                # Real regime analysis
+                                'regime_analysis': {
+                                    'regime_type': analysis['regime_type'],
+                                    'trend_strength': analysis['trend']['strength'],
+                                    'trend_direction': analysis['trend']['direction'],
+                                    'adx': analysis['trend']['adx'],
+                                    'volatility_regime': analysis['volatility']['regime'],
+                                    'volatility_ratio': analysis['volatility']['ratio'],
+                                    'price_clarity': analysis['price_action']['clarity'],
+                                    'indecision_pct': analysis['price_action']['indecision_pct'],
+                                    'momentum_aligned': analysis['momentum_aligned'],
+                                    'at_key_level': analysis['at_key_level'],
+                                },
+                                
+                                'signal_quality': mode_info['confidence'],
+                                'reasoning': f"Position imported from MT5 - {analysis['reasoning']}",
+                            }
+
+                            logger.info(f"[HYBRID] ✅ Market analysis complete:")
+                            logger.info(f"  Mode:       {mode_info['mode'].upper()}")
+                            logger.info(f"  Confidence: {mode_info['confidence']:.0%}")
+                            logger.info(f"  Regime:     {analysis['regime_type']}")
+                            logger.info(f"  Trend:      {analysis['trend']['strength']} / {analysis['trend']['direction']}")
+                            logger.info(f"  Volatility: {analysis['volatility']['regime']}")
+
+                        except Exception as e:
+                            logger.error(f"[HYBRID] ❌ Analysis failed: {e}")
+                            signal_details_base = None
+
+                    # Fallback if hybrid analysis fails
+                    if signal_details_base is None:
+                        logger.warning(f"[HYBRID] Using fallback signal_details (no market analysis)")
+                        signal_details_base = {
+                            'imported': True,
+                            'import_time': datetime.now().isoformat(),
+                            'aggregator_mode': 'unknown',
+                            'mode_confidence': 0.5,
+                            'regime_analysis': {
+                                'regime_type': 'unknown',
+                                'trend_strength': 'unknown',
+                                'trend_direction': 'unknown',
+                                'adx': 20.0,
+                                'volatility_regime': 'normal',
+                                'volatility_ratio': 1.0,
+                                'price_clarity': 'unknown',
+                                'indecision_pct': 0.0,
+                                'momentum_aligned': False,
+                                'at_key_level': False,
+                            },
+                            'signal_quality': 0.5,
+                            'reasoning': 'Position imported from MT5 - market analysis unavailable',
+                        }
+
+                    # ============================================================
+                    # STEP 3: Get actual account balance
+                    # ============================================================
+                    try:
+                        import MetaTrader5 as mt5
+                        account_info = mt5.account_info()
+                        account_balance = account_info.equity if account_info else self.portfolio_manager.current_capital
+                        logger.info(f"[MT5] Account balance: ${account_balance:,.2f}")
+                    except:
+                        account_balance = self.portfolio_manager.current_capital
+                        logger.warning(f"[MT5] Using portfolio capital: ${account_balance:,.2f}")
+
+                    # ============================================================
+                    # STEP 4: Import each position
+                    # ============================================================
                     imported_count = 0
                     for pos in mt5_positions:
-                        pos_type = (
-                            "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                        )
+                        pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
 
                         logger.info(
-                            f"\n  → Importing MT5 {pos_type}: ticket={pos.ticket}, "
+                            f"\n  → Importing MT5 {pos_type.upper()}: ticket={pos.ticket}, "
                             f"entry=${pos.price_open:.2f}, current=${pos.price_current:.2f}"
                         )
 
                         # Check if we can import
-                        can_import, reason = self.portfolio_manager.can_open_position(
-                            asset, pos_type
-                        )
+                        can_import, reason = self.portfolio_manager.can_open_position(asset, pos_type)
                         if not can_import:
                             logger.warning(f"[SYNC] ⚠️ Cannot import position: {reason}")
                             continue
 
-                        # ✅ Import with VTM support
+                        # Add position-specific details
+                        signal_details = signal_details_base.copy()
+                        signal_details['mt5_ticket'] = pos.ticket
+                        signal_details['side'] = pos_type
+                        signal_details['entry_price'] = pos.price_open
+
+                        # Import position
                         success = self.portfolio_manager.add_position(
                             asset=asset,
                             symbol=symbol,
                             side=pos_type,
                             entry_price=pos.price_open,
                             position_size_usd=(
-                                pos.volume
-                                * pos.price_open
-                                * self.symbol_info.trade_contract_size
+                                pos.volume * pos.price_open * self.symbol_info.trade_contract_size
                             ),
                             stop_loss=pos.sl if pos.sl > 0 else None,
                             take_profit=pos.tp if pos.tp > 0 else None,
-                            trailing_stop_pct=self.config["assets"][asset]
-                            .get("risk", {})
-                            .get("trailing_stop_pct"),
+                            trailing_stop_pct=self.config["assets"][asset].get("risk", {}).get("trailing_stop_pct"),
                             mt5_ticket=pos.ticket,
-                            ohlc_data=ohlc_data,  # ✅ Pass OHLC for VTM
-                            use_dynamic_management=True,  # ✅ Enable VTM
-                            entry_time=datetime.fromtimestamp(
-                                pos.time
-                            ),  # ✅ Preserve entry time
+                            ohlc_data=ohlc_data,
+                            use_dynamic_management=True,
+                            entry_time=datetime.fromtimestamp(pos.time),
+                            signal_details=signal_details,
+                            #account_balance=account_balance,
                         )
 
                         if success:
                             imported_count += 1
 
-                            # Get the imported position to check VTM status
-                            imported_positions = (
-                                self.portfolio_manager.get_asset_positions(asset)
-                            )
+                            # Verify VTM initialized
+                            imported_positions = self.portfolio_manager.get_asset_positions(asset)
                             if imported_positions:
-                                imported_pos = imported_positions[-1]  # Get last added
+                                imported_pos = imported_positions[-1]
                                 if imported_pos.trade_manager:
+                                    vtm_status = imported_pos.get_vtm_status()
                                     logger.info(
-                                        f"[VTM] ✅ VTM ACTIVE for imported position\n"
-                                        f"      Ticket: {pos.ticket}\n"
-                                        f"      Entry: ${imported_pos.entry_price:,.2f}\n"
-                                        f"      SL: ${imported_pos.stop_loss:,.2f}\n"
-                                        f"      TP: ${imported_pos.take_profit:,.2f}"
+                                        f"[VTM] ✅ ACTIVE with market analysis\n"
+                                        f"      Ticket:  {pos.ticket}\n"
+                                        f"      Mode:    {signal_details['aggregator_mode'].upper()}\n"
+                                        f"      Regime:  {signal_details['regime_analysis']['regime_type']}\n"
+                                        f"      Entry:   ${vtm_status['entry_price']:,.2f}\n"
+                                        f"      SL:      ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
+                                        f"      TP:      ${vtm_status.get('take_profit', 0):,.2f} (VTM calculated)"
                                     )
                                 else:
-                                    logger.warning(
-                                        f"[VTM] ⚠️ VTM not initialized for ticket {pos.ticket}"
-                                    )
+                                    logger.error(f"[VTM] ❌ NOT INITIALIZED for ticket {pos.ticket}")
+                                    logger.error(f"      OHLC data: {ohlc_data is not None}")
+                                    logger.error(f"      signal_details: {bool(signal_details)}")
+                                    logger.error(f"      account_balance: {account_balance}")
                         else:
-                            logger.error(
-                                f"[SYNC] ❌ Failed to import {asset} {pos_type} position"
-                            )
+                            logger.error(f"[SYNC] ❌ Failed to import {asset} {pos_type} position")
 
                     logger.info(
                         f"\n{'='*80}\n"
@@ -1858,30 +2096,19 @@ class MT5ExecutionHandler:
                     return True
 
                 else:
-                    # ✅ Clearer message when import is disabled
                     logger.warning(
                         f"\n{'='*80}\n"
                         f"[SYNC] ⚠️ IMPORT DISABLED IN CONFIG\n"
                         f"{'='*80}\n"
                         f"Found {mt5_count} MT5 position(s) but import is disabled.\n"
-                        f"\n"
-                        f"Current settings:\n"
-                        f"  portfolio.import_existing_positions = {import_enabled}\n"
-                        f"  trading.auto_sync_on_startup = {self.config.get('trading', {}).get('auto_sync_on_startup', False)}\n"
-                        f"\n"
                         f"These positions will NOT be managed by the bot.\n"
-                        f"Bot will only manage NEW positions it opens.\n"
                         f"{'='*80}"
                     )
 
-                    # Show what's on MT5
                     for pos in mt5_positions:
-                        pos_type = (
-                            "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
-                        )
+                        pos_type = "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
                         logger.info(
-                            f"  → MT5 {pos_type}: ticket={pos.ticket}, entry=${pos.price_open:.2f}, "
-                            f"current=${pos.price_current:.2f}, volume={pos.volume:.2f}, profit=${pos.profit:.2f}"
+                            f"  → MT5 {pos_type}: ticket={pos.ticket}, entry=${pos.price_open:.2f}"
                         )
 
                     return True
@@ -1895,7 +2122,6 @@ class MT5ExecutionHandler:
                     f"[SYNC] ⚠️ POSITION MISMATCH\n"
                     f"{'='*80}\n"
                     f"Portfolio shows {portfolio_count} position(s) but MT5 has 0.\n"
-                    f"Positions were likely closed manually in MT5.\n"
                     f"Removing positions from portfolio...\n"
                     f"{'='*80}"
                 )
@@ -1913,24 +2139,18 @@ class MT5ExecutionHandler:
                         closed_count += 1
                         logger.info(f"  ✅ Removed position {position.position_id}")
 
-                logger.info(
-                    f"\n[SYNC] Cleanup complete: {closed_count}/{portfolio_count} positions removed\n"
-                )
+                logger.info(f"\n[SYNC] Cleanup complete: {closed_count}/{portfolio_count} positions removed\n")
                 return closed_count == portfolio_count
 
             # ================================================================
-            # SCENARIO 3: Both have positions → VALIDATE & RECONCILE
+            # SCENARIO 3: Both have positions → VALIDATE
             # ================================================================
             if mt5_count > 0 and portfolio_count > 0:
-                logger.info(
-                    f"[SYNC] Validating {portfolio_count} portfolio vs {mt5_count} MT5 positions..."
-                )
+                logger.info(f"[SYNC] Validating {portfolio_count} portfolio vs {mt5_count} MT5 positions...")
 
-                # Build MT5 position map
                 mt5_by_ticket = {pos.ticket: pos for pos in mt5_positions}
-
-                # Check portfolio positions
                 positions_to_remove = []
+
                 for pos in portfolio_positions:
                     if pos.mt5_ticket and pos.mt5_ticket not in mt5_by_ticket:
                         logger.warning(
@@ -1939,7 +2159,6 @@ class MT5ExecutionHandler:
                         )
                         positions_to_remove.append(pos)
 
-                # Remove orphaned positions
                 if positions_to_remove:
                     current_price = self.get_current_price(self.symbol)
                     for pos in positions_to_remove:
@@ -1950,10 +2169,7 @@ class MT5ExecutionHandler:
                         )
                         logger.info(f"  ✅ Removed orphaned position {pos.position_id}")
 
-                # Final validation
-                remaining_portfolio_count = (
-                    self.portfolio_manager.get_asset_position_count(asset)
-                )
+                remaining_portfolio_count = self.portfolio_manager.get_asset_position_count(asset)
 
                 if remaining_portfolio_count == mt5_count:
                     logger.info(
@@ -1970,7 +2186,7 @@ class MT5ExecutionHandler:
                     return False
 
             # ================================================================
-            # SCENARIO 4: Both empty → All good
+            # SCENARIO 4: Both empty
             # ================================================================
             logger.info(f"[SYNC] ✅ No positions for {asset} in MT5 or portfolio")
             return True
