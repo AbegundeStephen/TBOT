@@ -853,12 +853,6 @@ class BinanceExecutionHandler:
         Round quantity to the correct lot size step and precision for Binance.
         """
         try:
-            # Round to correct precision first
-            if is_futures:
-                quantity = round(quantity, 3)  # Futures: 3 decimal places
-            else:
-                quantity = round(quantity, 6)  # Spot: 6 decimal places
-
             # Get symbol info from Binance
             if is_futures:
                 exchange_info = self.client.futures_exchange_info()
@@ -873,21 +867,36 @@ class BinanceExecutionHandler:
                             min_qty = float(f["minQty"])
                             max_qty = float(f["maxQty"])
 
+                            # Calculate precision from step_size
+                            # E.g., step_size = 0.00001 → precision = 5
+                            precision = len(str(step_size).rstrip('0').split('.')[-1])
+
                             logger.info(
-                                f"[LOT_SIZE] {symbol} | Min: {min_qty} | Max: {max_qty} | Step: {step_size}"
+                                f"[LOT_SIZE] {symbol} | Min: {min_qty} | Max: {max_qty} | "
+                                f"Step: {step_size} | Precision: {precision}"
                             )
 
                             # Round to the nearest step size
                             rounded_qty = round(quantity / step_size) * step_size
+                            
+                            # Apply precision to remove floating point errors
+                            rounded_qty = round(rounded_qty, precision)
+                            
+                            # Clamp to min/max bounds
                             rounded_qty = max(min_qty, min(rounded_qty, max_qty))
+                            
+                            logger.info(f"[QUANTITY] {quantity:.8f} → {rounded_qty:.{precision}f}")
+                            
                             return rounded_qty
 
-            logger.warning(f"Could not find LOT_SIZE filter for {symbol}")
-            return quantity
+            logger.warning(f"Could not find LOT_SIZE filter for {symbol}, using default precision")
+            # Fallback: use 5 decimals for BTC spot
+            return round(quantity, 5)
 
         except Exception as e:
             logger.error(f"Error rounding quantity: {e}")
-            return quantity
+            # Fallback: use 5 decimals for BTC spot
+            return round(quantity, 5)
 
 
     @handle_errors(
