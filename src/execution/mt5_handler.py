@@ -9,7 +9,7 @@ from typing import Dict, Optional, Tuple
 from datetime import datetime
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-
+from src.global_error_handler import handle_errors, ErrorSeverity
 logger = logging.getLogger(__name__)
 
 
@@ -383,6 +383,14 @@ class MT5ExecutionHandler:
             logger.info("[INIT] Auto-syncing positions with MT5...")
             self.sync_positions_with_mt5("GOLD")
 
+
+    @handle_errors(
+    component="mt5_handler",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=0.0
+)
     def get_current_price(self, symbol: str = None) -> float:
         """Get current market price"""
         if symbol is None:
@@ -442,6 +450,13 @@ class MT5ExecutionHandler:
 
         return True, f"OK - {current_count}/{max_per_asset} {side.upper()} positions open"
 
+    @handle_errors(
+    component="mt5_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def _open_mt5_position(
         self,
         signal: int,
@@ -725,6 +740,13 @@ class MT5ExecutionHandler:
             logger.error(f"[MT5] Error opening {asset} position: {e}", exc_info=True)
         return False
 
+    @handle_errors(
+    component="mt5_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def execute_signal(
         self,
         signal: int,
@@ -1071,7 +1093,14 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[SYNC CHECK] Error: {e}")
             return False
-
+        
+    @handle_errors(
+    component="mt5_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def _close_position(
         self, position, current_price: float, asset_name: str, reason: str
     ) -> bool:
@@ -1706,12 +1735,25 @@ class MT5ExecutionHandler:
                     )
 
                     if exit_signal:
-                        logger.info(
-                            f"[VTM] {asset_name} {position.position_id} triggered "
-                            f"{exit_signal.upper()} @ ${current_price:,.2f}"
-                        )
+                        # Handle both string and dict return types
+                        if isinstance(exit_signal, dict):
+                            signal_type = exit_signal.get('type', 'unknown')
+                            signal_reason = exit_signal.get('reason', 'VTM exit')
+                            logger.info(
+                                f"[VTM] {asset_name} {position.position_id} triggered "
+                                f"{signal_type.upper()} @ ${current_price:,.2f} - {signal_reason}"
+                            )
+                            close_reason = f"VTM_{signal_type}"
+                        else:
+                            # Legacy string format
+                            logger.info(
+                                f"[VTM] {asset_name} {position.position_id} triggered "
+                                f"{exit_signal.upper()} @ ${current_price:,.2f}"
+                            )
+                            close_reason = f"VTM_{exit_signal}"
+                        
                         self._close_position(
-                            position, current_price, asset_name, f"VTM_{exit_signal}"
+                            position, current_price, asset_name, close_reason
                         )
                         positions_closed = True
                         continue
@@ -1810,7 +1852,13 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
-    
+    @handle_errors(
+    component="mt5_handler",
+    severity=ErrorSeverity.WARNING,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def sync_positions_with_mt5(self, asset: str = "GOLD", symbol: str = None) -> bool:
         """
         ✅ COMPLETE FIX: Import positions WITH real market analysis for VTM

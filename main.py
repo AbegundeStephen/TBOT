@@ -1920,6 +1920,13 @@ class TradingBot:
             logger.error(f"[REGIME] Update error: {e}", exc_info=True)
 
     # ✨  Trading cycle with better error handling
+    @handle_errors(
+    component="main_trading_loop",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=None
+)
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
@@ -1937,6 +1944,8 @@ class TradingBot:
 
             self.reset_daily_counters()
             self._check_VTM_positions()
+            self._consecutive_errors = 0
+            self._last_successful_cycle = datetime.now()
 
             enabled = [
                 name
@@ -2123,6 +2132,20 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[ERROR] Cycle failed: {e}", exc_info=True)
             self._consecutive_errors += 1
+            
+            # Send critical alert if too many failures
+            if self._consecutive_errors >= self._max_consecutive_errors:
+                if self.error_handler:
+                    self.error_handler.handle_error(
+                        exception=e,
+                        component="main_trading_loop",
+                        severity=ErrorSeverity.CRITICAL,
+                        additional_info={
+                            "consecutive_errors": self._consecutive_errors,
+                            "last_successful": self._last_successful_cycle,
+                        },
+                        notify=True
+                    )
 
             if self.db_manager:
                 self.db_manager.log_system_event(
@@ -2395,7 +2418,15 @@ class TradingBot:
                     self.last_market_status_log = current_hour
             return is_open
         return True
-
+    
+    
+    @handle_errors(
+    component="trade_asset",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=None
+)
     def trade_asset(self, asset_name: str):
         """
         Execute trading logic with hybrid aggregator support
