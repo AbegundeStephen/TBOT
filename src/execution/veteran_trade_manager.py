@@ -356,12 +356,14 @@ class VeteranTradeManager:
                 max_stop = self.entry_price * (1 - self.min_stop_pct)
 
                 # FIXED: Take LOWER stop (wider)
-                self.initial_stop_loss = max(min_stop, min(max_stop, min(atr_stop, structure_stop)))
+                preliminary_stop = max(atr_stop, structure_stop)  # Choose wider stop
+                self.initial_stop_loss = max(min_stop, min(max_stop, preliminary_stop))
 
-                # FIXED: Safety check
-                if abs(self.entry_price - self.initial_stop_loss) < atr:
-                    logger.warning(f"[VTM] Stop too tight, widening to 1 ATR")
-                    self.initial_stop_loss = self.entry_price - atr
+                # Enhanced safety: Require minimum 1.5 ATR distance for BTC
+                min_distance = atr * 1.5
+                if abs(self.entry_price - self.initial_stop_loss) < min_distance:
+                    logger.warning(f"[VTM] Stop too tight ({abs(self.entry_price - self.initial_stop_loss):.2f}), widening to 1.5 ATR")
+                    self.initial_stop_loss = self.entry_price - min_distance
 
                 logger.info(f"[VTM] Stop Calc (LONG):")
                 logger.info(f"  Pivot: ${pivot_level:,.2f}" if pivot_level else "  Pivot: None")

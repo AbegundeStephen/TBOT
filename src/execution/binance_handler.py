@@ -423,6 +423,13 @@ class BinanceExecutionHandler:
 
         return True, f"OK - {current_count}/{max_per_asset} {side.upper()} positions open"
 
+    @handle_errors(
+    component="binance_handler",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=None
+)
     def get_current_price(self, symbol: str = None) -> Optional[float]:
         """Get current market price"""
         if symbol is None:
@@ -435,6 +442,13 @@ class BinanceExecutionHandler:
             logger.error(f"Error fetching price for {symbol}: {e}")
             return None
 
+    @handle_errors(
+    component="binance_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def execute_signal(
         self,
         signal: int,
@@ -474,6 +488,7 @@ class BinanceExecutionHandler:
         Returns:
             True if action taken, False otherwise
         """
+        
         try:
             # ============================================================
             # STEP 1: Get current price
@@ -875,7 +890,13 @@ class BinanceExecutionHandler:
             return quantity
 
 
-
+    @handle_errors(
+    component="binance_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def _open_position(
         self,
         signal: int,
@@ -1095,7 +1116,13 @@ class BinanceExecutionHandler:
             logger.error(f"[OPEN] Error opening {asset_name} position: {e}", exc_info=True)
             return False
 
-        
+    @handle_errors(
+    component="binance_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False
+)   
     def _close_position(
         self, position, current_price: float, asset_name: str, reason: str
     ) -> bool:
@@ -1269,6 +1296,13 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
+    @handle_errors(
+    component="binance_handler",
+    severity=ErrorSeverity.WARNING,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def sync_positions_with_binance(self, asset_name: str = "BTC", symbol: str = None) -> bool:
         """
         ✅ COMPLETE FIX: Sync portfolio with Binance holdings (multi-position aware + VTM)

@@ -10,6 +10,7 @@ import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from src.execution.veteran_trade_manager import VeteranTradeManager
+from src.global_error_handler import handle_errors, ErrorSeverity
 
 
 logger = logging.getLogger(__name__)
@@ -862,6 +863,14 @@ class PortfolioManager:
         
         return True, "OK"
 
+
+    @handle_errors(
+    component="portfolio_manager",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=False
+)
     def add_position(
         self,
         asset: str,
@@ -1020,7 +1029,15 @@ class PortfolioManager:
             )
 
         return len(positions_to_close)
-
+    
+    
+    @handle_errors(
+    component="portfolio_manager",
+    severity=ErrorSeverity.ERROR,
+    notify=True,
+    reraise=False,
+    default_return=None
+)
     def close_position(
         self,
         asset: str = None,
@@ -1131,6 +1148,13 @@ class PortfolioManager:
 
         return trade_result
 
+    @handle_errors(
+    component="portfolio_manager",
+    severity=ErrorSeverity.WARNING,
+    notify=False,  # Don't notify for update errors
+    reraise=False,
+    default_return=None
+)
     def update_positions(self, prices: Dict[str, float] = None):
         """Update all positions with current prices and exchange profit"""
         # Update exchange positions with real-time profit
