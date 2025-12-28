@@ -1454,7 +1454,7 @@ class BinanceExecutionHandler:
                         use_dynamic_management=True,
                         entry_time=datetime.now(),
                         signal_details=signal_details_base,
-                        account_balance=account_balance,
+                        #account_balance=account_balance,
                     )
 
                     if success:
