@@ -1188,269 +1188,72 @@
                 }
             });
         }
-        function showDocumentation(docType) {
+        async function showDocumentation(docType) {
             const modal = document.getElementById('signal-modal');
             const modalBody = document.getElementById('modal-body');
             
-            let title = '';
-            let content = '';
+            const docConfig = {
+                'vtm': {
+                    title: '📊 VTM (Veteran Trade Manager) Documentation',
+                    file: 'vtm_docs.html'
+                },
+                'ai-validator': {
+                    title: '🤖 AI Validator Documentation',
+                    file: 'ai_validator_docs.html'
+                },
+                'signal-aggregator': {
+                    title: '📡 Signal Aggregator Documentation',
+                    file: 'signal_aggregator_docs.html'
+                },
+                'bots': {
+                    title: '🔧 Bots Documentation',
+                    file: 'bots_docs.html'
+                }
+            };
             
-            switch(docType) {
-                case 'vtm':
-                    title = '📊 VTM (Veteran Trade Manager) Documentation';
-                    content = getVTMDocs();
-                    break;
-                case 'ai-validator':
-                    title = '🤖 AI Validator Documentation';
-                    content = '<div style="padding: 40px; text-align: center; color: #666;"><h3>Coming Soon</h3><p>AI Validator documentation is being prepared.</p></div>';
-                    break;
-                case 'signal-aggregator':
-                    title = '📡 Signal Aggregator Documentation';
-                    content = '<div style="padding: 40px; text-align: center; color: #666;"><h3>Coming Soon</h3><p>Signal Aggregator documentation is being prepared.</p></div>';
-                    break;
-                case 'bots':
-                    title = '🔧 Bots Documentation';
-                    content = '<div style="padding: 40px; text-align: center; color: #666;"><h3>Coming Soon</h3><p>Bots documentation is being prepared.</p></div>';
-                    break;
+            const config = docConfig[docType];
+            if (!config) {
+                console.error('Unknown doc type:', docType);
+                return;
             }
             
             // Update modal header title
-            document.querySelector('.modal-header h2').textContent = title;
-            modalBody.innerHTML = content;
+            document.querySelector('.modal-header h2').textContent = config.title;
+            
+            // Show loading state
+            modalBody.innerHTML = '<div class="loading"><div class="spinner"></div>Loading documentation...</div>';
             modal.classList.add('show');
+            
+            try {
+                // Fetch the documentation file from templates folder
+                const response = await fetch(`/templates/${config.file}`);
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to load documentation: ${response.status}`);
+                }
+                
+                const html = await response.text();
+                modalBody.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error loading documentation:', error);
+                modalBody.innerHTML = `
+                    <div style="padding: 40px; text-align: center; color: #666;">
+                        <h3>📄 Documentation Not Available</h3>
+                        <p style="margin-top: 15px;">
+                            The documentation file <strong>${config.file}</strong> could not be loaded.
+                        </p>
+                        <p style="margin-top: 10px; font-size: 14px; color: #999;">
+                            Please ensure the file exists in <code>src/dashboard/templates/</code> directory.
+                        </p>
+                        <p style="margin-top: 10px; font-size: 12px; color: #ef4444;">
+                            Error: ${error.message}
+                        </p>
+                    </div>
+                `;
+            }
         }
-
-        function getVTMDocs() {
-            return `
-                <style>
-                    .vtm-docs h3 { color: #667eea; margin-top: 20px; margin-bottom: 10px; }
-                    .vtm-docs p { margin-bottom: 15px; line-height: 1.6; color: #555; }
-                    .vtm-docs ul { margin-left: 20px; margin-bottom: 15px; }
-                    .vtm-docs li { margin-bottom: 8px; line-height: 1.6; color: #555; }
-                    .vtm-docs code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-                    .vtm-docs .scenario-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin: 20px 0; }
-                    .vtm-docs .scenario-box { padding: 15px; border-radius: 8px; border: 2px solid #e0e0e0; }
-                    .vtm-docs .scenario-box h4 { color: #333; margin-bottom: 10px; }
-                    .vtm-docs .highlight-box { background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%); padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea; }
-                </style>
-                <div class="vtm-docs">
-                    <h3>🔒 VTM Profit Locking Strategies</h3>
-                    <p>VTM (Veteran Trade Manager) provides multiple profit-locking strategies to protect your gains while letting winners run. Understanding when to use each strategy is crucial for optimal performance.</p>
-                    
-                    <div class="highlight-box">
-                        <h4 style="margin-bottom: 10px;">💡 Key Concept: Profit Lock vs Trailing Stop</h4>
-                        <p style="margin-bottom: 8px;"><strong>Profit Lock:</strong> Moves your stop-loss to break-even (or small profit) after reaching a threshold. Protects against reversals.</p>
-                        <p><strong>Trailing Stop:</strong> Follows price up but never down. Activated after hitting profit targets. Captures extended moves.</p>
-                    </div>
-                    
-                    <h3>📊 Strategy Comparison</h3>
-                    <div class="scenario-grid">
-                        <div class="scenario-box">
-                            <h4>🎯 No Early Lock</h4>
-                            <p><strong>Best for:</strong> Position trading, low frequency</p>
-                            <p><strong>Config:</strong> <code>enable_early_profit_lock=False</code></p>
-                            <ul>
-                                <li>✅ Catches huge moves (20-50%)</li>
-                                <li>✅ Doesn't get shaken out early</li>
-                                <li>❌ Full risk until first partial</li>
-                                <li>❌ Can reverse into losses</li>
-                            </ul>
-                            <p style="margin-top: 10px; font-weight: bold; color: #667eea;">Use for: BTC/ETH position trades</p>
-                        </div>
-                        
-                        <div class="scenario-box">
-                            <h4>🔒 Early Lock (1%)</h4>
-                            <p><strong>Best for:</strong> Gold, high-frequency trading</p>
-                            <p><strong>Config:</strong> <code>enable_early_profit_lock=True<br>early_lock_threshold_pct=0.01</code></p>
-                            <ul>
-                                <li>✅ Protection after 1% gain</li>
-                                <li>✅ Turns losers into break-evens</li>
-                                <li>✅ Better sleep at night</li>
-                                <li>❌ Slightly reduces max profit</li>
-                            </ul>
-                            <p style="margin-top: 10px; font-weight: bold; color: #667eea;">Use for: XAUUSD (Gold) trading</p>
-                        </div>
-                        
-                        <div class="scenario-box">
-                            <h4>⚡ Early Lock (2%)</h4>
-                            <p><strong>Best for:</strong> BTC day trading, medium volatility</p>
-                            <p><strong>Config:</strong> <code>enable_early_profit_lock=True<br>early_lock_threshold_pct=0.02</code></p>
-                            <ul>
-                                <li>✅ Room for normal volatility</li>
-                                <li>✅ Protects overnight holds</li>
-                                <li>✅ Good win rate preservation</li>
-                                <li>⚠️ Still some early-exit risk</li>
-                            </ul>
-                            <p style="margin-top: 10px; font-weight: bold; color: #667eea;">Use for: BTCUSDT intraday</p>
-                        </div>
-                        
-                        <div class="scenario-box">
-                            <h4>⚠️ Too Aggressive (0.5%)</h4>
-                            <p><strong>WARNING:</strong> Generally not recommended</p>
-                            <p><strong>Config:</strong> <code>early_lock_threshold_pct=0.005</code></p>
-                            <ul>
-                                <li>❌ Kills winners before they develop</li>
-                                <li>❌ Death by 1000 cuts</li>
-                                <li>❌ Massive opportunity cost</li>
-                                <li>✅ Only pro: Never takes losses</li>
-                            </ul>
-                            <p style="margin-top: 10px; font-weight: bold; color: #f44336;">Avoid unless extreme risk aversion</p>
-                        </div>
-                    </div>
-                    
-                    <h3>📈 Real-World Example: What 1% Lock Saves You</h3>
-                    <p>Consider a Gold trade that starts at $50,000:</p>
-                    
-                    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 15px 0;">
-                        <h4 style="margin-bottom: 15px;">Scenario: Early Reversal After +2%</h4>
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <thead>
-                                <tr style="background: #667eea; color: white;">
-                                    <th style="padding: 10px; text-align: left;">Time</th>
-                                    <th style="padding: 10px; text-align: left;">Price</th>
-                                    <th style="padding: 10px; text-align: left;">No Lock</th>
-                                    <th style="padding: 10px; text-align: left;">1% Lock</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr style="border-bottom: 1px solid #e0e0e0;">
-                                    <td style="padding: 10px;">Entry</td>
-                                    <td style="padding: 10px;">$50,000</td>
-                                    <td style="padding: 10px;">Stop: $46,000</td>
-                                    <td style="padding: 10px;">Stop: $46,000</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #e0e0e0;">
-                                    <td style="padding: 10px;">+1 hr</td>
-                                    <td style="padding: 10px;">$50,500</td>
-                                    <td style="padding: 10px;">Stop: $46,000</td>
-                                    <td style="padding: 10px; background: #e8f5e9;"><strong>Stop: $50,100 ✅</strong></td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #e0e0e0;">
-                                    <td style="padding: 10px;">+2 hr</td>
-                                    <td style="padding: 10px;">$51,000</td>
-                                    <td style="padding: 10px;">Stop: $46,000</td>
-                                    <td style="padding: 10px; background: #e8f5e9;">Stop: $50,100</td>
-                                </tr>
-                                <tr style="background: #fff3e0;">
-                                    <td style="padding: 10px;"><strong>Reversal</strong></td>
-                                    <td style="padding: 10px;"><strong>$46,000</strong></td>
-                                    <td style="padding: 10px; background: #ffebee;"><strong>LOSS: -$158 (-8%)</strong></td>
-                                    <td style="padding: 10px; background: #e8f5e9;"><strong>PROFIT: +$3 (+0.2%)</strong></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                        <p style="margin-top: 15px; font-weight: bold; color: #667eea;">Difference: $161 saved by early lock! 🎯</p>
-                    </div>
-                    
-                    <h3>🎮 VTM Configuration Guide</h3>
-                    <p>Here's how to configure VTM for different trading styles:</p>
-                    
-                    <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0;">
-                        <h4>For Gold Trading (XAUUSD):</h4>
-                        <pre style="background: #fff; padding: 15px; border-radius: 5px; overflow-x: auto;"><code>VTM_CONFIG = {
-    "enable_early_profit_lock": True,
-    "early_lock_threshold_pct": 0.01,  # Lock at 1%
-    "early_lock_stop_offset_pct": 0.002,  # 0.2% above entry
-    
-    "partial_targets": [0.03, 0.05, 0.08],  # 3%, 5%, 8%
-    "partial_sizes": [0.33, 0.33, 0.34],
-    "trailing_stop_activation_pct": 0.05,  # After 5%
-    "trailing_stop_distance_pct": 0.20  # 20% trail
-}</code></pre>
-                    </div>
-                    
-                    <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0;">
-                        <h4>For BTC Position Trading:</h4>
-                        <pre style="background: #fff; padding: 15px; border-radius: 5px; overflow-x: auto;"><code>VTM_CONFIG = {
-    "enable_early_profit_lock": False,  # Let it breathe
-    
-    "partial_targets": [0.12, 0.18, 0.25],  # 12%, 18%, 25%
-    "partial_sizes": [0.33, 0.33, 0.34],
-    "trailing_stop_activation_pct": 0.18,  # After 18%
-    "trailing_stop_distance_pct": 0.25  # 25% trail
-}</code></pre>
-                    </div>
-                    
-                    <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0;">
-                        <h4>For BTC Day Trading:</h4>
-                        <pre style="background: #fff; padding: 15px; border-radius: 5px; overflow-x: auto;"><code>VTM_CONFIG = {
-    "enable_early_profit_lock": True,
-    "early_lock_threshold_pct": 0.02,  # Lock at 2%
-    "early_lock_stop_offset_pct": 0.004,  # 0.4% above entry
-    
-    "partial_targets": [0.06, 0.10, 0.15],  # 6%, 10%, 15%
-    "partial_sizes": [0.33, 0.33, 0.34],
-    "trailing_stop_activation_pct": 0.10,  # After 10%
-    "trailing_stop_distance_pct": 0.22  # 22% trail
-}</code></pre>
-                    </div>
-                    
-                    <div class="highlight-box">
-                        <h4>🎯 Decision Tree: Which Strategy?</h4>
-                        <ul>
-                            <li><strong>Win rate > 80%?</strong> → Use early lock (1-2%)</li>
-                            <li><strong>Average target < 5%?</strong> → Use early lock (1%)</li>
-                            <li><strong>Overnight holds?</strong> → Use early lock (2%)</li>
-                            <li><strong>Big swings (20%+)?</strong> → No early lock</li>
-                            <li><strong>Low frequency (1-2 trades/day)?</strong> → No early lock</li>
-                            <li><strong>High frequency (5+ trades/day)?</strong> → Early lock (1%)</li>
-                        </ul>
-                    </div>
-                    
-                    <h3>📊 Performance Impact</h3>
-                    <p>Based on backtest data across 1000+ trades:</p>
-                    
-                    <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-                        <thead>
-                            <tr style="background: #667eea; color: white;">
-                                <th style="padding: 10px; text-align: left;">Metric</th>
-                                <th style="padding: 10px; text-align: left;">No Lock</th>
-                                <th style="padding: 10px; text-align: left;">1% Lock</th>
-                                <th style="padding: 10px; text-align: left;">2% Lock</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px;"><strong>Win Rate</strong></td>
-                                <td style="padding: 10px;">78%</td>
-                                <td style="padding: 10px; background: #e8f5e9;"><strong>84%</strong></td>
-                                <td style="padding: 10px;">82%</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px;"><strong>Avg Winner</strong></td>
-                                <td style="padding: 10px; background: #e8f5e9;"><strong>+8.2%</strong></td>
-                                <td style="padding: 10px;">+7.8%</td>
-                                <td style="padding: 10px;">+7.5%</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px;"><strong>Avg Loser</strong></td>
-                                <td style="padding: 10px;">-5.2%</td>
-                                <td style="padding: 10px; background: #e8f5e9;"><strong>-0.8%</strong></td>
-                                <td style="padding: 10px;">-1.2%</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px;"><strong>Max Drawdown</strong></td>
-                                <td style="padding: 10px;">-18%</td>
-                                <td style="padding: 10px; background: #e8f5e9;"><strong>-8%</strong></td>
-                                <td style="padding: 10px;">-10%</td>
-                            </tr>
-                            <tr style="background: #f8f9fa;">
-                                <td style="padding: 10px;"><strong>Overall Return</strong></td>
-                                <td style="padding: 10px;">+42%</td>
-                                <td style="padding: 10px; background: #e8f5e9;"><strong>+48%</strong></td>
-                                <td style="padding: 10px;">+45%</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    
-                    <p style="margin-top: 20px; font-size: 0.9em; color: #666;">
-                        <strong>Note:</strong> These results are specific to Gold (XAUUSD) trading with 84% historical win rate. 
-                        Results vary by asset, timeframe, and market conditions. Always backtest your specific setup.
-                    </p>
-                </div>
-            `;
-        }
-        
+       
         function updateLastRefreshTime() {
             const now = new Date().toLocaleTimeString('en-US', {
                 hour: '2-digit',

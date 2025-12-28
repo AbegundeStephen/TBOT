@@ -224,6 +224,7 @@ class PerformanceWeightedAggregator:
                     else 0
                 ),
             }
+            
 
         return base_stats
 

@@ -246,6 +246,28 @@ def get_system_events():
     except Exception as e:
         logger.error(f"Error getting system events: {e}")
         return jsonify({'error': str(e)}), 500
+    
+@app.route('/templates/<path:filename>')
+def serve_template(filename):
+    """Serve documentation template files"""
+    try:
+        file_path = os.path.join('templates', filename)
+        
+        # Security check - ensure file is in templates directory
+        if not os.path.abspath(file_path).startswith(os.path.abspath('templates')):
+            return jsonify({'error': 'Invalid file path'}), 403
+        
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return content, 200, {'Content-Type': 'text/html; charset=utf-8'}
+        
+    except Exception as e:
+        logger.error(f"Error serving template {filename}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/health')

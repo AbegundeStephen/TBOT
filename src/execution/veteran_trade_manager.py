@@ -2,6 +2,7 @@
 Production-Ready Veteran Trade Manager
 Optimized for live trading with BTC and GOLD
 Features Gemini's structure-based stop logic + asset-specific tuning
+ENHANCED: Structure-based take profits + critical bug fixes
 """
 
 import logging
@@ -31,29 +32,31 @@ class AssetProfile:
     BTC = {
         "name": "Bitcoin",
         "volatility": "high",
-        "min_stop_pct": 0.08,  # 8% minimum stop
-        "max_stop_pct": 0.15,  # 15% maximum stop
-        "atr_multiplier": 2.0,  # Wider ATR buffer
-        "pivot_lookback": 30,  # Look back 30 bars for pivots
-        "partial_targets": [1.5, 2.5, 4.0],  # R:R ratios
+        "min_stop_pct": 0.08,
+        "max_stop_pct": 0.15,
+        "atr_multiplier": 2.0,
+        "pivot_lookback": 30,
+        "partial_targets": [1.5, 2.5, 3.5],  # FIXED: More realistic (was 4.0)
         "partial_sizes": [0.33, 0.33, 0.34],
-        "runner_trail_pct": 0.20,  # 20% trail for runner
-        "time_stop_bars": 30,  # Give more time
-        "use_ema_structure": False,  # Don't use EMA for BTC (too whippy)
+        "runner_trail_pct": 0.20,
+        "time_stop_bars": 30,
+        "use_ema_structure": False,
+        "use_structure_targets": True,  # NEW: Enable structure-based TPs
     }
 
     GOLD = {
         "name": "Gold",
         "volatility": "medium",
-        "min_stop_pct": 0.02,  # 2% minimum stop
-        "max_stop_pct": 0.05,  # 5% maximum stop
-        "atr_multiplier": 1.5,  # Tighter ATR buffer
-        "pivot_lookback": 20,  # Look back 20 bars
-        "partial_targets": [1.5, 2.5, 3.5],  # More conservative
-        "partial_sizes": [0.40, 0.30, 0.30],  # Take more profit early
-        "runner_trail_pct": 0.12,  # 12% trail (tighter)
-        "time_stop_bars": 20,  # Exit dead trades faster
-        "use_ema_structure": True,  # Gold respects EMA better
+        "min_stop_pct": 0.02,
+        "max_stop_pct": 0.05,
+        "atr_multiplier": 1.5,
+        "pivot_lookback": 20,
+        "partial_targets": [1.5, 2.5, 3.5],
+        "partial_sizes": [0.40, 0.30, 0.30],
+        "runner_trail_pct": 0.12,
+        "time_stop_bars": 20,
+        "use_ema_structure": True,
+        "use_structure_targets": True,  # NEW: Enable structure-based TPs
     }
 
     @classmethod
@@ -69,30 +72,164 @@ class AssetProfile:
             return cls.GOLD
 
 
+# ============================================================================
+# HELPER FUNCTIONS FOR STRUCTURE-BASED TARGETS
+# ============================================================================
+
+def find_resistance_levels(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    current_price: float,
+    side: str,
+    lookback: int = 50,
+    min_touches: int = 2,
+    tolerance_pct: float = 0.01,
+) -> List[float]:
+    """
+    Find significant resistance/support levels based on market structure
+    """
+    lookback = min(lookback, len(close))
+    levels = []
+
+    if side == "long":
+        highs = high[-lookback:]
+        
+        for i in range(2, len(highs) - 2):
+            if highs[i] > current_price:
+                if (highs[i] > highs[i - 1] and highs[i] > highs[i - 2] and 
+                    highs[i] > highs[i + 1] and highs[i] > highs[i + 2]):
+                    levels.append(highs[i])
+        
+        clustered = []
+        for level in sorted(levels):
+            if not clustered or (level - clustered[-1]) / level > tolerance_pct:
+                clustered.append(level)
+            else:
+                clustered[-1] = (clustered[-1] + level) / 2
+        
+        verified = []
+        for level in clustered:
+            touches = sum(1 for h in highs if abs(h - level) / level <= tolerance_pct)
+            if touches >= min_touches:
+                verified.append(level)
+        
+        return sorted(verified)[:5]
+    
+    else:
+        lows = low[-lookback:]
+        
+        for i in range(2, len(lows) - 2):
+            if lows[i] < current_price:
+                if (lows[i] < lows[i - 1] and lows[i] < lows[i - 2] and 
+                    lows[i] < lows[i + 1] and lows[i] < lows[i + 2]):
+                    levels.append(lows[i])
+        
+        clustered = []
+        for level in sorted(levels, reverse=True):
+            if not clustered or (clustered[-1] - level) / level > tolerance_pct:
+                clustered.append(level)
+            else:
+                clustered[-1] = (clustered[-1] + level) / 2
+        
+        verified = []
+        for level in clustered:
+            touches = sum(1 for l in lows if abs(l - level) / level <= tolerance_pct)
+            if touches >= min_touches:
+                verified.append(level)
+        
+        return sorted(verified, reverse=True)[:5]
+
+
+def calculate_hybrid_targets(
+    entry_price: float,
+    stop_loss: float,
+    side: str,
+    structure_levels: List[float],
+    risk_multiples: List[float],
+    partial_sizes: List[float],
+    min_rr: float = 1.2,
+) -> Tuple[List[float], List[float]]:
+    """
+    Hybrid TP calculation: Uses structure when available, R:R as fallback
+    """
+    risk = abs(entry_price - stop_loss)
+    targets = []
+    adjusted_sizes = list(partial_sizes)
+
+    if side == "long":
+        rr_targets = [entry_price + (risk * r) for r in risk_multiples]
+        
+        for i, rr_target in enumerate(rr_targets):
+            if structure_levels:
+                closest = min(structure_levels, key=lambda x: abs(x - rr_target))
+                structure_rr = (closest - entry_price) / risk
+                
+                if abs(closest - rr_target) / rr_target < 0.20 and structure_rr >= min_rr:
+                    targets.append(closest)
+                    logger.info(f"[VTM] ✓ TP{i+1}: Structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                else:
+                    if structure_rr < risk_multiples[i]:
+                        targets.append(closest)
+                        logger.info(f"[VTM] ⚠ TP{i+1}: Capped by structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                    else:
+                        targets.append(rr_target)
+                        logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+            else:
+                targets.append(rr_target)
+                logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+    
+    else:
+        rr_targets = [entry_price - (risk * r) for r in risk_multiples]
+        
+        for i, rr_target in enumerate(rr_targets):
+            if structure_levels:
+                closest = min(structure_levels, key=lambda x: abs(x - rr_target))
+                structure_rr = (entry_price - closest) / risk
+                
+                if abs(closest - rr_target) / abs(rr_target) < 0.20 and structure_rr >= min_rr:
+                    targets.append(closest)
+                    logger.info(f"[VTM] ✓ TP{i+1}: Structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                else:
+                    if structure_rr < risk_multiples[i]:
+                        targets.append(closest)
+                        logger.info(f"[VTM] ⚠ TP{i+1}: Capped by structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                    else:
+                        targets.append(rr_target)
+                        logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+            else:
+                targets.append(rr_target)
+                logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+    
+    if len(targets) < len(partial_sizes):
+        remaining = sum(partial_sizes[len(targets):])
+        for i in range(len(targets)):
+            adjusted_sizes[i] = partial_sizes[i] + (remaining / len(targets))
+        adjusted_sizes = adjusted_sizes[:len(targets)]
+    
+    return targets, adjusted_sizes
+
+
 class VeteranTradeManager:
     """
-    Production-ready trade manager with:
-    - Gemini's structure-based stop loss (pivot detection)
-    - Asset-specific profiles for BTC and GOLD
-    - Partial profit taking
-    - Real-time updates for live trading
-    - Comprehensive logging
+    Production-ready trade manager with structure-based logic
     """
 
     def __init__(
         self,
         entry_price: float,
-        side: str,  # 'long' or 'short'
-        asset: str,  # 'BTC' or 'GOLD'
+        side: str,
+        asset: str,
         high: np.ndarray,
         low: np.ndarray,
         close: np.ndarray,
         account_balance: float,
-        account_risk: float = 0.015,  # 1.5% risk per trade
+        signal_details: Dict,
+        account_risk: float = 0.015,
         atr_period: int = 14,
-        custom_profile: Optional[Dict] = None,  # Override defaults
-        enable_early_profit_lock: bool = False,  # NEW: Lock profit early
-        early_lock_threshold_pct: float = 0.01,  # NEW: Lock at 1% gain
+        custom_profile: Optional[Dict] = None,
+        enable_early_profit_lock: bool = False,
+        early_lock_threshold_pct: float = 0.01,
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -103,11 +240,9 @@ class VeteranTradeManager:
         self.account_balance = account_balance
         self.account_risk = account_risk
         self.atr_period = atr_period
+        self.signal_details = signal_details
 
-        # Load asset profile
         self.profile = custom_profile or AssetProfile.get_profile(asset)
-
-        # Apply profile settings
         self.min_stop_pct = self.profile["min_stop_pct"]
         self.max_stop_pct = self.profile["max_stop_pct"]
         self.atr_multiplier = self.profile["atr_multiplier"]
@@ -117,13 +252,12 @@ class VeteranTradeManager:
         self.runner_trail_pct = self.profile["runner_trail_pct"]
         self.time_stop_bars = self.profile["time_stop_bars"]
         self.use_ema_structure = self.profile["use_ema_structure"]
+        self.use_structure_targets = self.profile.get("use_structure_targets", True)
 
-        # Profit lock settings
         self.enable_early_profit_lock = enable_early_profit_lock
         self.early_lock_threshold_pct = early_lock_threshold_pct
         self.early_profit_locked = False
 
-        # Trade state
         self.initial_stop_loss = None
         self.current_stop_loss = None
         self.take_profit_levels = []
@@ -136,54 +270,36 @@ class VeteranTradeManager:
         self.runner_activated = False
         self.entry_time = datetime.now()
 
-        # Initialize levels
         self._calculate_initial_levels()
 
         logger.info("=" * 80)
         logger.info(f"🎯 VETERAN TRADE MANAGER - {self.asset} {side.upper()}")
         logger.info("=" * 80)
-        logger.info(
-            f"Asset Profile: {self.profile['name']} ({self.profile['volatility']} volatility)"
-        )
+        logger.info(f"Asset Profile: {self.profile['name']} ({self.profile['volatility']} volatility)")
         logger.info(f"Entry Price:   ${entry_price:,.2f}")
-        logger.info(
-            f"Stop Loss:     ${self.initial_stop_loss:,.2f} "
-            f"(-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)"
-        )
+        logger.info(f"Stop Loss:     ${self.initial_stop_loss:,.2f} (-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)")
         logger.info(f"Position Size: {self.position_size:.6f} units")
-        logger.info(
-            f"Risk Amount:   ${account_balance * account_risk:,.2f} ({account_risk:.1%})"
-        )
+        logger.info(f"Risk Amount:   ${account_balance * account_risk:,.2f} ({account_risk:.1%})")
         logger.info(f"\n📊 PROFIT TARGETS:")
-        for i, (target, size) in enumerate(
-            zip(self.take_profit_levels, self.partial_sizes), 1
-        ):
+        for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes), 1):
             pct = self._calc_pct_distance(entry_price, target)
             logger.info(f"  {i}. ${target:,.2f} (+{pct:.2f}%) → Exit {size:.0%}")
         logger.info(f"\n⚙️  SETTINGS:")
         logger.info(f"  Stop Range: {self.min_stop_pct:.1%} - {self.max_stop_pct:.1%}")
         logger.info(f"  Runner Trail: {self.runner_trail_pct:.0%}")
-        logger.info(f"  Time Stop: {self.time_stop_bars} bars")
-        logger.info(
-            f"  EMA Structure: {'Enabled' if self.use_ema_structure else 'Disabled'}"
-        )
+        logger.info(f"  Structure TPs: {'Enabled' if self.use_structure_targets else 'Disabled'}")
         if self.enable_early_profit_lock:
-            logger.info(
-                f"  Early Profit Lock: {self.early_lock_threshold_pct:.1%} gain"
-            )
+            logger.info(f"  Early Profit Lock: {self.early_lock_threshold_pct:.1%} gain")
         logger.info("=" * 80)
 
     def _calc_pct_distance(self, price1: float, price2: float) -> float:
-        """Calculate percentage distance"""
         return abs(price1 - price2) / price1 * 100
 
     def _calculate_atr(self) -> float:
-        """Calculate ATR with fallback"""
         try:
             atr = talib.ATR(self.high, self.low, self.close, timeperiod=self.atr_period)
             current_atr = atr[-1]
             if np.isnan(current_atr) or current_atr <= 0:
-                # Fallback: 2% of price
                 return self.entry_price * 0.02
             return current_atr
         except Exception as e:
@@ -191,354 +307,238 @@ class VeteranTradeManager:
             return self.entry_price * 0.02
 
     def _find_pivot_structure(self) -> Optional[float]:
-        """
-        🔍 GEMINI'S STRUCTURE-BASED STOP LOGIC
-        Find the most recent pivot (V-shape for long, Λ-shape for short)
-        """
         try:
             lookback = min(self.pivot_lookback, len(self.close) - 3)
 
             if self.side == "long":
-                # Find pivot LOW (V-shape: left > center < right)
                 for i in range(lookback - 2, 1, -1):
                     current = self.low[-(i + 1)]
                     left = self.low[-(i + 2)]
                     right = self.low[-i]
-
-                    # V-shape check
                     if current < left and current < right:
-                        logger.info(
-                            f"[VTM] ✓ Found pivot LOW @ ${current:,.2f} "
-                            f"(V-shape confirmed at bar -{i})"
-                        )
+                        logger.info(f"[VTM] ✓ Pivot LOW @ ${current:,.2f} (bar -{i})")
                         return current
-
-                # Fallback: Use absolute lowest
                 fallback = np.min(self.low[-lookback:])
-                logger.warning(f"[VTM] No pivot found, using lowest: ${fallback:,.2f}")
+                logger.warning(f"[VTM] No pivot, using lowest: ${fallback:,.2f}")
                 return fallback
-
-            else:  # short
-                # Find pivot HIGH (Λ-shape: left < current > right)
+            else:
                 for i in range(lookback - 2, 1, -1):
                     current = self.high[-(i + 1)]
                     left = self.high[-(i + 2)]
                     right = self.high[-i]
-
-                    # Λ-shape check
                     if current > left and current > right:
-                        logger.info(
-                            f"[VTM] ✓ Found pivot HIGH @ ${current:,.2f} "
-                            f"(Λ-shape confirmed at bar -{i})"
-                        )
+                        logger.info(f"[VTM] ✓ Pivot HIGH @ ${current:,.2f} (bar -{i})")
                         return current
-
                 fallback = np.max(self.high[-lookback:])
-                logger.warning(f"[VTM] No pivot found, using highest: ${fallback:,.2f}")
+                logger.warning(f"[VTM] No pivot, using highest: ${fallback:,.2f}")
                 return fallback
-
         except Exception as e:
-            logger.error(f"[VTM] Pivot detection error: {e}")
+            logger.error(f"[VTM] Pivot error: {e}")
             return None
 
     def _calculate_initial_levels(self):
-        """Calculate initial stop and targets using Gemini's logic + ATR buffer"""
         try:
             atr = self._calculate_atr()
             pivot_level = self._find_pivot_structure()
 
             if self.side == "long":
-                # Calculate stop options
-                # 1. ATR-based stop
                 atr_distance = atr * self.atr_multiplier
-                atr_distance_pct = min(
-                    atr_distance / self.entry_price, self.max_stop_pct
-                )
+                atr_distance_pct = min(atr_distance / self.entry_price, self.max_stop_pct)
                 atr_distance_pct = max(atr_distance_pct, self.min_stop_pct)
                 atr_stop = self.entry_price * (1 - atr_distance_pct)
 
-                # 2. Structure-based stop (Gemini's logic)
                 if pivot_level:
-                    # Apply ATR buffer BELOW pivot
-                    structure_stop = pivot_level - (atr * 0.5)  # Half ATR below pivot
+                    structure_stop = pivot_level - (atr * 1.0)  # FIXED: Full ATR buffer
                 else:
                     structure_stop = self.entry_price * (1 - self.min_stop_pct)
 
-                # 3. Enforce min/max constraints
                 min_stop = self.entry_price * (1 - self.max_stop_pct)
                 max_stop = self.entry_price * (1 - self.min_stop_pct)
 
-                # Choose the wider of ATR or structure (more breathing room)
-                self.initial_stop_loss = max(
-                    min_stop,  # Don't go too wide
-                    min(max_stop, max(atr_stop, structure_stop)),  # Don't go too tight
-                )
+                # FIXED: Take LOWER stop (wider)
+                self.initial_stop_loss = max(min_stop, min(max_stop, min(atr_stop, structure_stop)))
 
-                # Log breakdown
-                logger.info(f"[VTM] Stop Loss Calculation (LONG):")
-                logger.info(
-                    f"  Pivot Level:     ${pivot_level:,.2f}"
-                    if pivot_level
-                    else "  Pivot: Not found"
-                )
-                logger.info(f"  ATR:             ${atr:,.2f} (x{self.atr_multiplier})")
-                logger.info(
-                    f"  ATR Stop:        ${atr_stop:,.2f} ({atr_distance_pct:.2%})"
-                )
-                logger.info(f"  Structure Stop:  ${structure_stop:,.2f}")
-                logger.info(
-                    f"  → FINAL STOP:    ${self.initial_stop_loss:,.2f} "
-                    f"({self._calc_pct_distance(self.entry_price, self.initial_stop_loss):.2%} below)"
-                )
+                # FIXED: Safety check
+                if abs(self.entry_price - self.initial_stop_loss) < atr:
+                    logger.warning(f"[VTM] Stop too tight, widening to 1 ATR")
+                    self.initial_stop_loss = self.entry_price - atr
 
-                # Calculate targets based on risk
-                risk = self.entry_price - self.initial_stop_loss
-                self.take_profit_levels = [
-                    self.entry_price + (risk * r) for r in self.partial_targets
-                ]
+                logger.info(f"[VTM] Stop Calc (LONG):")
+                logger.info(f"  Pivot: ${pivot_level:,.2f}" if pivot_level else "  Pivot: None")
+                logger.info(f"  ATR: ${atr:,.2f} (x{self.atr_multiplier})")
+                logger.info(f"  ATR Stop: ${atr_stop:,.2f}")
+                logger.info(f"  Structure Stop: ${structure_stop:,.2f}")
+                logger.info(f"  → FINAL: ${self.initial_stop_loss:,.2f}")
+
+                # Calculate TPs with structure
+                if self.use_structure_targets:
+                    logger.info(f"\n[VTM] Detecting resistance levels...")
+                    structure_levels = find_resistance_levels(
+                        self.high, self.low, self.close,
+                        self.entry_price, self.side, self.pivot_lookback
+                    )
+                    if structure_levels:
+                        logger.info(f"[VTM] Found {len(structure_levels)} resistance levels")
+                    self.take_profit_levels, self.partial_sizes = calculate_hybrid_targets(
+                        self.entry_price, self.initial_stop_loss, self.side,
+                        structure_levels, self.partial_targets, self.partial_sizes, min_rr=1.2
+                    )
+                else:
+                    risk = self.entry_price - self.initial_stop_loss
+                    self.take_profit_levels = [self.entry_price + (risk * r) for r in self.partial_targets]
 
             else:  # short
                 atr_distance = atr * self.atr_multiplier
-                atr_distance_pct = min(
-                    atr_distance / self.entry_price, self.max_stop_pct
-                )
+                atr_distance_pct = min(atr_distance / self.entry_price, self.max_stop_pct)
                 atr_distance_pct = max(atr_distance_pct, self.min_stop_pct)
                 atr_stop = self.entry_price * (1 + atr_distance_pct)
 
                 if pivot_level:
-                    structure_stop = pivot_level + (atr * 0.5)
+                    structure_stop = pivot_level + (atr * 1.0)  # FIXED
                 else:
                     structure_stop = self.entry_price * (1 + self.min_stop_pct)
 
                 min_stop = self.entry_price * (1 + self.max_stop_pct)
                 max_stop = self.entry_price * (1 + self.min_stop_pct)
 
-                self.initial_stop_loss = min(
-                    min_stop, max(max_stop, min(atr_stop, structure_stop))
-                )
+                # FIXED: Take HIGHER stop (wider for shorts)
+                self.initial_stop_loss = min(min_stop, max(max_stop, max(atr_stop, structure_stop)))
 
-                logger.info(f"[VTM] Stop Loss Calculation (SHORT):")
-                logger.info(
-                    f"  Pivot Level:     ${pivot_level:,.2f}"
-                    if pivot_level
-                    else "  Pivot: Not found"
-                )
-                logger.info(f"  ATR:             ${atr:,.2f} (x{self.atr_multiplier})")
-                logger.info(
-                    f"  ATR Stop:        ${atr_stop:,.2f} ({atr_distance_pct:.2%})"
-                )
-                logger.info(f"  Structure Stop:  ${structure_stop:,.2f}")
-                logger.info(
-                    f"  → FINAL STOP:    ${self.initial_stop_loss:,.2f} "
-                    f"({self._calc_pct_distance(self.entry_price, self.initial_stop_loss):.2%} above)"
-                )
+                if abs(self.initial_stop_loss - self.entry_price) < atr:
+                    logger.warning(f"[VTM] Stop too tight, widening to 1 ATR")
+                    self.initial_stop_loss = self.entry_price + atr
 
-                risk = self.initial_stop_loss - self.entry_price
-                self.take_profit_levels = [
-                    self.entry_price - (risk * r) for r in self.partial_targets
-                ]
+                logger.info(f"[VTM] Stop Calc (SHORT):")
+                logger.info(f"  Pivot: ${pivot_level:,.2f}" if pivot_level else "  Pivot: None")
+                logger.info(f"  ATR: ${atr:,.2f}")
+                logger.info(f"  → FINAL: ${self.initial_stop_loss:,.2f}")
+
+                if self.use_structure_targets:
+                    logger.info(f"\n[VTM] Detecting support levels...")
+                    structure_levels = find_resistance_levels(
+                        self.high, self.low, self.close,
+                        self.entry_price, self.side, self.pivot_lookback
+                    )
+                    if structure_levels:
+                        logger.info(f"[VTM] Found {len(structure_levels)} support levels")
+                    self.take_profit_levels, self.partial_sizes = calculate_hybrid_targets(
+                        self.entry_price, self.initial_stop_loss, self.side,
+                        structure_levels, self.partial_targets, self.partial_sizes, min_rr=1.2
+                    )
+                else:
+                    risk = self.initial_stop_loss - self.entry_price
+                    self.take_profit_levels = [self.entry_price - (risk * r) for r in self.partial_targets]
 
             self.current_stop_loss = self.initial_stop_loss
 
-            # Calculate position size
             risk_amount = self.account_balance * self.account_risk
             trade_risk = abs(self.entry_price - self.initial_stop_loss)
             self.position_size = risk_amount / trade_risk
 
+            # FIXED: Position size validation
+            if self.position_size * self.entry_price > self.account_balance * 2:
+                logger.error(f"[VTM] Position size too large!")
+                raise ValueError("Position exceeds 2x account balance")
+
+            dollar_risk = abs(self.entry_price - self.initial_stop_loss) * self.position_size
+            logger.info(f"[VTM] $ Risk: ${dollar_risk:,.2f} ({dollar_risk/self.account_balance:.2%})")
+
         except Exception as e:
-            logger.error(f"[VTM] Initialization error: {e}", exc_info=True)
+            logger.error(f"[VTM] Init error: {e}", exc_info=True)
             raise
 
-    def update_with_new_bar(
-        self, new_high: float, new_low: float, new_close: float
-    ) -> Optional[Dict]:
-        """
-        Update manager with new bar data
-        Returns exit info if exit triggered
-        """
+    def update_with_new_bar(self, new_high: float, new_low: float, new_close: float) -> Optional[Dict]:
         try:
-            # Update price arrays
             self.high = np.append(self.high, new_high)
             self.low = np.append(self.low, new_low)
             self.close = np.append(self.close, new_close)
 
-            # Trim history
-            max_history = 200
-            if len(self.close) > max_history:
-                self.high = self.high[-max_history:]
-                self.low = self.low[-max_history:]
-                self.close = self.close[-max_history:]
+            if len(self.close) > 200:
+                self.high = self.high[-200:]
+                self.low = self.low[-200:]
+                self.close = self.close[-200:]
 
             self.bars_in_trade += 1
 
-            # Update highest/lowest
             if self.side == "long":
                 self.highest_price_reached = max(self.highest_price_reached, new_high)
             else:
                 self.lowest_price_reached = min(self.lowest_price_reached, new_low)
 
-            # Check all exit conditions
             return self.check_exit(new_close)
-
         except Exception as e:
-            logger.error(f"[VTM] Update error: {e}", exc_info=True)
+            logger.error(f"[VTM] Update error: {e}")
             return None
 
     def update_with_current_price(self, current_price: float) -> Optional[Dict]:
-        """
-        Update with current price (for intrabar updates in live trading)
-        Use this for real-time monitoring between bars
-        """
         try:
-            # Update extremes
             if self.side == "long":
                 old_high = self.highest_price_reached
-                self.highest_price_reached = max(
-                    self.highest_price_reached, current_price
-                )
-
-                # Trail stop if runner active and new high
+                self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high:
                     new_trail = self.highest_price_reached * (1 - self.runner_trail_pct)
                     if new_trail > self.current_stop_loss:
-                        old_stop = self.current_stop_loss
                         self.current_stop_loss = new_trail
-                        logger.info(
-                            f"[VTM] 🏃 Runner trail: ${old_stop:,.2f} → "
-                            f"${self.current_stop_loss:,.2f} (High: ${self.highest_price_reached:,.2f})"
-                        )
+                        logger.info(f"[VTM] 🏃 Runner trail: ${self.current_stop_loss:,.2f}")
             else:
                 old_low = self.lowest_price_reached
-                self.lowest_price_reached = min(
-                    self.lowest_price_reached, current_price
-                )
-
+                self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low:
                     new_trail = self.lowest_price_reached * (1 + self.runner_trail_pct)
                     if new_trail < self.current_stop_loss:
-                        old_stop = self.current_stop_loss
                         self.current_stop_loss = new_trail
-                        logger.info(
-                            f"[VTM] 🏃 Runner trail: ${old_stop:,.2f} → "
-                            f"${self.current_stop_loss:,.2f} (Low: ${self.lowest_price_reached:,.2f})"
-                        )
+                        logger.info(f"[VTM] 🏃 Runner trail: ${self.current_stop_loss:,.2f}")
 
-            # Check for exits
             return self.check_exit(current_price)
-
         except Exception as e:
-            logger.error(f"[VTM] Real-time update error: {e}")
+            logger.error(f"[VTM] Price update error: {e}")
             return None
 
     def check_exit(self, current_price: float) -> Optional[Dict]:
-        """
-        Check all exit conditions
-        Returns: {'reason': ExitReason, 'price': float, 'size': float} or None
-        """
         if self.remaining_position <= 0:
             return None
 
         try:
-            # Calculate current P&L
             if self.side == "long":
                 pnl_pct = (current_price - self.entry_price) / self.entry_price
             else:
                 pnl_pct = (self.entry_price - current_price) / self.entry_price
 
-            # 🔒 EARLY PROFIT LOCK (if enabled)
-            if (
-                self.enable_early_profit_lock
-                and not self.early_profit_locked
-                and pnl_pct >= self.early_lock_threshold_pct
-            ):
-
+            # Early profit lock
+            if (self.enable_early_profit_lock and not self.early_profit_locked and
+                pnl_pct >= self.early_lock_threshold_pct):
                 self.early_profit_locked = True
-
-                # Move stop to break-even + small buffer
                 if self.side == "long":
-                    new_stop = self.entry_price * 1.002  # 0.2% above entry
+                    new_stop = self.entry_price * 1.002
                     if new_stop > self.current_stop_loss:
-                        old_stop = self.current_stop_loss
                         self.current_stop_loss = new_stop
-                        logger.info(
-                            f"🔒 EARLY PROFIT LOCKED @ {pnl_pct:.2%} gain\n"
-                            f"   Stop: ${old_stop:,.2f} → ${self.current_stop_loss:,.2f} (break-even)"
-                        )
+                        logger.info(f"🔒 Profit locked @ break-even")
                 else:
                     new_stop = self.entry_price * 0.998
                     if new_stop < self.current_stop_loss:
-                        old_stop = self.current_stop_loss
                         self.current_stop_loss = new_stop
-                        logger.info(
-                            f"🔒 EARLY PROFIT LOCKED @ {pnl_pct:.2%} gain\n"
-                            f"   Stop: ${old_stop:,.2f} → ${self.current_stop_loss:,.2f} (break-even)"
-                        )
+                        logger.info(f"🔒 Profit locked @ break-even")
 
-            # 1. Check stop loss (current_stop_loss, not initial - allows for profit lock)
+            # Check stop loss
             if self.side == "long":
                 if current_price <= self.current_stop_loss:
-                    # Determine if this is break-even or loss
-                    actual_pnl = (
-                        (current_price - self.entry_price) / self.entry_price * 100
-                    )
-                    if actual_pnl >= -0.5:  # Within 0.5% of break-even
-                        logger.info(
-                            f"\n{'='*80}\n"
-                            f"🔒 STOPPED AT BREAK-EVEN (Profit was locked)\n"
-                            f"{'='*80}\n"
-                            f"Price: ${current_price:,.2f} | Stop: ${self.current_stop_loss:,.2f}\n"
-                            f"P&L: {actual_pnl:+.2f}% | Bars: {self.bars_in_trade}\n"
-                            f"Partials Taken: {len(self.partials_hit)}\n"
-                            f"{'='*80}"
-                        )
+                    actual_pnl = (current_price - self.entry_price) / self.entry_price * 100
+                    if actual_pnl >= -0.5:
+                        logger.info(f"🔒 STOPPED AT BREAK-EVEN")
                     else:
-                        logger.info(
-                            f"\n{'='*80}\n"
-                            f"🛑 STOP LOSS HIT\n"
-                            f"{'='*80}\n"
-                            f"Price: ${current_price:,.2f} | Stop: ${self.current_stop_loss:,.2f}\n"
-                            f"P&L: {actual_pnl:+.2f}% | Bars: {self.bars_in_trade}\n"
-                            f"{'='*80}"
-                        )
-                    return {
-                        "reason": ExitReason.STOP_LOSS,
-                        "price": current_price,
-                        "size": self.remaining_position,
-                    }
+                        logger.info(f"🛑 STOP LOSS HIT: {actual_pnl:+.2f}%")
+                    return {"reason": ExitReason.STOP_LOSS, "price": current_price, "size": self.remaining_position}
             else:
                 if current_price >= self.current_stop_loss:
-                    actual_pnl = (
-                        (self.entry_price - current_price) / self.entry_price * 100
-                    )
+                    actual_pnl = (self.entry_price - current_price) / self.entry_price * 100
                     if actual_pnl >= -0.5:
-                        logger.info(
-                            f"\n{'='*80}\n"
-                            f"🔒 STOPPED AT BREAK-EVEN (Profit was locked)\n"
-                            f"{'='*80}\n"
-                            f"Price: ${current_price:,.2f} | Stop: ${self.current_stop_loss:,.2f}\n"
-                            f"P&L: {actual_pnl:+.2f}% | Bars: {self.bars_in_trade}\n"
-                            f"Partials Taken: {len(self.partials_hit)}\n"
-                            f"{'='*80}"
-                        )
+                        logger.info(f"🔒 STOPPED AT BREAK-EVEN")
                     else:
-                        logger.info(
-                            f"\n{'='*80}\n"
-                            f"🛑 STOP LOSS HIT\n"
-                            f"{'='*80}\n"
-                            f"Price: ${current_price:,.2f} | Stop: ${self.current_stop_loss:,.2f}\n"
-                            f"P&L: {actual_pnl:+.2f}% | Bars: {self.bars_in_trade}\n"
-                            f"{'='*80}"
-                        )
-                    return {
-                        "reason": ExitReason.STOP_LOSS,
-                        "price": current_price,
-                        "size": self.remaining_position,
-                    }
+                        logger.info(f"🛑 STOP LOSS HIT: {actual_pnl:+.2f}%")
+                    return {"reason": ExitReason.STOP_LOSS, "price": current_price, "size": self.remaining_position}
 
-            # 2. Check partial profit targets
-            for i, (target, size) in enumerate(
-                zip(self.take_profit_levels, self.partial_sizes)
-            ):
+            # Check partials
+            for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):
                 if i in self.partials_hit:
                     continue
 
@@ -551,106 +551,49 @@ class VeteranTradeManager:
                 if hit:
                     self.partials_hit.append(i)
                     self.remaining_position -= size
+                    pnl = abs(current_price - self.entry_price) / self.entry_price * 100
+                    logger.info(f"💰 PARTIAL #{i+1} HIT! Exit {size:.0%}, P&L: +{pnl:.2f}%")
 
-                    pnl_pct = (
-                        abs(current_price - self.entry_price) / self.entry_price * 100
-                    )
-
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"💰 PARTIAL PROFIT #{i+1} HIT!\n"
-                        f"{'='*80}\n"
-                        f"Target: ${target:,.2f} | Price: ${current_price:,.2f}\n"
-                        f"Exit Size: {size:.0%} | Remaining: {self.remaining_position:.0%}\n"
-                        f"P&L: +{pnl_pct:.2f}% | Bars: {self.bars_in_trade}\n"
-                        f"{'='*80}"
-                    )
-
-                    # Activate runner after 2nd partial
                     if len(self.partials_hit) >= 2 and not self.runner_activated:
                         self.runner_activated = True
-                        logger.info(
-                            f"🏃 RUNNER ACTIVATED: {self.remaining_position:.0%} position "
-                            f"now trails with {self.runner_trail_pct:.0%} stop"
-                        )
+                        logger.info(f"🏃 RUNNER ACTIVATED")
 
-                    # Move stop to break-even after first partial (if not already locked)
                     if len(self.partials_hit) == 1 and not self.early_profit_locked:
                         if self.side == "long":
-                            self.current_stop_loss = max(
-                                self.current_stop_loss,
-                                self.entry_price * 1.001,  # 0.1% above entry
-                            )
+                            self.current_stop_loss = max(self.current_stop_loss, self.entry_price * 1.001)
                         else:
-                            self.current_stop_loss = min(
-                                self.current_stop_loss, self.entry_price * 0.999
-                            )
-                        logger.info(
-                            f"🔒 Stop moved to break-even: ${self.current_stop_loss:,.2f}"
-                        )
+                            self.current_stop_loss = min(self.current_stop_loss, self.entry_price * 0.999)
+                        logger.info(f"🔒 Stop → break-even")
 
                     return {
-                        "reason": [
-                            ExitReason.TAKE_PROFIT_1,
-                            ExitReason.TAKE_PROFIT_2,
-                            ExitReason.TAKE_PROFIT_3,
-                        ][i],
+                        "reason": [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3][i],
                         "price": current_price,
-                        "size": size,
+                        "size": size
                     }
 
-            # 3. Check runner trailing stop
+            # Check runner trailing
             if self.runner_activated:
                 if self.side == "long" and current_price <= self.current_stop_loss:
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"🏃 RUNNER TRAILING STOP HIT\n"
-                        f"{'='*80}\n"
-                        f"Price: ${current_price:,.2f} | Trail: ${self.current_stop_loss:,.2f}\n"
-                        f"High: ${self.highest_price_reached:,.2f}\n"
-                        f"{'='*80}"
-                    )
-                    return {
-                        "reason": ExitReason.TRAILING_STOP,
-                        "price": current_price,
-                        "size": self.remaining_position,
-                    }
+                    logger.info(f"🏃 RUNNER TRAILING STOP HIT")
+                    return {"reason": ExitReason.TRAILING_STOP, "price": current_price, "size": self.remaining_position}
                 elif self.side == "short" and current_price >= self.current_stop_loss:
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"🏃 RUNNER TRAILING STOP HIT\n"
-                        f"{'='*80}\n"
-                        f"Price: ${current_price:,.2f} | Trail: ${self.current_stop_loss:,.2f}\n"
-                        f"Low: ${self.lowest_price_reached:,.2f}\n"
-                        f"{'='*80}"
-                    )
-                    return {
-                        "reason": ExitReason.TRAILING_STOP,
-                        "price": current_price,
-                        "size": self.remaining_position,
-                    }
+                    logger.info(f"🏃 RUNNER TRAILING STOP HIT")
+                    return {"reason": ExitReason.TRAILING_STOP, "price": current_price, "size": self.remaining_position}
 
             return None
-
         except Exception as e:
-            logger.error(f"[VTM] Exit check error: {e}", exc_info=True)
+            logger.error(f"[VTM] Exit check error: {e}")
             return None
 
     def get_current_levels(self) -> Dict:
-        """Get current stop/target levels for display"""
         current_price = self.close[-1]
-
         if self.side == "long":
             pnl_pct = (current_price - self.entry_price) / self.entry_price * 100
         else:
             pnl_pct = (self.entry_price - current_price) / self.entry_price * 100
 
         next_target_idx = len(self.partials_hit)
-        next_target = (
-            self.take_profit_levels[next_target_idx]
-            if next_target_idx < len(self.take_profit_levels)
-            else None
-        )
+        next_target = self.take_profit_levels[next_target_idx] if next_target_idx < len(self.take_profit_levels) else None
 
         return {
             "entry_price": self.entry_price,
@@ -677,79 +620,3 @@ class VeteranTradeManager:
             f"SL=${levels['stop_loss']:.2f}, "
             f"P&L={levels['pnl_pct']:+.2f}%)"
         )
-
-
-# ============================================================================
-# USAGE EXAMPLES FOR LIVE TRADING
-# ============================================================================
-
-if __name__ == "__main__":
-    import logging
-
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    print(
-        """
-╔════════════════════════════════════════════════════════════════════════╗
-║        PRODUCTION VTM - LIVE TRADING USAGE EXAMPLES                    ║
-╚════════════════════════════════════════════════════════════════════════╝
-
-EXAMPLE 1: BTC Long Position
-─────────────────────────────────────────────────────────────────────────
-"""
-    )
-
-    # Simulate BTC price data
-    np.random.seed(42)
-    btc_close = 50000 + np.cumsum(np.random.randn(100) * 500)
-    btc_high = btc_close + np.abs(np.random.randn(100) * 300)
-    btc_low = btc_close - np.abs(np.random.randn(100) * 300)
-
-    # Initialize for BTC long
-    btc_manager = VeteranTradeManager(
-        entry_price=50000,
-        side="long",
-        asset="BTC",
-        high=btc_high[:50],
-        low=btc_low[:50],
-        close=btc_close[:50],
-        account_balance=10000,
-        account_risk=0.015,
-    )
-
-    print(f"\n✓ Manager initialized")
-    print(f"\nCurrent Levels:")
-    levels = btc_manager.get_current_levels()
-    for key, value in levels.items():
-        if isinstance(value, float):
-            print(
-                f"  {key}: ${value:,.2f}"
-                if "price" in key or "stop" in key or "target" in key
-                else f"  {key}: {value:.2%}" if "pct" in key else f"  {key}: {value}"
-            )
-        else:
-            print(f"  {key}: {value}")
-
-    print(
-        """
-
-EXAMPLE 2: GOLD Short Position
-─────────────────────────────────────────────────────────────────────────
-"""
-    )
-
-    # Simulate GOLD price data
-    gold_close = 2000 + np.cumsum(np.random.randn(100) * 10)
-    gold_high = gold_close + np.abs(np.random.randn(100) * 5)
-    gold_low = gold_close - np.abs(np.random.randn(100) * 5)
-
-    # Initialize for GOLD short
-    gold_manager = VeteranTradeManager(
-        entry_price=2000,
-        side="short",
-        asset="GOLD",
-        high=gold_high[:50],
-        low=gold_low[:50],
-        close=gold_close[:50],
-        account_risk=0.015,
-    )

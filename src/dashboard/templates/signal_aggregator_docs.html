@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Aggregator Systems</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .section {
+            margin-bottom: 50px;
+        }
+        
+        .section-title {
+            font-size: 2em;
+            color: #667eea;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin: 30px 0;
+        }
+        
+        .aggregator-card {
+            border: 2px solid #e0e0e0;
+            border-radius: 15px;
+            padding: 30px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .aggregator-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .card-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .card-icon {
+            font-size: 3em;
+            margin-right: 15px;
+        }
+        
+        .card-title {
+            font-size: 1.8em;
+            color: #333;
+        }
+        
+        .card-subtitle {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        
+        .judge-grid {
+            display: grid;
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .judge-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 5px solid #667eea;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .judge-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .judge-name {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 1.1em;
+        }
+        
+        .judge-weight {
+            background: #667eea;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+        }
+        
+        .judge-description {
+            color: #666;
+            margin: 10px 0;
+        }
+        
+        .judge-rules {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+        
+        .strategy-box {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 15px 0;
+            border: 2px solid #e0e0e0;
+        }
+        
+        .strategy-name {
+            font-weight: bold;
+            color: #764ba2;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        
+        .weight-bar {
+            background: #e0e0e0;
+            height: 30px;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .weight-fill {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            transition: width 0.5s;
+        }
+        
+        .decision-flow {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            margin: 20px 0;
+            border: 2px solid #667eea;
+        }
+        
+        .flow-step {
+            display: flex;
+            align-items: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        
+        .step-number {
+            background: #667eea;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 1.2em;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+        
+        .step-content {
+            flex-grow: 1;
+        }
+        
+        .step-title {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .step-description {
+            color: #666;
+            font-size: 0.95em;
+        }
+        
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .comparison-table th {
+            background: #667eea;
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: bold;
+        }
+        
+        .comparison-table td {
+            padding: 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .comparison-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .pro-con-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .pro-box, .con-box {
+            padding: 20px;
+            border-radius: 10px;
+        }
+        
+        .pro-box {
+            background: #e8f5e9;
+            border-left: 5px solid #4caf50;
+        }
+        
+        .con-box {
+            background: #ffebee;
+            border-left: 5px solid #f44336;
+        }
+        
+        .pro-title, .con-title {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 10px;
+        }
+        
+        .pro-title {
+            color: #2e7d32;
+        }
+        
+        .con-title {
+            color: #c62828;
+        }
+        
+        .pro-box ul, .con-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .pro-box li::before {
+            content: "✓ ";
+            color: #4caf50;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        
+        .con-box li::before {
+            content: "✗ ";
+            color: #f44336;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        
+        .hybrid-card {
+            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+            border-radius: 15px;
+            padding: 30px;
+            margin: 30px 0;
+            border: 3px solid #ff6b6b;
+        }
+        
+        .regime-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .regime-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            border-top: 4px solid #ff6b6b;
+        }
+        
+        .regime-title {
+            font-weight: bold;
+            color: #ff6b6b;
+            margin-bottom: 10px;
+        }
+        
+        .regime-recommendation {
+            background: #fff3cd;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }
+        
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border-left: 5px solid #667eea;
+        }
+        
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        
+        .threshold-visual {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .threshold-bar {
+            position: relative;
+            height: 60px;
+            background: linear-gradient(90deg, #ffebee 0%, #fff9c4 50%, #e8f5e9 100%);
+            border-radius: 30px;
+            margin: 20px 0;
+            overflow: hidden;
+        }
+        
+        .threshold-marker {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            width: 3px;
+            background: #333;
+        }
+        
+        .threshold-label {
+            position: absolute;
+            top: -25px;
+            font-size: 0.9em;
+            font-weight: bold;
+            transform: translateX(-50%);
+        }
+        
+        @media (max-width: 768px) {
+            .comparison-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .pro-con-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 Signal Aggregator Systems</h1>
+            <p>Understanding the Institutional Council vs Performance-Weighted Approaches</p>
+        </div>
+        
+        <div class="content">
+            <!-- Overview Section -->
+            <div class="section">
+                <h2 class="section-title">📊 System Overview</h2>
+                <div class="highlight-box">
+                    <h3>Two Complementary Approaches to Signal Generation</h3>
+                    <p>Your trading system employs two distinct aggregation methodologies, each optimized for different market conditions:</p>
+                    <ul style="margin-top: 15px;">
+                        <li><strong>Institutional Council:</strong> A rule-based, judge-scored system mimicking institutional decision-making</li>
+                        <li><strong>Performance-Weighted:</strong> A statistical, confidence-weighted system optimized for complex markets</li>
+                        <li><strong>Hybrid Selector:</strong> Automatically switches between the two based on market regime analysis</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Institutional Council Section -->
+            <div class="section">
+                <h2 class="section-title">🏛️ Institutional Council Aggregator</h2>
+                
+                <div class="aggregator-card">
+                    <div class="card-header">
+                        <div class="card-icon">🏛️</div>
+                        <div>
+                            <div class="card-title">Institutional Council</div>
+                            <div class="card-subtitle">"BlackRock-Style" Weighted Voting System</div>
+                        </div>
+                    </div>
+                    
+                    <p><strong>Core Philosophy:</strong> Mimics how institutional traders make decisions - multiple independent "judges" evaluate the market, each with specific expertise and voting power.</p>
+                    
+                    <div class="judge-grid">
+                        <div class="judge-card">
+                            <div class="judge-header">
+                                <span class="judge-name">1. TREND Judge</span>
+                                <span class="judge-weight">1.5 pts</span>
+                            </div>
+                            <div class="judge-description">
+                                <strong>The Boss:</strong> Evaluates EMA alignment and overall market direction
+                            </div>
+                            <div class="judge-rules">
+                                <strong>Scoring:</strong><br>
+                                • Price > EMA50 AND EMA20 > EMA50 = Full credit (1.5 pts)<br>
+                                • Price > EMA50 BUT EMA20 < EMA50 = Partial (0.75 pts)<br>
+                                • Price below EMA50 = No credit (0 pts)
+                            </div>
+                        </div>
+                        
+                        <div class="judge-card">
+                            <div class="judge-header">
+                                <span class="judge-name">2. STRUCTURE Judge</span>
+                                <span class="judge-weight">1.5 pts</span>
+                            </div>
+                            <div class="judge-description">
+                                <strong>The Location Expert:</strong> Validates price position relative to S/R levels
+                            </div>
+                            <div class="judge-rules">
+                                <strong>Scoring:</strong><br>
+                                • At key S/R level (AI + indicators) = Full credit (1.5 pts)<br>
+                                • Near S/R (within threshold) = Partial (0.75 pts)<br>
+                                • No S/R nearby = No credit (0 pts)
+                            </div>
+                        </div>
+                        
+                        <div class="judge-card">
+                            <div class="judge-header">
+                                <span class="judge-name">3. MOMENTUM Judge</span>
+                                <span class="judge-weight">1.0 pt</span>
+                            </div>
+                            <div class="judge-description">
+                                <strong>The Fuel Gauge:</strong> Measures RSI and MACD strength
+                            </div>
+                            <div class="judge-rules">
+                                <strong>Scoring:</strong><br>
+                                • RSI in bullish zone (40-65) = Full credit (1.0 pt)<br>
+                                • RSI oversold (<30) = Dip-buying bonus (1.0 pt)<br>
+                                • MACD confirmation = +0.2 bonus
+                            </div>
+                        </div>
+                        
+                        <div class="judge-card">
+                            <div class="judge-header">
+                                <span class="judge-name">4. PATTERN Judge</span>
+                                <span class="judge-weight">0.5 pt</span>
+                            </div>
+                            <div class="judge-description">
+                                <strong>The Trigger:</strong> Validates AI candlestick patterns
+                            </div>
+                            <div class="judge-rules">
+                                <strong>Scoring:</strong><br>
+                                • AI pattern confidence > 75% = Full credit (0.5 pt)<br>
+                                • AI pattern confidence > 60% = Partial (0.4 pt)<br>
+                                • Below threshold = No credit (0 pts)
+                            </div>
+                        </div>
+                        
+                        <div class="judge-card">
+                            <div class="judge-header">
+                                <span class="judge-name">5. VOLUME Judge</span>
+                                <span class="judge-weight">0.5 pt</span>
+                            </div>
+                            <div class="judge-description">
+                                <strong>The Validator:</strong> Confirms volume strength
+                            </div>
+                            <div class="judge-rules">
+                                <strong>Scoring:</strong><br>
+                                • Volume > 1.5x MA(20) = Full credit (0.5 pt)<br>
+                                • Volume > MA(20) = Partial (0.35 pt)<br>
+                                • Below average = No credit (0 pts)
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="decision-flow">
+                        <h3 style="margin-bottom: 20px; color: #667eea;">Decision Process</h3>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">1</div>
+                            <div class="step-content">
+                                <div class="step-title">Detect Market Regime</div>
+                                <div class="step-description">EMA strategy identifies if market is BULL or BEAR</div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">2</div>
+                            <div class="step-content">
+                                <div class="step-title">Each Judge Evaluates</div>
+                                <div class="step-description">All 5 judges independently score the market setup (0 to max points)</div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">3</div>
+                            <div class="step-content">
+                                <div class="step-title">Calculate Total Score</div>
+                                <div class="step-description">Sum all judge scores (max possible: 5.0 points)</div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">4</div>
+                            <div class="step-content">
+                                <div class="step-title">Apply Threshold Rules</div>
+                                <div class="step-description">
+                                    • Trend-aligned: Need ≥ 3.5 / 5.0 (70% approval)<br>
+                                    • Counter-trend: Need ≥ 4.0 / 5.0 (80% unanimous)
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">5</div>
+                            <div class="step-content">
+                                <div class="step-title">AI Validation (Optional)</div>
+                                <div class="step-description">If enabled, AI can veto signals that lack pattern/S/R confirmation</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="threshold-visual">
+                        <h4>Council Score Requirements</h4>
+                        <div style="margin: 30px 0;">
+                            <p><strong>Trend-Aligned Trade (e.g., BUY in BULL market):</strong></p>
+                            <div class="threshold-bar">
+                                <div class="threshold-marker" style="left: 70%;">
+                                    <span class="threshold-label">3.5 pts ✓</span>
+                                </div>
+                            </div>
+                            <p style="text-align: center; color: #666; margin-top: 10px;">Simple majority required (70%)</p>
+                        </div>
+                        
+                        <div style="margin: 30px 0;">
+                            <p><strong>Counter-Trend Trade (e.g., BUY in BEAR market):</strong></p>
+                            <div class="threshold-bar">
+                                <div class="threshold-marker" style="left: 80%;">
+                                    <span class="threshold-label">4.0 pts ✓</span>
+                                </div>
+                            </div>
+                            <p style="text-align: center; color: #666; margin-top: 10px;">Near-unanimous required (80%)</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance-Weighted Section -->
+            <div class="section">
+                <h2 class="section-title">📊 Performance-Weighted Aggregator</h2>
+                
+                <div class="aggregator-card">
+                    <div class="card-header">
+                        <div class="card-icon">📊</div>
+                        <div>
+                            <div class="card-title">Performance-Weighted</div>
+                            <div class="card-subtitle">Statistical Confidence-Based Aggregation</div>
+                        </div>
+                    </div>
+                    
+                    <p><strong>Core Philosophy:</strong> Treats each strategy as a weighted contributor. Signals are aggregated based on confidence levels, agreement patterns, and regime context.</p>
+                    
+                    <div class="strategy-box">
+                        <div class="strategy-name">📈 Strategy Composition</div>
+                        <p style="margin: 10px 0;">The aggregator combines three strategies with equal base weights:</p>
+                        
+                        <div style="margin: 20px 0;">
+                            <p><strong>Mean Reversion (50%)</strong> - DECISION MAKER</p>
+                            <div class="weight-bar">
+                                <div class="weight-fill" style="width: 50%;">50%</div>
+                            </div>
+                            <p style="font-size: 0.9em; color: #666; margin-top: 5px;">Identifies oversold/overbought conditions, pivot bounces</p>
+                        </div>
+                        
+                        <div style="margin: 20px 0;">
+                            <p><strong>Trend Following (50%)</strong> - DECISION MAKER</p>
+                            <div class="weight-bar">
+                                <div class="weight-fill" style="width: 50%;">50%</div>
+                            </div>
+                            <p style="font-size: 0.9em; color: #666; margin-top: 5px;">Captures momentum breakouts, trend continuations</p>
+                        </div>
+                        
+                        <div style="margin: 20px 0;">
+                            <p><strong>EMA Strategy</strong> - REGIME DETECTOR</p>
+                            <div class="weight-bar">
+                                <div class="weight-fill" style="width: 100%; background: #ff9800;">REGIME ONLY</div>
+                            </div>
+                            <p style="font-size: 0.9em; color: #666; margin-top: 5px;">Does NOT contribute to signal, only identifies BULL/BEAR regime</p>
+                        </div>
+                    </div>
+                    
+                    <div class="decision-flow">
+                        <h3 style="margin-bottom: 20px; color: #764ba2;">Decision Process</h3>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">1</div>
+                            <div class="step-content">
+                                <div class="step-title">Detect Regime (EMA Strategy)</div>
+                                <div class="step-description">Multi-factor analysis: EMA alignment, momentum (20d/50d), volatility, ADX, MACD, RSI</div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">2</div>
+                            <div class="step-content">
+                                <div class="step-title">Get Strategy Signals</div>
+                                <div class="step-description">Mean Reversion and Trend Following each return: signal (-1/0/1) + confidence (0-1)</div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">3</div>
+                            <div class="step-content">
+                                <div class="step-title">AI Validation (Optional)</div>
+                                <div class="step-description">
+                                    Each non-zero signal validated against:<br>
+                                    • Pattern recognition (Sniper AI)<br>
+                                    • S/R proximity analysis<br>
+                                    Rejected signals → set to 0 with 0 confidence
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">4</div>
+                            <div class="step-content">
+                                <div class="step-title">Calculate Buy & Sell Scores</div>
+                                <div class="step-description">
+                                    For each direction, sum contributions:<br>
+                                    • Agreement: +full confidence × weight<br>
+                                    • Hold: +partial confidence × weight × 20%<br>
+                                    • Opposition: -confidence × weight × 50%
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">5</div>
+                            <div class="step-content">
+                                <div class="step-title">Apply Bonuses & Regime Adjustments</div>
+                                <div class="step-description">
+                                    • 2-strategy agreement: +0.25 bonus<br>
+                                    • Bull regime: +0.25 for BUY, -0.20 for SELL<br>
+                                    • Bear regime: -0.30 for BUY, +0.25 for SELL
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">6</div>
+                            <div class="step-content">
+                                <div class="step-title">Dynamic Threshold Adjustment</div>
+                                <div class="step-description">
+                                    Thresholds adapt based on regime confidence:<br>
+                                    • Bull: Lower buy threshold, higher sell threshold<br>
+                                    • Bear: Higher buy threshold, lower sell threshold
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">7</div>
+                            <div class="step-content">
+                                <div class="step-title">Make Final Decision</div>
+                                <div class="step-description">
+                                    Compare scores to thresholds:<br>
+                                    • Buy score ≥ threshold AND > sell score → BUY<br>
+                                    • Sell score ≥ threshold AND > buy score → SELL<br>
+                                    • Otherwise → HOLD
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">8</div>
+                            <div class="step-content">
+                                <div class="step-title">Signal Quality Filter</div>
+                                <div class="step-description">
+                                    Calculate signal_quality (0-1) from:<br>
+                                    • Base score (capped at 0.7)<br>
+                                    • Agreement penalty if no consensus<br>
+                                    • Regime alignment bonus<br>
+                                    Reject if quality < min_threshold (0.28 BTC / 0.25 GOLD)
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="highlight-box">
+                        <h4>🎚️ Asset-Specific Presets</h4>
+                        <p>The aggregator uses different configurations for BTC vs GOLD:</p>
+                        
+                        <table class="comparison-table" style="margin-top: 20px;">
+                            <thead>
+                                <tr>
+                                    <th>Parameter</th>
+                                    <th>BTC</th>
+                                    <th>GOLD</th>
+                                    <th>Why Different?</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Min Signal Quality</strong></td>
+                                    <td>0.28</td>
+                                    <td>0.25</td>
+                                    <td>BTC needs higher quality due to volatility</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Hold Contribution</strong></td>
+                                    <td>20%</td>
+                                    <td>18%</td>
+                                    <td>BTC benefits more from partial agreement</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="strategy-box">
+                        <div class="strategy-name">🔒 AI Circuit Breaker (Safety Feature)</div>
+                        <p style="margin: 10px 0;">Prevents AI from over-filtering signals:</p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li>Tracks last 50 AI validation decisions</li>
+                            <li>If rejection rate > 85%, circuit breaker triggers</li>
+                            <li>Temporarily disables AI validation for 10 signals</li>
+                            <li>Prevents "death by AI over-filtering"</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Comparison Section -->
+            <div class="section">
+                <h2 class="section-title">⚖️ Head-to-Head Comparison</h2>
+                
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>🏛️ Institutional Council</th>
+                            <th>📊 Performance-Weighted</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Decision Logic</strong></td>
+                            <td>Rule-based scoring by 5 judges</td>
+                            <td>Statistical confidence weighting</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Scoring System</strong></td>
+                            <td>Fixed points (0-5.0 scale)</td>
+                            <td>Dynamic scores based on confidence</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Strategy Inputs</strong></td>
+                            <td>Uses all 3 strategies for regime + signals</td>
+                            <td>Mean Reversion + Trend Following (EMA = regime only)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Threshold Type</strong></td>
+                            <td>Fixed (3.5 trend-aligned, 4.0 counter-trend)</td>
+                            <td>Dynamic (adjusts with regime confidence)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Best Market Conditions</strong></td>
+                            <td>Clean trends, clear S/R levels, normal volatility</td>
+                            <td>Ranging markets, high volatility, mixed signals</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Signal Frequency</strong></td>
+                            <td>Lower (stricter requirements)</td>
+                            <td>Moderate (balanced approach)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Risk Profile</strong></td>
+                            <td>Conservative (needs multiple confirmations)</td>
+                            <td>Moderate (allows partial agreement)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AI Validation Role</strong></td>
+                            <td>Optional veto (judges vote first)</td>
+                            <td>Pre-filter (validates strategies before scoring)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Complexity</strong></td>
+                            <td>Simple to understand (clear rules)</td>
+                            <td>Complex (many adjustment factors)</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div class="pro-con-grid">
+                    <div class="pro-box">
+                        <div class="pro-title">🏛️ Council Strengths</div>
+                        <ul>
+                            <li>Transparent decision-making</li>
+                            <li>Mimics institutional process</li>
+                            <li>Clear criteria for each signal</li>
+                            <li>Less prone to overfitting</li>
+                            <li>Better for trending markets</li>
+                            <li>Higher win rate potential</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="con-box">
+                        <div class="con-title">🏛️ Council Weaknesses</div>
+                        <ul>
+                            <li>Rigid rules may miss opportunities</li>
+                            <li>Lower signal frequency</li>
+                            <li>Struggles in choppy markets</li>
+                            <li>Fixed thresholds less adaptive</li>
+                            <li>Needs all judges functional</li>
+                            <li>Can be too conservative</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="pro-box">
+                        <div class="pro-title">📊 Performance Strengths</div>
+                        <ul>
+                            <li>Adapts to market conditions</li>
+                            <li>Handles uncertainty better</li>
+                            <li>Dynamic threshold adjustment</li>
+                            <li>Partial agreement contribution</li>
+                            <li>Better in ranging/volatile markets</li>
+                            <li>More trading opportunities</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="con-box">
+                        <div class="con-title">📊 Performance Weaknesses</div>
+                        <ul>
+                            <li>More complex to debug</li>
+                            <li>Many interacting parameters</li>
+                            <li>Can generate mixed signals</li>
+                            <li>AI circuit breaker needed</li>
+                            <li>Lower win rate in trends</li>
+                            <li>Requires careful tuning</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Hybrid Selector Section -->
+            <div class="section">
+                <h2 class="section-title">🔄 Hybrid Aggregator Selector</h2>
+                
+                <div class="hybrid-card">
+                    <div class="card-header">
+                        <div class="card-icon">🔄</div>
+                        <div>
+                            <div class="card-title">Intelligent Mode Switching</div>
+                            <div class="card-subtitle">Automatically selects the best aggregator for current market conditions</div>
+                        </div>
+                    </div>
+                    
+                    <p><strong>Core Concept:</strong> Instead of picking one aggregator and sticking with it, the Hybrid Selector analyzes real-time market structure and dynamically switches between Council and Performance modes.</p>
+                    
+                    <div class="decision-flow">
+                        <h3 style="margin-bottom: 20px; color: #ff6b6b;">Selection Process</h3>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">1</div>
+                            <div class="step-content">
+                                <div class="step-title">Market Regime Analysis</div>
+                                <div class="step-description">
+                                    The MarketRegimeAnalyzer calculates 6 key metrics:<br>
+                                    • <strong>Trend Strength:</strong> ADX + Directional Movement (strong/weak)<br>
+                                    • <strong>Volatility Regime:</strong> ATR ratio (high/normal/low)<br>
+                                    • <strong>Price Clarity:</strong> Indecision candle % (clear/mixed/noisy)<br>
+                                    • <strong>Momentum Alignment:</strong> RSI + MACD agreement<br>
+                                    • <strong>S/R Proximity:</strong> Distance to key levels<br>
+                                    • <strong>Regime Classification:</strong> trending_clean, ranging_quiet, etc.
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">2</div>
+                            <div class="step-content">
+                                <div class="step-title">Score Both Aggregators</div>
+                                <div class="step-description">
+                                    Each aggregator gets a score (0-9 for Council, 0-10 for Performance) based on market fit
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">3</div>
+                            <div class="step-content">
+                                <div class="step-title">Apply Decision Rules</div>
+                                <div class="step-description">
+                                    • Winner = highest score<br>
+                                    • Confidence = score / max_possible_score<br>
+                                    • Tie-breaker: Use regime type
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">4</div>
+                            <div class="step-content">
+                                <div class="step-title">Check Cooldown & Confidence</div>
+                                <div class="step-description">
+                                    • Only switch if confidence ≥ 65%<br>
+                                    • Minimum 30 minutes between switches<br>
+                                    • Prevents excessive mode flipping
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flow-step">
+                            <div class="step-number">5</div>
+                            <div class="step-content">
+                                <div class="step-title">Execute Switch & Notify</div>
+                                <div class="step-description">
+                                    • Update current mode<br>
+                                    • Log detailed reasoning<br>
+                                    • Send Telegram notification<br>
+                                    • Track statistics
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="strategy-box">
+                        <div class="strategy-name">🎯 Council Mode Scoring Logic</div>
+                        <p style="margin: 10px 0; font-weight: bold;">Best for: Clean trends, clear setups, institutional-grade signals</p>
+                        
+                        <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                            <table style="width: 100%;">
+                                <tr>
+                                    <td style="padding: 8px;"><strong>Condition</strong></td>
+                                    <td style="padding: 8px;"><strong>Points</strong></td>
+                                    <td style="padding: 8px;"><strong>Reasoning</strong></td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">Strong trend (ADX > 30)</td>
+                                    <td style="padding: 8px; color: #667eea; font-weight: bold;">+3</td>
+                                    <td style="padding: 8px;">Council's TREND judge thrives</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px;">Clear price action</td>
+                                    <td style="padding: 8px; color: #667eea; font-weight: bold;">+2</td>
+                                    <td style="padding: 8px;">STRUCTURE judge needs clarity</td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">At key S/R level</td>
+                                    <td style="padding: 8px; color: #667eea; font-weight: bold;">+2</td>
+                                    <td style="padding: 8px;">STRUCTURE judge validates</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px;">Normal volatility (0.9-1.2x)</td>
+                                    <td style="padding: 8px; color: #667eea; font-weight: bold;">+1</td>
+                                    <td style="padding: 8px;">Council prefers stability</td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">Momentum aligned</td>
+                                    <td style="padding: 8px; color: #667eea; font-weight: bold;">+1</td>
+                                    <td style="padding: 8px;">All judges agree</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px; font-weight: bold;">MAXIMUM</td>
+                                    <td style="padding: 8px; font-weight: bold; color: #667eea;">9 pts</td>
+                                    <td style="padding: 8px;"></td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="strategy-box">
+                        <div class="strategy-name">📊 Performance Mode Scoring Logic</div>
+                        <p style="margin: 10px 0; font-weight: bold;">Best for: Complex markets, mixed signals, mean-reversion setups</p>
+                        
+                        <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                            <table style="width: 100%;">
+                                <tr>
+                                    <td style="padding: 8px;"><strong>Condition</strong></td>
+                                    <td style="padding: 8px;"><strong>Points</strong></td>
+                                    <td style="padding: 8px;"><strong>Reasoning</strong></td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">Weak/ranging trend</td>
+                                    <td style="padding: 8px; color: #764ba2; font-weight: bold;">+3</td>
+                                    <td style="padding: 8px;">Mean-reversion shines</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px;">High volatility (>1.3x)</td>
+                                    <td style="padding: 8px; color: #764ba2; font-weight: bold;">+2</td>
+                                    <td style="padding: 8px;">Handles uncertainty better</td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">Noisy price action</td>
+                                    <td style="padding: 8px; color: #764ba2; font-weight: bold;">+2</td>
+                                    <td style="padding: 8px;">Uses statistical filters</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px;">Mixed momentum signals</td>
+                                    <td style="padding: 8px; color: #764ba2; font-weight: bold;">+1</td>
+                                    <td style="padding: 8px;">Weighs strategies dynamically</td>
+                                </tr>
+                                <tr style="background: #f8f9fa;">
+                                    <td style="padding: 8px;">Mean-reversion setup</td>
+                                    <td style="padding: 8px; color: #764ba2; font-weight: bold;">+2</td>
+                                    <td style="padding: 8px;">Core strength</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px; font-weight: bold;">MAXIMUM</td>
+                                    <td style="padding: 8px; font-weight: bold; color: #764ba2;">10 pts</td>
+                                    <td style="padding: 8px;"></td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="regime-grid">
+                        <div class="regime-card">
+                            <div class="regime-title">📈 Trending Clean</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>Strong trend (ADX > 25)</li>
+                                <li>Clear price action</li>
+                                <li>Normal volatility</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ COUNCIL MODE</strong><br>
+                                Confidence: High (75-90%)
+                            </div>
+                        </div>
+                        
+                        <div class="regime-card">
+                            <div class="regime-title">⚡ Trending Volatile</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>Strong trend</li>
+                                <li>High volatility (>1.3x)</li>
+                                <li>Large price swings</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ COUNCIL MODE</strong><br>
+                                Confidence: Medium (60-75%)
+                            </div>
+                        </div>
+                        
+                        <div class="regime-card">
+                            <div class="regime-title">➡️ Ranging Quiet</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>Weak trend (ADX < 25)</li>
+                                <li>Low volatility</li>
+                                <li>Sideways movement</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ PERFORMANCE MODE</strong><br>
+                                Confidence: High (70-85%)
+                            </div>
+                        </div>
+                        
+                        <div class="regime-card">
+                            <div class="regime-title">🌊 Volatile Choppy</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>High volatility</li>
+                                <li>Noisy price action</li>
+                                <li>Many indecision candles</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ PERFORMANCE MODE</strong><br>
+                                Confidence: High (75-90%)
+                            </div>
+                        </div>
+                        
+                        <div class="regime-card">
+                            <div class="regime-title">🔄 Reversal Setup</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>At key S/R level</li>
+                                <li>Momentum aligned</li>
+                                <li>Potential turning point</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ PERFORMANCE MODE</strong><br>
+                                Confidence: Medium (65-75%)
+                            </div>
+                        </div>
+                        
+                        <div class="regime-card">
+                            <div class="regime-title">❓ Mixed Signals</div>
+                            <p><strong>Characteristics:</strong></p>
+                            <ul style="margin-left: 20px; font-size: 0.9em;">
+                                <li>Conflicting indicators</li>
+                                <li>No clear direction</li>
+                                <li>Uncertain conditions</li>
+                            </ul>
+                            <div class="regime-recommendation">
+                                <strong>→ PERFORMANCE MODE</strong><br>
+                                Confidence: Medium (60-70%)
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="highlight-box">
+                        <h4>🛡️ Switch Safety Mechanisms</h4>
+                        <ol style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Confidence Threshold:</strong> Only switch if confidence ≥ 65% (prevents low-quality switches)</li>
+                            <li><strong>Cooldown Period:</strong> Minimum 30 minutes between switches (prevents excessive flipping)</li>
+                            <li><strong>Tie-Breaker Logic:</strong> If scores equal, use regime type as tiebreaker</li>
+                            <li><strong>Telegram Notifications:</strong> All switches logged and sent to Telegram for monitoring</li>
+                            <li><strong>History Tracking:</strong> Last 5 switches stored per asset for analysis</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Adaptive TP/SL Section -->
+            <div class="section">
+                <h2 class="section-title">🎯 Adaptive TP/SL Management</h2>
+                
+                <div class="strategy-box">
+                    <div class="strategy-name">Dynamic Take Profit & Stop Loss</div>
+                    <p style="margin: 10px 0;">The Hybrid Selector also manages TP/SL levels based on the active aggregator mode and market conditions.</p>
+                    
+                    <div style="background: white; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                        <h4>BTC - Council Mode (Ride Trends)</h4>
+                        <div style="margin: 15px 0;">
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Take Profit:</span>
+                                <strong style="color: #4caf50;">2.5x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Stop Loss:</span>
+                                <strong style="color: #f44336;">1.2x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Trailing Start:</span>
+                                <strong style="color: #ff9800;">1.5x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Risk:Reward:</span>
+                                <strong style="color: #667eea;">1:2.08</strong>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="background: white; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                        <h4>BTC - Performance Mode (Quicker Exits)</h4>
+                        <div style="margin: 15px 0;">
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Take Profit:</span>
+                                <strong style="color: #4caf50;">2.0x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Stop Loss:</span>
+                                <strong style="color: #f44336;">1.0x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Trailing Start:</span>
+                                <strong style="color: #ff9800;">1.2x ATR</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Risk:Reward:</span>
+                                <strong style="color: #667eea;">1:2.00</strong>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="highlight-box">
+                        <h4>🔧 Dynamic Adjustments</h4>
+                        <p>TP/SL levels adapt based on:</p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><strong>Confidence Factor:</strong> Higher confidence = wider TP, tighter SL (0.8-1.2x scaling)</li>
+                            <li><strong>Volatility Adjustment:</strong> High vol (>1.3x) = wider stops by 20%</li>
+                            <li><strong>Key Level Proximity:</strong> At S/R = tighter SL by 15%, wider TP by 15%</li>
+                            <li><strong>Mode-Specific Tuning:</strong> Council with high confidence = 20% wider TP</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- When to Use Section -->
+            <div class="section">
+                <h2 class="section-title">🤔 Which System Should You Use?</h2>
+                
+                <div class="comparison-grid">
+                    <div class="aggregator-card">
+                        <h3 style="color: #667eea; margin-bottom: 15px;">🏛️ Use Council When:</h3>
+                        <ul style="margin-left: 20px;">
+                            <li>Market is in a clear trend (ADX > 30)</li>
+                            <li>Price action is clean (< 30% indecision candles)</li>
+                            <li>Volatility is normal (0.9-1.2x ATR ratio)</li>
+                            <li>You want higher win rate over frequency</li>
+                            <li>You prefer transparent decision-making</li>
+                            <li>You're trading BTC in bull market</li>
+                            <li>You want institutional-grade signals</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="aggregator-card">
+                        <h3 style="color: #764ba2; margin-bottom: 15px;">📊 Use Performance When:</h3>
+                        <ul style="margin-left: 20px;">
+                            <li>Market is ranging or choppy</li>
+                            <li>Volatility is high (>1.3x ATR ratio)</li>
+                            <li>Price action is noisy (> 40% indecision)</li>
+                            <li>You want more trading opportunities</li>
+                            <li>You need adaptive thresholds</li>
+                            <li>You're trading mean-reversion setups</li>
+                            <li>You want statistical confidence-based signals</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="hybrid-card">
+                    <h3 style="margin-bottom: 15px; text-align: center; color: #ff6b6b;">🔄 Or Let Hybrid Selector Decide!</h3>
+                    <p style="text-align: center; font-size: 1.1em;">The Hybrid Selector automatically switches between Council and Performance modes based on real-time market analysis. This gives you the best of both worlds:</p>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
+                        <div style="background: white; padding: 15px; border-radius: 10px;">
+                            <strong style="color: #4caf50;">✓ Advantages:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>Optimal aggregator for each market phase</li>
+                                <li>No manual intervention needed</li>
+                                <li>Adapts to changing conditions</li>
+                                <li>Telegram notifications keep you informed</li>
+                            </ul>
+                        </div>
+                        <div style="background: white; padding: 15px; border-radius: 10px;">
+                            <strong style="color: #ff9800;">⚠️ Considerations:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>More complex system</li>
+                                <li>Requires monitoring</li>
+                                <li>30-min cooldown between switches</li>
+                                <li>Needs both aggregators configured</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Section -->
+            <div class="section">
+                <h2 class="section-title">📝 Summary</h2>
+                
+                <div class="decision-flow">
+                    <div class="flow-step">
+                        <div class="step-number">💡</div>
+                        <div class="step-content">
+                            <div class="step-title">Key Takeaway</div>
+                            <div class="step-description">
+                                You have two powerful aggregation systems, each optimized for different market conditions. The Council excels in trending markets with its rule-based institutional approach, while Performance thrives in complex conditions with its statistical confidence weighting. The Hybrid Selector intelligently switches between them, giving you the best tool for each market phase.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="highlight-box">
+                    <h4>🎓 Recommendation for Beginners:</h4>
+                    <p style="margin-top: 10px;">Start with the <strong>Hybrid Selector</strong>. It handles the complexity of choosing the right aggregator and will teach you how different market conditions favor different approaches. Once you understand the patterns, you can manually override if desired.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>Buy Threshold</strong></td>
+                                    <td>0.32</td>
+                                    <td>0.30</td>
+                                    <td>Gold is less volatile, can use tighter threshold</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Sell Threshold</strong></td>
+                                    <td>0.26</td>
+                                    <td>0.24</td>
+                                    <td>Gold has cleaner reversals</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Two-Strategy Bonus</strong></td>
+                                    <td>0.25</td>
+                                    <td>0.25</td>
+                                    <td>Same - consensus always valuable</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Bull Buy Boost</strong></td>
+                                    <td>0.25</td>
+                                    <td>0.22</td>
+                                    <td>BTC trends harder in bull markets</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Bear Buy Penalty</strong></td>
+                                    <td>-0.30</td>
+                                    <td>-0.28</td>
+                                    <td>BTC is riskier in bear markets</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>
