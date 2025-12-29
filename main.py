@@ -817,7 +817,7 @@ class TradingBot:
                 selector = DynamicPresetSelector(
                     self.data_manager, self.config, telegram_bot=self.telegram_bot
                 )
-                asset_presets = selector.get_preset_for_all_assets()
+                asset_presets = selector.get_preset_for_asset()
 
                 logger.info("\n📊 AUTO-PRESET RESULTS:")
                 for asset, selected_preset in asset_presets.items():
@@ -1604,7 +1604,7 @@ class TradingBot:
             from src.execution.auto_preset_selector import DynamicPresetSelector
 
             selector = DynamicPresetSelector(self.data_manager, self.config)
-            self.selected_presets = selector.get_preset_for_all_assets()
+            self.selected_presets = selector.get_preset_for_asset()
 
             # Initialize dynamic selector with startup presets
             for asset, preset in self.selected_presets.items():
