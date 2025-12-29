@@ -1604,11 +1604,13 @@ class TradingBot:
             from src.execution.auto_preset_selector import DynamicPresetSelector
 
             selector = DynamicPresetSelector(self.data_manager, self.config)
-            self.selected_presets = selector.get_preset_for_asset(asset_name)
-
-            # Initialize dynamic selector with startup presets
-            for asset, preset in self.selected_presets.items():
-                self.dynamic_selector.current_presets[asset] = preset
+            
+            # Get preset for EACH enabled asset
+            self.selected_presets = {}
+            for asset_name in self.strategies.keys():
+                preset = selector.get_preset_for_asset(asset_name)
+                self.selected_presets[asset_name] = preset
+                self.dynamic_selector.current_presets[asset_name] = preset
 
         else:
             # Manual preset
@@ -1619,6 +1621,7 @@ class TradingBot:
 
             for asset in self.selected_presets:
                 self.dynamic_selector.current_presets[asset] = preset
+
 
         # ✨  Try to initialize AI (non-fatal)
         ai_success = False
