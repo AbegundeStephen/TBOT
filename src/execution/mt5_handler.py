@@ -1720,7 +1720,7 @@ class MT5ExecutionHandler:
                 return False
 
             current_price = self.get_current_price()
-            if current_price is None:
+            if current_price is None or current_price == 0:
                 logger.warning(f"Could not get price for {asset_name}")
                 return False
 
@@ -1734,26 +1734,28 @@ class MT5ExecutionHandler:
                         current_price
                     )
 
+                    # ✅ FIX: exit_signal is a dict with 'reason', 'price', 'size'
                     if exit_signal:
-                        # Handle both string and dict return types
-                        if isinstance(exit_signal, dict):
-                            signal_type = exit_signal.get('type', 'unknown')
-                            signal_reason = exit_signal.get('reason', 'VTM exit')
-                            logger.info(
-                                f"[VTM] {asset_name} {position.position_id} triggered "
-                                f"{signal_type.upper()} @ ${current_price:,.2f} - {signal_reason}"
-                            )
-                            close_reason = f"VTM_{signal_type}"
-                        else:
-                            # Legacy string format
-                            logger.info(
-                                f"[VTM] {asset_name} {position.position_id} triggered "
-                                f"{exit_signal.upper()} @ ${current_price:,.2f}"
-                            )
-                            close_reason = f"VTM_{exit_signal}"
+                        # Extract data from dict
+                        exit_reason = exit_signal.get("reason", "unknown")
+                        exit_price = exit_signal.get("price", current_price)
+                        exit_size = exit_signal.get("size", position.quantity)
                         
+                        # Convert ExitReason enum to string
+                        if hasattr(exit_reason, 'value'):
+                            exit_reason_str = exit_reason.value
+                        else:
+                            exit_reason_str = str(exit_reason)
+                        
+                        logger.info(
+                            f"[VTM] {asset_name} {position.position_id} triggered "
+                            f"{exit_reason_str.upper()} @ ${exit_price:,.2f} "
+                            f"(closing {exit_size:.0%} of position)"
+                        )
+                        
+                        # Close the position
                         self._close_position(
-                            position, current_price, asset_name, close_reason
+                            position, current_price, asset_name, f"VTM_{exit_reason_str}"
                         )
                         positions_closed = True
                         continue
