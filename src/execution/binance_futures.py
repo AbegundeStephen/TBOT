@@ -41,7 +41,7 @@ class BinanceFuturesHandler:
             self.client.futures_account()
             logger.info("[FUTURES] ✓ Binance Futures API connected")
         except Exception as e:
-            logger.error(f"[FUTURES] ✗ Futures API unavailable: {e}")
+            logger.error(f"[FUTURES] ✗ Futures API unavailabl6e: {e}")
             raise
 
     def set_leverage(self, leverage: int = 10) -> bool:

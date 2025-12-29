@@ -24,6 +24,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for real-time updates
 
+@app.after_request
+def add_security_headers(response):
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' https://*.supabase.co;"
+    )
+    return response
+
+
 # Load from environment or config
 SUPABASE_URL = os.getenv('SUPABASE_URL', 'YOUR_SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'YOUR_SUPABASE_KEY')
