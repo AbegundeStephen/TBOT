@@ -1246,13 +1246,27 @@ class BinanceExecutionHandler:
                         current_price
                     )
 
+                    # ✅ FIX: exit_signal is a dict, not a string
                     if exit_signal:
+                        exit_reason = exit_signal.get("reason", "unknown")
+                        exit_price = exit_signal.get("price", current_price)
+                        exit_size = exit_signal.get("size", position.quantity)
+                        
+                        # Convert ExitReason enum to string
+                        if hasattr(exit_reason, 'value'):
+                            exit_reason_str = exit_reason.value
+                        else:
+                            exit_reason_str = str(exit_reason)
+                        
                         logger.info(
                             f"[VTM] {asset_name} {position.position_id} triggered "
-                            f"{exit_signal.upper()} @ ${current_price:,.2f}"
+                            f"{exit_reason_str.upper()} @ ${exit_price:,.2f} "
+                            f"(closing {exit_size:.0%} of position)"
                         )
+                        
+                        # Close the position
                         self._close_position(
-                            position, current_price, asset_name, f"VTM_{exit_signal}"
+                            position, current_price, asset_name, f"VTM_{exit_reason_str}"
                         )
                         positions_closed = True
                         continue
