@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VTM Profit Locking Comparison - Updated</title>
+    <title>VTM Trade Manager - Complete Guide</title>
     <style>
         * {
             margin: 0;
@@ -35,71 +35,206 @@
             text-align: center;
             color: rgba(255,255,255,0.9);
             font-size: 1.2em;
+            margin-bottom: 30px;
+        }
+        
+        .section {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 3px solid #f0f0f0;
+            padding-bottom: 10px;
+        }
+        
+        .section h3 {
+            color: #764ba2;
+            margin: 25px 0 15px 0;
+            font-size: 1.4em;
+        }
+        
+        .section h4 {
+            color: #333;
+            margin: 20px 0 10px 0;
+            font-size: 1.1em;
+        }
+        
+        .section p {
+            color: #555;
+            line-height: 1.8;
             margin-bottom: 15px;
         }
         
-        .update-banner {
-            background: rgba(255, 215, 0, 0.95);
-            color: #333;
-            padding: 15px 25px;
+        .code-block {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+            margin: 15px 0;
+            border-left: 4px solid #667eea;
+        }
+        
+        .formula-box {
+            background: linear-gradient(135deg, #667eea15, #764ba215);
+            padding: 20px;
             border-radius: 10px;
-            margin-bottom: 30px;
-            text-align: center;
+            margin: 20px 0;
+            border-left: 4px solid #667eea;
+        }
+        
+        .formula-box strong {
+            color: #667eea;
+            font-size: 1.1em;
+        }
+        
+        .step-list {
+            counter-reset: step-counter;
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .step-list li {
+            counter-increment: step-counter;
+            position: relative;
+            padding: 15px 15px 15px 50px;
+            margin-bottom: 15px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .step-list li::before {
+            content: counter(step-counter);
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #667eea;
+            color: white;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-weight: bold;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            font-size: 0.9em;
         }
         
         .comparison-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
-            margin-bottom: 30px;
+            margin: 20px 0;
         }
         
-        .scenario-card {
-            background: white;
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        .profile-card {
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 10px;
+            border-top: 4px solid #667eea;
         }
         
-        .scenario-header {
+        .profile-card h4 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+        
+        .param-list {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .param-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid #e0e0e0;
             display: flex;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid #f0f0f0;
+            justify-content: space-between;
         }
         
-        .scenario-icon {
-            font-size: 2.5em;
-            margin-right: 15px;
+        .param-list li:last-child {
+            border-bottom: none;
         }
         
-        .scenario-title {
-            flex: 1;
-        }
-        
-        .scenario-title h2 {
+        .param-name {
+            font-weight: bold;
             color: #333;
-            font-size: 1.5em;
-            margin-bottom: 5px;
         }
         
-        .scenario-subtitle {
-            color: #666;
-            font-size: 0.9em;
+        .param-value {
+            color: #667eea;
+            font-family: monospace;
+        }
+        
+        .highlight-box {
+            background: #fff3e0;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #ff9800;
+            margin: 15px 0;
+        }
+        
+        .highlight-box strong {
+            color: #e65100;
+        }
+        
+        .example-box {
+            background: #e8f5e9;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border-left: 4px solid #4caf50;
+        }
+        
+        .example-box h4 {
+            color: #2e7d32;
+            margin-bottom: 10px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        th {
+            background: #667eea;
+            color: white;
+            font-weight: bold;
+        }
+        
+        tr:hover {
+            background: #f5f5f5;
         }
         
         .timeline {
             position: relative;
-            padding-left: 30px;
+            padding-left: 40px;
+            margin: 20px 0;
         }
         
         .timeline::before {
             content: '';
             position: absolute;
-            left: 8px;
+            left: 15px;
             top: 0;
             bottom: 0;
             width: 2px;
@@ -108,250 +243,29 @@
         
         .timeline-item {
             position: relative;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
             padding-left: 20px;
         }
         
         .timeline-item::before {
             content: '';
             position: absolute;
-            left: -26px;
+            left: -31px;
             top: 5px;
             width: 14px;
             height: 14px;
             border-radius: 50%;
             background: white;
             border: 3px solid #667eea;
-            z-index: 1;
         }
         
-        .timeline-item.highlight::before {
-            background: #ffd700;
-            border-color: #ff9500;
-            box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
-        }
-        
-        .timeline-time {
-            font-weight: bold;
-            color: #667eea;
-            font-size: 0.9em;
-            margin-bottom: 5px;
-        }
-        
-        .timeline-price {
-            font-size: 1.3em;
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 5px;
-        }
-        
-        .timeline-event {
-            color: #555;
-            margin-bottom: 5px;
-        }
-        
-        .timeline-stop {
-            font-size: 0.9em;
-            color: #888;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            flex-wrap: wrap;
-        }
-        
-        .stop-badge {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 5px;
-            font-weight: bold;
-            font-size: 0.85em;
-        }
-        
-        .stop-initial {
-            background: #ffebee;
-            color: #c62828;
-        }
-        
-        .stop-locked {
-            background: #e8f5e9;
-            color: #2e7d32;
-        }
-        
-        .stop-trailing {
-            background: #e3f2fd;
-            color: #1565c0;
-        }
-        
-        .result-box {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 10px;
-            margin-top: 20px;
-        }
-        
-        .result-box h3 {
-            font-size: 1.3em;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .result-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.2);
-        }
-        
-        .result-item:last-child {
-            border-bottom: none;
-            font-weight: bold;
-            font-size: 1.2em;
-            padding-top: 15px;
-        }
-        
-        .pros-cons {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-top: 15px;
-        }
-        
-        .pros, .cons {
-            padding: 15px;
-            border-radius: 8px;
-        }
-        
-        .pros {
-            background: rgba(76, 175, 80, 0.1);
-            border-left: 4px solid #4caf50;
-        }
-        
-        .cons {
-            background: rgba(244, 67, 54, 0.1);
-            border-left: 4px solid #f44336;
-        }
-        
-        .pros h4, .cons h4 {
-            margin-bottom: 10px;
-            color: #333;
-        }
-        
-        .pros ul, .cons ul {
-            list-style: none;
-            padding-left: 0;
-        }
-        
-        .pros li, .cons li {
-            padding: 5px 0;
-            padding-left: 20px;
-            position: relative;
-        }
-        
-        .pros li::before {
-            content: '✓';
-            position: absolute;
-            left: 0;
-            color: #4caf50;
-            font-weight: bold;
-        }
-        
-        .cons li::before {
-            content: '✗';
-            position: absolute;
-            left: 0;
-            color: #f44336;
-            font-weight: bold;
-        }
-        
-        .recommendation {
-            background: white;
-            border-radius: 15px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-top: 30px;
-        }
-        
-        .recommendation h2 {
-            color: #333;
-            margin-bottom: 20px;
-            font-size: 2em;
-            text-align: center;
-        }
-        
-        .rec-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-        
-        .rec-card {
-            padding: 20px;
-            border-radius: 10px;
-            border: 2px solid #e0e0e0;
-        }
-        
-        .rec-card h3 {
-            color: #667eea;
-            margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .rec-card code {
-            display: block;
-            background: #f5f5f5;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-            font-size: 0.9em;
-            overflow-x: auto;
-        }
-        
-        .changes-section {
-            background: rgba(255,255,255,0.95);
-            border-radius: 15px;
-            padding: 25px;
-            margin-bottom: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-        
-        .changes-section h2 {
-            color: #333;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .change-item {
-            background: #f5f5f5;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            border-left: 4px solid #667eea;
-        }
-        
-        .change-item h4 {
+        .timeline-item h4 {
             color: #667eea;
             margin-bottom: 8px;
         }
         
-        .change-item p {
-            color: #555;
-            line-height: 1.6;
-        }
-        
         @media (max-width: 768px) {
             .comparison-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .pros-cons {
                 grid-template-columns: 1fr;
             }
         }
@@ -359,599 +273,423 @@
 </head>
 <body>
     <div class="container">
-        <h1>🔒 VTM Profit Locking Comparison</h1>
-        <p class="subtitle">Updated with structure-based stops and hybrid take-profit logic</p>
+        <h1>📊 VTM Trade Manager</h1>
+        <p class="subtitle">Production-Ready Trade Management with Structure-Based Logic</p>
         
-        <div class="update-banner">
-            ⚡ UPDATED: Now reflects VTM's structure-based stop logic + hybrid TP calculation (Dec 2024)
+        <!-- Overview -->
+        <div class="section">
+            <h2>🎯 Overview</h2>
+            <p>
+                The Veteran Trade Manager (VTM) is a sophisticated trade management system that combines market structure analysis 
+                with risk management to optimize trade exits. It uses hybrid logic that blends technical analysis (ATR, pivot points, 
+                resistance/support levels) with risk-reward ratios to place stops and take profits at optimal locations.
+            </p>
+            
+            <h3>Core Features</h3>
+            <ul style="padding-left: 20px; color: #555; line-height: 2;">
+                <li>✅ Structure-based stop loss placement (wider, safer stops)</li>
+                <li>✅ Hybrid take-profit calculation (market structure + R:R)</li>
+                <li>✅ Partial profit taking with customizable sizing</li>
+                <li>✅ Trailing stops for runner positions</li>
+                <li>✅ Optional early profit locking</li>
+                <li>✅ Asset-specific profiles (BTC, Gold)</li>
+                <li>✅ Time-based exit monitoring</li>
+            </ul>
         </div>
         
-        <!-- What's Changed Section -->
-        <div class="changes-section">
-            <h2>🔄 What's Changed in Current VTM</h2>
+        <!-- Asset Profiles -->
+        <div class="section">
+            <h2>⚙️ Asset Profiles</h2>
+            <p>VTM includes pre-configured profiles optimized for different asset characteristics.</p>
             
-            <div class="change-item">
-                <h4>1. Structure-Based Stop Loss (Wider & Safer)</h4>
-                <p><strong>OLD:</strong> Used min(atr_stop, structure_stop) → chose the TIGHTER stop<br>
-                <strong>NEW:</strong> Uses max(atr_stop, structure_stop) → chooses the WIDER stop<br>
-                <strong>Result:</strong> BTC stops are now ~0.5-1.0% instead of 0.2-0.3%, giving trades more breathing room</p>
-            </div>
-            
-            <div class="change-item">
-                <h4>2. Hybrid Take-Profit Targets</h4>
-                <p><strong>NEW:</strong> TPs now blend market structure with R:R multiples<br>
-                • Detects resistance levels (longs) or support levels (shorts)<br>
-                • Places targets AT structure if within 20% of R:R target<br>
-                • Falls back to R:R if no structure exists<br>
-                <strong>Result:</strong> Higher probability exits at natural turning points</p>
-            </div>
-            
-            <div class="change-item">
-                <h4>3. More Realistic Target Multiples</h4>
-                <p><strong>OLD:</strong> BTC partials at [1.5R, 2.5R, 4.0R]<br>
-                <strong>NEW:</strong> BTC partials at [1.5R, 2.5R, 3.5R] (more achievable)<br>
-                <strong>Result:</strong> Better chance of hitting all partials before reversal</p>
-            </div>
-            
-            <div class="change-item">
-                <h4>4. Enhanced Safety Checks</h4>
-                <p>• Minimum 1.5 ATR distance enforced for stops (prevents ultra-tight stops)<br>
-                • Position size validation (prevents >2x account balance positions)<br>
-                • Better logging for stop calculations</p>
+            <div class="comparison-grid">
+                <div class="profile-card">
+                    <h4>🪙 Bitcoin (BTC)</h4>
+                    <ul class="param-list">
+                        <li><span class="param-name">Volatility</span><span class="param-value">High</span></li>
+                        <li><span class="param-name">Stop Range</span><span class="param-value">0.8% - 1.5%</span></li>
+                        <li><span class="param-name">ATR Multiplier</span><span class="param-value">2.0x</span></li>
+                        <li><span class="param-name">Pivot Lookback</span><span class="param-value">30 bars</span></li>
+                        <li><span class="param-name">Partial Targets</span><span class="param-value">1.5R, 2.5R, 3.5R</span></li>
+                        <li><span class="param-name">Partial Sizes</span><span class="param-value">33%, 33%, 34%</span></li>
+                        <li><span class="param-name">Runner Trail</span><span class="param-value">20%</span></li>
+                        <li><span class="param-name">Structure TPs</span><span class="param-value">Enabled</span></li>
+                    </ul>
+                </div>
+                
+                <div class="profile-card">
+                    <h4>🥇 Gold (XAUUSD)</h4>
+                    <ul class="param-list">
+                        <li><span class="param-name">Volatility</span><span class="param-value">Medium</span></li>
+                        <li><span class="param-name">Stop Range</span><span class="param-value">0.2% - 0.5%</span></li>
+                        <li><span class="param-name">ATR Multiplier</span><span class="param-value">1.5x</span></li>
+                        <li><span class="param-name">Pivot Lookback</span><span class="param-value">20 bars</span></li>
+                        <li><span class="param-name">Partial Targets</span><span class="param-value">1.5R, 2.5R, 3.5R</span></li>
+                        <li><span class="param-name">Partial Sizes</span><span class="param-value">40%, 30%, 30%</span></li>
+                        <li><span class="param-name">Runner Trail</span><span class="param-value">12%</span></li>
+                        <li><span class="param-name">Structure TPs</span><span class="param-value">Enabled</span></li>
+                    </ul>
+                </div>
             </div>
         </div>
         
-        <div class="comparison-grid">
-            <!-- Scenario 1: No Early Lock -->
-            <div class="scenario-card">
-                <div class="scenario-header">
-                    <div class="scenario-icon">🎯</div>
-                    <div class="scenario-title">
-                        <h2>No Early Lock</h2>
-                        <p class="scenario-subtitle">Default VTM - locks after first partial hits</p>
-                    </div>
-                </div>
-                
-                <div class="timeline">
-                    <div class="timeline-item">
-                        <div class="timeline-time">00:00</div>
-                        <div class="timeline-price">$88,000</div>
-                        <div class="timeline-event">🟢 Entry - LONG (BTC)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                            <span>(-0.5% structure-based)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">01:00</div>
-                        <div class="timeline-price">$88,440</div>
-                        <div class="timeline-event">+0.5% gain</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                            <span>no change (needs +1.5R for lock)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">02:00</div>
-                        <div class="timeline-price">$88,880</div>
-                        <div class="timeline-event">+1.0% gain</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                            <span>still exposed to full risk</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">04:00</div>
-                        <div class="timeline-price">$88,660</div>
-                        <div class="timeline-event">🎯 TP1 Hit @ 1.5R! (+0.75%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,088</span>
-                            <span>✅ Locked at break-even!</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">06:00</div>
-                        <div class="timeline-price">$89,100</div>
-                        <div class="timeline-event">+1.25% gain - holding 67%</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,088</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">08:00</div>
-                        <div class="timeline-price">$89,100</div>
-                        <div class="timeline-event">🎯 TP2 @ Structure! (+1.25%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Stop: Trailing 20%</span>
-                            <span>🏃 Runner activated</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">10:00</div>
-                        <div class="timeline-price">$90,640</div>
-                        <div class="timeline-event">🚀 +3.0% - New high!</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Stop: $72,512</span>
-                            <span>(trails up with 20%)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">12:00</div>
-                        <div class="timeline-price">$89,500</div>
-                        <div class="timeline-event">🏃 Trailing stop hit (+1.7%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Exit final 34%</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="result-box">
-                    <h3>💰 Final Result</h3>
-                    <div class="result-item">
-                        <span>Partial 1 (33%):</span>
-                        <span>+0.75% = +$220</span>
-                    </div>
-                    <div class="result-item">
-                        <span>Partial 2 (33%):</span>
-                        <span>+1.25% = +$363</span>
-                    </div>
-                    <div class="result-item">
-                        <span>Runner (34%):</span>
-                        <span>+1.70% = +$510</span>
-                    </div>
-                    <div class="result-item">
-                        <span>TOTAL PROFIT:</span>
-                        <span>+$1,093 (+1.24%)</span>
-                    </div>
-                </div>
-                
-                <div class="pros-cons">
-                    <div class="pros">
-                        <h4>✅ Pros</h4>
-                        <ul>
-                            <li>Captured full move</li>
-                            <li>Structure-based exits</li>
-                            <li>Wider stop = less noise</li>
-                        </ul>
-                    </div>
-                    <div class="cons">
-                        <h4>❌ Cons</h4>
-                        <ul>
-                            <li>Risk for 4 hours</li>
-                            <li>Could lose if early reversal</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
+        <!-- Stop Loss Calculation -->
+        <div class="section">
+            <h2>🛑 Stop Loss Calculation</h2>
+            <p>
+                VTM uses a sophisticated multi-step process to calculate stop losses that balance safety with giving trades 
+                enough room to work. The system prioritizes WIDER stops to avoid premature stop-outs from normal market noise.
+            </p>
             
-            <!-- Scenario 2: Early Lock at 1% -->
-            <div class="scenario-card">
-                <div class="scenario-header">
-                    <div class="scenario-icon">🔒</div>
-                    <div class="scenario-title">
-                        <h2>Early Lock (1%)</h2>
-                        <p class="scenario-subtitle">Locks profit at 1% gain - Gold recommended</p>
-                    </div>
-                </div>
-                
-                <div class="timeline">
-                    <div class="timeline-item">
-                        <div class="timeline-time">00:00</div>
-                        <div class="timeline-price">$88,000</div>
-                        <div class="timeline-event">🟢 Entry - LONG (BTC)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                            <span>(-0.5%)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">02:00</div>
-                        <div class="timeline-price">$88,880</div>
-                        <div class="timeline-event">🔒 PROFIT LOCKED at +1%!</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,176</span>
-                            <span>✅ +0.2% protected</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">03:00</div>
-                        <div class="timeline-price">$88,440</div>
-                        <div class="timeline-event">Minor pullback to +0.5%</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,176</span>
-                            <span>still safe above break-even</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">04:00</div>
-                        <div class="timeline-price">$88,660</div>
-                        <div class="timeline-event">🎯 TP1 Hit @ 1.5R! (+0.75%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,088</span>
-                            <span>(already protected)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">06:00</div>
-                        <div class="timeline-price">$89,100</div>
-                        <div class="timeline-event">+1.25% - holding 67%</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,088</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">08:00</div>
-                        <div class="timeline-price">$89,100</div>
-                        <div class="timeline-event">🎯 TP2 Hit! (+1.25%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Stop: Trailing 20%</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">10:00</div>
-                        <div class="timeline-price">$90,640</div>
-                        <div class="timeline-event">🚀 +3.0% - New high!</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Stop: $72,512</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">12:00</div>
-                        <div class="timeline-price">$89,500</div>
-                        <div class="timeline-event">🏃 Trailing stop hit (+1.7%)</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-trailing">Exit final 34%</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="result-box">
-                    <h3>💰 Final Result</h3>
-                    <div class="result-item">
-                        <span>Partial 1 (33%):</span>
-                        <span>+0.75% = +$220</span>
-                    </div>
-                    <div class="result-item">
-                        <span>Partial 2 (33%):</span>
-                        <span>+1.25% = +$363</span>
-                    </div>
-                    <div class="result-item">
-                        <span>Runner (34%):</span>
-                        <span>+1.70% = +$510</span>
-                    </div>
-                    <div class="result-item">
-                        <span>TOTAL PROFIT:</span>
-                        <span>+$1,093 (+1.24%)</span>
-                    </div>
-                </div>
-                
-                <div class="pros-cons">
-                    <div class="pros">
-                        <h4>✅ Pros</h4>
-                        <ul>
-                            <li>Protected after 2 hours</li>
-                            <li>Same final profit</li>
-                            <li>No anxiety during pullback</li>
-                        </ul>
-                    </div>
-                    <div class="cons">
-                        <h4>❌ Cons</h4>
-                        <ul>
-                            <li>None in this scenario!</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
+            <h3>The Calculation Process</h3>
             
-            <!-- Scenario 3: Early Reversal -->
-            <div class="scenario-card">
-                <div class="scenario-header">
-                    <div class="scenario-icon">📉</div>
-                    <div class="scenario-title">
-                        <h2>Early Reversal</h2>
-                        <p class="scenario-subtitle">What if price reversed after +1.5%?</p>
-                    </div>
-                </div>
+            <ol class="step-list">
+                <li>
+                    <strong>Calculate ATR (Average True Range)</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Measures recent market volatility using a 14-period ATR. This gives us the "normal" price movement range.
+                    </p>
+                    <div class="code-block">atr = talib.ATR(high, low, close, timeperiod=14)</div>
+                </li>
                 
-                <div class="timeline">
-                    <div class="timeline-item">
-                        <div class="timeline-time">00:00</div>
-                        <div class="timeline-price">$88,000</div>
-                        <div class="timeline-event">🟢 Entry - LONG</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                        </div>
+                <li>
+                    <strong>Find Pivot Structure</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Identifies recent swing lows (for longs) or swing highs (for shorts) within the lookback period. 
+                        This represents key support/resistance that price respected in the recent past.
+                    </p>
+                    <div class="code-block">
+# For LONG: Find swing low where price[i] < price[i-1] and price[i] < price[i+1]
+# For SHORT: Find swing high where price[i] > price[i-1] and price[i] > price[i+1]
                     </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">01:00</div>
-                        <div class="timeline-price">$88,880</div>
-                        <div class="timeline-event">+1.0% gain</div>
-                        <div class="timeline-stop">
-                            <span style="background: #ffebee; color: #c62828; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">No Lock: $87,560</span>
-                            <span style="background: #e8f5e9; color: #2e7d32; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">Early Lock: $88,176</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">02:00</div>
-                        <div class="timeline-price">$89,320</div>
-                        <div class="timeline-event">+1.5% peak</div>
-                        <div class="timeline-stop">
-                            <span style="background: #ffebee; color: #c62828; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">No Lock: $87,560</span>
-                            <span style="background: #e8f5e9; color: #2e7d32; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">Early Lock: $88,176</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">03:00</div>
-                        <div class="timeline-price">$88,000</div>
-                        <div class="timeline-event">😱 Sudden drop to entry!</div>
-                        <div class="timeline-stop">
-                            <span style="background: #ffebee; color: #c62828; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">No Lock: Still holding (0%)</span>
-                            <span style="background: #e8f5e9; color: #2e7d32; padding: 3px 8px; border-radius: 5px; font-size: 0.85em;">Early Lock: Still holding (0%)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">04:00</div>
-                        <div class="timeline-price">$87,560</div>
-                        <div class="timeline-event">🛑 No lock stop triggered</div>
-                        <div class="timeline-stop">
-                            <span style="background: #ffebee; color: #c62828; padding: 3px 8px; border-radius: 5px; font-size: 0.85em; font-weight: bold;">No Lock: LOSS -$440 (-0.5%)</span>
-                        </div>
-                    </div>
-                    
-                    <div class="timeline-item">
-                        <div class="timeline-time">05:00</div>
-                        <div class="timeline-price">$88,176</div>
-                        <div class="timeline-event">🔒 Early lock stops out</div>
-                        <div class="timeline-stop">
-                            <span style="background: #e8f5e9; color: #2e7d32; padding: 3px 8px; border-radius: 5px; font-size: 0.85em; font-weight: bold;">Early Lock: +$176 (+0.2%)</span>
-                        </div>
-                    </div>
-                </div>
+                </li>
                 
-                <div class="result-box">
-                    <h3>💰 Result Comparison</h3>
-                    <div class="result-item">
-                        <span>No Early Lock:</span>
-                        <span style="color: #ff5252;">-$440 (-0.5%)</span>
+                <li>
+                    <strong>Calculate ATR-Based Stop</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Places stop at a multiple of ATR away from entry (e.g., 2.0x ATR for BTC). Constrained to min/max % range.
+                    </p>
+                    <div class="formula-box">
+                        <strong>For LONG:</strong><br>
+                        atr_distance_pct = min(atr × multiplier / entry_price, max_stop_pct)<br>
+                        atr_distance_pct = max(atr_distance_pct, min_stop_pct)<br>
+                        atr_stop = entry_price × (1 - atr_distance_pct)
                     </div>
-                    <div class="result-item">
-                        <span>Early Lock (1%):</span>
-                        <span style="color: #69f0ae;">+$176 (+0.2%)</span>
-                    </div>
-                    <div class="result-item">
-                        <span>DIFFERENCE:</span>
-                        <span style="color: #ffd700;">$616 saved!</span>
-                    </div>
-                </div>
+                </li>
                 
-                <div class="pros-cons">
-                    <div class="pros">
-                        <h4>🔒 Early Lock Saved You</h4>
-                        <ul>
-                            <li>Turned loss into gain</li>
-                            <li>Preserved capital</li>
-                            <li>Survived the reversal</li>
-                        </ul>
+                <li>
+                    <strong>Calculate Structure-Based Stop</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Places stop below the pivot point (for longs) with a full ATR buffer for safety.
+                    </p>
+                    <div class="formula-box">
+                        <strong>For LONG:</strong><br>
+                        structure_stop = pivot_low - (1.0 × atr)
                     </div>
-                    <div class="cons">
-                        <h4>⚠️  When NO Lock Better</h4>
-                        <ul>
-                            <li>Strong trending markets</li>
-                            <li>Low-frequency position trades</li>
-                            <li>When conviction is very high</li>
-                        </ul>
+                </li>
+                
+                <li>
+                    <strong>Choose the WIDER Stop</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Takes the maximum of ATR stop and structure stop, giving the trade more breathing room.
+                    </p>
+                    <div class="formula-box">
+                        <strong>Preliminary Stop:</strong><br>
+                        preliminary_stop = <strong>max</strong>(atr_stop, structure_stop)
                     </div>
-                </div>
-            </div>
+                    <div class="highlight-box">
+                        <strong>Key Insight:</strong> Using max() instead of min() is critical. We want the WIDER stop 
+                        to avoid being stopped out by normal market noise. This is especially important for volatile assets like BTC.
+                    </div>
+                </li>
+                
+                <li>
+                    <strong>Apply Min/Max Constraints</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Ensures the final stop falls within the asset's safe range (e.g., 0.8%-1.5% for BTC).
+                    </p>
+                    <div class="formula-box">
+                        <strong>Final Stop:</strong><br>
+                        min_stop = entry_price × (1 - max_stop_pct)<br>
+                        max_stop = entry_price × (1 - min_stop_pct)<br>
+                        final_stop = max(min_stop, min(max_stop, preliminary_stop))
+                    </div>
+                </li>
+                
+                <li>
+                    <strong>Safety Check: Minimum ATR Distance</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        For BTC, enforces a minimum of 1.5 ATR distance to prevent ultra-tight stops.
+                    </p>
+                    <div class="formula-box">
+                        <strong>If:</strong> |entry_price - stop| < (1.5 × atr)<br>
+                        <strong>Then:</strong> stop = entry_price - (1.5 × atr)
+                    </div>
+                </li>
+            </ol>
             
-            <!-- Scenario 4: Too Aggressive Lock -->
-            <div class="scenario-card">
-                <div class="scenario-header">
-                    <div class="scenario-icon">⚠️</div>
-                    <div class="scenario-title">
-                        <h2>Too Aggressive (0.5%)</h2>
-                        <p class="scenario-subtitle">When early lock is TOO early - kills winners</p>
-                    </div>
-                </div>
-                
+            <div class="example-box">
+                <h4>📝 Example: BTC Long at $88,000</h4>
                 <div class="timeline">
                     <div class="timeline-item">
-                        <div class="timeline-time">00:00</div>
-                        <div class="timeline-price">$88,000</div>
-                        <div class="timeline-event">🟢 Entry - LONG</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-initial">Stop: $87,560</span>
-                        </div>
+                        <h4>Given Data</h4>
+                        <p>Entry: $88,000 | ATR: $300 | Recent Pivot Low: $87,200</p>
                     </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">00:30</div>
-                        <div class="timeline-price">$88,440</div>
-                        <div class="timeline-event">🔒 LOCKED at +0.5%</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,176</span>
-                            <span>⚠️  Too tight!</span>
-                        </div>
-                    </div>
-                    
                     <div class="timeline-item">
-                        <div class="timeline-time">01:00</div>
-                        <div class="timeline-price">$88,176</div>
-                        <div class="timeline-event">Normal market noise</div>
-                        <div class="timeline-stop">
-                            <span class="stop-badge stop-locked">Stop: $88,176</span>
-                        </div>
+                        <h4>ATR Stop</h4>
+                        <p>$300 × 2.0 = $600 → $88,000 - $600 = <strong>$87,400</strong> (0.68%)</p>
                     </div>
-                    
-                    <div class="timeline-item highlight">
-                        <div class="timeline-time">01:15</div>
-                        <div class="timeline-price">$88,176</div>
-                        <div class="timeline-event">🛑 STOPPED OUT!</div>
-                        <div class="timeline-stop">
-                            <span style="background: #fff3e0; color: #e65100; padding: 3px 8px; border-radius: 5px; font-size: 0.85em; font-weight: bold;">Exit: +$176 (+0.2%)</span>
-                        </div>
-                    </div>
-                    
                     <div class="timeline-item">
-                        <div class="timeline-time">02:00</div>
-                        <div class="timeline-price">$88,880</div>
-                        <div class="timeline-event">😭 Watching from sidelines</div>
-                        <div class="timeline-stop">
-                            <span>Missed: +$880 (+1%)</span>
-                        </div>
+                        <h4>Structure Stop</h4>
+                        <p>$87,200 - $300 = <strong>$86,900</strong> (1.25%)</p>
                     </div>
-                    
                     <div class="timeline-item">
-                        <div class="timeline-time">04:00</div>
-                        <div class="timeline-price">$88,660</div>
-                        <div class="timeline-event">😭 Would have hit TP1</div>
-                        <div class="timeline-stop">
-                            <span>Missed: +$220 partial</span>
-                        </div>
+                        <h4>Chosen Stop</h4>
+                        <p>max($87,400, $86,900) = <strong>$87,400</strong></p>
                     </div>
-                    
                     <div class="timeline-item">
-                        <div class="timeline-time">12:00</div>
-                        <div class="timeline-price">$89,500</div>
-                        <div class="timeline-event">😭 Would have made $1,093</div>
-                        <div class="timeline-stop">
-                            <span>Missed: +$917!</span>
-                        </div>
+                        <h4>Safety Check</h4>
+                        <p>Distance: $600 ≥ (1.5 × $300) = $450 ✓ OK</p>
                     </div>
-                </div>
-                
-                <div class="result-box">
-                    <h3>⚠️  Result</h3>
-                    <div class="result-item">
-                        <span>Actual Profit:</span>
-                        <span>+$176 (+0.2%)</span>
-                    </div>
-                    <div class="result-item">
-                        <span>Potential Profit:</span>
-                        <span style="color: #ffd700;">+$1,093 (+1.24%)</span>
-                    </div>
-                    <div class="result-item">
-                        <span>OPPORTUNITY COST:</span>
-                        <span style="color: #ff5252;">-$917 missed!</span>
-                    </div>
-                </div>
-                
-                <div class="pros-cons">
-                    <div class="pros">
-                        <h4>✅ Only Pro</h4>
-                        <ul>
-                            <li>Avoided any loss</li>
-                        </ul>
-                    </div>
-                    <div class="cons">
-                        <h4>❌ Major Cons</h4>
-                        <ul>
-                            <li>Killed a winning trade</li>
-                            <li>Stop was too tight</li>
-                            <li>Death by over-caution</li>
-                        </ul>
+                    <div class="timeline-item">
+                        <h4>Final Stop Loss</h4>
+                        <p style="color: #667eea; font-weight: bold; font-size: 1.2em;">$87,400 (-0.68%)</p>
                     </div>
                 </div>
             </div>
         </div>
         
-        <!-- Recommendation Section -->
-        <div class="recommendation">
-            <h2>📋 Which Setting Should You Use?</h2>
+        <!-- Take Profit Calculation -->
+        <div class="section">
+            <h2>💰 Take Profit Calculation</h2>
+            <p>
+                VTM uses a hybrid approach that combines market structure (resistance/support levels) with traditional 
+                risk-reward ratios. This results in higher probability exits at natural turning points.
+            </p>
             
-            <div class="rec-grid">
-                <div class="rec-card">
-                    <h3>🥇 For GOLD Trading</h3>
-                    <p style="margin: 10px 0;"><strong>Best for:</strong> High win rate (80-85%), tight moves (0.5-2%), frequent trades</p>
-                    <code>enable_early_profit_lock=True
-early_lock_threshold_pct=0.01</code>
-                    <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
-                        <strong>Why:</strong> Gold moves are smaller and reversals are common. Locking at 1% protects your 80%+ win rate without cutting winners short. 
-                        The structure-based TPs (usually 0.5-1.5%) align perfectly with Gold's typical ranges.
+            <h3>The Hybrid TP Process</h3>
+            
+            <ol class="step-list">
+                <li>
+                    <strong>Detect Market Structure Levels</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Scans recent price history to find significant resistance (longs) or support (shorts) levels 
+                        based on swing highs/lows that have been tested multiple times.
                     </p>
-                </div>
+                    <div class="code-block">
+# For LONG: Find swing highs above current price
+# Requirements:
+# - Price[i] > Price[i-1] and Price[i] > Price[i-2]
+# - Price[i] > Price[i+1] and Price[i] > Price[i+2]
+# - At least 2 touches within tolerance (1%)
+                    </div>
+                </li>
                 
-                <div class="rec-card">
-                    <h3>🥈 For BTC Position Trading</h3>
-                    <p style="margin: 10px 0;"><strong>Best for:</strong> Lower frequency, big swings (5-30%), holding 1-5 days</p>
-                    <code>enable_early_profit_lock=False</code>
-                    <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
-                        <strong>Why:</strong> BTC position trades need breathing room. The wider structure-based stops (0.5-1.0%) give trades space. 
-                        Let it run to first partial (1.5R) before locking. Catches the 10-50%+ moves without premature exits.
+                <li>
+                    <strong>Calculate Risk-Reward Targets</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        Calculates traditional R:R targets (1.5R, 2.5R, 3.5R) based on the stop distance.
                     </p>
-                </div>
+                    <div class="formula-box">
+                        <strong>For LONG:</strong><br>
+                        risk = entry_price - stop_loss<br>
+                        tp1 = entry_price + (risk × 1.5)<br>
+                        tp2 = entry_price + (risk × 2.5)<br>
+                        tp3 = entry_price + (risk × 3.5)
+                    </div>
+                </li>
                 
-                <div class="rec-card">
-                    <h3>🥉 For BTC Swing Trading</h3>
-                    <p style="margin: 10px 0;"><strong>Best for:</strong> Medium frequency, 2-8% targets, holding 4-24 hours</p>
-                    <code>enable_early_profit_lock=True
-early_lock_threshold_pct=0.015</code>
-                    <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
-                        <strong>Why:</strong> Lock at 1.5% gain. Balances protection with profit potential. 
-                        Good for overnight holds where you're not actively monitoring. The hybrid TPs find natural resistance points.
+                <li>
+                    <strong>Blend Structure with R:R</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        For each target, checks if there's a structure level nearby. Uses structure if within 20% of R:R target 
+                        and still meets minimum R:R requirement (1.2R).
                     </p>
+                    <div class="formula-box">
+                        <strong>Decision Logic:</strong><br>
+                        1. Find closest structure level to R:R target<br>
+                        2. Calculate: structure_rr = (structure_level - entry) / risk<br>
+                        3. If |structure - rr_target| / rr_target < 20% AND structure_rr ≥ 1.2:<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;→ Use structure level<br>
+                        4. Else:<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;→ Use R:R target
+                    </div>
+                </li>
+                
+                <li>
+                    <strong>Handle Missing Levels</strong>
+                    <p style="margin-top: 8px; color: #666;">
+                        If structure levels are detected but they cap targets below intended R:R, the system may reduce the number 
+                        of partials and redistribute position sizes accordingly.
+                    </p>
+                </li>
+            </ol>
+            
+            <div class="example-box">
+                <h4>📝 Example: BTC Long TP Calculation</h4>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <h4>Given Data</h4>
+                        <p>Entry: $88,000 | Stop: $87,400 | Risk: $600</p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>R:R Targets (1.5R, 2.5R, 3.5R)</h4>
+                        <p>TP1: $88,900 | TP2: $89,500 | TP3: $90,100</p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>Detected Structure</h4>
+                        <p>Resistance found at: $88,850, $89,600, $90,200</p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>TP1 Decision</h4>
+                        <p>R:R target: $88,900 | Closest structure: $88,850<br>
+                        Difference: |88,850 - 88,900| / 88,900 = <strong>0.06%</strong> < 20%<br>
+                        Structure R:R: (88,850 - 88,000) / 600 = <strong>1.42R</strong> ≥ 1.2R ✓<br>
+                        <strong>→ Use structure: $88,850</strong></p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>TP2 Decision</h4>
+                        <p>R:R target: $89,500 | Closest structure: $89,600<br>
+                        Difference: 0.11% < 20% ✓<br>
+                        Structure R:R: 2.67R ≥ 1.2R ✓<br>
+                        <strong>→ Use structure: $89,600</strong></p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>TP3 Decision</h4>
+                        <p>R:R target: $90,100 | Closest structure: $90,200<br>
+                        Difference: 0.11% < 20% ✓<br>
+                        Structure R:R: 3.67R ≥ 1.2R ✓<br>
+                        <strong>→ Use structure: $90,200</strong></p>
+                    </div>
+                    <div class="timeline-item">
+                        <h4>Final Take Profits</h4>
+                        <p style="font-weight: bold; color: #667eea;">
+                            TP1: $88,850 (1.42R) - Exit 33%<br>
+                            TP2: $89,600 (2.67R) - Exit 33%<br>
+                            TP3: $90,200 (3.67R) - Exit 34%
+                        </p>
+                    </div>
                 </div>
             </div>
             
-            <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; color: white;">
-                <h3 style="margin-bottom: 15px;">💡 Key Insights with Updated VTM</h3>
-                <div style="line-height: 1.8; font-size: 1.05em;">
-                    <p style="margin-bottom: 15px;">
-                        <strong>1. Structure-Based Stops Are Safer:</strong> The new logic uses max(atr_stop, structure_stop), 
-                        giving you ~0.5-1.0% stops on BTC instead of the old 0.2-0.3%. This prevents premature stop-outs from normal market noise.
-                    </p>
-                    <p style="margin-bottom: 15px;">
-                        <strong>2. Hybrid TPs Improve Win Rate:</strong> By placing targets AT market structure (resistance/support), 
-                        you're exiting where price is likely to stall anyway. Falls back to R:R when no structure exists.
-                    </p>
-                    <p style="margin-bottom: 15px;">
-                        <strong>3. Early Locking Still Valuable:</strong> Even with wider stops, early profit locking at 1% (Gold) or 1.5% (BTC) 
-                        protects against reversals. It's insurance that costs almost nothing when trades go your way.
-                    </p>
-                    <p>
-                        <strong>The Formula:</strong> Gold = Lock early (1%) + Tight natural stops (0.2-0.3%) | 
-                        BTC Position = No early lock + Wide structure stops (0.5-1.0%) | 
-                        BTC Swing = Lock at 1.5% + Medium stops (0.4-0.6%)
-                    </p>
-                </div>
-            </div>
-            
-            <div style="margin-top: 20px; padding: 20px; background: #f5f5f5; border-radius: 10px; border-left: 4px solid #667eea;">
-                <h3 style="color: #333; margin-bottom: 15px;">🔧 How The New Logic Works Together</h3>
-                <div style="color: #555; line-height: 1.6;">
-                    <p style="margin-bottom: 10px;">
-                        <strong>Stop Loss:</strong> Finds pivot structure → Calculates ATR-based stop → Takes the WIDER one → 
-                        Enforces minimum 1.5 ATR distance → Result: Safer, less noise
-                    </p>
-                    <p style="margin-bottom: 10px;">
-                        <strong>Take Profits:</strong> Detects resistance/support levels → Calculates R:R targets (1.5R, 2.5R, 3.5R) → 
-                        Blends them (structure if within 20%) → Result: Higher probability exits
-                    </p>
-                    <p>
-                        <strong>Early Lock:</strong> Optional safety net that moves stop to break-even at your chosen % gain → 
-                        Doesn't interfere with targets → Only prevents big losses → Result: Sleep better at night
-                    </p>
-                </div>
+            <div class="highlight-box">
+                <strong>Why This Works:</strong> Market structure represents areas where price has historically struggled 
+                to break through. By placing targets AT these levels rather than blindly using R:R, you're exiting where 
+                the probability of reversal is highest. When no structure exists, R:R targets provide reliable fallback points.
             </div>
         </div>
-    </div>
-</body>
-</html>
+        
+        <!-- Position Management -->
+        <div class="section">
+            <h2>📊 Position Management</h2>
+            
+            <h3>Partial Profit Taking</h3>
+            <p>
+                VTM exits positions in stages to balance securing profits with letting winners run. The default split is 
+                three partials plus a runner.
+            </p>
+            
+            <table>
+                <tr>
+                    <th>Partial</th>
+                    <th>Target</th>
+                    <th>BTC Size</th>
+                    <th>Gold Size</th>
+                    <th>Action</th>
+                </tr>
+                <tr>
+                    <td>TP1</td>
+                    <td>1.5R (or structure)</td>
+                    <td>33%</td>
+                    <td>40%</td>
+                    <td>Lock stop at break-even after hit</td>
+                </tr>
+                <tr>
+                    <td>TP2</td>
+                    <td>2.5R (or structure)</td>
+                    <td>33%</td>
+                    <td>30%</td>
+                    <td>Activate runner trailing stop</td>
+                </tr>
+                <tr>
+                    <td>TP3</td>
+                    <td>3.5R (or structure)</td>
+                    <td>34%</td>
+                    <td>30%</td>
+                    <td>Final partial (if hit)</td>
+                </tr>
+                <tr>
+                    <td>Runner</td>
+                    <td>Trailing stop</td>
+                    <td>Remainder</td>
+                    <td>Remainder</td>
+                    <td>Trails at 20% (BTC) or 12% (Gold)</td>
+                </tr>
+            </table>
+            
+            <h3>Stop Loss Adjustment Logic</h3>
+            
+            <div class="timeline">
+                <div class="timeline-item">
+                    <h4>Initial Entry</h4>
+                    <p>Stop at structure-based level (e.g., -0.68% for BTC)</p>
+                </div>
+                <div class="timeline-item">
+                    <h4>TP1 Hit (1.5R)</h4>
+                    <p>Exit first partial → Move stop to break-even (+0.1%)<br>
+                    <em>Guarantees no loss on remaining 67%</em></p>
+                </div>
+                <div class="timeline-item">
+                    <h4>TP2 Hit (2.5R)</h4>
+                    <p>Exit second partial → Activate trailing stop<br>
+                    <em>Runner now trails at 20% (BTC) or 12% (Gold) from highest price</em></p>
+                </div>
+                <div class="timeline-item">
+                    <h4>Runner Phase</h4>
+                    <p>Stop trails up automatically as new highs are made<br>
+                    <em>Example: Price hits $90K → Stop moves to $72K (20% trail)</em></p>
+                </div>
+            </div>
+            
+            <h3>Early Profit Locking (Optional)</h3>
+            <p>
+                When enabled, VTM can lock in profits early to protect against reversals before first partial hits. 
+                This is particularly useful for Gold or overnight BTC swings.
+            </p>
+            
+            <div class="code-block">
+# Enable with:
+enable_early_profit_lock=True
+early_lock_threshold_pct=0.01  # Lock at 1% gain
+            </div>
+            
+            <div class="highlight-box">
+                <strong>When to Use Early Lock:</strong><br>
+                • Gold: YES (1% threshold) - Tight moves, frequent reversals<br>
+                • BTC Swings: YES (1.5% threshold) - Overnight holds, not monitoring<br>
+                • BTC Position: NO - Need breathing room for big moves
+            </div>
+        </div>
+        
+        <!-- Position Sizing -->
+        <div class="section">
+            <h2>💵 Position Sizing</h2>
+            <p>
+                VTM automatically calculates position size based on account risk percentage and stop distance.
+            </p>
+            
+            <div class="formula-box">
+                <strong>Position Size Formula:</strong><br><br>
+                risk_amount = account_balance × account_risk (e.g., 1.5%)<br>
+                trade_risk = |entry_price - stop_loss|<br>
+                position_size = risk_amount / trade_risk
+            </div>
+            
+            <div class="example-box">
+                <h4>📝 Example: Position Sizing</h4>
+                <p style="line-height: 2;">
+                    <strong>Account:</strong> $100,000<br>
+                    <strong>Risk:</strong> 1.5% = $1,500<br>
+                    <strong>Entry:</strong> $88,000<br>
+                    <strong>Stop:</strong> $87,400<br>
+                    <strong>Trade Risk:</strong> $600
