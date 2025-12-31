@@ -261,7 +261,7 @@ class MarketRegimeAnalyzer:
             performance_reasons.append("Weak/ranging market")
         
         # High volatility (Performance handles uncertainty better)
-        if volatility_ratio > 1.3:
+        if volatility_ratio > 1.15:  
             performance_score += 2
             performance_reasons.append(f"High volatility ({volatility_ratio:.2f}x)")
         
@@ -655,7 +655,7 @@ class HybridAggregatorSelector:
                 # Check cooldown
                 if self._can_switch(asset_name):
                     # Only switch if confidence is high enough
-                    if confidence >= 0.65:
+                    if confidence >= 0.55:
                         self._execute_mode_switch(
                             asset=asset_name,
                             old_mode=current_mode,
