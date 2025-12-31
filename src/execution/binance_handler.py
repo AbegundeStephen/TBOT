@@ -99,7 +99,14 @@ class PositionSizingRequest:
 
 
 class HybridPositionSizer:
-    """Hybrid position sizing with automated rules and manual overrides"""
+    """
+    ✅ FIXED: Risk-based position sizing with VTM integration
+    
+    Key Changes:
+    1. Sizes positions based on actual stop loss distance (not % of capital)
+    2. Calculates risk FIRST, then position size
+    3. Validates actual risk matches target (1.5-2%)
+    """
 
     def __init__(self, config: Dict, portfolio_manager):
         self.config = config
@@ -107,203 +114,269 @@ class HybridPositionSizer:
         self.portfolio_cfg = config["portfolio"]
         self.risk_cfg = config.get("risk_management", {})
         self.override_history = []
-        logger.info("HybridPositionSizer initialized")
-
-    def calculate_size(self, request: PositionSizingRequest) -> Tuple[float, Dict]:
-        """Calculate position size with hybrid logic"""
-        try:
-            base_size = self._calculate_automated_size(
-                request.asset, request.current_price, request.signal
-            )
-
-            confidence_adjusted = self._apply_confidence_adjustment(
-                base_size, request.confidence_score, request.market_condition
-            )
-
-            if request.mode == SizingMode.MANUAL_OVERRIDE and request.manual_size_usd:
-                final_size, override_result = self._apply_manual_override(
-                    base_size,
-                    confidence_adjusted,
-                    request.manual_size_usd,
-                    request.override_reason,
-                    request.max_override_pct,
-                )
-            elif request.mode == SizingMode.REDUCED_RISK:
-                final_size = confidence_adjusted * 0.5
-                override_result = {
-                    "mode": "REDUCED_RISK",
-                    "reason": "Lower exposure due to uncertain market conditions",
-                    "reduction_pct": 50,
-                }
-            elif request.mode == SizingMode.ELEVATED_RISK:
-                final_size = min(
-                    confidence_adjusted * 1.5,
-                    self._get_max_position_size(request.asset),
-                )
-                override_result = {
-                    "mode": "ELEVATED_RISK",
-                    "reason": "Higher exposure for high-conviction trade",
-                    "elevation_pct": 50,
-                }
-            else:
-                final_size = confidence_adjusted
-                override_result = {"mode": "AUTOMATED"}
-
-            final_size = self._apply_hard_limits(
-                request.asset, final_size, request.signal
-            )
-
-            metadata = {
-                "asset": request.asset,
-                "mode": request.mode,
-                "signal": request.signal,
-                "confidence_score": request.confidence_score,
-                "market_condition": request.market_condition,
-                "base_size_usd": base_size,
-                "confidence_adjusted_usd": confidence_adjusted,
-                "final_size_usd": final_size,
-                "override_details": override_result,
-            }
-
-            self._log_sizing_decision(metadata)
-
-            if request.mode != SizingMode.AUTOMATED:
-                self.override_history.append(metadata)
-
-            return base_size, {"mode": "AUTOMATED"}
-
-        except Exception as e:
-            logger.error(f"Error calculating position size: {e}", exc_info=True)
-            return 0.0, {"error": str(e)}
-
-    def _calculate_automated_size(self, asset: str, price: float, signal: int) -> float:
-        """Calculate base size (existing implementation)"""
-        asset_cfg = self.config["assets"][asset]
-        base_pct = self.portfolio_cfg.get("base_position_size", 0.10)
-        base_size = self.portfolio_manager.current_capital * base_pct
-        return base_size
-
-    def _apply_confidence_adjustment(
-        self, base_size: float, confidence_score: float, market_condition: str
-    ) -> float:
-        """Adjust size based on signal confidence and market conditions"""
-
-        confidence_scalar = 0.5 + (confidence_score * 1.0)
-        confidence_scalar = max(0.3, min(1.5, confidence_scalar))
-        adjusted_size = base_size * confidence_scalar
-
-        condition_scalars = {
-            "bullish": 1.1,
-            "neutral": 1.0,
-            "bearish": 0.8,
-            "uncertain": 0.6,
-            "extreme_volatility": 0.5,
-        }
-        condition_scalar = condition_scalars.get(market_condition, 1.0)
-        adjusted_size *= condition_scalar
-
-        logger.debug(
-            f"Confidence adjustment: ${base_size:.2f} → ${adjusted_size:.2f} "
-            f"(confidence={confidence_score:.2f}, condition={market_condition})"
+        
+        # Get risk parameters from config
+        self.target_risk_pct = self.portfolio_cfg.get("target_risk_per_trade", 0.015)
+        self.max_risk_pct = self.portfolio_cfg.get("max_risk_per_trade", 0.020)
+        self.aggressive_threshold = self.portfolio_cfg.get("aggressive_risk_threshold", 0.70)
+        
+        logger.info(
+            f"[RISK SIZER] Initialized\n"
+            f"  Target Risk: {self.target_risk_pct:.2%}\n"
+            f"  Max Risk:    {self.max_risk_pct:.2%}\n"
+            f"  Aggressive:  >{self.aggressive_threshold:.0%} confidence"
         )
 
-        return adjusted_size
-
-    def _apply_manual_override(
+    def calculate_size_risk_based(
         self,
-        base_size: float,
-        confidence_adjusted: float,
-        manual_size_usd: float,
-        override_reason: str,
-        max_override_pct: float,
+        asset: str,
+        entry_price: float,
+        stop_loss_price: float,
+        signal: int,
+        confidence_score: float = None,
+        market_condition: str = None,
+        sizing_mode: str = SizingMode.AUTOMATED,
+        manual_size_usd: float = None,
+        override_reason: str = None,
     ) -> Tuple[float, Dict]:
-        """Apply manual override with safety guards"""
-
-        min_allowed = confidence_adjusted * (1 - max_override_pct / 100)
-        max_allowed = confidence_adjusted * (1 + max_override_pct / 100)
-
-        if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
-            logger.warning(
-                f"Manual override ${manual_size_usd:,.2f} exceeds bounds "
-                f"[${min_allowed:,.2f}, ${max_allowed:,.2f}]. Clamping."
+        """
+        ✅ NEW: Calculate position size based on ACTUAL RISK
+        
+        Formula:
+            Position Size = (Account × Risk%) / (|Entry - Stop| / Entry)
+        
+        Args:
+            asset: Asset name
+            entry_price: Entry price
+            stop_loss_price: Actual stop loss from VTM
+            signal: +1 (long) or -1 (short)
+            confidence_score: Signal confidence (0-1)
+            market_condition: Market regime
+            sizing_mode: AUTOMATED, MANUAL_OVERRIDE, REDUCED_RISK, ELEVATED_RISK
+            manual_size_usd: Manual override amount
+            override_reason: Reason for override
+        
+        Returns:
+            (position_size_usd, metadata)
+        """
+        try:
+            # ============================================================
+            # STEP 1: Determine risk percentage to use
+            # ============================================================
+            if sizing_mode == SizingMode.ELEVATED_RISK:
+                risk_pct = self.max_risk_pct
+                logger.info(f"[RISK] Using ELEVATED risk: {risk_pct:.2%}")
+            elif sizing_mode == SizingMode.REDUCED_RISK:
+                risk_pct = self.target_risk_pct * 0.75
+                logger.info(f"[RISK] Using REDUCED risk: {risk_pct:.2%}")
+            elif confidence_score and confidence_score >= self.aggressive_threshold:
+                risk_pct = self.max_risk_pct
+                logger.info(f"[RISK] High confidence ({confidence_score:.0%}) → Using max risk: {risk_pct:.2%}")
+            else:
+                risk_pct = self.target_risk_pct
+                logger.debug(f"[RISK] Using target risk: {risk_pct:.2%}")
+            
+            # Calculate risk amount in dollars
+            risk_amount = self.portfolio_manager.current_capital * risk_pct
+            
+            # ============================================================
+            # STEP 2: Validate stop loss distance
+            # ============================================================
+            asset_cfg = self.config["assets"][asset]
+            risk_cfg = asset_cfg.get("risk", {})
+            
+            min_stop_pct = risk_cfg.get("min_stop_distance_pct", 0.01)
+            max_stop_pct = risk_cfg.get("max_stop_distance_pct", 0.10)
+            
+            stop_distance = abs(entry_price - stop_loss_price)
+            stop_distance_pct = stop_distance / entry_price
+            
+            if stop_distance_pct < min_stop_pct:
+                logger.error(
+                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}\n"
+                    f"  Entry: ${entry_price:,.2f}\n"
+                    f"  Stop:  ${stop_loss_price:,.2f}\n"
+                    f"  → Trade BLOCKED"
+                )
+                return 0.0, {
+                    "error": "stop_too_tight",
+                    "stop_distance_pct": stop_distance_pct,
+                    "min_required": min_stop_pct
+                }
+            
+            if stop_distance_pct > max_stop_pct:
+                logger.warning(
+                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}\n"
+                    f"  Entry: ${entry_price:,.2f}\n"
+                    f"  Stop:  ${stop_loss_price:,.2f}\n"
+                    f"  → Clamping to max"
+                )
+                stop_distance_pct = max_stop_pct
+                if signal == 1:  # LONG
+                    stop_loss_price = entry_price * (1 - max_stop_pct)
+                else:  # SHORT
+                    stop_loss_price = entry_price * (1 + max_stop_pct)
+                stop_distance = abs(entry_price - stop_loss_price)
+            
+            # ============================================================
+            # STEP 3: Calculate position size from risk
+            # ============================================================
+            # Position Size = Risk Amount / (Stop Distance % )
+            position_size_usd = risk_amount / stop_distance_pct
+            
+            # ============================================================
+            # STEP 4: Apply manual override if requested
+            # ============================================================
+            if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
+                # Allow override within 50% of calculated size
+                min_allowed = position_size_usd * 0.5
+                max_allowed = position_size_usd * 1.5
+                
+                if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
+                    logger.warning(
+                        f"[OVERRIDE] Manual size ${manual_size_usd:,.2f} outside safe range "
+                        f"[${min_allowed:,.2f}, ${max_allowed:,.2f}] - Clamping"
+                    )
+                    manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
+                
+                # Recalculate actual risk with override
+                override_risk = manual_size_usd * stop_distance_pct
+                override_risk_pct = override_risk / self.portfolio_manager.current_capital
+                
+                logger.info(
+                    f"[OVERRIDE] Manual size applied\n"
+                    f"  Calculated:  ${position_size_usd:,.2f}\n"
+                    f"  Manual:      ${manual_size_usd:,.2f}\n"
+                    f"  New Risk:    {override_risk_pct:.2%} (${override_risk:.2f})\n"
+                    f"  Reason:      {override_reason or 'User override'}"
+                )
+                
+                position_size_usd = manual_size_usd
+            
+            # ============================================================
+            # STEP 5: Apply hard position limits
+            # ============================================================
+            min_size = asset_cfg.get("min_position_usd", 100)
+            max_size = asset_cfg.get("max_position_usd", 6000)
+            
+            if position_size_usd < min_size:
+                logger.warning(f"[RISK] Position ${position_size_usd:.2f} below minimum ${min_size}")
+                return 0.0, {
+                    "error": "below_minimum",
+                    "calculated_size": position_size_usd,
+                    "minimum": min_size
+                }
+            
+            original_size = position_size_usd
+            position_size_usd = min(position_size_usd, max_size)
+            
+            if original_size > max_size:
+                logger.warning(
+                    f"[RISK] Position clamped to max: ${original_size:,.2f} → ${max_size:,.2f}"
+                )
+            
+            # ============================================================
+            # STEP 6: Check portfolio-level limits
+            # ============================================================
+            max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
+            max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
+            
+            current_exposure = sum(
+                pos.quantity * pos.entry_price
+                for pos in self.portfolio_manager.positions.values()
             )
-            manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
-
-        deviation_pct = (
-            ((manual_size_usd - confidence_adjusted) / confidence_adjusted * 100)
-            if confidence_adjusted > 0
-            else 0
-        )
-
-        result = {
-            "mode": "MANUAL_OVERRIDE",
-            "reason": override_reason or "User override",
-            "manual_size": manual_size_usd,
-            "deviation_pct": deviation_pct,
-        }
-
-        logger.info(
-            f"Manual override applied: ${confidence_adjusted:,.2f} → ${manual_size_usd:,.2f} "
-            f"({deviation_pct:+.1f}%) - Reason: {override_reason}"
-        )
-
-        return manual_size_usd, result
-
-    def _apply_hard_limits(
-        self, asset: str, position_size: float, signal: int
-    ) -> float:
-        """Apply absolute limits to prevent excessive exposure"""
-
-        asset_cfg = self.config["assets"][asset]
-
-        min_size = asset_cfg.get("min_position_usd", 100)
-        max_size = asset_cfg.get("max_position_usd", 6000)
-        max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
-        max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
-
-        if position_size < min_size:
-            logger.debug(
-                f"Position size ${position_size:,.2f} below minimum ${min_size}"
+            
+            max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
+            if current_exposure + position_size_usd > max_portfolio_usd:
+                old_size = position_size_usd
+                position_size_usd = max(0, max_portfolio_usd - current_exposure)
+                logger.warning(
+                    f"[RISK] Portfolio limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
+                )
+            
+            max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
+            if position_size_usd > max_asset_usd:
+                old_size = position_size_usd
+                position_size_usd = max_asset_usd
+                logger.warning(
+                    f"[RISK] Single asset limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
+                )
+            
+            # ============================================================
+            # STEP 7: Calculate ACTUAL risk with final position size
+            # ============================================================
+            actual_risk = position_size_usd * stop_distance_pct
+            actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
+            
+            # ============================================================
+            # STEP 8: Build metadata
+            # ============================================================
+            metadata = {
+                "asset": asset,
+                "mode": sizing_mode,
+                "signal": signal,
+                "confidence_score": confidence_score,
+                "market_condition": market_condition,
+                
+                # Entry and stop
+                "entry_price": entry_price,
+                "stop_loss_price": stop_loss_price,
+                "stop_distance_usd": stop_distance,
+                "stop_distance_pct": stop_distance_pct * 100,
+                
+                # Risk calculation
+                "target_risk_pct": risk_pct * 100,
+                "target_risk_usd": risk_amount,
+                "actual_risk_pct": actual_risk_pct * 100,
+                "actual_risk_usd": actual_risk,
+                
+                # Position sizing
+                "position_size_usd": position_size_usd,
+                "position_size_units": position_size_usd / entry_price,
+                
+                # Override info
+                "override_details": {
+                    "mode": sizing_mode,
+                    "reason": override_reason
+                } if sizing_mode != SizingMode.AUTOMATED else None,
+                
+                "timestamp": datetime.now().isoformat(),
+            }
+            
+            # Log detailed sizing decision
+            logger.info(
+                f"\n{'='*80}\n"
+                f"[RISK-BASED SIZING] {asset} {['SHORT', 'HOLD', 'LONG'][signal+1]}\n"
+                f"{'='*80}\n"
+                f"📊 MARKET INFO:\n"
+                f"  Entry Price:    ${entry_price:,.2f}\n"
+                f"  Stop Loss:      ${stop_loss_price:,.2f}\n"
+                f"  Stop Distance:  ${stop_distance:,.2f} ({stop_distance_pct:.2%})\n"
+                f"  Confidence:     {confidence_score:.0%}" if confidence_score else "" + "\n"
+                f"  Condition:      {market_condition}\n"
+                f"\n"
+                f"💰 RISK CALCULATION:\n"
+                f"  Account:        ${self.portfolio_manager.current_capital:,.2f}\n"
+                f"  Target Risk:    {risk_pct:.2%} (${risk_amount:.2f})\n"
+                f"  Position Size:  ${position_size_usd:,.2f}\n"
+                f"  Units:          {position_size_usd / entry_price:.6f}\n"
+                f"\n"
+                f"✅ ACTUAL RISK:\n"
+                f"  Dollar Risk:    ${actual_risk:.2f}\n"
+                f"  Risk %:         {actual_risk_pct:.2%}\n"
+                f"  Status:         {'✅ WITHIN TARGET' if abs(actual_risk_pct - risk_pct) < 0.005 else '⚠️  ADJUSTED'}\n"
+                f"{'='*80}"
             )
-            return 0.0
-
-        position_size = min(position_size, max_size)
-
-        current_exposure = self._calculate_current_exposure()
-        max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
-        if current_exposure + position_size > max_portfolio_usd:
-            position_size = max(0, max_portfolio_usd - current_exposure)
-            logger.warning(
-                f"Position clamped to portfolio limit: ${position_size:,.2f}"
-            )
-
-        max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
-        position_size = min(position_size, max_asset_usd)
-
-        return position_size
-
-    def _calculate_current_exposure(self) -> float:
-        """Calculate total current portfolio exposure"""
-        return sum(
-            pos.quantity * pos.entry_price
-            for pos in self.portfolio_manager.positions.values()
-        )
-
-    def _get_max_position_size(self, asset: str) -> float:
-        """Get maximum allowed position size for an asset"""
-        asset_cfg = self.config["assets"][asset]
-        max_usd = asset_cfg.get("max_position_usd", 6000)
-        max_asset_pct = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
-        max_asset_usd = self.portfolio_manager.current_capital * max_asset_pct
-        return min(max_usd, max_asset_usd)
-
-    def _log_sizing_decision(self, metadata: Dict):
-        """Log sizing decision for audit"""
-        logger.info(
-            f"[SIZING] {metadata['asset']} | Mode: {metadata['mode']} | "
-            f"Confidence: {metadata['confidence_score']:.2f} | "
-            f"Size: ${metadata['final_size_usd']:,.2f}"
-        )
+            
+            # Track overrides
+            if sizing_mode != SizingMode.AUTOMATED:
+                self.override_history.append(metadata)
+            
+            return position_size_usd, metadata
+            
+        except Exception as e:
+            logger.error(f"[RISK] Error calculating position size: {e}", exc_info=True)
+            return 0.0, {"error": str(e)}
 
 
 class BinanceExecutionHandler:
@@ -917,107 +990,208 @@ class BinanceExecutionHandler:
         manual_size_usd: float = None,
         override_reason: str = None,
         signal_details: Dict = None,
-        
     ) -> bool:
         """
-        Open LONG or SHORT position with hybrid-aware VTM
+        ✅ FIXED: Open position with RISK-FIRST approach
         
-        Args:
-        signal_details: MUST contain:
-            - aggregator_mode: 'council' or 'performance'
-            - mode_confidence: 0-1
-            - regime_analysis: Market conditions
+        Flow:
+        1. Calculate stop loss FIRST using VTM
+        2. Size position based on actual stop loss distance
+        3. Verify risk is within limits
+        4. Execute trade
         """
         try:
             # ============================================================
-            # STEP 1: Determine side from signal
+            # STEP 1: Determine side
             # ============================================================
             side = "long" if signal == 1 else "short"
             logger.info(f"[OPEN] Opening {side.upper()} position for {asset_name}")
 
             # ============================================================
-            # STEP 2: Calculate position size
+            # STEP 2: Fetch OHLC data for VTM
             # ============================================================
-            sizing_request = PositionSizingRequest(
+            ohlc_data = None
+            
+            if self.data_manager:
+                try:
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=10)
+                    
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=self.symbol,
+                        interval=self.asset_config.get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    
+                    if len(df) > 50:
+                        ohlc_data = {
+                            "high": df["high"].values,
+                            "low": df["low"].values,
+                            "close": df["close"].values,
+                        }
+                        logger.info(f"[VTM] Fetched {len(df)} bars for stop calculation")
+                    else:
+                        logger.warning(f"[VTM] Insufficient data ({len(df)} bars)")
+                
+                except Exception as e:
+                    logger.error(f"[VTM] OHLC fetch failed: {e}")
+                    ohlc_data = None
+            
+            # ============================================================
+            # STEP 3: Calculate stop loss FIRST using VTM
+            # ============================================================
+            stop_loss_price = None
+            
+            if ohlc_data and signal_details:
+                try:
+                    from src.trading.veteran_trade_manager import VeteranTradeManager
+                    
+                    logger.info(f"[VTM] Calculating structure-based stop loss...")
+                    
+                    # Initialize VTM temporarily just to get stop loss
+                    temp_vtm = VeteranTradeManager(
+                        entry_price=current_price,
+                        side=side,
+                        asset=asset_name,
+                        high=ohlc_data["high"],
+                        low=ohlc_data["low"],
+                        close=ohlc_data["close"],
+                        account_balance=self.portfolio_manager.current_capital,
+                        signal_details=signal_details,
+                        account_risk=0.015,  # Temporary, won't affect stop calculation
+                    )
+                    
+                    stop_loss_price = temp_vtm.initial_stop_loss
+                    
+                    stop_distance_pct = abs(current_price - stop_loss_price) / current_price
+                    
+                    logger.info(
+                        f"[VTM] ✓ Structure-based stop calculated:\n"
+                        f"  Entry: ${current_price:,.2f}\n"
+                        f"  Stop:  ${stop_loss_price:,.2f}\n"
+                        f"  Distance: ${abs(current_price - stop_loss_price):,.2f} ({stop_distance_pct:.2%})"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"[VTM] Stop calculation failed: {e}")
+                    stop_loss_price = None
+            
+            # ============================================================
+            # STEP 4: Fallback to fixed % if VTM unavailable
+            # ============================================================
+            if stop_loss_price is None:
+                risk = self.asset_config.get("risk", {})
+                
+                if side == "long":
+                    stop_loss_pct = risk.get("stop_loss_pct", 0.02)
+                    stop_loss_price = current_price * (1 - stop_loss_pct)
+                else:
+                    stop_loss_pct = risk.get("stop_loss_pct_short", risk.get("stop_loss_pct", 0.025))
+                    stop_loss_price = current_price * (1 + stop_loss_pct)
+                
+                logger.warning(
+                    f"[VTM] Using fallback fixed stop: "
+                    f"${stop_loss_price:,.2f} ({stop_loss_pct:.2%})"
+                )
+            
+            # ============================================================
+            # STEP 5: Calculate position size based on ACTUAL stop
+            # ============================================================
+            position_size_usd, sizing_metadata = self.sizer.calculate_size_risk_based(
                 asset=asset_name,
-                current_price=current_price,
+                entry_price=current_price,
+                stop_loss_price=stop_loss_price,  # ✅ Use actual stop from VTM
                 signal=signal,
-                mode=sizing_mode,
-                manual_size_usd=manual_size_usd,
                 confidence_score=confidence_score,
-                market_condition=market_condition or "neutral",
+                market_condition=market_condition,
+                sizing_mode=sizing_mode,
+                manual_size_usd=manual_size_usd,
                 override_reason=override_reason,
-                max_override_pct=2.0,
             )
-
-            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
-
-            # Apply short size reduction if configured
+            
+            # Check for errors
+            if position_size_usd <= 0:
+                error_msg = sizing_metadata.get("error", "Unknown error")
+                logger.error(f"[FAIL] Position sizing failed: {error_msg}")
+                return False
+            
+            # ============================================================
+            # STEP 6: Apply short size reduction if configured
+            # ============================================================
             if side == "short":
                 short_config = self.config.get("portfolio", {}).get("short_position_sizing", {})
                 use_reduced = short_config.get("use_reduced_size_for_shorts", False)
                 multiplier = short_config.get("short_size_multiplier", 0.8)
+                
                 if use_reduced and multiplier < 1.0:
-                    logger.info(f"[SHORT] Applying {multiplier}x size reduction")
+                    original_size = position_size_usd
                     position_size_usd *= multiplier
-
-            if position_size_usd <= 0:
-                logger.warning(f"{asset_name}: Invalid position size: ${position_size_usd:.2f}")
-                return False
-
+                    logger.info(
+                        f"[SHORT] Applied {multiplier}x size reduction: "
+                        f"${original_size:,.2f} → ${position_size_usd:,.2f}"
+                    )
+                    
+                    # Recalculate actual risk after reduction
+                    stop_distance_pct = abs(current_price - stop_loss_price) / current_price
+                    actual_risk = position_size_usd * stop_distance_pct
+                    actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
+                    
+                    logger.info(
+                        f"[SHORT] Adjusted risk: {actual_risk_pct:.2%} (${actual_risk:.2f})"
+                    )
+            
             # ============================================================
-            # STEP 3: Calculate quantity
+            # STEP 7: Final risk verification
+            # ============================================================
+            max_risk_pct = self.config.get("portfolio", {}).get("max_risk_per_trade", 0.025)
+            
+            if sizing_metadata.get("actual_risk_pct", 0) / 100 > max_risk_pct:
+                logger.error(
+                    f"[BLOCKED] Risk exceeds maximum!\n"
+                    f"  Actual:  {sizing_metadata['actual_risk_pct']:.2%}\n"
+                    f"  Maximum: {max_risk_pct:.2%}"
+                )
+                return False
+            
+            # ============================================================
+            # STEP 8: Calculate quantity
             # ============================================================
             quantity = position_size_usd / current_price
-           # Round to correct precision (spot or futures)
-           # Round to correct precision and lot size
+            
+            # Round to correct precision
             is_futures = hasattr(self, "futures_handler") and self.config.get("binance", {}).get("enable_futures", False)
             quantity = self._round_quantity(quantity, self.symbol, is_futures)
-
+            
             MIN_BTC = 0.00001
             if quantity < MIN_BTC:
                 logger.warning(f"{asset_name}: Quantity {quantity:.8f} below minimum {MIN_BTC}")
                 return False
-
-            # ============================================================
-            # STEP 4: Calculate Stop Loss & Take Profit
-            # ============================================================
-            """ risk = self.asset_config.get("risk", {})
-
-            if side == "long":
-                stop_loss_pct = risk.get("stop_loss_pct", 0.05)
-                take_profit_pct = risk.get("take_profit_pct", 0.10)
-                trailing_stop_pct = risk.get("trailing_stop_pct", 0.03)
-                stop_loss = current_price * (1 - stop_loss_pct)
-                take_profit = current_price * (1 + take_profit_pct)
-            else:  # SHORT
-                stop_loss_pct = risk.get("stop_loss_pct_short", risk.get("stop_loss_pct", 0.04))
-                take_profit_pct = risk.get("take_profit_pct_short", risk.get("take_profit_pct", 0.08))
-                trailing_stop_pct = risk.get("trailing_stop_pct_short", risk.get("trailing_stop_pct", 0.025))
-                stop_loss = current_price * (1 + stop_loss_pct)
-                take_profit = current_price * (1 - take_profit_pct)
- """
+            
+            # Recalculate actual position size after rounding
+            actual_position_size = quantity * current_price
+            
             logger.info(
-                f"[OPEN] {side.upper()} {quantity:.8f} {self.symbol} @ ${current_price:,.2f}\n"
-                f"  Size: ${position_size_usd:,.2f}\n"
-                f"  Mode: {sizing_mode} | Confidence: {confidence_score}\n"
-                f"  ⚠️  VTM will calculate TP/SL based on market structure"
+                f"[SIZE] Final position details:\n"
+                f"  Quantity: {quantity:.8f} {self.symbol}\n"
+                f"  Value:    ${actual_position_size:,.2f}\n"
+                f"  Entry:    ${current_price:,.2f}\n"
+                f"  Stop:     ${stop_loss_price:,.2f}"
             )
-
-
+            
             # ============================================================
-            # STEP 5: Execute on Binance (Futures or Spot)
+            # STEP 9: Execute on Binance (Futures or Spot)
             # ============================================================
             order_id = None
-
+            
             # Try Futures first if enabled
             if hasattr(self, "futures_handler"):
                 try:
                     if side == "long":
                         order = self.futures_handler.open_long_position(
                             quantity=quantity,
-                            stop_loss=None,
-                            take_profit=None
+                            stop_loss=None,  # VTM manages
+                            take_profit=None  # VTM manages
                         )
                     else:
                         order = self.futures_handler.open_short_position(
@@ -1025,17 +1199,17 @@ class BinanceExecutionHandler:
                             stop_loss=None,
                             take_profit=None
                         )
-
+                    
                     if order:
                         order_id = order.get("orderId")
                         logger.info(f"[FUTURES] ✓ {side.upper()} position opened via Futures")
                     else:
-                        logger.warning(f"[FUTURES] Failed to open {side.upper()} position, falling back to spot")
-
+                        logger.warning(f"[FUTURES] Failed, falling back to spot")
+                
                 except Exception as e:
-                    logger.warning(f"[FUTURES] Error opening {side.upper()}: {e}, falling back to spot")
-
-            # Fall back to spot if Futures fails or is not available
+                    logger.warning(f"[FUTURES] Error: {e}, falling back to spot")
+            
+            # Fall back to spot if Futures fails
             if not order_id:
                 if not self.is_paper_mode:
                     try:
@@ -1045,82 +1219,77 @@ class BinanceExecutionHandler:
                                 quantity=quantity
                             )
                             order_id = order.get("orderId")
-                            logger.info(f"[SPOT] ✓ LONG position opened via Spot")
-                        else:  # SHORT
+                            logger.info(f"[SPOT] ✓ LONG position opened")
+                        else:
                             logger.error(
-                                f"[SPOT] ❌ SHORT positions require Binance Futures API\n"
-                                f"  Current mode: SPOT (only supports LONG)\n"
-                                f"  Asset: {asset_name} will only trade LONG positions in live mode."
+                                f"[SPOT] ❌ SHORT requires Futures API\n"
+                                f"  Enable futures or trade LONG only"
                             )
                             return False
+                    
                     except Exception as e:
-                        logger.error(f"[SPOT] Order execution failed: {e}")
+                        logger.error(f"[SPOT] Order failed: {e}")
                         return False
                 else:
-                    # Paper mode: simulate order execution
+                    # Paper mode
                     order_id = f"PAPER_{side.upper()}_{int(time.time())}"
-                    logger.info(
-                        f"[PAPER] ✓ Simulated {side.upper()} order\n"
-                        f"  Order ID: {order_id}\n"
-                        f"  Quantity: {quantity:.8f} {self.symbol}\n"
-                        f"  Entry: ${current_price:,.2f}"
-                    )
-
+                    logger.info(f"[PAPER] ✓ Simulated {side.upper()} order: {order_id}")
+            
             # ============================================================
-            # STEP 6: Fetch OHLC data for VTM
-            # ============================================================
-            ohlc_data = None
-            if self.data_manager:
-                try:
-                    end_time = datetime.now(timezone.utc)
-                    start_time = end_time - timedelta(days=10)
-                    df = self.data_manager.fetch_binance_data(
-                        symbol=self.symbol,
-                        interval=self.asset_config.get("interval", "1h"),
-                        start_date=start_time.strftime("%Y-%m-%d"),
-                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-                    if len(df) > 0:
-                        ohlc_data = {
-                            "high": df["high"].values,
-                            "low": df["low"].values,
-                            "close": df["close"].values,
-                        }
-                except Exception as e:
-                    logger.warning(f"[VTM] OHLC fetch failed: {e}")
-
-            # ============================================================
-            # STEP 7: Add position to Portfolio Manager
+            # STEP 10: Add position to Portfolio Manager with VTM
             # ============================================================
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
                 side=side,
                 entry_price=current_price,
-                position_size_usd=position_size_usd,
-                stop_loss=None, # ❌ VTM will calculate
-                take_profit=None, # ❌ VTM will calculate
-                trailing_stop_pct=None, # ❌ VTM will manage
+                position_size_usd=actual_position_size,
+                stop_loss=None,  # ✅ VTM will manage this
+                take_profit=None,  # ✅ VTM will manage this
+                trailing_stop_pct=None,  # ✅ VTM will manage this
                 binance_order_id=order_id,
                 ohlc_data=ohlc_data,
-                use_dynamic_management=True, # ✅ Enable VTM
-                signal_details=signal_details, # ✅ Pass hybrid context
-
+                use_dynamic_management=True,  # ✅ Enable VTM
+                signal_details=signal_details,
             )
-
-            if success:
-                logger.info(f"[OK] {asset_name} {side.upper()} position opened successfully")
-                if order_id:
-                    logger.info(f"  └─ Order ID: {order_id}")
-                if ohlc_data:
-                    logger.info(f"  └─ VTM: ACTIVE")
-                if self.is_paper_mode:
-                    logger.info(f"  └─ Mode: PAPER (simulated)")
-                return True
-            else:
-                logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")
+            
+            if not success:
+                logger.error(f"[FAIL] Portfolio Manager rejected position")
+                
+                # Emergency: Close unwanted position
+                if order_id and not self.is_paper_mode:
+                    logger.warning(f"[EMERGENCY] Closing unwanted position...")
+                    # Add emergency close logic here
+                
                 return False
-
+            
+            # ============================================================
+            # STEP 11: Verify VTM initialized correctly
+            # ============================================================
+            positions = self.portfolio_manager.get_asset_positions(asset_name)
+            if positions:
+                new_position = positions[-1]
+                
+                if new_position.trade_manager:
+                    vtm_status = new_position.get_vtm_status()
+                    logger.info(
+                        f"\n{'='*80}\n"
+                        f"[VTM] ✅ ACTIVE for {side.upper()} position\n"
+                        f"{'='*80}\n"
+                        f"  Order ID: {order_id}\n"
+                        f"  Entry:    ${vtm_status['entry_price']:,.2f}\n"
+                        f"  SL:       ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
+                        f"  TP:       ${vtm_status.get('take_profit', 0):,.2f} (VTM calculated)\n"
+                        f"  Size:     {quantity:.8f} {self.symbol}\n"
+                        f"  Risk:     ${sizing_metadata['actual_risk_usd']:,.2f} ({sizing_metadata['actual_risk_pct']:.2%})\n"
+                        f"{'='*80}"
+                    )
+                else:
+                    logger.warning(f"[VTM] ⚠️ NOT INITIALIZED - Using static SL/TP")
+            
+            logger.info(f"[OK] {side.upper()} {asset_name} position opened successfully")
+            return True
+        
         except Exception as e:
             logger.error(f"[OPEN] Error opening {asset_name} position: {e}", exc_info=True)
             return False

@@ -2275,7 +2275,7 @@ class TradingBot:
             logger.error(f"[VTM] Position check error: {e}")
 
     def _log_VTM_status(self):
-        """Log Dynamic Trade Manager status for all positions"""
+        """Log Veteran Trade Manager status for all positions"""
         try:
             has_VTM = False
 

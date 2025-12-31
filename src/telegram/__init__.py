@@ -1160,7 +1160,7 @@ class TradingTelegramBot:
                 await update.message.reply_text("📊 No open positions")
                 return
 
-            msg = "🎯 <b>DYNAMIC TRADE MANAGER STATUS</b>\n\n"
+            msg = "🎯 <b>VETERAN TRADE MANAGER STATUS</b>\n\n"
 
             for position_id, position in positions.items():  # ✅  iterate over items()
                 vtm_status = position.get_vtm_status()  # ✅  correct method name
