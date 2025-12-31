@@ -997,6 +997,9 @@ class PerformanceWeightedAggregator:
                 "tf_confidence": tf_conf,
                 "ema_regime_signal": ema_signal,
                 "ema_regime_confidence": ema_conf,
+                
+                # ✅ NEW: Pass the full preset config (contains risk_overrides)
+                "preset_config": self.config
             }
 
             if self.ai_enabled:
