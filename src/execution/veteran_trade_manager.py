@@ -27,36 +27,69 @@ class ExitReason(Enum):
 
 
 class AssetProfile:
-    """Asset-specific trading profiles"""
-
     BTC = {
         "name": "Bitcoin",
         "volatility": "high",
-        "min_stop_pct": 0.08,
-        "max_stop_pct": 0.15,
-        "atr_multiplier": 2.0,
-        "pivot_lookback": 30,
-        "partial_targets": [1.5, 2.5, 3.5],  # FIXED: More realistic (was 4.0)
-        "partial_sizes": [0.33, 0.33, 0.34],
-        "runner_trail_pct": 0.20,
-        "time_stop_bars": 30,
+        
+        # ✅ HYBRID: Balance between day/swing
+        "min_stop_pct": 0.03,   # 3% minimum (realistic intraday)
+        "max_stop_pct": 0.06,   # 6% maximum (protects from spikes)
+        "atr_multiplier": 1.8,  # Balanced structure + volatility
+        "pivot_lookback": 30,   # Medium-term structure
+        
+        # ✅ AGGRESSIVE BUT REALISTIC TARGETS
+        "partial_targets": [2.5, 4.5, 7.0],
+        # With 4% stop:
+        # TP1: 10% away (~12-24 hours) [2.5R]
+        # TP2: 18% away (~24-48 hours) [4.5R]
+        # TP3: 28% away (~48-96 hours) [7R]
+        
+        "partial_sizes": [0.45, 0.30, 0.25],  # Majority out early
+        "runner_trail_pct": 0.025,  # 2.5% trailing (balanced)
+        "time_stop_bars": 72,  # 3 days maximum hold
+        
         "use_ema_structure": False,
-        "use_structure_targets": True,  # NEW: Enable structure-based TPs
+        "use_structure_targets": True,
+        
+        # ✅ BALANCED PROTECTION
+        "max_hold_bars": 72,  # 3 days
+        "breakeven_after_bars": 8,  # BE after 8 hours
+        "breakeven_profit_threshold": 0.012,  # 1.2% profit
+        "early_scale_enabled": True,  # Scale 20% if +2% in 4H
+        "early_scale_threshold": 0.02,
+        "early_scale_bars": 4,
     }
 
     GOLD = {
         "name": "Gold",
         "volatility": "medium",
-        "min_stop_pct": 0.02,
-        "max_stop_pct": 0.05,
+        
+        # ✅ HYBRID: Gold's realistic ranges
+        "min_stop_pct": 0.012,  # 1.2% minimum
+        "max_stop_pct": 0.025,  # 2.5% maximum
         "atr_multiplier": 1.5,
-        "pivot_lookback": 20,
-        "partial_targets": [1.5, 2.5, 3.5],
-        "partial_sizes": [0.40, 0.30, 0.30],
-        "runner_trail_pct": 0.12,
-        "time_stop_bars": 20,
+        "pivot_lookback": 25,
+        
+        # ✅ GOLD REALISTIC TARGETS
+        "partial_targets": [2.5, 4.0, 6.0],
+        # With 1.5% stop:
+        # TP1: 3.75% away (~12-24 hours) [2.5R]
+        # TP2: 6% away (~24-48 hours) [4R]
+        # TP3: 9% away (~48-72 hours) [6R]
+        
+        "partial_sizes": [0.45, 0.30, 0.25],
+        "runner_trail_pct": 0.015,  # 1.5% trailing
+        "time_stop_bars": 60,  # 2.5 days max
+        
         "use_ema_structure": True,
-        "use_structure_targets": True,  # NEW: Enable structure-based TPs
+        "use_structure_targets": True,
+        
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 8,
+        "breakeven_profit_threshold": 0.01,  # 1% profit
+        "early_scale_enabled": True,
+        "early_scale_threshold": 0.015,
+        "early_scale_bars": 4,
     }
 
     @classmethod
@@ -148,64 +181,111 @@ def calculate_hybrid_targets(
     structure_levels: List[float],
     risk_multiples: List[float],
     partial_sizes: List[float],
-    min_rr: float = 1.2,
+    min_rr: float = 2.0,  # Minimum 2:1
 ) -> Tuple[List[float], List[float]]:
     """
-    Hybrid TP calculation: Uses structure when available, R:R as fallback
+    ✅ REALISTIC: Balances structure with achievable targets
+    
+    Rules:
+    1. Always enforce 2:1 minimum R:R
+    2. Use structure if within 25% of target AND ≥2R
+    3. Cap maximum target at 10R (unrealistic beyond that)
+    4. Adjust sizes if structure reduces number of targets
     """
     risk = abs(entry_price - stop_loss)
     targets = []
     adjusted_sizes = list(partial_sizes)
+    
+    logger.info(f"\n[VTM] Target Calculation:")
+    logger.info(f"  Entry: ${entry_price:,.2f}")
+    logger.info(f"  Stop:  ${stop_loss:,.2f}")
+    logger.info(f"  Risk:  ${risk:,.2f} ({risk/entry_price:.2%})")
 
     if side == "long":
-        rr_targets = [entry_price + (risk * r) for r in risk_multiples]
-        
-        for i, rr_target in enumerate(rr_targets):
+        for i, r_multiple in enumerate(risk_multiples):
+            # Calculate risk-based target
+            rr_target = entry_price + (risk * r_multiple)
+            
+            # Cap at 10R (10x risk = unrealistic)
+            if r_multiple > 10:
+                logger.warning(f"  ⚠️  TP{i+1}: {r_multiple}R exceeds 10R cap, skipping")
+                continue
+            
+            # Check if we have structure nearby
             if structure_levels:
                 closest = min(structure_levels, key=lambda x: abs(x - rr_target))
                 structure_rr = (closest - entry_price) / risk
+                distance_pct = abs(closest - rr_target) / rr_target
                 
-                if abs(closest - rr_target) / rr_target < 0.20 and structure_rr >= min_rr:
+                # Use structure if: (a) ≥2R AND (b) within 25% of target
+                if structure_rr >= min_rr and distance_pct < 0.25:
                     targets.append(closest)
-                    logger.info(f"[VTM] ✓ TP{i+1}: Structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                    logger.info(
+                        f"  ✓ TP{i+1}: ${closest:,.2f} ({structure_rr:.1f}R) "
+                        f"[Structure {distance_pct:.0%} from target]"
+                    )
+                elif structure_rr < min_rr:
+                    # Structure too close - use risk-based
+                    targets.append(rr_target)
+                    logger.info(
+                        f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R) "
+                        f"[Structure only {structure_rr:.1f}R - too close]"
+                    )
                 else:
-                    if structure_rr < risk_multiples[i]:
-                        targets.append(closest)
-                        logger.info(f"[VTM] ⚠ TP{i+1}: Capped by structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
-                    else:
-                        targets.append(rr_target)
-                        logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+                    # Structure too far - use risk-based
+                    targets.append(rr_target)
+                    logger.info(
+                        f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R) "
+                        f"[Structure {distance_pct:.0%} away - using target]"
+                    )
             else:
+                # No structure - always use risk-based
                 targets.append(rr_target)
-                logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+                logger.info(f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R)")
     
-    else:
-        rr_targets = [entry_price - (risk * r) for r in risk_multiples]
-        
-        for i, rr_target in enumerate(rr_targets):
+    else:  # short
+        for i, r_multiple in enumerate(risk_multiples):
+            rr_target = entry_price - (risk * r_multiple)
+            
+            if r_multiple > 10:
+                logger.warning(f"  ⚠️  TP{i+1}: {r_multiple}R exceeds 10R cap, skipping")
+                continue
+            
             if structure_levels:
                 closest = min(structure_levels, key=lambda x: abs(x - rr_target))
                 structure_rr = (entry_price - closest) / risk
+                distance_pct = abs(closest - rr_target) / abs(rr_target)
                 
-                if abs(closest - rr_target) / abs(rr_target) < 0.20 and structure_rr >= min_rr:
+                if structure_rr >= min_rr and distance_pct < 0.25:
                     targets.append(closest)
-                    logger.info(f"[VTM] ✓ TP{i+1}: Structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
+                    logger.info(
+                        f"  ✓ TP{i+1}: ${closest:,.2f} ({structure_rr:.1f}R) "
+                        f"[Structure {distance_pct:.0%} from target]"
+                    )
+                elif structure_rr < min_rr:
+                    targets.append(rr_target)
+                    logger.info(
+                        f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R) "
+                        f"[Structure only {structure_rr:.1f}R - too close]"
+                    )
                 else:
-                    if structure_rr < risk_multiples[i]:
-                        targets.append(closest)
-                        logger.info(f"[VTM] ⚠ TP{i+1}: Capped by structure @ ${closest:,.2f} ({structure_rr:.1f}R)")
-                    else:
-                        targets.append(rr_target)
-                        logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+                    targets.append(rr_target)
+                    logger.info(
+                        f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R) "
+                        f"[Structure {distance_pct:.0%} away - using target]"
+                    )
             else:
                 targets.append(rr_target)
-                logger.info(f"[VTM] → TP{i+1}: Risk-based @ ${rr_target:,.2f} ({risk_multiples[i]:.1f}R)")
+                logger.info(f"  → TP{i+1}: ${rr_target:,.2f} ({r_multiple:.1f}R)")
     
+    # Adjust position sizes if we have fewer targets than expected
     if len(targets) < len(partial_sizes):
+        logger.warning(f"  ⚠️  Only {len(targets)} targets (expected {len(partial_sizes)})")
         remaining = sum(partial_sizes[len(targets):])
         for i in range(len(targets)):
             adjusted_sizes[i] = partial_sizes[i] + (remaining / len(targets))
         adjusted_sizes = adjusted_sizes[:len(targets)]
+        logger.info(f"  → Adjusted sizes: {[f'{s:.0%}' for s in adjusted_sizes]}")
     
     return targets, adjusted_sizes
 
