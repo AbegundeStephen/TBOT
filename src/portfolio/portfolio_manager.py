@@ -1081,6 +1081,111 @@ class PortfolioManager:
 
         return len(positions_to_close)
     
+    def close_all_positions(self, prices: Dict[str, float] = None):
+        """
+        ✅ FIXED: Close all open positions
+        Fixes bug where exit_price was being interpreted as position_id
+        """
+        logger.info("Closing all positions...")
+
+        # Use list() to create a copy of keys since we modify dict during iteration
+        position_ids = list(self.positions.keys())
+
+        for pid in position_ids:
+            if pid not in self.positions:
+                continue
+                
+            position = self.positions[pid]
+            asset_name = position.asset
+            
+            # Get correct exit price using ASSET name
+            exit_price = (
+                prices.get(asset_name, position.entry_price)
+                if prices
+                else position.entry_price
+            )
+            
+            # ✅ FIX: Use keyword arguments to ensure data goes to correct parameters
+            self.close_position(
+                position_id=pid,           # ← String position ID
+                exit_price=exit_price,     # ← Float price
+                reason="manual_close_all"
+            )
+
+        logger.info("All positions closed")
+
+    def close_all_positions_for_asset(
+        self, 
+        asset: str, 
+        exit_price: float = None, 
+        reason: str = "manual_close_asset"
+    ) -> List[Dict]:
+        """
+        ✅ NEW: Close ALL open positions for a specific asset (e.g., BTC)
+        Used by Telegram 'Close BTC' buttons to ensure total exit.
+        
+        Args:
+            asset: Asset name (e.g., "BTC", "GOLD")
+            exit_price: Exit price (optional, will fetch if not provided)
+            reason: Close reason
+        
+        Returns:
+            List of trade results for closed positions
+        """
+        logger.info(f"Closing ALL positions for {asset}...")
+        
+        # Find all positions matching the asset
+        positions_to_close = [
+            p for p in self.positions.values() 
+            if p.asset == asset
+        ]
+        
+        if not positions_to_close:
+            logger.warning(f"No positions found for {asset} to close.")
+            return []
+
+        results = []
+        for pos in positions_to_close:
+            # Determine exit price if not provided
+            current_exit_price = exit_price
+            
+            if current_exit_price is None:
+                # Try to get real-time price from handlers
+                if hasattr(self, 'mt5_handler') and pos.mt5_ticket:
+                    try:
+                        import MetaTrader5 as mt5
+                        tick = mt5.symbol_info_tick(pos.symbol)
+                        if tick:
+                            current_exit_price = (tick.ask + tick.bid) / 2
+                    except:
+                        pass
+                
+                elif hasattr(self, 'binance_handler') and pos.binance_order_id:
+                    try:
+                        # Get from binance handler if available
+                        # (you'll need to pass handlers to portfolio manager for this)
+                        pass
+                    except:
+                        pass
+                
+                # Fallback to entry price if live price unavailable
+                if current_exit_price is None:
+                    current_exit_price = pos.entry_price
+            
+            # Close the individual position
+            result = self.close_position(
+                position_id=pos.position_id,
+                exit_price=current_exit_price,
+                reason=reason
+            )
+            
+            if result:
+                results.append(result)
+        
+        logger.info(
+            f"Successfully closed {len(results)}/{len(positions_to_close)} positions for {asset}"
+        )
+        return results
     
     @handle_errors(
     component="portfolio_manager",

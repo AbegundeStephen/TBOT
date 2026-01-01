@@ -1362,87 +1362,140 @@ class TradingTelegramBot:
 
     @admin_only
     async def cmd_close_asset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /close <asset> [position_number] command - ENHANCED"""
+        """
+        ✅ FIXED: Handle /close <asset> [position_number] command
+        
+        Usage:
+            /close BTC           → Close ALL BTC positions
+            /close BTC 2         → Close 2nd BTC position only
+            /close GOLD          → Close ALL GOLD positions
+        """
         try:
             if not context.args:
                 await update.message.reply_text(
-                    "⚠️ Usage:\n"
-                    "/close BTC - Close first BTC position\n"
-                    "/close BTC 2 - Close 2nd BTC position\n"
-                    "/close GOLD - Close first GOLD position"
+                    "⚠️ *Usage:*\n"
+                    "`/close BTC` - Close ALL BTC positions\n"
+                    "`/close BTC 2` - Close 2nd BTC position\n"
+                    "`/close GOLD` - Close ALL GOLD positions",
+                    parse_mode=ParseMode.MARKDOWN
                 )
                 return
 
             asset = context.args[0].upper()
-            position_index = 0  # Default to first position
             
+            if asset not in ["BTC", "GOLD"]:
+                await update.message.reply_text(
+                    "⚠️ Invalid asset. Use: BTC or GOLD"
+                )
+                return
+
+            # ================================================================
+            # CASE 1: Close Specific Position (Index provided)
+            # ================================================================
             if len(context.args) > 1:
                 try:
                     position_index = int(context.args[1]) - 1  # Convert to 0-indexed
                     if position_index < 0:
-                        raise ValueError("Position number must be positive")
+                        raise ValueError
                 except ValueError:
-                    await update.message.reply_text("⚠️ Invalid position number. Use: /close BTC 2")
+                    await update.message.reply_text(
+                        "⚠️ Invalid position number. Use: `/close BTC 2`",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
                     return
 
-            if asset not in ["BTC", "GOLD"]:
-                await update.message.reply_text("⚠️ Invalid asset. Use: BTC or GOLD")
-                return
-
-            # Get all positions for asset
-            positions = self.trading_bot.portfolio_manager.get_asset_positions(asset)
-            
-            if not positions:
-                await update.message.reply_text(f"ℹ️ No open positions for {asset}")
-                return
+                # Get positions for asset
+                positions = self.trading_bot.portfolio_manager.get_asset_positions(asset)
                 
-            if position_index >= len(positions):
-                await update.message.reply_text(
-                    f"⚠️ Position #{position_index + 1} doesn't exist.\n"
-                    f"You have {len(positions)} position(s) for {asset}"
-                )
-                return
+                if not positions or position_index >= len(positions):
+                    await update.message.reply_text(
+                        f"⚠️ Position #{position_index + 1} not found for {asset}"
+                    )
+                    return
 
-            # Get the specific position
-            position_to_close = positions[position_index]
-
-            # Get current price
-            if asset == "BTC" and self.trading_bot.binance_handler:
-                current_price = self.trading_bot.binance_handler.get_current_price()
-            elif asset == "GOLD" and self.trading_bot.mt5_handler:
-                current_price = self.trading_bot.mt5_handler.get_current_price()
-            else:
-                await update.message.reply_text(f"❌ Cannot get price for {asset}")
-                return
-
-            # Close the position
-            result = self.trading_bot.portfolio_manager.close_position(
-                position_id=position_to_close.position_id,
-                exit_price=current_price,
-                reason="manual_telegram"
-            )
-
-            if result:
-                pnl = result["pnl"]
-                pnl_icon = "🟢" if pnl >= 0 else "🔴"
-                pnl_sign = "+" if pnl >= 0 else ""
+                # Get exit price
+                price = None
+                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
+                exchange = asset_cfg.get("exchange", "binance")
                 
-                remaining = len(positions) - 1
+                if exchange == "binance" and self.trading_bot.binance_handler:
+                    price = self.trading_bot.binance_handler.get_current_price()
+                elif exchange == "mt5" and self.trading_bot.mt5_handler:
+                    price = self.trading_bot.mt5_handler.get_current_price()
 
-                await update.message.reply_text(
-                    f"{pnl_icon} *{asset} Position #{position_index + 1} Closed*\n\n"
-                    f"Side: {result['side'].upper()}\n"
-                    f"P&L: {pnl_sign}${pnl:,.2f}\n"
-                    f"Remaining positions: {remaining}\n"
-                    f"Reason: Manual close via Telegram",
-                    parse_mode=ParseMode.MARKDOWN,
+                # Close the specific position
+                result = self.trading_bot.portfolio_manager.close_position(
+                    position_id=positions[position_index].position_id,
+                    exit_price=price or positions[position_index].entry_price,
+                    reason="manual_telegram_specific"
                 )
+
+                if result:
+                    pnl_icon = "🟢" if result["pnl"] >= 0 else "🔴"
+                    await update.message.reply_text(
+                        f"{pnl_icon} *{asset} Position #{position_index + 1} Closed*\n\n"
+                        f"P&L: ${result['pnl']:,.2f} ({result['pnl_pct']*100:+.2f}%)",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Failed to close {asset} position #{position_index + 1}"
+                    )
+
+            # ================================================================
+            # CASE 2: Close ALL Positions for Asset (No index provided)
+            # ================================================================
             else:
-                await update.message.reply_text(f"❌ Failed to close {asset} position")
+                # Get exit price
+                price = None
+                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
+                exchange = asset_cfg.get("exchange", "binance")
+                
+                if exchange == "binance" and self.trading_bot.binance_handler:
+                    price = self.trading_bot.binance_handler.get_current_price()
+                elif exchange == "mt5" and self.trading_bot.mt5_handler:
+                    price = self.trading_bot.mt5_handler.get_current_price()
+                
+                # ✅ Use the new method to close all positions for asset
+                results = self.trading_bot.portfolio_manager.close_all_positions_for_asset(
+                    asset=asset,
+                    exit_price=price,
+                    reason="manual_telegram_all"
+                )
+                
+                if not results:
+                    await update.message.reply_text(
+                        f"ℹ️ No open positions found for {asset}"
+                    )
+                else:
+                    # Calculate summary
+                    total_pnl = sum(r["pnl"] for r in results)
+                    pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+                    
+                    # Build message with details
+                    msg = f"✅ *Closed ALL {asset} Positions*\n\n"
+                    msg += f"Trades Closed: {len(results)}\n"
+                    msg += f"{pnl_icon} Total P&L: ${total_pnl:,.2f}\n\n"
+                    
+                    # Show individual results
+                    for i, result in enumerate(results, 1):
+                        pnl = result["pnl"]
+                        pnl_pct = result["pnl_pct"] * 100
+                        side = result["side"].upper()
+                        icon = "🟢" if pnl >= 0 else "🔴"
+                        
+                        msg += f"{icon} #{i} {side}: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+                    
+                    await update.message.reply_text(
+                        msg,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
 
         except Exception as e:
-            logger.error(f"Error closing asset: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error closing position.")
+            logger.error(f"Error in cmd_close_asset: {e}", exc_info=True)
+            await update.message.reply_text(
+                "❌ Error processing close command."
+            )
             
             
     async def cmd_preset_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
