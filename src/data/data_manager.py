@@ -112,12 +112,25 @@ class DataManager:
             )
             init_result = mt5.initialize()
 
-            if not init_result and path:
-                logger.info(f"Auto-detect failed, trying with path: {path}")
-                if path.endswith("terminal64.exe"):
-                    path = path.replace("\\terminal64.exe", "")
-                    logger.info(f"Corrected path to: {path}")
-                init_result = mt5.initialize(path=path)
+            logger.info("\nStep 1: Initializing MT5 terminal...")
+
+            if not path:
+                logger.info("No MT5 path provided, attempting auto-detect")
+                init_result = mt5.initialize()
+            else:
+                logger.info(f"Initializing MT5 using explicit executable path: {path}")
+                init_result = mt5.initialize(
+                    path=path,
+                    login=int(login),
+                    password=str(password),
+                    server=str(server),
+                )
+
+            if not init_result:
+                error = mt5.last_error()
+                logger.error(f"MT5 initialize() failed: {error}")
+                return False
+
 
             if not init_result:
                 error = mt5.last_error()
