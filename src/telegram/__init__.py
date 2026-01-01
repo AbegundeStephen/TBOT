@@ -878,7 +878,6 @@ class TradingTelegramBot:
         if is_admin:
             help_text += (
                 "*🎮 Control Commands (Admin Only):*\n"
-                "/start\\_trading - Resume trading operations\n"
                 "/stop\\_trading - Pause trading (keep positions)\n"
                 "/close\\_all - Close all open positions\n"
                 "/close BTC - Close BTC position\n"
