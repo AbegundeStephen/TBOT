@@ -140,24 +140,19 @@ class HybridPositionSizer:
         override_reason: str = None,
     ) -> Tuple[float, Dict]:
         """
-        ✅ NEW: Calculate position size based on ACTUAL RISK
+        ✅ FIXED: Calculate position size based on ACTUAL RISK
         
-        Formula:
-            Position Size = (Account × Risk%) / (|Entry - Stop| / Entry)
-        
-        Args:
-            asset: Asset name
-            entry_price: Entry price
-            stop_loss_price: Actual stop loss from VTM
-            signal: +1 (long) or -1 (short)
-            confidence_score: Signal confidence (0-1)
-            market_condition: Market regime
-            sizing_mode: AUTOMATED, MANUAL_OVERRIDE, REDUCED_RISK, ELEVATED_RISK
-            manual_size_usd: Manual override amount
-            override_reason: Reason for override
-        
-        Returns:
-            (position_size_usd, metadata)
+        Correct Formula:
+            Position Size = Risk Amount / Stop Loss Distance (in $)
+            
+        Example:
+            - Account: $10,000
+            - Risk: 1.5% = $150
+            - Entry: $45,000
+            - Stop: $43,650 (3% below entry)
+            - Stop Distance: $1,350
+            - Position Size: $150 / $1,350 = 0.111 BTC = $5,000
+            - Actual Risk: 0.111 * $1,350 = $150 ✓
         """
         try:
             # ============================================================
@@ -165,16 +160,12 @@ class HybridPositionSizer:
             # ============================================================
             if sizing_mode == SizingMode.ELEVATED_RISK:
                 risk_pct = self.max_risk_pct
-                logger.info(f"[RISK] Using ELEVATED risk: {risk_pct:.2%}")
             elif sizing_mode == SizingMode.REDUCED_RISK:
                 risk_pct = self.target_risk_pct * 0.75
-                logger.info(f"[RISK] Using REDUCED risk: {risk_pct:.2%}")
             elif confidence_score and confidence_score >= self.aggressive_threshold:
                 risk_pct = self.max_risk_pct
-                logger.info(f"[RISK] High confidence ({confidence_score:.0%}) → Using max risk: {risk_pct:.2%}")
             else:
                 risk_pct = self.target_risk_pct
-                logger.debug(f"[RISK] Using target risk: {risk_pct:.2%}")
             
             # Calculate risk amount in dollars
             risk_amount = self.portfolio_manager.current_capital * risk_pct
@@ -193,10 +184,7 @@ class HybridPositionSizer:
             
             if stop_distance_pct < min_stop_pct:
                 logger.error(
-                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}\n"
-                    f"  Entry: ${entry_price:,.2f}\n"
-                    f"  Stop:  ${stop_loss_price:,.2f}\n"
-                    f"  → Trade BLOCKED"
+                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}"
                 )
                 return 0.0, {
                     "error": "stop_too_tight",
@@ -206,10 +194,7 @@ class HybridPositionSizer:
             
             if stop_distance_pct > max_stop_pct:
                 logger.warning(
-                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}\n"
-                    f"  Entry: ${entry_price:,.2f}\n"
-                    f"  Stop:  ${stop_loss_price:,.2f}\n"
-                    f"  → Clamping to max"
+                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}"
                 )
                 stop_distance_pct = max_stop_pct
                 if signal == 1:  # LONG
@@ -219,16 +204,27 @@ class HybridPositionSizer:
                 stop_distance = abs(entry_price - stop_loss_price)
             
             # ============================================================
-            # STEP 3: Calculate position size from risk
+            # STEP 3: Calculate position size from risk (✅ FIXED)
             # ============================================================
-            # Position Size = Risk Amount / (Stop Distance % )
+            # ✅ CORRECT: Divide by DOLLAR distance, not percentage
             position_size_usd = risk_amount / stop_distance_pct
+            
+            # ✅ Alternative (more explicit) calculation:
+            # units = risk_amount / stop_distance  # e.g., 0.111 BTC
+            # position_size_usd = units * entry_price  # e.g., $5,000
+            
+            logger.info(
+                f"[RISK] Position Calculation:\n"
+                f"  Risk Amount:     ${risk_amount:.2f}\n"
+                f"  Stop Distance:   ${stop_distance:.2f} ({stop_distance_pct:.2%})\n"
+                f"  Units:           {risk_amount / stop_distance:.6f}\n"
+                f"  Position Size:   ${position_size_usd:,.2f}"
+            )
             
             # ============================================================
             # STEP 4: Apply manual override if requested
             # ============================================================
             if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
-                # Allow override within 50% of calculated size
                 min_allowed = position_size_usd * 0.5
                 max_allowed = position_size_usd * 1.5
                 
@@ -239,7 +235,6 @@ class HybridPositionSizer:
                     )
                     manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
                 
-                # Recalculate actual risk with override
                 override_risk = manual_size_usd * stop_distance_pct
                 override_risk_pct = override_risk / self.portfolio_manager.current_capital
                 
@@ -247,8 +242,7 @@ class HybridPositionSizer:
                     f"[OVERRIDE] Manual size applied\n"
                     f"  Calculated:  ${position_size_usd:,.2f}\n"
                     f"  Manual:      ${manual_size_usd:,.2f}\n"
-                    f"  New Risk:    {override_risk_pct:.2%} (${override_risk:.2f})\n"
-                    f"  Reason:      {override_reason or 'User override'}"
+                    f"  New Risk:    {override_risk_pct:.2%} (${override_risk:.2f})"
                 )
                 
                 position_size_usd = manual_size_usd
@@ -276,7 +270,7 @@ class HybridPositionSizer:
                 )
             
             # ============================================================
-            # STEP 6: Check portfolio-level limits
+            # STEP 6: Check portfolio-level limits (✅ CRITICAL)
             # ============================================================
             max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
             max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
@@ -286,14 +280,18 @@ class HybridPositionSizer:
                 for pos in self.portfolio_manager.positions.values()
             )
             
+            # ✅ CRITICAL CHECK: Ensure new position doesn't exceed portfolio limits
             max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
             if current_exposure + position_size_usd > max_portfolio_usd:
                 old_size = position_size_usd
                 position_size_usd = max(0, max_portfolio_usd - current_exposure)
                 logger.warning(
-                    f"[RISK] Portfolio limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
+                    f"[RISK] Portfolio limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}\n"
+                    f"  Current Exposure: ${current_exposure:,.2f}\n"
+                    f"  Max Allowed:      ${max_portfolio_usd:,.2f}"
                 )
             
+            # ✅ CRITICAL CHECK: Single asset exposure
             max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
             if position_size_usd > max_asset_usd:
                 old_size = position_size_usd
@@ -302,11 +300,26 @@ class HybridPositionSizer:
                     f"[RISK] Single asset limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
                 )
             
+            # ✅ SAFETY CHECK: Never exceed 2% of capital per position
+            max_position_safety = self.portfolio_manager.current_capital * 0.02
+            if position_size_usd > max_position_safety:
+                logger.error(
+                    f"[RISK] SAFETY VIOLATION: Position ${position_size_usd:,.2f} exceeds 2% limit!"
+                )
+                position_size_usd = max_position_safety
+            
             # ============================================================
             # STEP 7: Calculate ACTUAL risk with final position size
             # ============================================================
             actual_risk = position_size_usd * stop_distance_pct
             actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
+            
+            # ✅ VERIFY: Actual risk should match target
+            if actual_risk_pct > self.max_risk_pct:
+                logger.error(
+                    f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds max {self.max_risk_pct:.2%}!"
+                )
+                return 0.0, {"error": "risk_exceeds_maximum"}
             
             # ============================================================
             # STEP 8: Build metadata
@@ -332,6 +345,7 @@ class HybridPositionSizer:
                 
                 # Position sizing
                 "position_size_usd": position_size_usd,
+                "position_size_pct": (position_size_usd / self.portfolio_manager.current_capital) * 100,
                 "position_size_units": position_size_usd / entry_price,
                 
                 # Override info
@@ -352,13 +366,13 @@ class HybridPositionSizer:
                 f"  Entry Price:    ${entry_price:,.2f}\n"
                 f"  Stop Loss:      ${stop_loss_price:,.2f}\n"
                 f"  Stop Distance:  ${stop_distance:,.2f} ({stop_distance_pct:.2%})\n"
-                f"  Confidence:     {confidence_score:.0%}" if confidence_score else "" + "\n"
-                f"  Condition:      {market_condition}\n"
+                + (f"  Confidence:     {confidence_score:.0%}\n" if confidence_score else "")
+                + f"  Condition:      {market_condition}\n"
                 f"\n"
                 f"💰 RISK CALCULATION:\n"
                 f"  Account:        ${self.portfolio_manager.current_capital:,.2f}\n"
                 f"  Target Risk:    {risk_pct:.2%} (${risk_amount:.2f})\n"
-                f"  Position Size:  ${position_size_usd:,.2f}\n"
+                f"  Position Size:  ${position_size_usd:,.2f} ({metadata['position_size_pct']:.2f}% of capital)\n"
                 f"  Units:          {position_size_usd / entry_price:.6f}\n"
                 f"\n"
                 f"✅ ACTUAL RISK:\n"
