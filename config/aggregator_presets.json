@@ -2,6 +2,7 @@
   "AGGREGATOR_PRESETS": {
     "BTC": {
       "conservative": {
+        "description": "High thresholds, requires almost unanimous Council agreement. Focus: Capital Preservation.",
         "buy_threshold": 0.32,
         "sell_threshold": 0.40,
         "two_strategy_bonus": 0.18,
@@ -16,9 +17,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.75,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 4.0,
+        "council_counter_trend": 4.5
       },
       "balanced": {
+        "description": "Standard thresholds, standard Council rules. Focus: Balanced Growth.",
         "buy_threshold": 0.30,
         "sell_threshold": 0.36,
         "two_strategy_bonus": 0.20,
@@ -33,9 +37,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.72,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 3.5,
+        "council_counter_trend": 4.0
       },
       "aggressive": {
+        "description": "Lower thresholds, Council accepts weaker confirmation. Focus: Trend Catching.",
         "buy_threshold": 0.25,
         "sell_threshold": 0.30,
         "two_strategy_bonus": 0.22,
@@ -50,9 +57,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.70,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 3.0,
+        "council_counter_trend": 3.5
       },
       "scalper": {
+        "description": "Lowest thresholds for high frequency. Focus: Volume & Speed.",
         "buy_threshold": 0.24,
         "sell_threshold": 0.30,
         "two_strategy_bonus": 0.25,
@@ -69,21 +79,13 @@
         "verbose": false,
         "min_quality_margin": 0.05,
         "opposition_penalty": 0.5,
-        "_comment_risk": "=== SCALPER RISK OVERRIDES ===",
-        "risk_overrides": {
-          "min_stop_pct": 0.005,
-          "max_stop_pct": 0.015,
-          "atr_multiplier": 1.2,
-          "pivot_lookback": 10,
-          "partial_targets": [1.5, 3.0, 5.0],
-          "partial_sizes": [0.50, 0.30, 0.20],
-          "time_stop_bars": 12,
-          "runner_trail_pct": 0.005
-        }
+        "council_trend_aligned": 2.5,
+        "council_counter_trend": 3.5
       }
     },
     "GOLD": {
       "conservative": {
+        "description": "Strict GOLD settings. Focus: Capital Preservation.",
         "buy_threshold": 0.33,
         "sell_threshold": 0.42,
         "two_strategy_bonus": 0.18,
@@ -98,9 +100,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.75,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 4.0,
+        "council_counter_trend": 4.5
       },
       "balanced": {
+        "description": "Standard GOLD settings. Focus: Balanced Growth.",
         "buy_threshold": 0.33,
         "sell_threshold": 0.36,
         "two_strategy_bonus": 0.20,
@@ -115,9 +120,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.72,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 3.5,
+        "council_counter_trend": 4.0
       },
       "aggressive": {
+        "description": "Active GOLD settings. Focus: Trend Catching.",
         "buy_threshold": 0.28,
         "sell_threshold": 0.30,
         "two_strategy_bonus": 0.22,
@@ -132,9 +140,12 @@
         "allow_single_override": true,
         "single_override_threshold": 0.70,
         "opposition_penalty": 0.5,
-        "verbose": false
+        "verbose": false,
+        "council_trend_aligned": 3.0,
+        "council_counter_trend": 3.5
       },
       "scalper": {
+        "description": "High frequency GOLD settings. Focus: Volume & Speed.",
         "buy_threshold": 0.23,
         "sell_threshold": 0.30,
         "two_strategy_bonus": 0.25,
@@ -151,17 +162,8 @@
         "verbose": false,
         "min_quality_margin": 0.06,
         "opposition_penalty": 0.5,
-        "_comment_risk": "=== SCALPER RISK OVERRIDES ===",
-        "risk_overrides": {
-          "min_stop_pct": 0.003,
-          "max_stop_pct": 0.010,
-          "atr_multiplier": 1.2,
-          "pivot_lookback": 10,
-          "partial_targets": [1.5, 3.0, 5.0],
-          "partial_sizes": [0.50, 0.30, 0.20],
-          "time_stop_bars": 12,
-          "runner_trail_pct": 0.003
-        }
+        "council_trend_aligned": 2.5,
+        "council_counter_trend": 3.5
       }
     }
   }

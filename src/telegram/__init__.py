@@ -1068,6 +1068,10 @@ class TradingTelegramBot:
                 asset = pos["asset"]
                 side = pos["side"].upper()
                 side_icon = "🟢" if side == "LONG" else "🔴"
+                
+                is_futures = pos.get("is_futures", False)
+                leverage = pos.get("leverage", 1)
+                margin = pos.get("margin_type", "SPOT")
 
                 entry_price = pos.get("entry_price", 0)
                 current_price = pos.get("current_price", 0)
@@ -1078,9 +1082,15 @@ class TradingTelegramBot:
 
                 pnl_icon = "🟢" if pnl >= 0 else "🔴"
                 pnl_sign = "+" if pnl >= 0 else ""
+                
+                if is_futures:
+                    type_str = f"⚡ Futures {leverage}x ({margin})"
+                else:
+                    type_str = "Spot"
 
                 positions_msg += (
                     f"{side_icon} *{asset} - {side}*\n"
+                    f"⚙️ {type_str}\n"
                     f"📍 Entry Price: ${entry_price:,.2f}\n"
                     f"💹 Current Price: ${current_price:,.2f}\n"
                     f"📦 Quantity: {quantity:.6f}\n"
@@ -2142,13 +2152,15 @@ class TradingTelegramBot:
             )
 
     async def notify_trade_opened(
-        self, asset: str, side: str, price: float, size: float, sl: float, tp: float
+        self, asset: str, side: str, price: float, size: float, sl: float, tp: float, leverage: int = 1, margin_type: str = "SPOT", is_futures: bool = False
     ):
         """Notify when a trade is opened"""
         side_icon = "🟢" if side.lower() == "long" else "🔴"
+        type_str = f"⚡ Futures {leverage}x ({margin_type})" if is_futures else "Spot"
 
         msg = (
             f"{side_icon} *Trade Opened: {asset}*\n\n"
+            f"⚙️ Type: {type_str}\n"
             f"Side: {side.upper()}\n"
             f"Entry Price: ${price:,.2f}\n"
             f"Size: ${size:,.2f}\n"
