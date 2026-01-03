@@ -44,12 +44,12 @@ class PerformanceWeightedAggregator:
         self.previous_regime = None
         self.regime_initialized = False
 
-        # ADD THESE TWO LINES
+        # Logging and Thresholds
         self.detailed_logging = enable_detailed_logging
         self.strong_signal_bypass = strong_signal_bypass_threshold
 
         # ================================================================
-        # AI VALIDATOR SETUP WITH SAFETY CHECKS
+        # AI VALIDATOR SETUP
         # ================================================================
         self.ai_validator = None
         self.ai_enabled = True
@@ -76,7 +76,7 @@ class PerformanceWeightedAggregator:
                 logger.error(f"[AGGREGATOR] AI validation setup failed: {e}")
                 logger.warning("[AGGREGATOR] Continuing without AI validation")
                 self.ai_validator = None
-                self.ai_enabled = False  #  Should be False when validator fails
+                self.ai_enabled = False
 
         # AI statistics tracking
         if self.ai_enabled:
@@ -108,45 +108,47 @@ class PerformanceWeightedAggregator:
             )
 
         # Strategy weights
-        if self.asset_type == "BTC":
-            self.weights = {"mean_reversion": 0.50, "trend_following": 0.50}
-        else:  # GOLD
-            self.weights = {"mean_reversion": 0.50, "trend_following": 0.50}
+        self.weights = {"mean_reversion": 0.50, "trend_following": 0.50}
 
-        # Asset-specific configuration
+        # ================================================================
+        # CONFIGURATION MERGE (Safety Fix)
+        # ================================================================
+        # 1. Define Defaults first (guarantees all keys exist)
+        if self.asset_type == "BTC":
+            self.config = {
+                "buy_threshold": 0.32,
+                "sell_threshold": 0.26,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.30,
+                "bull_buy_boost": 0.25,
+                "bull_sell_penalty": 0.20,
+                "bear_sell_boost": 0.25,
+                "bear_buy_penalty": 0.30,
+                "min_confidence_to_use": 0.08,
+                "min_signal_quality": 0.28,
+                "hold_contribution_pct": 0.20,
+                "opposition_penalty": 0.5,
+            }
+        else:  # GOLD (Default)
+            self.config = {
+                "buy_threshold": 0.30,
+                "sell_threshold": 0.24,
+                "two_strategy_bonus": 0.25,
+                "three_strategy_bonus": 0.35,
+                "bull_buy_boost": 0.22,
+                "bull_sell_penalty": 0.15,
+                "bear_sell_boost": 0.22,
+                "bear_buy_penalty": 0.28,
+                "min_confidence_to_use": 0.06,
+                "min_signal_quality": 0.25,
+                "hold_contribution_pct": 0.18,
+                "opposition_penalty": 0.5,
+            }
+        
+        # 2. Update with passed config (Merge instead of Overwrite)
         if config is not None:
-            self.config = config
-        else:
-            if self.asset_type == "BTC":
-                self.config = {
-                    "buy_threshold": 0.32,
-                    "sell_threshold": 0.26,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.30,
-                    "bull_buy_boost": 0.25,
-                    "bull_sell_penalty": 0.20,
-                    "bear_sell_boost": 0.25,
-                    "bear_buy_penalty": 0.30,
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.28,
-                    "hold_contribution_pct": 0.20,
-                    "opposition_penalty": 0.5,
-                }
-            else:  # GOLD
-                self.config = {
-                    "buy_threshold": 0.30,
-                    "sell_threshold": 0.24,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.35,
-                    "bull_buy_boost": 0.22,
-                    "bull_sell_penalty": 0.15,
-                    "bear_sell_boost": 0.22,
-                    "bear_buy_penalty": 0.28,
-                    "min_confidence_to_use": 0.06,
-                    "min_signal_quality": 0.25,
-                    "hold_contribution_pct": 0.18,
-                    "opposition_penalty": 0.5,
-                }
+            # This ensures keys missing from 'config' are filled by defaults above
+            self.config.update(config)
 
         self.stats = {
             "total_evaluations": 0,

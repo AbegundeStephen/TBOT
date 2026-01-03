@@ -37,6 +37,9 @@ class Position:
         ohlc_data: dict = None,
         account_balance: float = None,
         use_dynamic_management: bool = True,
+        leverage: int = 1,
+        margin_type: str = "SPOT",
+        is_futures: bool = False,
     ):
         self.asset = asset
         self.symbol = symbol
@@ -47,6 +50,10 @@ class Position:
         self.position_id = (
             position_id or f"{asset}_{side}_{int(entry_time.timestamp())}"
         )
+        self.leverage = leverage
+        self.margin_type = margin_type
+        self.is_futures = is_futures
+        
         self.stop_loss = None
         self.take_profit = None
         self.trailing_stop_pct = None
@@ -887,6 +894,9 @@ class PortfolioManager:
         use_dynamic_management: bool = True,
         entry_time: datetime = None,
         signal_details: dict = None, 
+        leverage: int = 1,
+        margin_type: str = "SPOT",
+        is_futures: bool = False,
     ) -> bool:
         """
         Add a new position with hybrid aware VTM support and Preset Risk Overrides
@@ -926,6 +936,9 @@ class PortfolioManager:
             ohlc_data=ohlc_data,
             account_balance=self.current_capital,
             use_dynamic_management=use_dynamic_management,
+            leverage=leverage,
+            margin_type=margin_type,
+            is_futures=is_futures
         )
 
         # 4. Initialize Veteran Trade Manager with Config & Overrides
@@ -1494,6 +1507,9 @@ class PortfolioManager:
                     "binance_profit": (
                         pos.binance_profit if pos.binance_order_id else None
                     ),
+                    "leverage": getattr(pos, 'leverage', 1),
+                    "margin_type": getattr(pos, 'margin_type', "SPOT"),
+                    "is_futures": getattr(pos, 'is_futures', False),
                 }
                 for pos in self.positions.values()
             },

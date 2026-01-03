@@ -18,6 +18,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.execution.binance_futures import BinanceFuturesHandler
 from src.global_error_handler import handle_errors, ErrorSeverity
+from src.execution.veteran_trade_manager import VeteranTradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -987,12 +988,12 @@ class BinanceExecutionHandler:
 
 
     @handle_errors(
-    component="binance_handler",
-    severity=ErrorSeverity.CRITICAL,
-    notify=True,
-    reraise=False,
-    default_return=False
-)
+        component="binance_handler",
+        severity=ErrorSeverity.CRITICAL,
+        notify=True,
+        reraise=False,
+        default_return=False
+    )
     def _open_position(
         self,
         signal: int,
@@ -1004,226 +1005,138 @@ class BinanceExecutionHandler:
         manual_size_usd: float = None,
         override_reason: str = None,
         signal_details: Dict = None,
+        
     ) -> bool:
         """
-        ✅ FIXED: Open position with RISK-FIRST approach
-        
-        Flow:
-        1. Calculate stop loss FIRST using VTM
-        2. Size position based on actual stop loss distance
-        3. Verify risk is within limits
-        4. Execute trade
+        Open LONG or SHORT position with hybrid-aware VTM and Exchange Safety Stop
         """
         try:
             # ============================================================
-            # STEP 1: Determine side
+            # STEP 1: Determine side from signal
             # ============================================================
             side = "long" if signal == 1 else "short"
             logger.info(f"[OPEN] Opening {side.upper()} position for {asset_name}")
 
             # ============================================================
-            # STEP 2: Fetch OHLC data for VTM
+            # STEP 2: Calculate position size
             # ============================================================
-            ohlc_data = None
-            
-            if self.data_manager:
-                try:
-                    end_time = datetime.now(timezone.utc)
-                    start_time = end_time - timedelta(days=10)
-                    
-                    df = self.data_manager.fetch_binance_data(
-                        symbol=self.symbol,
-                        interval=self.asset_config.get("interval", "1h"),
-                        start_date=start_time.strftime("%Y-%m-%d"),
-                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-                    
-                    if len(df) > 50:
-                        ohlc_data = {
-                            "high": df["high"].values,
-                            "low": df["low"].values,
-                            "close": df["close"].values,
-                        }
-                        logger.info(f"[VTM] Fetched {len(df)} bars for stop calculation")
-                    else:
-                        logger.warning(f"[VTM] Insufficient data ({len(df)} bars)")
-                
-                except Exception as e:
-                    logger.error(f"[VTM] OHLC fetch failed: {e}")
-                    ohlc_data = None
-            
-            # ============================================================
-            # STEP 3: Calculate stop loss FIRST using VTM
-            # ============================================================
-            stop_loss_price = None
-            
-            if ohlc_data and signal_details:
-                try:
-                    from src.trading.veteran_trade_manager import VeteranTradeManager
-                    
-                    logger.info(f"[VTM] Calculating structure-based stop loss...")
-                    
-                    # Initialize VTM temporarily just to get stop loss
-                    temp_vtm = VeteranTradeManager(
-                        entry_price=current_price,
-                        side=side,
-                        asset=asset_name,
-                        high=ohlc_data["high"],
-                        low=ohlc_data["low"],
-                        close=ohlc_data["close"],
-                        account_balance=self.portfolio_manager.current_capital,
-                        signal_details=signal_details,
-                        account_risk=0.015,  # Temporary, won't affect stop calculation
-                    )
-                    
-                    stop_loss_price = temp_vtm.initial_stop_loss
-                    
-                    stop_distance_pct = abs(current_price - stop_loss_price) / current_price
-                    
-                    logger.info(
-                        f"[VTM] ✓ Structure-based stop calculated:\n"
-                        f"  Entry: ${current_price:,.2f}\n"
-                        f"  Stop:  ${stop_loss_price:,.2f}\n"
-                        f"  Distance: ${abs(current_price - stop_loss_price):,.2f} ({stop_distance_pct:.2%})"
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"[VTM] Stop calculation failed: {e}")
-                    stop_loss_price = None
-            
-            # ============================================================
-            # STEP 4: Fallback to fixed % if VTM unavailable
-            # ============================================================
-            if stop_loss_price is None:
-                risk = self.asset_config.get("risk", {})
-                
-                if side == "long":
-                    stop_loss_pct = risk.get("stop_loss_pct", 0.02)
-                    stop_loss_price = current_price * (1 - stop_loss_pct)
-                else:
-                    stop_loss_pct = risk.get("stop_loss_pct_short", risk.get("stop_loss_pct", 0.025))
-                    stop_loss_price = current_price * (1 + stop_loss_pct)
-                
-                logger.warning(
-                    f"[VTM] Using fallback fixed stop: "
-                    f"${stop_loss_price:,.2f} ({stop_loss_pct:.2%})"
-                )
-            
-            # ============================================================
-            # STEP 5: Calculate position size based on ACTUAL stop
-            # ============================================================
-            position_size_usd, sizing_metadata = self.sizer.calculate_size_risk_based(
+            sizing_request = PositionSizingRequest(
                 asset=asset_name,
-                entry_price=current_price,
-                stop_loss_price=stop_loss_price,  # ✅ Use actual stop from VTM
+                current_price=current_price,
                 signal=signal,
-                confidence_score=confidence_score,
-                market_condition=market_condition,
-                sizing_mode=sizing_mode,
+                mode=sizing_mode,
                 manual_size_usd=manual_size_usd,
+                confidence_score=confidence_score,
+                market_condition=market_condition or "neutral",
                 override_reason=override_reason,
+                max_override_pct=2.0,
             )
-            
-            # Check for errors
-            if position_size_usd <= 0:
-                error_msg = sizing_metadata.get("error", "Unknown error")
-                logger.error(f"[FAIL] Position sizing failed: {error_msg}")
-                return False
-            
-            # ============================================================
-            # STEP 6: Apply short size reduction if configured
-            # ============================================================
+
+            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
+
+            # Apply short size reduction if configured
             if side == "short":
                 short_config = self.config.get("portfolio", {}).get("short_position_sizing", {})
                 use_reduced = short_config.get("use_reduced_size_for_shorts", False)
                 multiplier = short_config.get("short_size_multiplier", 0.8)
-                
                 if use_reduced and multiplier < 1.0:
-                    original_size = position_size_usd
+                    logger.info(f"[SHORT] Applying {multiplier}x size reduction")
                     position_size_usd *= multiplier
-                    logger.info(
-                        f"[SHORT] Applied {multiplier}x size reduction: "
-                        f"${original_size:,.2f} → ${position_size_usd:,.2f}"
-                    )
-                    
-                    # Recalculate actual risk after reduction
-                    stop_distance_pct = abs(current_price - stop_loss_price) / current_price
-                    actual_risk = position_size_usd * stop_distance_pct
-                    actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
-                    
-                    logger.info(
-                        f"[SHORT] Adjusted risk: {actual_risk_pct:.2%} (${actual_risk:.2f})"
-                    )
-            
-            # ============================================================
-            # STEP 7: Final risk verification
-            # ============================================================
-            max_risk_pct = self.config.get("portfolio", {}).get("max_risk_per_trade", 0.025)
-            
-            if sizing_metadata.get("actual_risk_pct", 0) / 100 > max_risk_pct:
-                logger.error(
-                    f"[BLOCKED] Risk exceeds maximum!\n"
-                    f"  Actual:  {sizing_metadata['actual_risk_pct']:.2%}\n"
-                    f"  Maximum: {max_risk_pct:.2%}"
-                )
+
+            if position_size_usd <= 0:
+                logger.warning(f"{asset_name}: Invalid position size: ${position_size_usd:.2f}")
                 return False
-            
+                
+            # ✅ MERGE SIZING METADATA INTO SIGNAL DETAILS
+            # This ensures sizing info is available in Step 7 and persisted
+            if signal_details is None:
+                signal_details = {}
+            if sizing_metadata:
+                signal_details['sizing'] = sizing_metadata
+
             # ============================================================
-            # STEP 8: Calculate quantity
+            # STEP 3: Calculate quantity
             # ============================================================
             quantity = position_size_usd / current_price
             
-            # Round to correct precision
+            # Round to correct precision and lot size
             is_futures = hasattr(self, "futures_handler") and self.config.get("binance", {}).get("enable_futures", False)
             quantity = self._round_quantity(quantity, self.symbol, is_futures)
+            leverage = 1
+            margin_type = "SPOT"
             
+            if is_futures:
+            # Fetch from config (using safe gets)
+                asset_conf = self.config.get("assets", {}).get(asset_name, {})
+                leverage = asset_conf.get("leverage", 10)
+                margin_type = asset_conf.get("margin_type", "CROSSED")
+
             MIN_BTC = 0.00001
             if quantity < MIN_BTC:
                 logger.warning(f"{asset_name}: Quantity {quantity:.8f} below minimum {MIN_BTC}")
                 return False
-            
-            # Recalculate actual position size after rounding
-            actual_position_size = quantity * current_price
-            
-            logger.info(
-                f"[SIZE] Final position details:\n"
-                f"  Quantity: {quantity:.8f} {self.symbol}\n"
-                f"  Value:    ${actual_position_size:,.2f}\n"
-                f"  Entry:    ${current_price:,.2f}\n"
-                f"  Stop:     ${stop_loss_price:,.2f}"
-            )
-            
+
             # ============================================================
-            # STEP 9: Execute on Binance (Futures or Spot)
+            # STEP 4: Calculate "Catastrophic" Safety Stop (Required for Futures)
+            # ============================================================
+            # Even though VTM manages the trade, we need a HARD STOP on the exchange
+            # in case the bot crashes or loses internet.
+            
+            risk_config = self.asset_config.get("risk", {})
+            safety_sl_price = None
+            
+            # Default to 5% if not specified, just to be safe
+            sl_pct = risk_config.get("stop_loss_pct", 0.05) 
+            
+            if side == "long":
+                safety_sl_price = current_price * (1 - sl_pct)
+            else: # SHORT
+                safety_sl_price = current_price * (1 + sl_pct)
+                
+            # Round safety stop to valid precision
+            if hasattr(self, 'futures_handler'):
+                # BTC usually allows 1 or 2 decimals for price, safe to use 2
+                safety_sl_price = round(safety_sl_price, 2)
+
+            logger.info(
+                f"[OPEN] {side.upper()} {quantity:.8f} {self.symbol} @ ${current_price:,.2f}\n"
+                f"  Size: ${position_size_usd:,.2f}\n"
+                f"  Safety SL: ${safety_sl_price:,.2f} (Hard order on exchange)\n"
+                f"  VTM: Active (Will manage dynamic exits)"
+            )
+
+            # ============================================================
+            # STEP 5: Execute on Binance (Futures or Spot)
             # ============================================================
             order_id = None
-            
+
             # Try Futures first if enabled
             if hasattr(self, "futures_handler"):
                 try:
+                    # ✅ PASS THE SAFETY STOP HERE
                     if side == "long":
                         order = self.futures_handler.open_long_position(
                             quantity=quantity,
-                            stop_loss=None,  # VTM manages
-                            take_profit=None  # VTM manages
+                            stop_loss=safety_sl_price, # <--- Critical: Pass the value
+                            take_profit=None 
                         )
                     else:
                         order = self.futures_handler.open_short_position(
                             quantity=quantity,
-                            stop_loss=None,
+                            stop_loss=safety_sl_price, # <--- Critical: Pass the value
                             take_profit=None
                         )
-                    
+
                     if order:
                         order_id = order.get("orderId")
                         logger.info(f"[FUTURES] ✓ {side.upper()} position opened via Futures")
                     else:
-                        logger.warning(f"[FUTURES] Failed, falling back to spot")
-                
+                        logger.warning(f"[FUTURES] Failed to open {side.upper()} position, falling back to spot")
+
                 except Exception as e:
-                    logger.warning(f"[FUTURES] Error: {e}, falling back to spot")
-            
-            # Fall back to spot if Futures fails
+                    logger.warning(f"[FUTURES] Error opening {side.upper()}: {e}, falling back to spot")
+
+            # Fall back to spot if Futures fails or is not available
             if not order_id:
                 if not self.is_paper_mode:
                     try:
@@ -1233,77 +1146,84 @@ class BinanceExecutionHandler:
                                 quantity=quantity
                             )
                             order_id = order.get("orderId")
-                            logger.info(f"[SPOT] ✓ LONG position opened")
-                        else:
+                            logger.info(f"[SPOT] ✓ LONG position opened via Spot")
+                        else:  # SHORT
                             logger.error(
-                                f"[SPOT] ❌ SHORT requires Futures API\n"
-                                f"  Enable futures or trade LONG only"
+                                f"[SPOT] ❌ SHORT positions require Binance Futures API\n"
+                                f"  Current mode: SPOT (only supports LONG)\n"
+                                f"  Asset: {asset_name} will only trade LONG positions in live mode."
                             )
                             return False
-                    
                     except Exception as e:
-                        logger.error(f"[SPOT] Order failed: {e}")
+                        logger.error(f"[SPOT] Order execution failed: {e}")
                         return False
                 else:
-                    # Paper mode
+                    # Paper mode: simulate order execution
                     order_id = f"PAPER_{side.upper()}_{int(time.time())}"
-                    logger.info(f"[PAPER] ✓ Simulated {side.upper()} order: {order_id}")
-            
+                    logger.info(
+                        f"[PAPER] ✓ Simulated {side.upper()} order\n"
+                        f"  Order ID: {order_id}\n"
+                        f"  Quantity: {quantity:.8f} {self.symbol}\n"
+                        f"  Entry: ${current_price:,.2f}"
+                    )
+
             # ============================================================
-            # STEP 10: Add position to Portfolio Manager with VTM
+            # STEP 6: Fetch OHLC data for VTM
+            # ============================================================
+            ohlc_data = None
+            if self.data_manager:
+                try:
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=10)
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=self.symbol,
+                        interval=self.asset_config.get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    if len(df) > 0:
+                        ohlc_data = {
+                            "high": df["high"].values,
+                            "low": df["low"].values,
+                            "close": df["close"].values,
+                        }
+                except Exception as e:
+                    logger.warning(f"[VTM] OHLC fetch failed: {e}")
+
+            # ============================================================
+            # STEP 7: Add position to Portfolio Manager
             # ============================================================
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
                 side=side,
                 entry_price=current_price,
-                position_size_usd=actual_position_size,
-                stop_loss=None,  # ✅ VTM will manage this
-                take_profit=None,  # ✅ VTM will manage this
-                trailing_stop_pct=None,  # ✅ VTM will manage this
+                position_size_usd=position_size_usd,
+                stop_loss=None, # VTM will calculate its own soft stop
+                take_profit=None, # VTM will calculate its own targets
+                trailing_stop_pct=None, # VTM will manage
                 binance_order_id=order_id,
                 ohlc_data=ohlc_data,
-                use_dynamic_management=True,  # ✅ Enable VTM
-                signal_details=signal_details,
+                use_dynamic_management=True, # ✅ Enable VTM
+                signal_details=signal_details, # ✅ Pass hybrid context (now includes sizing)
+                leverage=leverage,
+                margin_type=margin_type,
+                is_futures=is_futures
             )
-            
-            if not success:
-                logger.error(f"[FAIL] Portfolio Manager rejected position")
-                
-                # Emergency: Close unwanted position
-                if order_id and not self.is_paper_mode:
-                    logger.warning(f"[EMERGENCY] Closing unwanted position...")
-                    # Add emergency close logic here
-                
+
+            if success:
+                logger.info(f"[OK] {asset_name} {side.upper()} position opened successfully")
+                if order_id:
+                    logger.info(f"  └─ Order ID: {order_id}")
+                if ohlc_data:
+                    logger.info(f"  └─ VTM: ACTIVE")
+                if self.is_paper_mode:
+                    logger.info(f"  └─ Mode: PAPER (simulated)")
+                return True
+            else:
+                logger.error(f"[FAIL] Portfolio Manager rejected {asset_name} position")
                 return False
-            
-            # ============================================================
-            # STEP 11: Verify VTM initialized correctly
-            # ============================================================
-            positions = self.portfolio_manager.get_asset_positions(asset_name)
-            if positions:
-                new_position = positions[-1]
-                
-                if new_position.trade_manager:
-                    vtm_status = new_position.get_vtm_status()
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"[VTM] ✅ ACTIVE for {side.upper()} position\n"
-                        f"{'='*80}\n"
-                        f"  Order ID: {order_id}\n"
-                        f"  Entry:    ${vtm_status['entry_price']:,.2f}\n"
-                        f"  SL:       ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
-                        f"  TP:       ${vtm_status.get('take_profit', 0):,.2f} (VTM calculated)\n"
-                        f"  Size:     {quantity:.8f} {self.symbol}\n"
-                        f"  Risk:     ${sizing_metadata['actual_risk_usd']:,.2f} ({sizing_metadata['actual_risk_pct']:.2%})\n"
-                        f"{'='*80}"
-                    )
-                else:
-                    logger.warning(f"[VTM] ⚠️ NOT INITIALIZED - Using static SL/TP")
-            
-            logger.info(f"[OK] {side.upper()} {asset_name} position opened successfully")
-            return True
-        
+
         except Exception as e:
             logger.error(f"[OPEN] Error opening {asset_name} position: {e}", exc_info=True)
             return False
@@ -1503,20 +1423,16 @@ class BinanceExecutionHandler:
             logger.error(f"Error checking positions: {e}", exc_info=True)
 
     @handle_errors(
-    component="binance_handler",
-    severity=ErrorSeverity.WARNING,
-    notify=True,
-    reraise=False,
-    default_return=False
-)
+        component="binance_handler",
+        severity=ErrorSeverity.WARNING,
+        notify=True,
+        reraise=False,
+        default_return=False
+    )
     def sync_positions_with_binance(self, asset_name: str = "BTC", symbol: str = None) -> bool:
         """
-        ✅ FIXED: Sync portfolio with Binance (Futures or Spot)
-        
-        Detects trading mode automatically:
-        - If Futures enabled: Check Futures positions
-        - If Spot only: Check Spot holdings
-        - Paper mode: Skip sync (simulated positions only)
+        ✅ FIXED: Sync portfolio with Binance holdings (Futures-aware + VTM)
+        Correctly checks Futures positions or Spot balance based on configuration.
         """
         if symbol is None:
             symbol = self.symbol
@@ -1525,24 +1441,190 @@ class BinanceExecutionHandler:
             logger.info(f"[SYNC] Starting position sync for {asset_name}...")
             
             # ============================================================
-            # PAPER MODE: Skip sync (no real positions)
+            # STEP 1: Get Portfolio Positions
             # ============================================================
-            if self.is_paper_mode:
-                logger.info("[SYNC] Paper mode - skipping position sync")
-                return True
+            portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
+            portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
             
+            # Determine predominant side in portfolio
+            portfolio_side = None
+            if portfolio_positions:
+                longs = sum(1 for p in portfolio_positions if p.side == 'long')
+                shorts = sum(1 for p in portfolio_positions if p.side == 'short')
+                if longs > 0 and shorts == 0: portfolio_side = "long"
+                elif shorts > 0 and longs == 0: portfolio_side = "short"
+                elif longs > 0 and shorts > 0: portfolio_side = "mixed"
+
             # ============================================================
-            # Detect if using Futures or Spot
+            # STEP 2: Get Binance Positions (The Fix)
             # ============================================================
-            using_futures = hasattr(self, 'futures_handler') and self.futures_handler is not None
+            binance_qty = 0.0
+            binance_side = None # "long", "short", or None
             
-            if using_futures:
-                logger.info("[SYNC] Using Futures API for position sync")
-                return self._sync_futures_positions(asset_name, symbol)
+            # ➤ CHECK FUTURES (Priority)
+            if hasattr(self, "futures_handler"):
+                # Get raw position info from Futures API
+                pos_info = self.futures_handler.get_position_info()
+                if pos_info:
+                    pos_amt = float(pos_info.get('positionAmt', 0))
+                    binance_qty = abs(pos_amt)
+                    
+                    if pos_amt > 0:
+                        binance_side = "long"
+                    elif pos_amt < 0:
+                        binance_side = "short"
+                    
+                    if binance_qty > 0:
+                        logger.info(f"[SYNC] Detected Futures Position: {pos_amt} {asset_name} ({binance_side})")
+            
+            # ➤ FALLBACK TO SPOT (If no Futures handler)
             else:
-                logger.info("[SYNC] Using Spot API for position sync")
-                return self._sync_spot_positions(asset_name, symbol)
-        
+                account = self.client.get_account()
+                for balance in account["balances"]:
+                    if balance["asset"] == asset_name: # e.g., "BTC"
+                        qty = float(balance["free"]) + float(balance["locked"])
+                        if qty > 0:
+                            binance_qty = qty
+                            binance_side = "long" # Spot is always long
+                            logger.info(f"[SYNC] Detected Spot Balance: {binance_qty} {asset_name}")
+                        break
+
+            current_price = self.get_current_price(symbol)
+            MIN_QTY_THRESHOLD = 0.0001 # Minimum to care about
+
+            # ================================================================
+            # SCENARIO 1: Binance has Position, Portfolio Empty → IMPORT
+            # ================================================================
+            if binance_qty > MIN_QTY_THRESHOLD and not portfolio_positions:
+                import_enabled = bool(
+                    self.config.get("portfolio", {}).get("import_existing_positions", False)
+                )
+                
+                if import_enabled and binance_side:
+                    logger.info(
+                        f"[SYNC] Found {binance_side.upper()} position of {binance_qty:.8f} {asset_name} on Binance.\n"
+                        f"  → Importing into Portfolio with VTM support..."
+                    )
+                    
+                    # 1. Fetch OHLC for VTM
+                    ohlc_data = None
+                    df = None
+                    try:
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=10)
+                        df = self.data_manager.fetch_binance_data(
+                            symbol=symbol,
+                            interval=self.config["assets"][asset_name].get("interval", "1h"),
+                            start_date=start_time.strftime("%Y-%m-%d"),
+                            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                        if len(df) > 50:
+                            ohlc_data = {
+                                "high": df["high"].values,
+                                "low": df["low"].values,
+                                "close": df["close"].values,
+                            }
+                    except Exception as e:
+                        logger.error(f"[VTM] Failed to fetch OHLC during sync: {e}")
+
+                    # 2. Generate Signal Details (for VTM context)
+                    signal_details_base = {
+                        'imported': True,
+                        'import_time': datetime.now().isoformat(),
+                        'aggregator_mode': 'unknown',
+                        'reasoning': f'{asset_name} position imported from Binance ({binance_side})'
+                    }
+
+                    # 3. Add to Portfolio
+                    position_size_usd = binance_qty * current_price
+                    success = self.portfolio_manager.add_position(
+                        asset=asset_name,
+                        symbol=symbol,
+                        side=binance_side, # Use the detected side (Long/Short)
+                        entry_price=current_price,
+                        position_size_usd=position_size_usd,
+                        stop_loss=None, # VTM will calculate
+                        take_profit=None,
+                        trailing_stop_pct=self.config["assets"][asset_name].get("risk", {}).get("trailing_stop_pct"),
+                        binance_order_id=None,
+                        ohlc_data=ohlc_data,
+                        use_dynamic_management=True,
+                        signal_details=signal_details_base,
+                    )
+                    
+                    if success:
+                        logger.info(f"[SYNC] ✓ Imported {binance_qty:.8f} BTC as {binance_side.upper()} position")
+                        return True
+                    else:
+                        logger.error(f"[SYNC] Failed to import position into portfolio")
+                        return False
+                else:
+                    logger.info(f"[SYNC] Found position on Binance but import disabled/invalid. Ignoring.")
+                    return True
+
+            # ================================================================
+            # SCENARIO 2: Portfolio has Position, Binance Empty → CLOSE ALL
+            # ================================================================
+            if portfolio_positions and binance_qty <= MIN_QTY_THRESHOLD:
+                logger.warning(
+                    f"[SYNC] Portfolio has {len(portfolio_positions)} position(s) but Binance is empty.\n"
+                    f"  → Closing all portfolio positions (assuming manual close)."
+                )
+                for position in portfolio_positions:
+                    self.portfolio_manager.close_position(
+                        position_id=position.position_id,
+                        exit_price=current_price,
+                        reason="sync_missing_binance",
+                    )
+                return True
+
+            # ================================================================
+            # SCENARIO 3: Both have positions → VALIDATE
+            # ================================================================
+            if portfolio_positions and binance_qty > MIN_QTY_THRESHOLD:
+                # Check 1: Side Mismatch
+                # If Binance is Short but Portfolio is Long (or vice versa)
+                if binance_side != portfolio_side and portfolio_side != "mixed":
+                    logger.warning(
+                        f"[SYNC] CRITICAL SIDE MISMATCH!\n"
+                        f"  Binance: {binance_side.upper()} | Portfolio: {portfolio_side.upper()}\n"
+                        f"  → Closing portfolio positions to reset state."
+                    )
+                    for position in portfolio_positions:
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason="sync_side_mismatch",
+                        )
+                    return True
+
+                # Check 2: Quantity Mismatch
+                qty_diff = abs(binance_qty - portfolio_total_qty)
+                qty_diff_pct = (qty_diff / binance_qty * 100) if binance_qty > 0 else 0
+
+                if qty_diff_pct > 10.0: # Allow 10% variance
+                    logger.warning(
+                        f"[SYNC] QUANTITY MISMATCH (>10%):\n"
+                        f"  Binance: {binance_qty:.8f} | Portfolio: {portfolio_total_qty:.8f}\n"
+                        f"  Diff: {qty_diff_pct:.2f}%\n"
+                        f"  → Closing portfolio positions to reset."
+                    )
+                    for position in portfolio_positions:
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason="sync_quantity_mismatch",
+                        )
+                    return True
+                
+                else:
+                    logger.info(f"[SYNC] ✓ {asset_name} positions in sync ({binance_side.upper()} {binance_qty:.6f})")
+                    self._verify_vtm_status_after_sync(asset_name)
+                    return True
+
+            logger.info(f"[SYNC] ✓ No {asset_name} positions detected (Clean state)")
+            return True
+
         except Exception as e:
             logger.error(f"[SYNC] Error: {e}", exc_info=True)
             return False

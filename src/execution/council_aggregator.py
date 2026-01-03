@@ -62,9 +62,27 @@ class InstitutionalCouncilAggregator:
         self.ai_validator = ai_validator
         self.detailed_logging = enable_detailed_logging
         
-        # Council configuration
-        self.trend_aligned_threshold = trend_aligned_threshold
-        self.counter_trend_threshold = counter_trend_threshold
+        # ================================================================
+        # CONFIGURATION MERGE FIX
+        # ================================================================
+        # Start with hardcoded defaults (contains technical keys like 'rsi_bullish_zone')
+        self.config = self._get_default_config()
+        
+        # If a preset config is provided, UPDATE defaults instead of replacing them
+        if config:
+            self.config.update(config)
+
+        # ================================================================
+        # DYNAMIC THRESHOLD LOADING
+        # ================================================================
+        # Prioritize values from the merged config (presets).
+        # If not found, fall back to the arguments passed to __init__.
+        self.trend_aligned_threshold = self.config.get(
+            'council_trend_aligned', trend_aligned_threshold
+        )
+        self.counter_trend_threshold = self.config.get(
+            'council_counter_trend', counter_trend_threshold
+        )
         
         # Weights
         self.w_trend = weight_trend
@@ -80,9 +98,6 @@ class InstitutionalCouncilAggregator:
         ])
         if abs(total_weight - 5.0) > 0.01:
             logger.warning(f"[COUNCIL] Weights sum to {total_weight:.2f}, not 5.0")
-        
-        # Asset-specific config
-        self.config = config or self._get_default_config()
         
         # Statistics
         self.stats = {

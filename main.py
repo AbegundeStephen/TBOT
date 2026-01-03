@@ -276,6 +276,7 @@ class TradingBot:
 
         try:
             import MetaTrader5 as mt5
+
             mt5_handler = mt5 if mt5_initialized else None
         except ImportError:
             mt5_handler = None
@@ -334,7 +335,9 @@ class TradingBot:
         ):
             try:
                 # ✅ CRITICAL: Temporarily disable auto-sync
-                original_auto_sync = self.config["trading"].get("auto_sync_on_startup", True)
+                original_auto_sync = self.config["trading"].get(
+                    "auto_sync_on_startup", True
+                )
                 self.config["trading"]["auto_sync_on_startup"] = False
 
                 self.binance_handler = BinanceExecutionHandler(
@@ -355,7 +358,7 @@ class TradingBot:
                 # ✅ STEP 3.5: Enable Futures BEFORE sync
                 if self.config["assets"]["BTC"].get("enable_futures", False):
                     logger.info("\n[FUTURES] Enabling Futures handler...")
-                    
+
                     from src.execution.binance_futures import (
                         enable_futures_for_binance_handler,
                     )
@@ -365,13 +368,19 @@ class TradingBot:
                     )
 
                     if futures_enabled:
-                        logger.info("[FUTURES] ✅ Futures API enabled for SHORT trading")
+                        logger.info(
+                            "[FUTURES] ✅ Futures API enabled for SHORT trading"
+                        )
                     else:
-                        logger.warning("[FUTURES] ⚠️ Futures unavailable, shorts simulated")
+                        logger.warning(
+                            "[FUTURES] ⚠️ Futures unavailable, shorts simulated"
+                        )
 
                 # ✅ STEP 3.6: NOW do the sync (after Futures is enabled)
                 if original_auto_sync and not self.portfolio_manager.is_paper_mode:
-                    logger.info("\n[SYNC] Running position sync (after Futures setup)...")
+                    logger.info(
+                        "\n[SYNC] Running position sync (after Futures setup)..."
+                    )
                     self.binance_handler.sync_positions_with_binance("BTC")
 
                 # Link database to handler
@@ -676,150 +685,18 @@ class TradingBot:
         # STEP 2: Define Preset Configurations
         # ================================================================
         # These presets work for BOTH aggregator types
-        AGGREGATOR_PRESETS = {
-            "BTC": {
-                "conservative": {
-                    "buy_threshold": 0.32,
-                    "sell_threshold": 0.40,
-                    "two_strategy_bonus": 0.18,
-                    "three_strategy_bonus": 0.20,
-                    "bull_buy_boost": 0.10,
-                    "bull_sell_penalty": 0.12,
-                    "bear_sell_boost": 0.10,
-                    "bear_buy_penalty": 0.12,
-                    "min_confidence_to_use": 0.12,
-                    "min_signal_quality": 0.32,
-                    "hold_contribution_pct": 0.15,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.75,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "balanced": {
-                    "buy_threshold": 0.30,
-                    "sell_threshold": 0.36,
-                    "two_strategy_bonus": 0.20,
-                    "three_strategy_bonus": 0.22,
-                    "bull_buy_boost": 0.11,
-                    "bull_sell_penalty": 0.11,
-                    "bear_sell_boost": 0.11,
-                    "bear_buy_penalty": 0.11,
-                    "min_confidence_to_use": 0.10,
-                    "min_signal_quality": 0.28,
-                    "hold_contribution_pct": 0.17,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.72,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "aggressive": {
-                    "buy_threshold": 0.25,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.22,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.12,
-                    "bull_sell_penalty": 0.12,
-                    "bear_sell_boost": 0.12,
-                    "bear_buy_penalty": 0.12,
-                    "min_confidence_to_use": 0.09,
-                    "min_signal_quality": 0.25,
-                    "hold_contribution_pct": 0.18,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.70,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "scalper": {
-                    "buy_threshold": 0.24,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.30,
-                    "bull_buy_boost": 0.15,
-                    "bull_sell_penalty": 0.10,
-                    "bear_sell_boost": 0.15,
-                    "bear_buy_penalty": 0.10,
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.20,
-                    "hold_contribution_pct": 0.20,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                    "min_quality_margin": 0.05,
-                    "opposition_penalty": 0.5,
-                },
-            },
-            "GOLD": {
-                "conservative": {
-                    "buy_threshold": 0.33,
-                    "sell_threshold": 0.42,
-                    "two_strategy_bonus": 0.18,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.07,
-                    "bull_sell_penalty": 0.09,
-                    "bear_sell_boost": 0.07,
-                    "bear_buy_penalty": 0.09,
-                    "min_confidence_to_use": 0.12,
-                    "min_signal_quality": 0.30,
-                    "hold_contribution_pct": 0.12,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.75,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "balanced": {
-                    "buy_threshold": 0.33,
-                    "sell_threshold": 0.36,
-                    "two_strategy_bonus": 0.20,
-                    "three_strategy_bonus": 0.25,
-                    "bull_buy_boost": 0.08,
-                    "bull_sell_penalty": 0.08,
-                    "bear_sell_boost": 0.08,
-                    "bear_buy_penalty": 0.08,
-                    "min_confidence_to_use": 0.10,
-                    "min_signal_quality": 0.28,
-                    "hold_contribution_pct": 0.14,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.72,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "aggressive": {
-                    "buy_threshold": 0.28,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.22,
-                    "three_strategy_bonus": 0.30,
-                    "bull_buy_boost": 0.09,
-                    "bull_sell_penalty": 0.09,
-                    "bear_sell_boost": 0.09,
-                    "bear_buy_penalty": 0.09,
-                    "min_confidence_to_use": 0.08,
-                    "min_signal_quality": 0.22,
-                    "hold_contribution_pct": 0.15,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.70,
-                    "opposition_penalty": 0.5,
-                    "verbose": False,
-                },
-                "scalper": {
-                    "buy_threshold": 0.23,
-                    "sell_threshold": 0.30,
-                    "two_strategy_bonus": 0.25,
-                    "three_strategy_bonus": 0.35,
-                    "bull_buy_boost": 0.12,
-                    "bull_sell_penalty": 0.08,
-                    "bear_sell_boost": 0.12,
-                    "bear_buy_penalty": 0.08,
-                    "min_confidence_to_use": 0.06,
-                    "min_signal_quality": 0.18,
-                    "hold_contribution_pct": 0.18,
-                    "allow_single_override": True,
-                    "single_override_threshold": 0.65,
-                    "verbose": False,
-                    "min_quality_margin": 0.06,
-                    "opposition_penalty": 0.5,
-                },
-            },
-        }
+        AGGREGATOR_PRESETS = {}
+        try:
+            CONFIG_PATH = Path("config/aggregator_presets.json")
+            if CONFIG_PATH.exists():
+                with open(CONFIG_PATH, "r") as f:
+                    data = json.load(f)
+                    AGGREGATOR_PRESETS = data.get("AGGREGATOR_PRESETS", {})
+                logger.info("[INIT] Loaded aggregator presets from file")
+            else:
+                logger.warning("[INIT] aggregator_presets.json not found")
+        except Exception as e:
+            logger.error(f"[INIT] Error loading presets: {e}")
 
         # ================================================================
         # STEP 3: Auto-Preset Selection (if enabled)
@@ -834,7 +711,13 @@ class TradingBot:
                 selector = DynamicPresetSelector(
                     self.data_manager, self.config, telegram_bot=self.telegram_bot
                 )
-                asset_presets = selector.get_preset_for_asset(asset_name)
+                asset_presets = {}
+
+                # Calculate preset for each enabled asset
+                for asset_name in self.strategies.keys():
+                    if self.config["assets"][asset_name].get("enabled", False):
+                        p = selector.get_preset_for_asset(asset_name)
+                        asset_presets[asset_name] = p
 
                 logger.info("\n📊 AUTO-PRESET RESULTS:")
                 for asset, selected_preset in asset_presets.items():
@@ -890,7 +773,10 @@ class TradingBot:
 
             # Get preset config for this asset
             selected_preset = asset_presets.get(asset_name, "balanced")
-            preset_config = AGGREGATOR_PRESETS.get(asset_name, {}).get(selected_preset)
+
+            # Handle asset key mapping (BTCUSDT -> BTC)
+            config_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
+            preset_config = AGGREGATOR_PRESETS.get(config_key, {}).get(selected_preset)
 
             if preset_config is None:
                 logger.error(
@@ -908,7 +794,7 @@ class TradingBot:
 
             if mode == "performance":
                 # --------------------------------------------------------
-                # PERFORMANCE MODE (Your existing aggregator)
+                # PERFORMANCE MODE
                 # --------------------------------------------------------
                 try:
                     from src.execution.signal_aggregator import (
@@ -965,7 +851,8 @@ class TradingBot:
                             self, "detailed_logging", False
                         ),
                         # Council-specific settings
-                        trend_aligned_threshold=3.5,
+                        config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
+                        trend_aligned_threshold=3.5,  # Defaults (will be overridden by config)
                         counter_trend_threshold=4.0,
                     )
 
@@ -973,7 +860,12 @@ class TradingBot:
                     logger.info(
                         f"  AI:         {'Enabled' if ai_validator else 'Disabled'}"
                     )
-                    logger.info(f"  Thresholds: 3.5 (trend) / 4.0 (counter)")
+                    # Log the actual active thresholds
+                    thresh_trend = preset_config.get("council_trend_aligned", 3.5)
+                    thresh_count = preset_config.get("council_counter_trend", 4.0)
+                    logger.info(
+                        f"  Thresholds: {thresh_trend} (trend) / {thresh_count} (counter)"
+                    )
 
                 except Exception as e:
                     logger.error(f"  [ERROR] Failed to create Council aggregator: {e}")
@@ -991,7 +883,7 @@ class TradingBot:
                         InstitutionalCouncilAggregator,
                     )
 
-                    # Create both
+                    # Create Performance Aggregator
                     perf_agg = PerformanceWeightedAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
                         trend_following_strategy=strategies.get("trend_following"),
@@ -1008,6 +900,7 @@ class TradingBot:
                         ),
                     )
 
+                    # Create Council Aggregator
                     council_agg = InstitutionalCouncilAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
                         trend_following_strategy=strategies.get("trend_following"),
@@ -1017,6 +910,7 @@ class TradingBot:
                             ai_validator if self.params.use_ai_validation else None
                         ),
                         enable_detailed_logging=False,
+                        config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
                         trend_aligned_threshold=3.5,
                         counter_trend_threshold=4.0,
                     )
@@ -1055,44 +949,9 @@ class TradingBot:
             logger.info(
                 "\n⚠️  HYBRID MODE: Signals require consensus from both aggregators"
             )
-
-            logger.info("\n")
-            try:
-                from src.execution.signal_aggregator import (
-                    PerformanceWeightedAggregator,
-                )
-                from src.execution.council_aggregator import (
-                    InstitutionalCouncilAggregator,
-                )
-
-                # Create both aggregators
-                perf_agg = PerformanceWeightedAggregator(
-                    mean_reversion_strategy=strategies.get("mean_reversion"),
-                    trend_following_strategy=strategies.get("trend_following"),
-                    ema_strategy=strategies.get("ema_strategy"),
-                    asset_type=asset_name,
-                    config=preset_config,
-                    ai_validator=ai_validator,
-                    enable_ai_circuit_breaker=True,
-                )
-                council_agg = InstitutionalCouncilAggregator(...)
-
-                # Store both in a dict
-                self.aggregators[asset_name] = {
-                    "performance": perf_agg,
-                    "council": council_agg,
-                    "mode": "hybrid",
-                }
-
-                logger.info(f"  Type:       Hybrid (Dynamic Mode Selection)")
-                logger.info(
-                    f"  AI:         {'Enabled' if ai_validator else 'Disabled'}"
-                )
-                logger.info(f"  Note:       Intelligent mode switching enabled")
-
-            except Exception as e:
-                logger.error(f"  [ERROR] Failed to create Hybrid aggregators: {e}")
-                pass
+            logger.info(f"  Type:       Hybrid (Dynamic Mode Selection)")
+            logger.info(f"  AI:         {'Enabled' if ai_validator else 'Disabled'}")
+            logger.info(f"  Note:       Intelligent mode switching enabled")
 
     def _format_ai_validation_direct(self, signal: int, df: pd.DataFrame) -> dict:
         """
@@ -1461,7 +1320,7 @@ class TradingBot:
 
     def _update_asset_signal(self, asset_name: str):
         """
-        Update signal for an asset (handles all aggregator modes)
+        Update signal for an asset (Monitor Only - No DB Writes)
         """
         try:
             asset_cfg = self.config["assets"][asset_name]
@@ -1526,45 +1385,21 @@ class TradingBot:
             # ============================================================
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 # Hybrid mode: Get consensus signal
+                # ✅ FIX: Added missing arguments to match definition
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
-                    asset_name, df
+                    asset_name, 
+                    df, 
+                    aggregators=aggregator, 
+                    hybrid_selector=self.hybrid_selector
                 )
-                logger.info(f"[SIGNAL] {asset_name} HYBRID signal details: {details}")
+                logger.debug(f"[SIGNAL] {asset_name} HYBRID signal details calculated")
             else:
                 # Normal mode: Single aggregator
                 signal, details = aggregator.get_aggregated_signal(df)
 
-            # Log signal to database (if enabled)
-            if self.db_manager:
-                signal_id, is_new = self.db_manager.insert_signal_smart(
-                    asset=asset_name,
-                    signal=signal,
-                    signal_quality=details.get("signal_quality", 0),
-                    regime=details.get("regime", "UNKNOWN"),
-                    regime_confidence=details.get("regime_confidence", 0),
-                    mr_signal=details.get("mr_signal", 0),
-                    mr_confidence=details.get("mr_confidence", 0),
-                    tf_signal=details.get("tf_signal", 0),
-                    tf_confidence=details.get("tf_confidence", 0),
-                    ema_signal=details.get("ema_signal"),
-                    ema_confidence=details.get("ema_confidence"),
-                    buy_score=details.get("buy_score"),
-                    sell_score=details.get("sell_score"),
-                    reasoning=details.get("reasoning"),
-                    price=current_price,
-                    ai_validated=details.get("ai_validated", False),
-                    ai_modified=details.get("ai_modified", False),
-                    ai_details=details.get("ai_validation"),
-                    executed=False,
-                )
+            # 🛑 DB LOGGING REMOVED HERE (Moved to trade_asset execution success)
 
-                if is_new:
-                    logger.info(
-                        f"[SIGNAL] {asset_name}: {signal:+2d} "
-                        f"(Q={details.get('signal_quality', 0):.2f})"
-                    )
-
-            # Update Telegram monitor (if available)
+            # Update Telegram monitor (if available) - KEEPS MONITORING LIVE
             if self.telegram_bot:
                 self.telegram_bot.signal_monitor.record_signal(
                     asset=asset_name,
@@ -1621,7 +1456,7 @@ class TradingBot:
             from src.execution.auto_preset_selector import DynamicPresetSelector
 
             selector = DynamicPresetSelector(self.data_manager, self.config)
-            
+
             # Get preset for EACH enabled asset
             self.selected_presets = {}
             for asset_name in self.strategies.keys():
@@ -1638,7 +1473,6 @@ class TradingBot:
 
             for asset in self.selected_presets:
                 self.dynamic_selector.current_presets[asset] = preset
-
 
         # ✨  Try to initialize AI (non-fatal)
         ai_success = False
@@ -1863,24 +1697,36 @@ class TradingBot:
 
     def _reinitialize_aggregator(self, asset_name: str, preset: str):
         """
-        Reinitialize aggregator with new preset - FIXED for hybrid mode
+        Reinitialize aggregator with new preset - FIXED for Council & Hybrid modes
         """
         try:
-            CONFIG_PATH = Path(__file__).parent / "config" / "aggregator_presets.json"
-            with open(CONFIG_PATH, "r") as f:
-                AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
+            # 1. Load Presets
+            try:
+                CONFIG_PATH = Path("config/aggregator_presets.json")
+                with open(CONFIG_PATH, "r") as f:
+                    AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
+            except Exception:
+                # Fallback path if running from src/execution context
+                try:
+                    CONFIG_PATH = (
+                        Path(__file__).parents[2] / "config" / "aggregator_presets.json"
+                    )
+                    with open(CONFIG_PATH, "r") as f:
+                        AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
+                except Exception:
+                    logger.error("[REGIME] Could not load presets file")
+                    return
 
             from src.execution.signal_aggregator import PerformanceWeightedAggregator
             from src.execution.council_aggregator import InstitutionalCouncilAggregator
 
-            # Get strategies for this asset
+            # 2. Get strategies for this asset
             strategies = self.strategies.get(asset_name, {})
-
             if not strategies:
                 logger.warning(f"[REGIME] No strategies for {asset_name}")
                 return
 
-            # Get preset config
+            # 3. Get preset config
             asset_type = "BTC" if "BTC" in asset_name.upper() else "GOLD"
             preset_config = AGGREGATOR_PRESETS.get(asset_type, {}).get(preset)
 
@@ -1888,29 +1734,43 @@ class TradingBot:
                 logger.error(f"[REGIME] No config for {asset_name} {preset}")
                 return
 
-            # Get AI validator if available
+            # 4. Get AI validator if available
             ai_validator = None
             if hasattr(self, "ai_validator") and self.ai_validator:
                 ai_validator = self.ai_validator
 
-            # ================================================================
-            # FIX: Check aggregator mode and reinitialize accordingly
-            # ================================================================
-            current_aggregator = self.aggregators.get(asset_name)
+            # 5. Determine Mode (Check Global Config)
+            global_mode = (
+                self.config.get("aggregator_settings", {})
+                .get("mode", "performance")
+                .lower()
+            )
 
-            # Determine if we're in hybrid mode
-            is_hybrid = (
+            # Use current aggregator state to confirm if we are in hybrid (fallback)
+            current_aggregator = self.aggregators.get(asset_name)
+            is_hybrid_state = (
                 isinstance(current_aggregator, dict)
                 and current_aggregator.get("mode") == "hybrid"
             )
 
-            if is_hybrid:
-                # ✅ HYBRID MODE: Recreate both aggregators
-                logger.info(
-                    f"[REGIME] Reinitializing HYBRID aggregators for {asset_name}"
-                )
+            # Force hybrid if config says so OR state says so
+            if global_mode == "hybrid" or is_hybrid_state:
+                mode_to_init = "hybrid"
+            elif global_mode == "council":
+                mode_to_init = "council"
+            else:
+                mode_to_init = "performance"
 
-                # Create Performance aggregator
+            logger.info(
+                f"[REGIME] Reinitializing {asset_name} | Preset: {preset.upper()} | Mode: {mode_to_init.upper()}"
+            )
+
+            # ================================================================
+            # RE-INITIALIZE BASED ON MODE
+            # ================================================================
+
+            if mode_to_init == "hybrid":
+                # ✅ HYBRID MODE: Recreate both
                 perf_agg = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -1925,35 +1785,43 @@ class TradingBot:
                     ),
                 )
 
-                # Create Council aggregator
                 council_agg = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
                     ema_strategy=strategies.get("ema_strategy"),
                     asset_type=asset_type,
                     ai_validator=ai_validator,
-                    enable_detailed_logging=False,  # Reduce noise
+                    enable_detailed_logging=False,
+                    config=preset_config,  # ✅ FIX: Pass config to Council
                     trend_aligned_threshold=3.5,
                     counter_trend_threshold=4.0,
                 )
 
-                # Store both
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
                     "council": council_agg,
                     "mode": "hybrid",
                 }
+                logger.info(f"[REGIME] ✓ Hybrid aggregators refreshed for {asset_name}")
 
-                logger.info(
-                    f"[REGIME] ✓ Hybrid aggregators reinitialized for {asset_name} with {preset.upper()}"
+            elif mode_to_init == "council":
+                # ✅ COUNCIL MODE (Single)
+                new_aggregator = InstitutionalCouncilAggregator(
+                    mean_reversion_strategy=strategies.get("mean_reversion"),
+                    trend_following_strategy=strategies.get("trend_following"),
+                    ema_strategy=strategies.get("ema_strategy"),
+                    asset_type=asset_type,
+                    ai_validator=ai_validator,
+                    enable_detailed_logging=getattr(self, "detailed_logging", False),
+                    config=preset_config,  # ✅ FIX: Pass config to Council
+                    trend_aligned_threshold=3.5,
+                    counter_trend_threshold=4.0,
                 )
+                self.aggregators[asset_name] = new_aggregator
+                logger.info(f"[REGIME] ✓ Council aggregator refreshed for {asset_name}")
 
             else:
-                # ✅ SINGLE MODE: Just recreate the single aggregator
-                logger.info(
-                    f"[REGIME] Reinitializing single aggregator for {asset_name}"
-                )
-
+                # ✅ PERFORMANCE MODE (Single)
                 new_aggregator = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -1967,12 +1835,9 @@ class TradingBot:
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
                 )
-
-                # Replace old aggregator
                 self.aggregators[asset_name] = new_aggregator
-
                 logger.info(
-                    f"[REGIME] ✓ Aggregator reinitialized for {asset_name} with {preset.upper()}"
+                    f"[REGIME] ✓ Performance aggregator refreshed for {asset_name}"
                 )
 
         except Exception as e:
@@ -2526,8 +2391,7 @@ class TradingBot:
     )
     def trade_asset(self, asset_name: str):
         """
-        Execute trading logic with hybrid aggregator support
-
+        Execute trading logic and LOG TO DB ONLY ON SUCCESS
         """
         asset_cfg = self.config["assets"][asset_name]
         if not asset_cfg.get("enabled", False):
@@ -2551,178 +2415,92 @@ class TradingBot:
             logger.info(f"Trading {asset_name}")
             logger.info(f"{'-' * 70}")
 
-            # Show market info
-            if asset_name == "GOLD":
-                status, msg = MarketHours.get_market_status("gold")
-                logger.info(f"[MARKET] {msg}")
-            else:
-                logger.info(f"[MARKET] {asset_name}: 24/7 (Cryptocurrency)")
-
-            # ================================================================
-            # FIX 1: Get FRESH signal from aggregator (not database)
-            # ================================================================
-
-            # Fetch latest data
+            # ============================================================
+            # 1. Fetch FRESH Data & Signal (Re-calculation ensures accuracy)
+            # ============================================================
             end_time = datetime.now(timezone.utc)
-
+            
             if exchange == "binance":
                 interval = asset_cfg.get("interval", "1h")
                 lookback = 15 if interval == "1h" else 60
                 start_time = end_time - timedelta(days=lookback)
-
+                
                 df = self.data_manager.fetch_binance_data(
-                    symbol=symbol,
-                    interval=interval,
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    symbol=symbol, 
+                    interval=interval, 
+                    start_date=start_time.strftime("%Y-%m-%d"), 
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
                 )
             else:
                 timeframe = asset_cfg.get("timeframe", "H1")
                 lookback = 25 if timeframe == "H1" else 75
                 start_time = end_time - timedelta(days=lookback)
-
+                
                 df = self.data_manager.fetch_mt5_data(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    symbol=symbol, 
+                    timeframe=timeframe, 
+                    start_date=start_time.strftime("%Y-%m-%d"), 
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
                 )
 
             df = self.data_manager.clean_data(df)
-
+            
             if len(df) < 250:
-                logger.warning(
-                    f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250)"
-                )
+                logger.warning(f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250)")
                 return
 
-            # Get aggregator
             aggregator = self.aggregators.get(asset_name)
             if not aggregator:
                 logger.warning(f"[SKIP] {asset_name}: No aggregator available")
                 return
 
-            # ✅ FIX: Get FRESH signal with full details
+            # Get Signal (Hybrid or Single)
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
-                    asset_name=asset_name,
-                    df=df,
-                    aggregators=aggregator,
-                    hybrid_selector=self.hybrid_selector,
+                    asset_name, 
+                    df, 
+                    aggregators=aggregator, 
+                    hybrid_selector=self.hybrid_selector
                 )
             else:
                 signal, details = aggregator.get_aggregated_signal(df)
 
-            # Get current price
             try:
                 current_price = handler.get_current_price(symbol)
             except:
                 current_price = float(df["close"].iloc[-1])
-
-            # Update details with current price
+            
             details["price"] = current_price
 
-            logger.info(f"[PRICE] {asset_name}: ${current_price:,.2f}")
-
-            # ================================================================
-            # FIX 2: Use FRESH details for logging (not database reconstruction)
-            # ================================================================
-
-            # Log AI validation if present
-            if details.get("ai_validation"):
-                ai_viz = details["ai_validation"]
-                logger.info(f"\n[AI VALIDATION]")
-                logger.info(f"  Pattern:  {ai_viz.get('pattern_name', 'N/A')}")
-                logger.info(f"  Conf:     {ai_viz.get('pattern_confidence', 0):.2%}")
-                logger.info(
-                    f"  S/R:      {'Yes' if ai_viz.get('sr_analysis', {}).get('near_sr_level') else 'No'}"
-                )
-                logger.info(f"  Result:   {ai_viz.get('action', 'N/A').upper()}")
-
-            # Log signals with FRESH confidences
-            logger.info(f"\n[SIGNAL] Strategy Analysis:")
-            logger.info(
-                f"  Mean Reversion:   {details.get('mr_signal', 0):>2} "
-                f"(confidence: {details.get('mr_confidence', 0):.3f})"
-            )
-            logger.info(
-                f"  Trend Following:  {details.get('tf_signal', 0):>2} "
-                f"(confidence: {details.get('tf_confidence', 0):.3f})"
-            )
-            logger.info(
-                f"  EMA Regime:       {details.get('regime', 'N/A')} "
-                f"(confidence: {details.get('regime_confidence', 0):.3f})"
-            )
-
-            if details.get("ai_modified", False):
-                logger.info(f"\n[AI] Signal modifications detected")
-
-            logger.info(f"\n[AGGREGATED] Signal: {signal:>2}")
-            logger.info(f"[QUALITY] Score: {details.get('signal_quality', 0):.3f}")
-            logger.info(f"[REASONING] {details.get('reasoning', 'N/A')}")
-
-            # ✅ FIX: Log hybrid mode if active
+            # Log Signal Quality to Console (BUT DO NOT WRITE TO DB YET)
+            logger.info(f"[SIGNAL] {asset_name} Signal: {signal} (Quality: {details.get('signal_quality', 0):.2f})")
+            
             if details.get("aggregator_mode"):
-                logger.info(f"\n[HYBRID MODE]")
-                logger.info(f"  Active Mode: {details['aggregator_mode'].upper()}")
-                logger.info(f"  Confidence:  {details.get('mode_confidence', 0):.2%}")
-                logger.info(f"  ⚠️  VTM will calculate TP/SL dynamically")
-
-                scores = details.get("scores", {})
-                for judge, score in scores.items():
-                    logger.info(f"  {judge.capitalize():12s}: {score:.2f}")
+                logger.info(f"  Mode: {details['aggregator_mode'].upper()} | Conf: {details.get('mode_confidence', 0):.2%}")
 
             # Skip if HOLD signal
             if signal == 0:
-                logger.info(f"[HOLD] {asset_name}: No action (HOLD signal)")
-
-                # ✅ OPTIONAL: Still log to database for tracking
-                if self.db_manager:
-                    self.db_manager.insert_signal_smart(
-                        asset=asset_name,
-                        signal=signal,
-                        signal_quality=details.get("signal_quality", 0),
-                        regime=details.get("regime", "UNKNOWN"),
-                        regime_confidence=details.get("regime_confidence", 0),
-                        mr_signal=details.get("mr_signal", 0),
-                        mr_confidence=details.get("mr_confidence", 0),
-                        tf_signal=details.get("tf_signal", 0),
-                        tf_confidence=details.get("tf_confidence", 0),
-                        ema_signal=details.get("ema_signal"),
-                        ema_confidence=details.get("ema_confidence"),
-                        buy_score=details.get("buy_score"),
-                        sell_score=details.get("sell_score"),
-                        reasoning=details.get("reasoning"),
-                        price=current_price,
-                        ai_validated=details.get("ai_validated", False),
-                        ai_modified=details.get("ai_modified", False),
-                        ai_details=details.get("ai_validation"),
-                        executed=False,
-                    )
-
+                logger.info(f"[HOLD] {asset_name}: No action taken.")
                 return
 
-            # Check trading limits
+            # ============================================================
+            # 2. Check Limits & Cooldowns
+            # ============================================================
             if not self.check_trading_limits():
-                logger.info(
-                    f"[LIMIT] {asset_name}: Trading limits prevent new position"
-                )
+                logger.info(f"[LIMIT] Trading limits reached.")
                 return
-
+            
             if not self.check_min_time_between_trades(asset_name):
-                logger.info(f"[COOLDOWN] {asset_name}: Cooldown period active")
+                logger.info(f"[COOLDOWN] {asset_name} is in cooldown.")
                 return
 
             # Store BEFORE state
             positions_before = self.portfolio_manager.get_asset_positions(asset_name)
             position_ids_before = {p.position_id for p in positions_before}
 
-            logger.info(
-                f"[BEFORE] {len([p for p in positions_before if p.side == 'long'])} LONG, "
-                f"{len([p for p in positions_before if p.side == 'short'])} SHORT positions"
-            )
-
-            # Execute signal (using FRESH details with correct confidences)
+            # ============================================================
+            # 3. Execute Trade
+            # ============================================================
             success = False
             try:
                 if exchange == "binance":
@@ -2731,12 +2509,9 @@ class TradingBot:
                         current_price=current_price,
                         asset_name=asset_name,
                         confidence_score=details.get("signal_quality", 0.5),
-                        market_condition=(
-                            "bull" if details.get("regime") == "🚀 BULL" else "bear"
-                        ),
-                        signal_details=details,  # ✅ Pass full details including hybrid context
+                        market_condition=("bull" if details.get("regime") == "🚀 BULL" else "bear"),
+                        signal_details=details,
                     )
-
                     self.binance_handler.check_and_update_positions(asset_name)
                 else:
                     success = self.mt5_handler.execute_signal(
@@ -2744,51 +2519,35 @@ class TradingBot:
                         symbol=symbol,
                         asset_name=asset_name,
                         confidence_score=details.get("signal_quality", 0.5),
-                        market_condition=(
-                            "bull" if details.get("regime") == "🚀 BULL" else "bear"
-                        ),
+                        market_condition=("bull" if details.get("regime") == "🚀 BULL" else "bear"),
                         signal_details=details,
                     )
                     self.mt5_handler.check_and_update_positions(asset_name)
-
             except Exception as e:
                 logger.error(f"[ERROR] Failed to execute signal for {asset_name}: {e}")
                 return
 
-            # Handle success (unchanged)
+            # ============================================================
+            # 4. Handle Success & DB Logging
+            # ============================================================
             if success:
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
                 position_ids_after = {p.position_id for p in positions_after}
                 new_position_ids = position_ids_after - position_ids_before
                 closed_position_ids = position_ids_before - position_ids_after
 
-                logger.info(
-                    f"[AFTER] {len([p for p in positions_after if p.side == 'long'])} LONG, "
-                    f"{len([p for p in positions_after if p.side == 'short'])} SHORT positions"
-                )
+                # Update internal counters
+                self.trade_count_today += 1
+                self.last_trade_times[asset_name] = datetime.now()
+                
+                logger.info(f"[SUCCESS] {asset_name} Trade Executed (Daily count: {self.trade_count_today})")
 
-                # Send notifications for NEW positions
+                # Send Telegram Notifications (New Positions)
                 if new_position_ids:
                     for position_id in new_position_ids:
-                        new_pos = next(
-                            (
-                                p
-                                for p in positions_after
-                                if p.position_id == position_id
-                            ),
-                            None,
-                        )
-
-                        if (
-                            new_pos
-                            and self.telegram_bot
-                            and self._telegram_ready.is_set()
-                        ):
+                        new_pos = next((p for p in positions_after if p.position_id == position_id), None)
+                        if new_pos and self.telegram_bot and self._telegram_ready.is_set():
                             try:
-                                logger.info(
-                                    f"[TELEGRAM] Notifying NEW {new_pos.side.upper()} position: {position_id}"
-                                )
-
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
                                         asset=asset_name,
@@ -2797,37 +2556,21 @@ class TradingBot:
                                         size=new_pos.quantity * new_pos.entry_price,
                                         sl=new_pos.stop_loss,
                                         tp=new_pos.take_profit,
+                                        leverage=getattr(new_pos, 'leverage', 1),
+                                        margin_type=getattr(new_pos, 'margin_type', 'SPOT'),
+                                        is_futures=getattr(new_pos, 'is_futures', False)
                                     )
                                 )
                             except Exception as e:
-                                logger.error(
-                                    f"[TELEGRAM] Failed to send open notification: {e}"
-                                )
+                                logger.error(f"[TELEGRAM] Notification failed: {e}")
 
-                # Send notifications for CLOSED positions
+                # Send Notifications (Closed Positions)
                 if closed_position_ids:
                     closed_trades = self.portfolio_manager.closed_positions
-
                     for position_id in closed_position_ids:
-                        matching_trade = next(
-                            (
-                                t
-                                for t in reversed(closed_trades)
-                                if t.get("position_id") == position_id
-                            ),
-                            None,
-                        )
-
-                        if (
-                            matching_trade
-                            and self.telegram_bot
-                            and self._telegram_ready.is_set()
-                        ):
+                        matching_trade = next((t for t in reversed(closed_trades) if t.get("position_id") == position_id), None)
+                        if matching_trade and self.telegram_bot and self._telegram_ready.is_set():
                             try:
-                                logger.info(
-                                    f"[TELEGRAM] Notifying CLOSED position: {position_id}"
-                                )
-
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_closed(
                                         asset=asset_name,
@@ -2838,37 +2581,31 @@ class TradingBot:
                                     )
                                 )
                             except Exception as e:
-                                logger.error(
-                                    f"[TELEGRAM] Failed to send close notification: {e}"
-                                )
+                                logger.error(f"[TELEGRAM] Close notification failed: {e}")
 
-                # Send visualization chart (using FRESH details)
+                # Send Visualization Chart
                 if new_position_ids and self.chart_sender:
                     try:
-                        logger.info(
-                            f"[VIZ] Trade executed, sending chart for {asset_name}..."
-                        )
+                        logger.info(f"[VIZ] Sending chart for {asset_name}...")
                         df_4h = self._fetch_4h_data(asset_name)
-
                         self._send_telegram_notification(
                             self.chart_sender.send_decision_chart(
                                 asset_name=asset_name,
-                                df_15min=df,  # Use the df we already fetched
+                                df_15min=df,
                                 df_4h=df_4h,
                                 signal=signal,
-                                details=details,  # ✅ FRESH details with correct confidences
+                                details=details,
                                 current_price=current_price,
                             )
-                        )
-                        logger.info(
-                            f"[VIZ] ✓ Chart sent for executed {asset_name} trade"
                         )
                     except Exception as e:
                         logger.error(f"[VIZ] Chart error: {e}")
 
-                # ✅ Log to database with FRESH details
+                # ✅✅✅ DATABASE LOGGING (Only on Success) ✅✅✅
                 if self.db_manager:
                     try:
+                        logger.info(f"[DB] Logging successful trade execution for {asset_name}")
+                        
                         signal_id, is_new = self.db_manager.insert_signal_smart(
                             asset=asset_name,
                             signal=signal,
@@ -2888,56 +2625,29 @@ class TradingBot:
                             ai_validated=details.get("ai_validated", False),
                             ai_modified=details.get("ai_modified", False),
                             ai_details=details.get("ai_validation"),
-                            executed=True,  # Mark as executed
+                            executed=True,  # ✅ MARK AS EXECUTED
                         )
-
-                        # Link to trade if new position created
+                        
+                        # Link signal to trade ID if available
                         if new_position_ids:
-                            new_position_id = list(new_position_ids)[0]
-                            new_pos = next(
-                                (
-                                    p
-                                    for p in positions_after
-                                    if p.position_id == new_position_id
-                                ),
-                                None,
-                            )
-
-                            if (
-                                new_pos
-                                and hasattr(new_pos, "db_trade_id")
-                                and new_pos.db_trade_id
-                            ):
+                            new_pos_id = list(new_position_ids)[0]
+                            new_pos = next((p for p in positions_after if p.position_id == new_pos_id), None)
+                            if new_pos and hasattr(new_pos, "db_trade_id") and new_pos.db_trade_id:
                                 self.db_manager.update_signal_execution(
                                     signal_id=signal_id,
                                     executed=True,
                                     trade_id=new_pos.db_trade_id,
                                 )
-
+                        
                     except Exception as e:
-                        logger.error(f"[DB] Signal logging error: {e}")
+                        logger.error(f"[DB] Failed to log execution: {e}")
 
-                # Update counters
-                self.trade_count_today += 1
-                self.last_trade_times[asset_name] = datetime.now()
-                signal_type = "BUY" if signal == 1 else "SELL"
-                logger.info(
-                    f"[SUCCESS] {asset_name} {signal_type} executed "
-                    f"(Daily count: {self.trade_count_today})"
-                )
-                logger.info(
-                    f"  Opened: {len(new_position_ids)}, Closed: {len(closed_position_ids)}"
-                )
-
-                # Log trade
+                # Log trade to local file
                 if self.config.get("logging", {}).get("save_trades", True):
                     self._log_trade(asset_name, signal, details, current_price)
 
             else:
-                logger.warning(
-                    f"[SKIP] {asset_name}: Trade not executed "
-                    f"(limits/cooldowns/handler failure)"
-                )
+                logger.warning(f"[SKIP] {asset_name}: Execution returned False (limits/cooldowns/handler failure)")
 
         except Exception as e:
             logger.error(f"[ERROR] {asset_name} trading error: {e}", exc_info=True)
@@ -2948,13 +2658,11 @@ class TradingBot:
                     message=f"{asset_name} trading error: {str(e)}",
                     component="trade_execution",
                 )
-
+            
             if self.telegram_bot and self._telegram_ready.is_set():
                 try:
                     self._send_telegram_notification(
-                        self.telegram_bot.notify_error(
-                            f"Error in {asset_name}:\n{str(e)[:200]}"
-                        )
+                        self.telegram_bot.notify_error(f"Error in {asset_name}:\n{str(e)[:200]}")
                     )
                 except:
                     pass
