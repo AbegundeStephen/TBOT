@@ -1,6 +1,10 @@
 """
-Data Manager -  VERSION
-Corrects date handling for Binance API
+✅ FIXED DataManager - Properly handles separate Futures keys
+Key fixes:
+1. Creates separate clients for Spot and Futures
+2. Uses correct endpoints based on trading mode
+3. Doesn't force Futures API for data fetching (Spot is fine for OHLCV)
+4. Better error handling
 """
 
 import pandas as pd
@@ -20,53 +24,117 @@ class DataManager:
 
     def __init__(self, config: Dict):
         self.config = config
-        self.binance_client = None
+        self.binance_client = None  # For Spot data (OHLCV)
+        self.futures_client = None  # For Futures trading (separate)
         self.mt5_initialized = False
 
     def initialize_binance(self) -> bool:
-        """Initialize Binance API connection with dynamic API base URL."""
+        """
+        ✅ FIXED: Initialize Binance with proper separation of Spot vs Futures
+        
+        Key Changes:
+        1. Always use Spot API for data fetching (OHLCV data)
+        2. Create separate Futures client if futures keys exist
+        3. Don't mix Spot and Futures endpoints
+        """
         try:
             api_config = self.config["api"]["binance"]
             api_key = api_config.get("api_key", "")
             api_secret = api_config.get("api_secret", "")
 
-            logger.info(f"Initializing Binance API...")
+            logger.info("=" * 70)
+            logger.info("INITIALIZING BINANCE API")
+            logger.info("=" * 70)
 
             if not api_key or not api_secret or api_key == "YOUR_BINANCE_API_KEY":
-                logger.warning("Binance API keys not configured, using public API only")
+                logger.warning("⚠️  Binance API keys not configured, using public API only")
                 self.binance_client = Client("", "")
+                logger.info("✅ Public Spot API initialized (no authentication)")
+                return True
+
+            # ============================================================
+            # STEP 1: Initialize SPOT client (for OHLCV data)
+            # ============================================================
+            logger.info("\n📊 Initializing SPOT client (for price data)...")
+            
+            if api_config.get("testnet", True):
+                self.binance_client = Client(api_key, api_secret, testnet=True)
+                self.binance_client.API_URL = "https://testnet.binance.vision/api"
+                logger.info("   Endpoint: https://testnet.binance.vision/api (testnet)")
             else:
-                # Check if Futures trading is enabled
-                enable_futures = self.config.get("assets", {}).get("BTC", {}).get("enable_futures", False)
+                self.binance_client = Client(api_key, api_secret)
+                logger.info("   Endpoint: https://api.binance.com (LIVE)")
 
-                if api_config.get("testnet", True):
-                    # Set the API base URL based on whether Futures is enabled
-                    if enable_futures:
-                        api_base = api_config.get("futures_api_base", "https://testnet.binancefuture.com")
-                        logger.info(f"Using Futures Testnet API: {api_base}")
-                        self.binance_client = Client(api_key, api_secret, testnet=True, tld="com")
-                        self.binance_client.API_URL = api_base
-                    else:
-                        api_base = api_config.get("api_base", "https://testnet.binance.vision/api")
-                        logger.info(f"Using Spot Testnet API: {api_base}")
-                        self.binance_client = Client(api_key, api_secret, testnet=True, tld="com")
-                        self.binance_client.API_URL = api_base
-                else:
-                    # Live trading
-                    self.binance_client = Client(api_key, api_secret)
-
-            # Verify the connection
+            # Test Spot connection
             self.binance_client.ping()
-            logger.info("Binance API initialized successfully")
+            logger.info("✅ Spot API connected successfully")
+
+            # ============================================================
+            # STEP 2: Initialize FUTURES client (if separate keys exist)
+            # ============================================================
+            futures_config = self.config.get("api", {}).get("binance_futures")
+            
+            if futures_config:
+                logger.info("\n🚀 Initializing FUTURES client (separate keys)...")
+                
+                futures_key = futures_config.get("api_key", "")
+                futures_secret = futures_config.get("api_secret", "")
+                
+                if futures_key and futures_secret:
+                    if futures_config.get("testnet", True):
+                        self.futures_client = Client(futures_key, futures_secret, testnet=True)
+                        self.futures_client.API_URL = "https://testnet.binancefuture.com"
+                        logger.info("   Endpoint: https://testnet.binancefuture.com (testnet)")
+                    else:
+                        self.futures_client = Client(futures_key, futures_secret)
+                        self.futures_client.API_URL = "https://fapi.binance.com"
+                        logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
+                    
+                    # Test Futures connection
+                    try:
+                        self.futures_client.futures_ping()
+                        logger.info("✅ Futures API connected successfully")
+                    except Exception as e:
+                        logger.warning(f"⚠️  Futures API test failed: {e}")
+                        logger.warning("   Will fall back to Spot keys for Futures")
+                        self.futures_client = None
+                else:
+                    logger.warning("⚠️  Futures keys incomplete, will use Spot keys if needed")
+            else:
+                logger.info("\n📝 No separate Futures config found")
+                logger.info("   Will use Spot keys for Futures trading (if enabled)")
+                # Don't set futures_client - let execution handler decide
+
+            logger.info("\n" + "=" * 70)
+            logger.info("BINANCE INITIALIZATION COMPLETE")
+            logger.info("=" * 70)
+            logger.info(f"Spot Client:    {'✅ Active' if self.binance_client else '❌ Inactive'}")
+            logger.info(f"Futures Client: {'✅ Active (separate keys)' if self.futures_client else '📝 Will use Spot keys'}")
+            logger.info("=" * 70 + "\n")
+
             return True
 
         except BinanceAPIException as e:
-            logger.error(f"Binance API error: {e}")
+            logger.error(f"❌ Binance API error: {e}")
             return False
         except Exception as e:
-            logger.error(f"Failed to initialize Binance API: {e}")
+            logger.error(f"❌ Failed to initialize Binance API: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
+    def get_futures_client(self) -> Optional[Client]:
+        """
+        ✅ NEW: Get the appropriate client for Futures trading
+        Returns separate Futures client if available, otherwise Spot client
+        """
+        if self.futures_client:
+            return self.futures_client
+        elif self.binance_client:
+            logger.debug("Using Spot client for Futures (no separate keys)")
+            return self.binance_client
+        else:
+            return None
 
     def initialize_mt5(self) -> bool:
         """Initialize MT5 connection with detailed diagnostics"""
@@ -107,30 +175,17 @@ class DataManager:
 
             logger.info("\nStep 1: Initializing MT5 terminal...")
 
-            logger.info(
-                "Attempting initialize without path (auto-detect running MT5)..."
-            )
-            init_result = mt5.initialize()
-
-            logger.info("\nStep 1: Initializing MT5 terminal...")
-
             if not path:
                 logger.info("No MT5 path provided, attempting auto-detect")
                 init_result = mt5.initialize()
             else:
-                logger.info(f"Initializing MT5 using explicit executable path: {path}")
+                logger.info(f"Initializing MT5 using explicit path: {path}")
                 init_result = mt5.initialize(
                     path=path,
                     login=int(login),
                     password=str(password),
                     server=str(server),
                 )
-
-            if not init_result:
-                error = mt5.last_error()
-                logger.error(f"MT5 initialize() failed: {error}")
-                return False
-
 
             if not init_result:
                 error = mt5.last_error()
@@ -235,7 +290,6 @@ class DataManager:
         except Exception as e:
             logger.error(f"Unexpected error during MT5 initialization: {e}")
             import traceback
-
             logger.error(traceback.format_exc())
             return False
 
@@ -245,7 +299,10 @@ class DataManager:
     def _fetch_klines_with_retry(
         self, symbol: str, interval: str, startTime: int, endTime: int, limit: int
     ):
-        """Helper method to fetch klines with retry logic."""
+        """
+        ✅ ALWAYS uses SPOT client for OHLCV data
+        Futures and Spot have identical OHLCV data, so Spot is fine
+        """
         return self.binance_client.get_klines(
             symbol=symbol,
             interval=interval,
@@ -263,16 +320,14 @@ class DataManager:
         limit: int = 1000,
     ) -> pd.DataFrame:
         """
-        Fetch historical OHLCV data from Binance with robust date handling and retry logic.
-
-         Properly handles datetime strings with time components
+        ✅ Fetch historical OHLCV data from Binance
+        Always uses SPOT endpoint (Spot and Futures have same OHLCV data)
         """
         if self.binance_client is None:
             raise RuntimeError("Binance client not initialized")
 
         try:
-            #  Parse datetime strings that may include time
-            # This handles both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" formats
+            # Parse datetime strings that may include time
             start_dt = pd.to_datetime(start_date)
 
             # If timezone-naive, assume UTC
@@ -281,7 +336,7 @@ class DataManager:
             else:
                 start_dt = start_dt.tz_convert("UTC")
 
-            #  Handle end_date properly
+            # Handle end_date properly
             if end_date:
                 end_dt = pd.to_datetime(end_date)
                 if end_dt.tz is None:
@@ -289,19 +344,18 @@ class DataManager:
                 else:
                     end_dt = end_dt.tz_convert("UTC")
             else:
-                # If no end_date provided, use current time
                 end_dt = pd.Timestamp.now(tz="UTC")
 
             start_ts = int(start_dt.timestamp() * 1000)
             end_ts = int(end_dt.timestamp() * 1000)
 
             logger.info(f"Fetching {symbol} data from {start_dt} to {end_dt} (UTC)")
-            logger.info(f"Start timestamp: {start_ts} ({start_dt})")
-            logger.info(f"End timestamp: {end_ts} ({end_dt})")
+            logger.debug(f"Start timestamp: {start_ts} ({start_dt})")
+            logger.debug(f"End timestamp: {end_ts} ({end_dt})")
 
             all_klines = []
             current_start = start_ts
-            max_iterations = 100  # Safety limit to prevent infinite loops
+            max_iterations = 100
             iteration = 0
 
             while current_start < end_ts and iteration < max_iterations:
@@ -325,31 +379,26 @@ class DataManager:
 
                 all_klines.extend(klines)
 
-                # Get the timestamp of the last candle
                 last_timestamp = klines[-1][0]
 
-                # If we got the same timestamp as before, we're stuck
                 if last_timestamp <= current_start:
                     logger.warning(
                         f"Duplicate timestamp detected, stopping to prevent infinite loop"
                     )
                     break
 
-                # Move to next batch (add 1ms to avoid duplicates)
                 current_start = last_timestamp + 1
 
-                logger.info(
+                logger.debug(
                     f"Batch {iteration}: Fetched {len(klines)} bars, total: {len(all_klines)}"
                 )
 
-                # If we got fewer bars than the limit, we've reached the end
                 if len(klines) < limit:
-                    logger.info("Reached end of available data (partial batch)")
+                    logger.debug("Reached end of available data (partial batch)")
                     break
 
-                # If we've reached the end timestamp, stop
                 if last_timestamp >= end_ts:
-                    logger.info("Reached requested end timestamp")
+                    logger.debug("Reached requested end timestamp")
                     break
 
             if iteration >= max_iterations:
@@ -389,14 +438,12 @@ class DataManager:
             df = df[["timestamp", "open", "high", "low", "close", "volume"]]
             df = df.set_index("timestamp")
 
-            # Remove duplicates (keep first occurrence)
+            # Remove duplicates
             df = df[~df.index.duplicated(keep="first")]
-
-            # Sort by timestamp
             df = df.sort_index()
 
-            logger.info(f"Successfully fetched {len(df)} bars for {symbol}")
-            logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
+            logger.info(f"✅ Successfully fetched {len(df)} bars for {symbol}")
+            logger.info(f"   Date range: {df.index[0]} to {df.index[-1]}")
 
             # Validate data range
             days_requested = (end_dt - start_dt).days
@@ -404,21 +451,23 @@ class DataManager:
 
             if df.index[0] > start_dt:
                 missing_days = (df.index[0] - start_dt).days
-                logger.warning(
-                    f"Data starts at {df.index[0]}, but requested {start_dt}. "
-                    f"Missing {missing_days} days of data at the beginning."
-                )
+                if missing_days > 1:
+                    logger.warning(
+                        f"   ⚠️  Data starts at {df.index[0]}, but requested {start_dt}. "
+                        f"Missing {missing_days} days at the beginning."
+                    )
 
             if df.index[-1] < end_dt:
                 missing_hours = (end_dt - df.index[-1]).total_seconds() / 3600
-                if missing_hours > 2:  # Only warn if significantly behind
+                if missing_hours > 2:
                     logger.warning(
-                        f"Data ends at {df.index[-1]}, but requested {end_dt}. "
-                        f"Missing {missing_hours:.1f} hours of data at the end."
+                        f"   ⚠️  Data ends at {df.index[-1]}, but requested {end_dt}. "
+                        f"Missing {missing_hours:.1f} hours at the end."
                     )
 
+            coverage_pct = (days_received / max(days_requested, 1)) * 100
             logger.info(
-                f"Coverage: {days_received}/{days_requested} days ({days_received/max(days_requested,1)*100:.1f}%)"
+                f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)"
             )
 
             return df
@@ -435,11 +484,7 @@ class DataManager:
         end_date: Optional[str] = None,
         count: int = 10000,
     ) -> pd.DataFrame:
-        """
-        Fetch historical OHLCV data from MT5
-
-         Properly handles datetime strings with time components
-        """
+        """Fetch historical OHLCV data from MT5"""
         if not self.mt5_initialized:
             raise RuntimeError("MT5 not initialized")
 
@@ -458,14 +503,13 @@ class DataManager:
 
             tf = timeframe_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
 
-            #  Handle datetime strings with time components
             start_dt = pd.to_datetime(start_date)
             if end_date:
                 end_dt = pd.to_datetime(end_date)
             else:
                 end_dt = datetime.now()
 
-            # Convert to Python datetime (MT5 requires this)
+            # Convert to Python datetime
             start_dt = (
                 start_dt.to_pydatetime()
                 if hasattr(start_dt, "to_pydatetime")
@@ -491,8 +535,8 @@ class DataManager:
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
             df = df.set_index("timestamp")
 
-            logger.info(f"Fetched {len(df)} bars for {symbol} from MT5")
-            logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
+            logger.info(f"✅ Fetched {len(df)} bars for {symbol} from MT5")
+            logger.info(f"   Date range: {df.index[0]} to {df.index[-1]}")
 
             return df
 
@@ -612,10 +656,10 @@ class DataManager:
         if self.mt5_initialized:
             try:
                 import MetaTrader5 as mt5
-
                 mt5.shutdown()
                 logger.info("MT5 shutdown complete")
             except Exception as e:
                 logger.error(f"Error shutting down MT5: {e}")
 
         self.binance_client = None
+        self.futures_client = None

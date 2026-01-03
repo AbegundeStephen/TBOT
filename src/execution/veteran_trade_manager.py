@@ -301,7 +301,7 @@ class VeteranTradeManager:
         side: str,
         asset: str,
         high: np.ndarray,
-        low: np.ndarray,
+        low: np.ndarray,  
         close: np.ndarray,
         account_balance: float,
         signal_details: Dict,

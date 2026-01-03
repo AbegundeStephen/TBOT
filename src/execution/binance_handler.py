@@ -1511,274 +1511,364 @@ class BinanceExecutionHandler:
 )
     def sync_positions_with_binance(self, asset_name: str = "BTC", symbol: str = None) -> bool:
         """
-        ✅ COMPLETE FIX: Sync portfolio with Binance holdings (multi-position aware + VTM)
-        Just copy-paste this entire method to replace your existing one in binance_handler.py
+        ✅ FIXED: Sync portfolio with Binance (Futures or Spot)
+        
+        Detects trading mode automatically:
+        - If Futures enabled: Check Futures positions
+        - If Spot only: Check Spot holdings
+        - Paper mode: Skip sync (simulated positions only)
         """
         if symbol is None:
             symbol = self.symbol
         
         try:
             logger.info(f"[SYNC] Starting position sync for {asset_name}...")
-            account = self.client.get_account()
+            
+            # ============================================================
+            # PAPER MODE: Skip sync (no real positions)
+            # ============================================================
+            if self.is_paper_mode:
+                logger.info("[SYNC] Paper mode - skipping position sync")
+                return True
+            
+            # ============================================================
+            # Detect if using Futures or Spot
+            # ============================================================
+            using_futures = hasattr(self, 'futures_handler') and self.futures_handler is not None
+            
+            if using_futures:
+                logger.info("[SYNC] Using Futures API for position sync")
+                return self._sync_futures_positions(asset_name, symbol)
+            else:
+                logger.info("[SYNC] Using Spot API for position sync")
+                return self._sync_spot_positions(asset_name, symbol)
+        
+        except Exception as e:
+            logger.error(f"[SYNC] Error: {e}", exc_info=True)
+            return False
 
+
+    def _sync_futures_positions(self, asset_name: str, symbol: str) -> bool:
+        """
+        ✅ NEW: Sync Futures positions (supports LONG + SHORT)
+        """
+        try:
             # Get portfolio positions
             portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
-
-            # Get Binance balance
-            btc_balance = 0.0
-            for balance in account["balances"]:
-                if balance["asset"] == "BTC":
-                    btc_balance = float(balance["free"]) + float(balance["locked"])
-
+            
+            # Get Futures positions from API
+            futures_positions = self.futures_handler.client.futures_position_information(symbol=symbol)
+            
+            # Find active Futures positions
+            active_futures = []
+            for pos in futures_positions:
+                pos_amt = float(pos.get('positionAmt', 0))
+                if pos_amt != 0:
+                    side = "long" if pos_amt > 0 else "short"
+                    active_futures.append({
+                        'side': side,
+                        'quantity': abs(pos_amt),
+                        'entry_price': float(pos.get('entryPrice', 0)),
+                        'unrealized_pnl': float(pos.get('unRealizedProfit', 0)),
+                    })
+            
+            # Get current price
             current_price = self.get_current_price(symbol)
-            MIN_BTC_BALANCE = 0.0001
-
-            # Calculate total portfolio quantity
-            portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
-
-            # ================================================================
-            # SCENARIO 1: Binance has BTC, portfolio is empty → IMPORT WITH VTM
-            # ================================================================
-            if btc_balance > MIN_BTC_BALANCE and not portfolio_positions:
-                import_enabled = bool(
-                    self.config.get("portfolio", {}).get("import_existing_positions", False)
-                )
+            
+            logger.info(
+                f"[SYNC] State:\n"
+                f"  Portfolio: {len(portfolio_positions)} position(s)\n"
+                f"  Futures:   {len(active_futures)} position(s)"
+            )
+            
+            # ============================================================
+            # SCENARIO 1: Futures has positions, portfolio is empty → IMPORT
+            # ============================================================
+            if active_futures and not portfolio_positions:
+                import_enabled = self.config.get("portfolio", {}).get("import_existing_positions", False)
                 
-                if import_enabled:
-                    logger.info(
-                        f"[SYNC] BTC balance {btc_balance:.8f} detected.\n"
-                        f"  → Importing as LONG position WITH VTM support..."
+                if not import_enabled:
+                    logger.warning(
+                        f"[SYNC] Found {len(active_futures)} Futures position(s) but import disabled\n"
+                        f"  → Enable 'import_existing_positions' in config to import them"
                     )
-                    
-                    # ============================================================
-                    # STEP 1: Fetch OHLC data for VTM
-                    # ============================================================
+                    return True
+                
+                logger.info(f"[SYNC] Importing {len(active_futures)} Futures position(s)...")
+                
+                for fut_pos in active_futures:
+                    # Fetch OHLC data for VTM
                     ohlc_data = None
-                    df = None
-                    
                     try:
+                        from datetime import datetime, timedelta, timezone
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10)
-
+                        
                         df = self.data_manager.fetch_binance_data(
                             symbol=symbol,
-                            interval=self.config["assets"][asset_name].get("interval", "1h"),
+                            interval=self.asset_config.get("interval", "1h"),
                             start_date=start_time.strftime("%Y-%m-%d"),
                             end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                         )
-
+                        
                         if len(df) > 50:
                             ohlc_data = {
                                 "high": df["high"].values,
                                 "low": df["low"].values,
                                 "close": df["close"].values,
                             }
-                            logger.info(f"[VTM] Fetched {len(df)} bars for dynamic management")
-                        else:
-                            logger.warning(f"[VTM] Insufficient data ({len(df)} bars), VTM disabled")
-
                     except Exception as e:
-                        logger.error(f"[VTM] Failed to fetch OHLC: {e}")
-                        ohlc_data = None
-                        df = None
-
-                    # ============================================================
-                    # STEP 2: Get REAL market analysis from HybridAggregatorSelector
-                    # ============================================================
-                    signal_details_base = None
-
-                    if df is not None and len(df) > 200:
-                        try:
-                            logger.info(f"[HYBRID] Analyzing market for imported BTC position...")
-
-                            # Try to get hybrid selector from parent bot
-                            hybrid_selector = None
-                            if hasattr(self, 'trading_bot') and hasattr(self.trading_bot, 'hybrid_selector'):
-                                hybrid_selector = self.trading_bot.hybrid_selector
-                                logger.info(f"[HYBRID] Using existing hybrid_selector from bot")
-                            else:
-                                # Create temporary instance
-                                from src.execution.hybrid_aggregator_selector import HybridAggregatorSelector
-                                hybrid_selector = HybridAggregatorSelector(
-                                    self.data_manager,
-                                    self.config,
-                                )
-                                logger.info(f"[HYBRID] Created temporary hybrid_selector")
-
-                            # Get current market analysis
-                            mode_info = hybrid_selector.get_optimal_mode(asset_name, df)
-                            analysis = mode_info['analysis']
-
-                            # Build REAL signal_details from market analysis
-                            signal_details_base = {
-                                'imported': True,
-                                'import_time': datetime.now().isoformat(),
-                                
-                                # Real aggregator mode
-                                'aggregator_mode': mode_info['mode'],
-                                'mode_confidence': mode_info['confidence'],
-                                
-                                # Real regime analysis
-                                'regime_analysis': {
-                                    'regime_type': analysis['regime_type'],
-                                    'trend_strength': analysis['trend']['strength'],
-                                    'trend_direction': analysis['trend']['direction'],
-                                    'adx': analysis['trend']['adx'],
-                                    'volatility_regime': analysis['volatility']['regime'],
-                                    'volatility_ratio': analysis['volatility']['ratio'],
-                                    'price_clarity': analysis['price_action']['clarity'],
-                                    'indecision_pct': analysis['price_action']['indecision_pct'],
-                                    'momentum_aligned': analysis['momentum_aligned'],
-                                    'at_key_level': analysis['at_key_level'],
-                                },
-                                
-                                'signal_quality': mode_info['confidence'],
-                                'reasoning': f"BTC position imported from Binance - {analysis['reasoning']}",
-                            }
-
-                            logger.info(f"[HYBRID] ✅ Market analysis complete:")
-                            logger.info(f"  Mode:       {mode_info['mode'].upper()}")
-                            logger.info(f"  Confidence: {mode_info['confidence']:.0%}")
-                            logger.info(f"  Regime:     {analysis['regime_type']}")
-                            logger.info(f"  Trend:      {analysis['trend']['strength']} / {analysis['trend']['direction']}")
-                            logger.info(f"  Volatility: {analysis['volatility']['regime']}")
-
-                        except Exception as e:
-                            logger.error(f"[HYBRID] ❌ Analysis failed: {e}")
-                            signal_details_base = None
-
-                    # Fallback if hybrid analysis fails
-                    if signal_details_base is None:
-                        logger.warning(f"[HYBRID] Using fallback signal_details (no market analysis)")
-                        signal_details_base = {
-                            'imported': True,
-                            'import_time': datetime.now().isoformat(),
-                            'aggregator_mode': 'unknown',
-                            'mode_confidence': 0.5,
-                            'regime_analysis': {
-                                'regime_type': 'unknown',
-                                'trend_strength': 'unknown',
-                                'trend_direction': 'unknown',
-                                'adx': 20.0,
-                                'volatility_regime': 'normal',
-                                'volatility_ratio': 1.0,
-                                'price_clarity': 'unknown',
-                                'indecision_pct': 0.0,
-                                'momentum_aligned': False,
-                                'at_key_level': False,
-                            },
-                            'signal_quality': 0.5,
-                            'reasoning': 'BTC position imported from Binance - market analysis unavailable',
-                        }
-
-                    # ============================================================
-                    # STEP 3: Get actual account balance
-                    # ============================================================
-                    account_balance = self.portfolio_manager.current_capital
-                    logger.info(f"[BINANCE] Account capital: ${account_balance:,.2f}")
-
-                    position_size_usd = btc_balance * current_price
-
-                    # ✅ Import with VTM support
+                        logger.error(f"[VTM] OHLC fetch failed: {e}")
+                    
+                    # Get signal details (basic fallback)
+                    signal_details = {
+                        'imported': True,
+                        'import_time': datetime.now().isoformat(),
+                        'aggregator_mode': 'unknown',
+                        'mode_confidence': 0.5,
+                        'regime_analysis': {
+                            'regime_type': 'unknown',
+                            'trend_strength': 'unknown',
+                            'volatility_regime': 'normal',
+                        },
+                        'signal_quality': 0.5,
+                        'reasoning': f'{fut_pos["side"].upper()} position imported from Binance Futures',
+                    }
+                    
+                    # Calculate position size
+                    position_size_usd = fut_pos['quantity'] * fut_pos['entry_price']
+                    
+                    # Import position
                     success = self.portfolio_manager.add_position(
                         asset=asset_name,
                         symbol=symbol,
-                        side="long",
-                        entry_price=current_price,
+                        side=fut_pos['side'],
+                        entry_price=fut_pos['entry_price'],
                         position_size_usd=position_size_usd,
                         stop_loss=None,
                         take_profit=None,
-                        trailing_stop_pct=self.config["assets"][asset_name].get("risk", {}).get("trailing_stop_pct"),
+                        trailing_stop_pct=self.asset_config.get("risk", {}).get("trailing_stop_pct"),
                         binance_order_id=None,
                         ohlc_data=ohlc_data,
                         use_dynamic_management=True,
                         entry_time=datetime.now(),
-                        signal_details=signal_details_base,
-                        #account_balance=account_balance,
+                        signal_details=signal_details,
                     )
-
+                    
                     if success:
-                        logger.info(f"[SYNC] ✓ Imported {btc_balance:.8f} BTC as LONG position")
-
-                        # Verify VTM status
-                        imported_pos = self.portfolio_manager.get_position(asset_name)
-                        if imported_pos and imported_pos.trade_manager:
-                            vtm_status = imported_pos.get_vtm_status()
-                            logger.info(
-                                f"[VTM] ✓ VTM ACTIVE for imported BTC position\n"
-                                f"      Mode:    {signal_details_base['aggregator_mode'].upper()}\n"
-                                f"      Regime:  {signal_details_base['regime_analysis']['regime_type']}\n"
-                                f"      Entry:   ${vtm_status['entry_price']:,.2f}\n"
-                                f"      SL:      ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
-                                f"      TP:      ${vtm_status['take_profit']:,.2f} (VTM calculated)"
-                            )
-                        else:
-                            logger.warning(f"[VTM] ⚠️ VTM not initialized for imported BTC position")
-
-                        return True
+                        logger.info(
+                            f"[SYNC] ✓ Imported {fut_pos['side'].upper()}: "
+                            f"{fut_pos['quantity']:.6f} BTC @ ${fut_pos['entry_price']:,.2f}"
+                        )
                     else:
-                        logger.error(f"[SYNC] Failed to import BTC position")
-                        return False
-                else:
-                    logger.info(
-                        f"[SYNC] BTC balance {btc_balance:.8f} detected but auto-import disabled.\n"
-                        f"  → Bot will open new positions on BUY signals."
+                        logger.error(f"[SYNC] ✗ Failed to import {fut_pos['side'].upper()} position")
+                
+                return True
+            
+            # ============================================================
+            # SCENARIO 2: Portfolio has positions, Futures is empty → CLOSE
+            # ============================================================
+            if portfolio_positions and not active_futures:
+                logger.warning(
+                    f"[SYNC] Portfolio has {len(portfolio_positions)} position(s) "
+                    f"but Futures API shows none\n"
+                    f"  → Removing portfolio positions (likely closed manually)"
+                )
+                
+                for pos in portfolio_positions:
+                    self.portfolio_manager.close_position(
+                        position_id=pos.position_id,
+                        exit_price=current_price,
+                        reason="sync_missing_futures",
+                    )
+                
+                return True
+            
+            # ============================================================
+            # SCENARIO 3: Both have positions → VALIDATE
+            # ============================================================
+            if portfolio_positions and active_futures:
+                # Group by side
+                portfolio_by_side = {
+                    'long': [p for p in portfolio_positions if p.side == 'long'],
+                    'short': [p for p in portfolio_positions if p.side == 'short'],
+                }
+                
+                futures_by_side = {
+                    'long': [f for f in active_futures if f['side'] == 'long'],
+                    'short': [f for f in active_futures if f['side'] == 'short'],
+                }
+                
+                # Check each side
+                for side in ['long', 'short']:
+                    port_qty = sum(p.quantity for p in portfolio_by_side[side])
+                    fut_qty = sum(f['quantity'] for f in futures_by_side[side])
+                    
+                    if abs(port_qty - fut_qty) > 0.0001:  # Allow for rounding
+                        logger.warning(
+                            f"[SYNC] {side.upper()} quantity mismatch:\n"
+                            f"  Portfolio: {port_qty:.6f} BTC\n"
+                            f"  Futures:   {fut_qty:.6f} BTC\n"
+                            f"  → Closing all {side} positions to resync"
+                        )
+                        
+                        for pos in portfolio_by_side[side]:
+                            self.portfolio_manager.close_position(
+                                position_id=pos.position_id,
+                                exit_price=current_price,
+                                reason=f"sync_{side}_mismatch",
+                            )
+                
+                logger.info("[SYNC] ✓ Positions validated")
+                return True
+            
+            # ============================================================
+            # SCENARIO 4: Both empty → OK
+            # ============================================================
+            logger.info(f"[SYNC] ✓ No {asset_name} positions detected")
+            return True
+        
+        except Exception as e:
+            logger.error(f"[SYNC] Futures sync error: {e}", exc_info=True)
+            return False
+
+
+    def _sync_spot_positions(self, asset_name: str, symbol: str) -> bool:
+        """
+        ✅ Original Spot sync logic (for backward compatibility)
+        """
+        try:
+            # Get portfolio positions
+            portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
+            
+            # Get Spot balance
+            account = self.client.get_account()
+            btc_balance = 0.0
+            
+            for balance in account["balances"]:
+                if balance["asset"] == "BTC":
+                    btc_balance = float(balance["free"]) + float(balance["locked"])
+            
+            current_price = self.get_current_price(symbol)
+            MIN_BTC_BALANCE = 0.0001
+            
+            # Calculate total portfolio quantity
+            portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
+            
+            logger.info(
+                f"[SYNC] State:\n"
+                f"  Portfolio: {portfolio_total_qty:.6f} BTC\n"
+                f"  Spot:      {btc_balance:.6f} BTC"
+            )
+            
+            # SCENARIO 1: Spot has BTC, portfolio empty → IMPORT
+            if btc_balance > MIN_BTC_BALANCE and not portfolio_positions:
+                import_enabled = self.config.get("portfolio", {}).get("import_existing_positions", False)
+                
+                if not import_enabled:
+                    logger.warning(
+                        f"[SYNC] BTC balance {btc_balance:.6f} detected but import disabled\n"
+                        f"  → Bot will open new positions on BUY signals"
                     )
                     return True
-
-            # ================================================================
-            # SCENARIO 2: Portfolio has positions, Binance is empty → CLOSE ALL
-            # ================================================================
+                
+                logger.info(f"[SYNC] Importing {btc_balance:.6f} BTC as LONG position...")
+                
+                # Fetch OHLC data
+                ohlc_data = None
+                try:
+                    from datetime import datetime, timedelta, timezone
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=10)
+                    
+                    df = self.data_manager.fetch_binance_data(
+                        symbol=symbol,
+                        interval=self.asset_config.get("interval", "1h"),
+                        start_date=start_time.strftime("%Y-%m-%d"),
+                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    
+                    if len(df) > 50:
+                        ohlc_data = {
+                            "high": df["high"].values,
+                            "low": df["low"].values,
+                            "close": df["close"].values,
+                        }
+                except Exception as e:
+                    logger.error(f"[VTM] OHLC fetch failed: {e}")
+                
+                position_size_usd = btc_balance * current_price
+                
+                success = self.portfolio_manager.add_position(
+                    asset=asset_name,
+                    symbol=symbol,
+                    side="long",
+                    entry_price=current_price,
+                    position_size_usd=position_size_usd,
+                    stop_loss=None,
+                    take_profit=None,
+                    trailing_stop_pct=self.asset_config.get("risk", {}).get("trailing_stop_pct"),
+                    binance_order_id=None,
+                    ohlc_data=ohlc_data,
+                    use_dynamic_management=True,
+                    entry_time=datetime.now(),
+                    signal_details={
+                        'imported': True,
+                        'import_time': datetime.now().isoformat(),
+                    },
+                )
+                
+                if success:
+                    logger.info(f"[SYNC] ✓ Imported {btc_balance:.6f} BTC")
+                return success
+            
+            # SCENARIO 2: Portfolio has positions, Spot empty → CLOSE
             if portfolio_positions and btc_balance <= MIN_BTC_BALANCE:
                 logger.warning(
-                    f"[SYNC] Portfolio shows {len(portfolio_positions)} position(s) "
-                    f"but Binance balance is {btc_balance:.8f} BTC\n"
-                    f" → Removing all positions (likely sold manually)."
+                    f"[SYNC] Portfolio has {len(portfolio_positions)} position(s) "
+                    f"but Spot balance is {btc_balance:.6f}\n"
+                    f"  → Removing positions (likely sold manually)"
                 )
-                for position in portfolio_positions:
+                
+                for pos in portfolio_positions:
                     self.portfolio_manager.close_position(
-                        position_id=position.position_id,
+                        position_id=pos.position_id,
                         exit_price=current_price,
-                        reason="sync_missing_binance",
+                        reason="sync_missing_spot",
                     )
                 return True
-
-            # ================================================================
+            
             # SCENARIO 3: Both have positions → VALIDATE
-            # ================================================================
             if btc_balance > MIN_BTC_BALANCE and portfolio_positions:
                 qty_diff = abs(btc_balance - portfolio_total_qty)
                 qty_diff_pct = (qty_diff / btc_balance * 100) if btc_balance > 0 else 0
-
+                
                 if qty_diff_pct > 0.1:
                     logger.warning(
-                        f"[SYNC] QUANTITY MISMATCH:\n"
-                        f"  Binance: {btc_balance:.8f} BTC\n"
-                        f"  Portfolio: {portfolio_total_qty:.8f} BTC ({len(portfolio_positions)} positions)\n"
-                        f"  Difference: {qty_diff:.8f} BTC ({qty_diff_pct:.2f}%)\n"
+                        f"[SYNC] Quantity mismatch:\n"
+                        f"  Spot:      {btc_balance:.6f} BTC\n"
+                        f"  Portfolio: {portfolio_total_qty:.6f} BTC ({len(portfolio_positions)} positions)\n"
+                        f"  Difference: {qty_diff:.6f} BTC ({qty_diff_pct:.2f}%)\n"
                         f"  → Closing all positions to clear mismatch"
                     )
-                    for position in portfolio_positions:
+                    
+                    for pos in portfolio_positions:
                         self.portfolio_manager.close_position(
-                            position_id=position.position_id,
+                            position_id=pos.position_id,
                             exit_price=current_price,
                             reason="sync_quantity_mismatch",
                         )
                     return True
                 else:
-                    logger.info(
-                        f"[SYNC] ✓ {asset_name} positions in sync\n"
-                        f"  Balance: {btc_balance:.8f} BTC\n"
-                        f"  Positions: {len(portfolio_positions)}/{self.portfolio_manager.max_positions_per_asset}"
-                    )
-                    self._verify_vtm_status_after_sync(asset_name)
+                    logger.info("[SYNC] ✓ Positions in sync")
                     return True
-
+            
+            # SCENARIO 4: Both empty
             logger.info(f"[SYNC] ✓ No {asset_name} positions detected")
             return True
-
+        
         except Exception as e:
-            logger.error(f"[SYNC] Error: {e}", exc_info=True)
+            logger.error(f"[SYNC] Spot sync error: {e}", exc_info=True)
             return False
 
 
