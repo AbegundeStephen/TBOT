@@ -206,7 +206,8 @@ class TradingBot:
 
     def initialize_exchanges(self):
         """
-        ✨  Initialize exchanges with proper database integration
+        ✅ FIXED: Initialize exchanges with proper Futures setup order
+        Key change: Enable Futures BEFORE auto-sync runs
         """
         logger.info("\n" + "-" * 70)
         logger.info("STEP 1: Initializing Exchange Connections")
@@ -214,7 +215,9 @@ class TradingBot:
 
         mt5_initialized = False
 
+        # ============================================================
         # Connect to MT5 (for GOLD)
+        # ============================================================
         if self.config["assets"]["GOLD"].get("enabled", False):
             try:
                 if self.data_manager.initialize_mt5():
@@ -227,7 +230,9 @@ class TradingBot:
                 logger.error(f"[FAIL] MT5 initialization error: {e}")
                 self.config["assets"]["GOLD"]["enabled"] = False
 
+        # ============================================================
         # Connect to Binance (for BTC)
+        # ============================================================
         if self.config["assets"]["BTC"].get("enabled", False):
             try:
                 if self.data_manager.initialize_binance():
@@ -239,20 +244,20 @@ class TradingBot:
                 logger.error(f"[FAIL] Binance initialization error: {e}")
                 self.config["assets"]["BTC"]["enabled"] = False
 
-        # ✨ STEP 1.5: Initialize Database BEFORE Portfolio
+        # ============================================================
+        # STEP 1.5: Initialize Database BEFORE Portfolio
+        # ============================================================
         logger.info("\n" + "-" * 70)
         logger.info("STEP 1.5: Initializing Database Connection")
         logger.info("-" * 70)
 
         if self.config.get("database", {}).get("enabled", False):
             try:
-
                 db_config = self.config["database"]
                 self.db_manager = TradingDatabaseManager(
                     supabase_url=db_config["supabase_url"],
                     supabase_key=db_config["supabase_key"],
                 )
-
                 logger.info("[DB] ✓ Connected to Supabase")
             except Exception as e:
                 logger.error(f"[DB] Failed to initialize: {e}")
@@ -262,28 +267,28 @@ class TradingBot:
             logger.info("[DB] Database disabled in config")
             self.db_manager = None
 
-        # ✨ STEP 2: Initialize Portfolio Manager WITH Database
+        # ============================================================
+        # STEP 2: Initialize Portfolio Manager WITH Database
+        # ============================================================
         logger.info("\n" + "-" * 70)
         logger.info("STEP 2: Initializing Portfolio Manager")
         logger.info("-" * 70)
 
         try:
             import MetaTrader5 as mt5
-
             mt5_handler = mt5 if mt5_initialized else None
         except ImportError:
             mt5_handler = None
             logger.warning("[WARN] MetaTrader5 not available")
 
         try:
-
             self.portfolio_manager = PortfolioManager(
                 config=self.config,
                 mt5_handler=mt5_handler,
-                binance_client=self.data_manager.binance_client,
+                binance_client=self.data_manager.binance_client,  # ✅ Use SPOT client
             )
 
-            # ✨ CRITICAL FIX: Link database to portfolio
+            # Link database to portfolio
             if self.db_manager:
                 self.portfolio_manager.db_manager = self.db_manager
                 logger.info("[DB] ✓ Database linked to portfolio manager")
@@ -293,7 +298,7 @@ class TradingBot:
             )
             logger.info(f"     Capital: ${self.portfolio_manager.current_capital:,.2f}")
 
-            # ✨ Log system startup to database
+            # Log system startup to database
             if self.db_manager:
                 self.db_manager.log_system_event(
                     event_type="startup",
@@ -315,31 +320,42 @@ class TradingBot:
             logger.error(f"[FAIL] Portfolio Manager initialization failed: {e}")
             raise
 
-        # ✨ STEP 3: Initialize Execution Handlers WITH Database
+        # ============================================================
+        # STEP 3: Initialize Execution Handlers (WITHOUT AUTO-SYNC!)
+        # ============================================================
         logger.info("\n" + "-" * 70)
         logger.info("STEP 3: Initializing Execution Handlers")
         logger.info("-" * 70)
 
+        # ✅ BINANCE HANDLER
         if (
             self.config["assets"]["BTC"].get("enabled", False)
-            and self.data_manager.binance_client is not None
+            and self.data_manager.get_futures_client() is not None
         ):
             try:
+                # ✅ CRITICAL: Temporarily disable auto-sync
+                original_auto_sync = self.config["trading"].get("auto_sync_on_startup", True)
+                self.config["trading"]["auto_sync_on_startup"] = False
 
                 self.binance_handler = BinanceExecutionHandler(
                     config=self.config,
-                    client=self.data_manager.binance_client,
+                    client=self.data_manager.get_futures_client(),  # Use Futures client
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
                 )
+
+                # Restore original setting
+                self.config["trading"]["auto_sync_on_startup"] = original_auto_sync
 
                 self.binance_handler.trading_bot = self
                 if self.binance_handler:
                     self.binance_handler.error_handler = self.error_handler
                     self.binance_handler.trading_bot = self
 
-                # ✅ NEW: Enable Futures for SHORT trading
+                # ✅ STEP 3.5: Enable Futures BEFORE sync
                 if self.config["assets"]["BTC"].get("enable_futures", False):
+                    logger.info("\n[FUTURES] Enabling Futures handler...")
+                    
                     from src.execution.binance_futures import (
                         enable_futures_for_binance_handler,
                     )
@@ -349,15 +365,16 @@ class TradingBot:
                     )
 
                     if futures_enabled:
-                        logger.info(
-                            "[FUTURES] ✅ SHORT trading via Futures API enabled"
-                        )
+                        logger.info("[FUTURES] ✅ Futures API enabled for SHORT trading")
                     else:
-                        logger.warning(
-                            "[FUTURES] ⚠️ Futures unavailable, shorts will be simulated"
-                        )
+                        logger.warning("[FUTURES] ⚠️ Futures unavailable, shorts simulated")
 
-                # ✨ Link database to handler
+                # ✅ STEP 3.6: NOW do the sync (after Futures is enabled)
+                if original_auto_sync and not self.portfolio_manager.is_paper_mode:
+                    logger.info("\n[SYNC] Running position sync (after Futures setup)...")
+                    self.binance_handler.sync_positions_with_binance("BTC")
+
+                # Link database to handler
                 if self.db_manager:
                     self.binance_handler.db_manager = self.db_manager
                     logger.info("[DB] ✓ Database linked to Binance handler")
@@ -369,9 +386,9 @@ class TradingBot:
                 self.binance_handler = None
                 self.config["assets"]["BTC"]["enabled"] = False
 
+        # ✅ MT5 HANDLER (unchanged)
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
-
                 self.mt5_handler = MT5ExecutionHandler(
                     config=self.config,
                     portfolio_manager=self.portfolio_manager,
@@ -384,7 +401,7 @@ class TradingBot:
                     self.mt5_handler.error_handler = self.error_handler
                     self.mt5_handler.trading_bot = self
 
-                # ✨ Link database to handler
+                # Link database to handler
                 if self.db_manager:
                     self.mt5_handler.db_manager = self.db_manager
                     logger.info("[DB] ✓ Database linked to MT5 handler")
