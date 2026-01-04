@@ -369,7 +369,7 @@ class TradingBot:
 
                     if futures_enabled:
                         logger.info(
-                            "[FUTURES] ✅ Futures API enabled for SHORT trading"
+                            "[FUTURES] ✅ Futures API enabled for FUTURES trading"
                         )
                     else:
                         logger.warning(
