@@ -1032,7 +1032,7 @@ class BinanceExecutionHandler:
                 max_override_pct=2.0,
             )
 
-            position_size_usd, sizing_metadata = self.sizer.calculate_size(sizing_request)
+            position_size_usd, sizing_metadata = self.sizer.calculate_size_risk_based(sizing_request)
 
             # Apply short size reduction if configured
             if side == "short":
