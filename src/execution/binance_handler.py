@@ -1060,7 +1060,11 @@ class BinanceExecutionHandler:
             quantity = position_size_usd / current_price
             
             # Round to correct precision and lot size
-            is_futures = hasattr(self, "futures_handler") and self.config.get("binance", {}).get("enable_futures", False)
+            is_futures = (
+            hasattr(self, "futures_handler") and 
+            self.futures_handler is not None and
+            self.config.get("assets", {}).get(asset_name, {}).get("enable_futures", False)
+        )
             quantity = self._round_quantity(quantity, self.symbol, is_futures)
             leverage = 1
             margin_type = "SPOT"

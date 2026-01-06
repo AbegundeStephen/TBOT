@@ -162,179 +162,6 @@ class InstitutionalCouncilAggregator:
         logger.info("=" * 80)
         logger.info("")
         
-    def _format_ai_validation_for_viz(
-        self, final_signal: int, details: dict, df: pd.DataFrame
-    ) -> dict:
-        """
-        Format AI validation results for visualization
-        (Same as PerformanceWeightedAggregator implementation)
-        
-        Args:
-            final_signal: Final signal after AI validation
-            details: Signal details dict
-            df: Market data
-
-        Returns:
-            Formatted AI validation data ready for visualization
-        """
-        try:
-            # Initialize with safe defaults
-            viz_data = {
-                "pattern_detected": False,
-                "validation_passed": False,
-                "pattern_name": "None",
-                "pattern_id": None,
-                "pattern_confidence": 0.0,
-                "top3_patterns": [],
-                "top3_confidences": [],
-                "sr_analysis": {
-                    "near_sr_level": False,
-                    "level_type": "none",
-                    "nearest_level": None,
-                    "distance_pct": None,
-                    "levels": [],
-                    "total_levels_found": 0,
-                },
-                "action": "none",
-                "rejection_reasons": [],
-                "error": None,
-            }
-
-            # Check if AI validator exists and was used
-            if not self.ai_validator:
-                viz_data["action"] = "ai_disabled"
-                return viz_data
-
-            # Get current price for S/R analysis
-            current_price = float(df["close"].iloc[-1])
-
-            # ================================================================
-            # STEP 1: Get S/R Analysis from AI Validator
-            # ================================================================
-            try:
-                sr_result = self.ai_validator._check_support_resistance_fixed(
-                    df=df,
-                    current_price=current_price,
-                    signal=final_signal,
-                    threshold=self.ai_validator.current_sr_threshold,
-                )
-
-                viz_data["sr_analysis"] = {
-                    "near_sr_level": sr_result.get("near_level", False),
-                    "level_type": sr_result.get("level_type", "none"),
-                    "nearest_level": sr_result.get("nearest_level"),
-                    "distance_pct": sr_result.get("distance_pct"),
-                    "levels": sr_result.get("all_levels", [])[:5],  # Top 5 levels
-                    "total_levels_found": len(sr_result.get("all_levels", [])),
-                }
-
-            except Exception as e:
-                logger.error(f"[VIZ] S/R analysis failed: {e}")
-                viz_data["error"] = f"S/R error: {str(e)}"
-
-            # ================================================================
-            # STEP 2: Get Pattern Detection from AI Validator
-            # ================================================================
-            try:
-                pattern_result = self.ai_validator._check_pattern(
-                    df=df,
-                    signal=final_signal,
-                    min_confidence=self.ai_validator.current_pattern_threshold,
-                )
-
-                viz_data["pattern_detected"] = pattern_result.get("pattern_confirmed", False)
-                viz_data["pattern_name"] = pattern_result.get("pattern_name", "None")
-                viz_data["pattern_id"] = pattern_result.get("pattern_id")
-                viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
-
-                # Get top 3 patterns if available
-                if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
-                    try:
-                        # Get last 15 candles for pattern detection
-                        snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-                        first_open = snippet[0, 0]
-
-                        if first_open > 0:
-                            snippet_norm = snippet / first_open - 1
-                            snippet_input = snippet_norm.reshape(1, 15, 4)
-
-                            # Get predictions
-                            predictions = self.ai_validator.sniper.model.predict(
-                                snippet_input, verbose=0
-                            )[0]
-
-                            # Get top 3
-                            top3_indices = predictions.argsort()[-3:][::-1]
-                            top3_confidences = predictions[top3_indices]
-
-                            # Map to pattern names
-                            top3_patterns = []
-                            for idx in top3_indices:
-                                pattern_name = (
-                                    self.ai_validator.reverse_pattern_map.get(
-                                        idx, f"Pattern_{idx}"
-                                    )
-                                )
-                                top3_patterns.append(pattern_name)
-
-                            viz_data["top3_patterns"] = top3_patterns
-                            viz_data["top3_confidences"] = top3_confidences.tolist()
-
-                    except Exception as e:
-                        logger.debug(f"[VIZ] Top3 patterns failed: {e}")
-
-            except Exception as e:
-                logger.error(f"[VIZ] Pattern detection failed: {e}")
-                viz_data["error"] = f"Pattern error: {str(e)}"
-
-            # ================================================================
-            # STEP 3: Determine Validation Status
-            # ================================================================
-
-            # Check if signal was modified by AI
-            original_signal = details.get("original_signal", final_signal)
-
-            if final_signal == 0 and original_signal != 0:
-                # AI rejected the signal
-                viz_data["validation_passed"] = False
-                viz_data["action"] = "rejected"
-
-                # Collect rejection reasons
-                reasons = []
-                if not viz_data["sr_analysis"]["near_sr_level"]:
-                    reasons.append("No nearby S/R level")
-                if not viz_data["pattern_detected"]:
-                    reasons.append("No pattern detected")
-                if (
-                    viz_data["pattern_confidence"]
-                    < self.ai_validator.current_pattern_threshold
-                ):
-                    reasons.append(
-                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
-                    )
-
-                viz_data["rejection_reasons"] = reasons
-
-            elif final_signal != 0:
-                # Signal was approved
-                viz_data["validation_passed"] = True
-                
-                # Check if it was a bypass (council doesn't have bypass logic, so always approved)
-                viz_data["action"] = "approved"
-            else:
-                # HOLD signal
-                viz_data["action"] = "hold"
-
-            return viz_data
-
-        except Exception as e:
-            logger.error(f"[VIZ] AI formatting failed: {e}", exc_info=True)
-            return {
-                "pattern_detected": False,
-                "validation_passed": False,
-                "error": str(e),
-                "action": "error",
-            }
     
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
         """
@@ -499,22 +326,87 @@ class InstitutionalCouncilAggregator:
             })
             
             # AI validation (if enabled and signal is not HOLD)
-            if self.ai_validator:
+            if self.ai_validator and signal != 0:
+                # Store original signal for comparison
+                original_signal = signal
+                
+                # Run AI validation
                 validated_signal, ai_details = self.ai_validator.validate_signal(
                     signal=signal,
                     signal_details=details,
                     df=df,
                 )
                 
+                # Check if AI modified the signal
                 if validated_signal != signal:
                     logger.warning(f"[AI] Overruled: {signal} → {validated_signal}")
                     signal = validated_signal
-                    details['ai_validation'] = ai_details
                     details['ai_modified'] = True
-                    # Update signal in details
                     details['signal'] = signal
+                
+                # ✅ NEW: Format AI validation for visualization
+                try:
+                    formatted_ai = self._format_ai_validation_for_viz(
+                        final_signal=signal,
+                        details=details.copy(),
+                        df=df
+                    )
+                    details['ai_validation'] = formatted_ai
+                    
+                    logger.debug(
+                        f"[COUNCIL] AI validation formatted: "
+                        f"Pattern={formatted_ai.get('pattern_name')}, "
+                        f"Confidence={formatted_ai.get('pattern_confidence', 0):.2%}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"[COUNCIL] AI formatting failed: {e}")
+                    
+                    # ✅ Fallback: Create minimal valid structure
+                    details['ai_validation'] = {
+                        "pattern_detected": False,
+                        "pattern_name": "Error",
+                        "pattern_confidence": 0.0,
+                        "pattern_id": None,
+                        "top3_patterns": [],
+                        "top3_confidences": [],
+                        "sr_analysis": {
+                            "near_sr_level": False,
+                            "level_type": "none",
+                            "nearest_level": None,
+                            "distance_pct": None,
+                            "levels": [],
+                            "total_levels_found": 0,
+                        },
+                        "validation_passed": signal != 0,
+                        "action": "error_formatting",
+                        "error": str(e),
+                    }
+            
+            elif self.ai_validator and signal == 0:
+                # Even for HOLD signals, provide minimal AI validation structure
+                details['ai_validation'] = {
+                    "pattern_detected": False,
+                    "pattern_name": "None",
+                    "pattern_confidence": 0.0,
+                    "pattern_id": None,
+                    "top3_patterns": [],
+                    "top3_confidences": [],
+                    "sr_analysis": {
+                        "near_sr_level": False,
+                        "level_type": "none",
+                        "nearest_level": None,
+                        "distance_pct": None,
+                        "levels": [],
+                        "total_levels_found": 0,
+                    },
+                    "validation_passed": True,
+                    "action": "hold",
+                }
             
             return signal, details
+
+
             
         except Exception as e:
             logger.error(f"[COUNCIL] Error: {e}", exc_info=True)
@@ -534,6 +426,180 @@ class InstitutionalCouncilAggregator:
                 'reasoning': f"error: {str(e)[:50]}",
             }
         
+        
+    def _format_ai_validation_for_viz(
+        self, final_signal: int, details: dict, df: pd.DataFrame
+    ) -> dict:
+        """
+        ✅ NEW: Format AI validation results for visualization
+        IDENTICAL to PerformanceWeightedAggregator implementation
+        
+        Args:
+            final_signal: Final signal after AI validation
+            details: Signal details dict
+            df: Market data
+
+        Returns:
+            Formatted AI validation data ready for visualization
+        """
+        try:
+            # Initialize with safe defaults
+            viz_data = {
+                "pattern_detected": False,
+                "validation_passed": False,
+                "pattern_name": "None",
+                "pattern_id": None,
+                "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
+                "sr_analysis": {
+                    "near_sr_level": False,
+                    "level_type": "none",
+                    "nearest_level": None,
+                    "distance_pct": None,
+                    "levels": [],
+                    "total_levels_found": 0,
+                },
+                "action": "none",
+                "rejection_reasons": [],
+                "error": None,
+            }
+
+            # Check if AI validator exists and was used
+            if not self.ai_validator:
+                viz_data["action"] = "ai_disabled"
+                return viz_data
+
+            # Get current price for S/R analysis
+            current_price = float(df["close"].iloc[-1])
+
+            # ================================================================
+            # STEP 1: Get S/R Analysis from AI Validator
+            # ================================================================
+            try:
+                sr_result = self.ai_validator._check_support_resistance_fixed(
+                    df=df,
+                    current_price=current_price,
+                    signal=final_signal,
+                    threshold=self.ai_validator.current_sr_threshold,
+                )
+
+                viz_data["sr_analysis"] = {
+                    "near_sr_level": sr_result.get("near_level", False),
+                    "level_type": sr_result.get("level_type", "none"),
+                    "nearest_level": sr_result.get("nearest_level"),
+                    "distance_pct": sr_result.get("distance_pct"),
+                    "levels": sr_result.get("all_levels", [])[:5],  # Top 5 levels
+                    "total_levels_found": len(sr_result.get("all_levels", [])),
+                }
+
+            except Exception as e:
+                logger.error(f"[VIZ] S/R analysis failed: {e}")
+                viz_data["error"] = f"S/R error: {str(e)}"
+
+            # ================================================================
+            # STEP 2: Get Pattern Detection from AI Validator
+            # ================================================================
+            try:
+                pattern_result = self.ai_validator._check_pattern(
+                    df=df,
+                    signal=final_signal,
+                    min_confidence=self.ai_validator.current_pattern_threshold,
+                )
+
+                viz_data["pattern_detected"] = pattern_result.get("pattern_confirmed", False)
+                viz_data["pattern_name"] = pattern_result.get("pattern_name", "None")
+                viz_data["pattern_id"] = pattern_result.get("pattern_id")
+                viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
+
+                # Get top 3 patterns if available
+                if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
+                    try:
+                        # Get last 15 candles for pattern detection
+                        snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
+                        first_open = snippet[0, 0]
+
+                        if first_open > 0:
+                            snippet_norm = snippet / first_open - 1
+                            snippet_input = snippet_norm.reshape(1, 15, 4)
+
+                            # Get predictions
+                            predictions = self.ai_validator.sniper.model.predict(
+                                snippet_input, verbose=0
+                            )[0]
+
+                            # Get top 3
+                            top3_indices = predictions.argsort()[-3:][::-1]
+                            top3_confidences = predictions[top3_indices]
+
+                            # Map to pattern names
+                            top3_patterns = []
+                            for idx in top3_indices:
+                                pattern_name = (
+                                    self.ai_validator.reverse_pattern_map.get(
+                                        idx, f"Pattern_{idx}"
+                                    )
+                                )
+                                top3_patterns.append(pattern_name)
+
+                            viz_data["top3_patterns"] = top3_patterns
+                            viz_data["top3_confidences"] = top3_confidences.tolist()
+
+                    except Exception as e:
+                        logger.debug(f"[VIZ] Top3 patterns failed: {e}")
+
+            except Exception as e:
+                logger.error(f"[VIZ] Pattern detection failed: {e}")
+                viz_data["error"] = f"Pattern error: {str(e)}"
+
+            # ================================================================
+            # STEP 3: Determine Validation Status
+            # ================================================================
+
+            # Check if signal was modified by AI
+            original_signal = details.get("original_signal", final_signal)
+
+            if final_signal == 0 and original_signal != 0:
+                # AI rejected the signal
+                viz_data["validation_passed"] = False
+                viz_data["action"] = "rejected"
+
+                # Collect rejection reasons
+                reasons = []
+                if not viz_data["sr_analysis"]["near_sr_level"]:
+                    reasons.append("No nearby S/R level")
+                if not viz_data["pattern_detected"]:
+                    reasons.append("No pattern detected")
+                if (
+                    viz_data["pattern_confidence"]
+                    < self.ai_validator.current_pattern_threshold
+                ):
+                    reasons.append(
+                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
+                    )
+
+                viz_data["rejection_reasons"] = reasons
+
+            elif final_signal != 0:
+                # Signal was approved
+                viz_data["validation_passed"] = True
+                viz_data["action"] = "approved"
+            else:
+                # HOLD signal
+                viz_data["action"] = "hold"
+
+            return viz_data
+
+        except Exception as e:
+            logger.error(f"[VIZ] AI formatting failed: {e}", exc_info=True)
+            return {
+                "pattern_detected": False,
+                "validation_passed": False,
+                "error": str(e),
+                "action": "error",
+            }
+    
+    
     def _judge_trend(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, str]:
         """
         JUDGE 1: TREND (1.5 pts)
