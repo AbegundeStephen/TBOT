@@ -1078,6 +1078,172 @@ class TradingBot:
                     "total_levels_found": 0,
                 },
             }
+            
+    def _validate_ai_details_structure(self, ai_validation: dict, context: str = "") -> bool:
+        """
+        ✅ NEW: Validate AI validation dict has all required fields
+        
+        Args:
+            ai_validation: AI validation dict to check
+            context: Context string for logging (e.g., "BTC Council")
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        if not ai_validation or not isinstance(ai_validation, dict):
+            logger.error(f"[AI VIZ {context}] ❌ ai_validation is not a dict: {type(ai_validation)}")
+            return False
+        
+        required_fields = {
+            "pattern_detected": bool,
+            "pattern_name": str,
+            "pattern_confidence": (int, float),
+            "pattern_id": (int, type(None)),
+            "top3_patterns": list,
+            "top3_confidences": list,
+            "sr_analysis": dict,
+            "validation_passed": bool,
+            "action": str,
+        }
+        
+        sr_required_fields = {
+            "near_sr_level": bool,
+            "level_type": str,
+            "nearest_level": (int, float, type(None)),
+            "distance_pct": (int, float, type(None)),
+            "levels": list,
+            "total_levels_found": int,
+        }
+        
+        all_valid = True
+        
+        # Check top-level fields
+        for field, expected_type in required_fields.items():
+            if field not in ai_validation:
+                logger.error(f"[AI VIZ {context}] ❌ Missing field: {field}")
+                all_valid = False
+                continue
+            
+            value = ai_validation[field]
+            
+            if not isinstance(value, expected_type):
+                logger.error(
+                    f"[AI VIZ {context}] ❌ {field} wrong type: "
+                    f"expected {expected_type}, got {type(value)}"
+                )
+                all_valid = False
+        
+        # Check sr_analysis sub-fields
+        if "sr_analysis" in ai_validation:
+            sr_analysis = ai_validation["sr_analysis"]
+            
+            if not isinstance(sr_analysis, dict):
+                logger.error(f"[AI VIZ {context}] ❌ sr_analysis is not a dict")
+                all_valid = False
+            else:
+                for field, expected_type in sr_required_fields.items():
+                    if field not in sr_analysis:
+                        logger.error(f"[AI VIZ {context}] ❌ sr_analysis missing: {field}")
+                        all_valid = False
+                    elif not isinstance(sr_analysis[field], expected_type):
+                        logger.error(
+                            f"[AI VIZ {context}] ❌ sr_analysis.{field} wrong type: "
+                            f"expected {expected_type}, got {type(sr_analysis[field])}"
+                        )
+                        all_valid = False
+        
+        # Log summary
+        if all_valid:
+            logger.info(f"[AI VIZ {context}] ✅ All fields valid")
+            logger.debug(
+                f"[AI VIZ {context}] Pattern: {ai_validation.get('pattern_name')}, "
+                f"Confidence: {ai_validation.get('pattern_confidence', 0):.2%}, "
+                f"Top3: {len(ai_validation.get('top3_patterns', []))}"
+            )
+        else:
+            logger.error(f"[AI VIZ {context}] ❌ Validation FAILED")
+            logger.error(f"[AI VIZ {context}] Available fields: {list(ai_validation.keys())}")
+        
+        return all_valid
+
+
+    def _log_ai_validation_summary(self, asset_name: str, details: dict):
+        """
+        ✅ NEW: Log comprehensive AI validation summary
+        Call this before sending charts
+        """
+        logger.info(f"\n{'='*70}")
+        logger.info(f"[AI VIZ SUMMARY] {asset_name}")
+        logger.info(f"{'='*70}")
+        
+        ai_validation = details.get("ai_validation")
+        
+        if not ai_validation:
+            logger.error(f"❌ ai_validation is missing from details")
+            logger.error(f"Available keys: {list(details.keys())}")
+            return
+        
+        if not isinstance(ai_validation, dict):
+            logger.error(f"❌ ai_validation is not a dict: {type(ai_validation)}")
+            return
+        
+        # Pattern info
+        pattern_name = ai_validation.get("pattern_name", "N/A")
+        pattern_conf = ai_validation.get("pattern_confidence", 0)
+        pattern_detected = ai_validation.get("pattern_detected", False)
+        
+        logger.info(f"Pattern:")
+        logger.info(f"  Name:       {pattern_name}")
+        logger.info(f"  Confidence: {pattern_conf:.2%}")
+        logger.info(f"  Detected:   {pattern_detected}")
+        
+        # Top 3 patterns
+        top3 = ai_validation.get("top3_patterns", [])
+        top3_conf = ai_validation.get("top3_confidences", [])
+        
+        logger.info(f"Top 3 Patterns:")
+        if top3:
+            for i, (name, conf) in enumerate(zip(top3, top3_conf), 1):
+                logger.info(f"  {i}. {name}: {conf:.2%}")
+        else:
+            logger.warning(f"  ⚠️ No top3 patterns available")
+        
+        # S/R Analysis
+        sr_analysis = ai_validation.get("sr_analysis", {})
+        
+        logger.info(f"S/R Analysis:")
+        logger.info(f"  Near Level: {sr_analysis.get('near_sr_level', False)}")
+        logger.info(f"  Type:       {sr_analysis.get('level_type', 'N/A')}")
+        logger.info(f"  Nearest:    ${sr_analysis.get('nearest_level', 0):,.2f}")
+        logger.info(f"  Distance:   {sr_analysis.get('distance_pct', 0):.2f}%")
+        logger.info(f"  Total Levels: {sr_analysis.get('total_levels_found', 0)}")
+        
+        # Validation status
+        validation_passed = ai_validation.get("validation_passed", False)
+        action = ai_validation.get("action", "unknown")
+        
+        logger.info(f"Validation:")
+        logger.info(f"  Passed: {validation_passed}")
+        logger.info(f"  Action: {action}")
+        
+        # Rejection reasons (if any)
+        rejection_reasons = ai_validation.get("rejection_reasons", [])
+        if rejection_reasons:
+            logger.info(f"Rejection Reasons:")
+            for reason in rejection_reasons:
+                logger.info(f"  - {reason}")
+        
+        # Error (if any)
+        error = ai_validation.get("error")
+        if error:
+            logger.error(f"❌ Error: {error}")
+        
+        # Validate structure
+        is_valid = self._validate_ai_details_structure(ai_validation, asset_name)
+        
+        logger.info(f"{'='*70}\n")
+        
+        return is_val
 
     def get_aggregated_signal_hybrid_dynamic(
         self,
@@ -1087,7 +1253,7 @@ class TradingBot:
         hybrid_selector,
     ) -> Tuple[int, Dict]:
         """
-        FIXED: Ensures AI validation details are properly preserved in hybrid mode
+        ✅ FIXED: Ensures AI validation details are ALWAYS populated
         """
 
         # ================================================================
@@ -1130,54 +1296,83 @@ class TradingBot:
             logger.info(f"[PERFORMANCE] Reasoning: {details.get('reasoning', 'N/A')}")
 
         # ================================================================
-        # ✅ FIX 1: VERIFY AI validation was added by aggregator
+        # ✅ FIX: ALWAYS format AI validation (don't rely on aggregator)
         # ================================================================
         ai_validation = details.get("ai_validation")
 
-        if ai_validation is None:
+        if ai_validation is None or not isinstance(ai_validation, dict):
             logger.warning(
-                f"[HYBRID] ⚠️ No AI validation from {selected_mode} aggregator!"
+                f"[HYBRID] ⚠️ No AI validation from {selected_mode} aggregator, "
+                f"generating manually..."
             )
-            logger.warning(f"[HYBRID] Attempting manual AI validation...")
 
-            # ✅ MANUAL AI VALIDATION: If aggregator didn't add it, do it now
-            if hasattr(self, "ai_validator") and self.ai_validator:
+            # Get the actual aggregator instance
+            actual_aggregator = aggregators.get(selected_mode)
+
+            # Try aggregator's method first
+            if actual_aggregator and hasattr(
+                actual_aggregator, "_format_ai_validation_for_viz"
+            ):
                 try:
-                    # Get the actual aggregator instance (performance or council)
-                    actual_aggregator = aggregators.get(selected_mode)
-
-                    if actual_aggregator and hasattr(
-                        actual_aggregator, "_format_ai_validation_for_viz"
-                    ):
-                        # Use aggregator's method if available
-                        ai_validation = actual_aggregator._format_ai_validation_for_viz(
-                            final_signal=signal, details=details.copy(), df=df
-                        )
-                    else:
-                        # Fallback: Call AI validator directly
-                        logger.info(
-                            f"[HYBRID] Aggregator lacks method, using direct AI validation"
-                        )
-                        ai_validation = self._format_ai_validation_direct(signal, df)
-
-                    details["ai_validation"] = ai_validation
-                    logger.info(f"[HYBRID] ✅ Manual AI validation added")
-
+                    ai_validation = actual_aggregator._format_ai_validation_for_viz(
+                        final_signal=signal, details=details.copy(), df=df
+                    )
+                    logger.info(
+                        f"[HYBRID] ✅ AI validation from {selected_mode} aggregator"
+                    )
                 except Exception as e:
-                    logger.error(f"[HYBRID] Manual AI validation failed: {e}")
-                    # Create minimal placeholder
-                    details["ai_validation"] = {
-                        "pattern_detected": False,
-                        "validation_passed": False,
-                        "pattern_name": "N/A",
-                        "pattern_confidence": 0.0,
-                        "error": f"Manual validation failed: {str(e)}",
-                    }
+                    logger.error(
+                        f"[HYBRID] Aggregator method failed: {e}, using fallback"
+                    )
+                    ai_validation = None
+
+            # Fallback: Use direct AI validation
+            if ai_validation is None:
+                logger.info(f"[HYBRID] Using direct AI validation fallback")
+                ai_validation = self._format_ai_validation_direct(signal, df)
+
+            # Store in details
+            details["ai_validation"] = ai_validation
+
         else:
-            logger.info(f"[HYBRID] ✅ AI validation present from aggregator")
+            logger.info(
+                f"[HYBRID] ✅ AI validation present from {selected_mode} aggregator"
+            )
+            logger.debug(
+                f"[HYBRID] Pattern: {ai_validation.get('pattern_name', 'N/A')}, "
+                f"Confidence: {ai_validation.get('pattern_confidence', 0):.2%}"
+            )
 
         # ================================================================
-        # STEP 3: Get current price
+        # STEP 3: Verify AI validation has all required fields
+        # ================================================================
+        required_fields = [
+        "pattern_detected",
+        "pattern_name",
+        "pattern_confidence",  # ← FIXED: single 'f'
+        "top3_patterns",
+        "top3_confidences",
+        "sr_analysis",
+        "validation_passed",
+        "action",
+    ]
+
+        missing_fields = [
+            field for field in required_fields if field not in ai_validation
+        ]
+
+        if missing_fields:
+            logger.warning(
+                f"[HYBRID] ⚠️ AI validation missing fields: {missing_fields}"
+            )
+            logger.warning(f"[HYBRID] Regenerating complete AI validation...")
+
+            # Regenerate completely
+            ai_validation = self._format_ai_validation_direct(signal, df)
+            details["ai_validation"] = ai_validation
+
+        # ================================================================
+        # STEP 4: Get current price
         # ================================================================
         try:
             current_price = float(df["close"].iloc[-1])
@@ -1185,7 +1380,7 @@ class TradingBot:
             current_price = 0.0
 
         # ================================================================
-        # STEP 4: Calculate adaptive TP/SL if signal is not HOLD
+        # STEP 5: Calculate adaptive TP/SL if signal is not HOLD
         # ================================================================
         tp_sl_info = None
 
@@ -1212,23 +1407,15 @@ class TradingBot:
                 logger.error(f"[TP/SL] Calculation failed: {e}")
 
         # ================================================================
-        # STEP 5: ✅ FIX 2 - Build merged details PRESERVING ai_validation
+        # STEP 6: Build merged details
         # ================================================================
-
-        # Start with base details from aggregator (includes ai_validation)
         merged_details = details.copy()
-
-        # ✅ CRITICAL: Explicitly preserve ai_validation reference
-        # (in case .update() somehow overwrites it)
-        preserved_ai_validation = merged_details.get("ai_validation")
 
         # Add hybrid-specific metadata
         hybrid_metadata = {
-            # Hybrid mode metadata
             "aggregator_mode": selected_mode,
             "mode_confidence": confidence,
             "mode_switched": switch_occurred,
-            # Market regime analysis
             "regime_analysis": {
                 "regime_type": analysis["regime_type"],
                 "trend_strength": analysis["trend"]["strength"],
@@ -1240,49 +1427,66 @@ class TradingBot:
                 "momentum_aligned": analysis.get("momentum_aligned", False),
                 "at_key_level": analysis.get("at_key_level", False),
             },
-            # Adaptive TP/SL
             "adaptive_tpsl": tp_sl_info,
-            # Update signal_quality with hybrid confidence boost
             "signal_quality": max(details.get("signal_quality", 0), confidence * 0.8),
         }
 
-        # Merge hybrid metadata into details
         merged_details.update(hybrid_metadata)
 
-        # ✅ ENSURE ai_validation is DEFINITELY in merged_details
-        if "ai_validation" not in merged_details and preserved_ai_validation:
-            merged_details["ai_validation"] = preserved_ai_validation
-            logger.warning(f"[HYBRID] Re-added ai_validation after merge")
-
         # ================================================================
-        # STEP 6: DEBUG - Verify ai_validation is present
+        # ✅ CRITICAL: Verify ai_validation is in merged_details
         # ================================================================
-        final_ai_validation = merged_details.get("ai_validation")
-
-        if final_ai_validation:
-            logger.info(f"[HYBRID] ✅ AI validation in merged_details:")
-            logger.info(f"  Pattern: {final_ai_validation.get('pattern_name', 'N/A')}")
-            logger.info(
-                f"  Confidence: {final_ai_validation.get('pattern_confidence', 0):.2%}"
+        if "ai_validation" not in merged_details:
+            logger.error(
+                f"[HYBRID] ❌ CRITICAL: ai_validation lost during merge!"
             )
-            logger.info(
-                f"  Validation: {final_ai_validation.get('validation_passed', False)}"
-            )
-        else:
-            logger.error(f"[HYBRID] ❌ AI validation MISSING from merged_details!")
-            # Last resort: add empty placeholder so chart doesn't crash
+            # Last resort: add placeholder
             merged_details["ai_validation"] = {
                 "pattern_detected": False,
-                "validation_passed": False,
                 "pattern_name": "ERROR",
                 "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
+                "sr_analysis": {
+                    "near_sr_level": False,
+                    "level_type": "none",
+                    "nearest_level": None,
+                    "distance_pct": None,
+                    "levels": [],
+                    "total_levels_found": 0,
+                },
+                "validation_passed": False,
+                "action": "error_lost_validation",
                 "error": "AI validation lost during hybrid merge",
             }
 
         # ================================================================
-        # STEP 7: Apply mode-specific quality filters
+        # STEP 7: Final validation check
         # ================================================================
+        final_ai_validation = merged_details.get("ai_validation")
 
+        if not final_ai_validation or not isinstance(final_ai_validation, dict):
+            logger.error(
+                f"[HYBRID] ❌ FINAL CHECK FAILED: ai_validation is invalid"
+            )
+        else:
+            logger.info(f"[HYBRID] ✅ Final AI validation verified:")
+            logger.info(
+                f"  Pattern: {final_ai_validation.get('pattern_name', 'N/A')}"
+            )
+            logger.info(
+                f"  Confidence: {final_ai_validation.get('pattern_confidence', 0):.2%}"
+            )
+            logger.info(
+                f"  Action: {final_ai_validation.get('action', 'N/A')}"
+            )
+            logger.info(
+                f"  Top3: {len(final_ai_validation.get('top3_patterns', []))} patterns"
+            )
+
+        # ================================================================
+        # STEP 8: Apply mode-specific quality filters
+        # ================================================================
         if selected_mode == "council":
             min_score = merged_details.get("required_score", 3.5)
             actual_score = merged_details.get("total_score", 0)
@@ -2586,8 +2790,42 @@ class TradingBot:
                 # Send Visualization Chart
                 if new_position_ids and self.chart_sender:
                     try:
-                        logger.info(f"[VIZ] Sending chart for {asset_name}...")
+                        logger.info(f"[VIZ] Preparing chart for {asset_name}...")
+                        
+                        # Fetch 4H data for S/R analysis
                         df_4h = self._fetch_4h_data(asset_name)
+                        
+                        # ✅ NEW: Validate AI details before sending
+                        logger.info(f"[VIZ] Validating AI details structure...")
+                        is_valid = self._log_ai_validation_summary(asset_name, details)
+                        
+                        if not is_valid:
+                            logger.error(
+                                f"[VIZ] ⚠️ AI validation structure invalid, "
+                                f"attempting repair..."
+                            )
+                            
+                            # Attempt to repair/regenerate AI validation
+                            if not details.get("ai_validation") or not isinstance(
+                                details["ai_validation"], dict
+                            ):
+                                logger.info(f"[VIZ] Regenerating AI validation from scratch...")
+                                details["ai_validation"] = self._format_ai_validation_direct(
+                                    signal, df
+                                )
+                                
+                                # Validate again
+                                is_valid = self._validate_ai_details_structure(
+                                    details["ai_validation"], asset_name
+                                )
+                                
+                                if is_valid:
+                                    logger.info(f"[VIZ] ✅ Repair successful")
+                                else:
+                                    logger.error(f"[VIZ] ❌ Repair failed, chart may be incomplete")
+                        
+                        # Send chart (even if validation failed - better to have partial chart)
+                        logger.info(f"[VIZ] Sending chart to Telegram...")
                         self._send_telegram_notification(
                             self.chart_sender.send_decision_chart(
                                 asset_name=asset_name,
@@ -2598,8 +2836,11 @@ class TradingBot:
                                 current_price=current_price,
                             )
                         )
+                        
+                        logger.info(f"[VIZ] ✅ Chart sent successfully")
+                        
                     except Exception as e:
-                        logger.error(f"[VIZ] Chart error: {e}")
+                        logger.error(f"[VIZ] Chart generation error: {e}", exc_info=True)
 
                 # ✅✅✅ DATABASE LOGGING (Only on Success) ✅✅✅
                 if self.db_manager:
