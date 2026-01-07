@@ -28,47 +28,48 @@ class BinanceFuturesHandler:
     def __init__(self, client: Client, symbol: str = "BTCUSDT"):
         self.client = client
         self.symbol = symbol
-        self.price_precision = 2  # Default for BTCUSDT
-        self.quantity_precision = 3  # Default for BTCUSDT
-        self.min_notional = 5.0  # Minimum order value in USDT
+        self.filters = {}
         
-        try:
-            # Get actual precision from exchange
-            exchange_info = self.client.futures_exchange_info()
-            for s in exchange_info['symbols']:
-                if s['symbol'] == self.symbol:
-                    self.price_precision = s['pricePrecision']
-                    self.quantity_precision = s['quantityPrecision']
-                    
-                    # ✅ NEW: Get filters for validation
-                    for f in s['filters']:
-                        if f['filterType'] == 'PRICE_FILTER':
-                            self.tick_size = float(f['tickSize'])
-                        elif f['filterType'] == 'LOT_SIZE':
-                            self.step_size = float(f['stepSize'])
-                            self.min_qty = float(f['minQty'])
-                        elif f['filterType'] == 'MIN_NOTIONAL':
-                            self.min_notional = float(f['notional'])
-                    
-                    logger.info(
-                        f"[FUTURES] {self.symbol} Precision:\n"
-                        f"  Price:    {self.price_precision} decimals (tick: {self.tick_size})\n"
-                        f"  Quantity: {self.quantity_precision} decimals (step: {self.step_size})\n"
-                        f"  Min Notional: ${self.min_notional}"
-                    )
-                    break
-        except Exception as e:
-            logger.warning(f"[FUTURES] Could not fetch precision info: {e}")
-            self.tick_size = 0.01
-            self.step_size = 0.001
-        
-        # Verify Futures API access
+        # Verify Futures API access and load filters
         try:
             self.client.futures_account()
-            logger.info("[FUTURES] ✓ Binance Futures API connected")
+            self._load_symbol_filters()
+            logger.info(f"[FUTURES] ✓ Binance Futures API connected for {symbol}")
         except Exception as e:
             logger.error(f"[FUTURES] ✗ Futures API unavailable: {e}")
             raise
+
+    def _load_symbol_filters(self):
+        """Load LOT_SIZE and MIN_NOTIONAL filters for the symbol"""
+        try:
+            info = self.client.futures_exchange_info()
+            for s in info['symbols']:
+                if s['symbol'] == self.symbol:
+                    # Quantity Precision (step size)
+                    for f in s['filters']:
+                        if f['filterType'] == 'LOT_SIZE':
+                            self.filters['step_size'] = float(f['stepSize'])
+                            self.filters['min_qty'] = float(f['minQty'])
+                        elif f['filterType'] == 'MIN_NOTIONAL':
+                            self.filters['min_notional'] = float(f.get('notional', 5.0))
+                    
+                    self.filters['precision'] = int(s.get('quantityPrecision', 3))
+                    logger.info(f"[FUTURES] Filters loaded: Step={self.filters['step_size']}, MinNotional=${self.filters.get('min_notional', 5.0)}")
+                    return
+        except Exception as e:
+            logger.error(f"[FUTURES] Failed to load filters: {e}")
+            # Fallback defaults for BTC
+            self.filters = {'step_size': 0.001, 'min_qty': 0.001, 'min_notional': 5.0, 'precision': 3}
+
+    def _adjust_quantity(self, quantity: float) -> float:
+        """Round quantity to valid step size"""
+        import math
+        step = self.filters.get('step_size', 0.001)
+        precision = self.filters.get('precision', 3)
+        
+        # Round down to nearest step to avoid "LOT_SIZE" error
+        quantity = math.floor(quantity / step) * step
+        return round(quantity, precision)
 
     def set_leverage(self, leverage: int = 10) -> bool:
         """Set leverage for the trading pair"""
