@@ -62,6 +62,7 @@ from src.ai.visualization import (
     create_visualization_system,
     should_send_chart,
 )
+from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 
 import pickle
 
@@ -138,6 +139,7 @@ class TradingBot:
         # Core components
         self.data_manager = DataManager(self.config)
         self.portfolio_manager = None
+        self.data_manager_telegram = ThreadSafeBotDataManager(max_cache_age=10)
         self.db_manager = None  # ✨ Initialize BEFORE portfolio
 
         # Handler instances
@@ -2262,6 +2264,10 @@ class TradingBot:
                 logger.error(f"[ERROR] Failed to update positions: {e}")
 
             logger.info(f"[ASSETS] Enabled: {', '.join(enabled)}")
+
+            if hasattr(self, 'data_manager_telegram'):
+                self.data_manager_telegram.update_snapshot(self)
+                self.data_manager_telegram.process_queued_commands(self)
 
             # Trade each asset
             for asset_name in enabled:

@@ -826,29 +826,15 @@ class TradingTelegramBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
         user_id = update.effective_user.id
-        username = update.effective_user.username or "Unknown"
         is_admin = user_id in self.admin_ids
-
-        welcome_msg = (
-            "🤖 *Welcome to Trading Bot Control*\n\n"
-            f"👤 User: @{username}\n"
-            f"🆔 ID: `{user_id}`\n"
+        
+        msg = (
+            "🤖 *Trading Bot Control*\n\n"
             f"🔐 Access: {'✅ Admin' if is_admin else '❌ Guest'}\n\n"
+            f"{'Use /help for commands' if is_admin else 'Contact admin for access'}"
         )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-        if is_admin:
-            welcome_msg += (
-                "You have full access to all bot commands.\n"
-                "Use /help to see available commands."
-            )
-        else:
-            welcome_msg += (
-                "⚠️ You are not authorized to control this bot.\n"
-                "Contact the bot administrator for access."
-            )
-
-        await update.message.reply_text(welcome_msg, parse_mode=ParseMode.MARKDOWN)
-        logger.info(f"User {user_id} ({username}) started bot - Admin: {is_admin}")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
@@ -893,71 +879,53 @@ class TradingTelegramBot:
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command"""
+        """✅ Thread-safe status command"""
         try:
-            portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
+            # Use data manager if available
+            if hasattr(self.trading_bot, 'data_manager_telegram'):
+                snapshot = self.trading_bot.data_manager_telegram.get_snapshot()
+                if snapshot:
+                    portfolio_status = snapshot.portfolio_status
+                    is_running = snapshot.is_running
+                else:
+                    # Fallback
+                    portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
+                    is_running = self.trading_bot.is_running
+            else:
+                portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status()
+                is_running = self.trading_bot.is_running
 
-            status_icon = "🟢" if self.trading_bot.is_running else "🔴"
-
+            status_icon = "🟢" if is_running else "🔴"
             total_value = portfolio_status.get("total_value", 0)
             cash = portfolio_status.get("cash", 0)
             open_positions = portfolio_status.get("open_positions", 0)
-            daily_pnl = portfolio_status.get("daily_pnl", 0)
 
-            pnl_icon = "🟢" if daily_pnl >= 0 else "🔴"
-            pnl_sign = "+" if daily_pnl >= 0 else ""
-
-            # Check market status
-            btc_status = "✅ 24/7 Open"
-            gold_status = self._get_gold_market_status()
-
-            status_msg = (
+            msg = (
                 f"{status_icon} *Bot Status*\n\n"
-                f"🤖 Trading: {'Running' if self.trading_bot.is_running else 'Stopped'}\n"
-                f"💰 Portfolio Value: ${total_value:,.2f}\n"
+                f"🤖 Trading: {'Running' if is_running else 'Stopped'}\n"
+                f"💰 Portfolio: ${total_value:,.2f}\n"
                 f"💵 Cash: ${cash:,.2f}\n"
-                f"📈 Open Positions: {open_positions}\n\n"
-                f"*Market Status:*\n"
-                f"₿ BTC: {btc_status}\n"
-                f"🥇 GOLD: {gold_status}\n\n"
+                f"📈 Positions: {open_positions}\n\n"
+                f"*Markets:*\n"
+                f"₿ BTC: ✅ 24/7\n"
+                f"🥇 GOLD: {self._get_gold_market_status()}\n\n"
+                f"🕐 {datetime.now().strftime('%H:%M:%S')}"
             )
 
-            # ✨ NEW: Add preset info
-            if (
-                hasattr(self.trading_bot, "selected_presets")
-                and self.trading_bot.selected_presets
-            ):
-                status_msg += "*Current Presets:*\n"
-                for asset, preset in self.trading_bot.selected_presets.items():
-                    emoji = "₿" if asset == "BTC" else "🥇"
-                    status_msg += f"{emoji} {asset}: `{preset.upper()}`\n"
-                status_msg += "\n"
-
-            status_msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
-
-            # Add inline keyboard for quick actions
             keyboard = [
                 [
                     InlineKeyboardButton("📊 Positions", callback_data="positions"),
                     InlineKeyboardButton("📜 History", callback_data="history"),
                 ],
-                [
-                    InlineKeyboardButton("⚙️ Presets", callback_data="presets"),
-                    InlineKeyboardButton("📡 Signals", callback_data="signals"),
-                ],
                 [InlineKeyboardButton("🔄 Refresh", callback_data="status")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
-                status_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
-            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
         except Exception as e:
             logger.error(f"Error in cmd_status: {e}", exc_info=True)
-            await update.message.reply_text(
-                "❌ Error fetching status. Please try again."
-            )
+            await update.message.reply_text("❌ Error fetching status.")
 
     async def _send_status_message(self, query):
         """Send status message (for callback)"""
@@ -1022,38 +990,36 @@ class TradingTelegramBot:
             logger.error(f"Error in _send_status_message: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /positions command -  VERSION"""
+        """
+        ✅ Thread-safe positions command using cached snapshot
+        """
         try:
-            # Fetch latest prices
-            current_prices = {}
-            for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
-                if not asset_cfg.get("enabled", False):
-                    continue
+            # Check for data manager
+            if not hasattr(self.trading_bot, 'data_manager_telegram'):
+                await update.message.reply_text(
+                    "⚠️ Data manager not available. Bot may still be initializing."
+                )
+                return
 
-                exchange = asset_cfg.get("exchange", "binance")
-                handler = (
-                    self.trading_bot.binance_handler
-                    if exchange == "binance"
-                    else self.trading_bot.mt5_handler
+            data_mgr = self.trading_bot.data_manager_telegram
+            snapshot = data_mgr.get_snapshot(force_fresh=False)
+
+            if not snapshot:
+                await update.message.reply_text(
+                    "⚠️ Position data temporarily unavailable.\n"
+                    "Please try again in a few seconds."
+                )
+                return
+
+            # Check if data is stale
+            if snapshot.is_stale(max_age_seconds=30):
+                await update.message.reply_text(
+                    "⚠️ Data may be slightly outdated (refreshing soon)..."
                 )
 
-                if handler:
-                    try:
-                        price = handler.get_current_price()
-                        if price and price > 0:
-                            current_prices[asset_name] = price
-                            logger.debug(f"[TELEGRAM] {asset_name} price: ${price:,.2f}")
-                    except Exception as e:
-                        logger.error(f"Failed to get {asset_name} price: {e}")
-
-            # Update positions with latest prices
-            self.trading_bot.portfolio_manager.update_positions(current_prices)
-
-            # Get updated portfolio status
-            portfolio_status = self.trading_bot.portfolio_manager.get_portfolio_status(
-                current_prices
-            )
-            positions = portfolio_status.get("positions", {})
+            # Use snapshot data (thread-safe)
+            positions = snapshot.positions
+            current_prices = snapshot.current_prices
 
             if not positions:
                 await update.message.reply_text(
@@ -1062,84 +1028,75 @@ class TradingTelegramBot:
                 )
                 return
 
-            positions_msg = "📊 *Open Positions*\n\n"
+            # Build message
+            msg = "📊 *Open Positions*\n\n"
 
             for position_id, pos in positions.items():
                 asset = pos["asset"]
                 side = pos["side"].upper()
                 side_icon = "🟢" if side == "LONG" else "🔴"
-                
+
                 is_futures = pos.get("is_futures", False)
                 leverage = pos.get("leverage", 1)
                 margin = pos.get("margin_type", "SPOT")
 
                 entry_price = pos.get("entry_price", 0)
-                current_price = pos.get("current_price", 0)
+                current_price = current_prices.get(asset, entry_price)
                 quantity = pos.get("quantity", 0)
-                current_value = pos.get("current_value", 0)
-                pnl = pos.get("pnl", 0)
-                pnl_pct = pos.get("pnl_pct", 0) * 100
+
+                # Calculate P&L
+                if side == "LONG":
+                    pnl = (current_price - entry_price) * quantity
+                else:
+                    pnl = (entry_price - current_price) * quantity
+
+                pnl_pct = (pnl / (quantity * entry_price) * 100) if entry_price > 0 else 0
+                current_value = quantity * current_price
 
                 pnl_icon = "🟢" if pnl >= 0 else "🔴"
                 pnl_sign = "+" if pnl >= 0 else ""
-                
-                if is_futures:
-                    type_str = f"⚡ Futures {leverage}x ({margin})"
-                else:
-                    type_str = "Spot"
+                type_str = f"⚡ Futures {leverage}x ({margin})" if is_futures else "Spot"
 
-                positions_msg += (
+                msg += (
                     f"{side_icon} *{asset} - {side}*\n"
                     f"⚙️ {type_str}\n"
-                    f"📍 Entry Price: ${entry_price:,.2f}\n"
-                    f"💹 Current Price: ${current_price:,.2f}\n"
-                    f"📦 Quantity: {quantity:.6f}\n"
-                    f"💰 Current Value: ${current_value:,.2f}\n"
+                    f"📍 Entry: ${entry_price:,.2f}\n"
+                    f"💹 Current: ${current_price:,.2f}\n"
+                    f"📦 Qty: {quantity:.6f}\n"
+                    f"💰 Value: ${current_value:,.2f}\n"
                     f"{pnl_icon} P&L: {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
                 )
-
-                # Show exchange-specific info
-                if pos.get("mt5_ticket"):
-                    positions_msg += f"🎫 MT5 Ticket: {pos['mt5_ticket']}\n"
-                    if pos.get("mt5_profit") is not None:
-                        mt5_profit = pos["mt5_profit"]
-                        positions_msg += f"   MT5 P&L: ${mt5_profit:,.2f}\n"
-
-                if pos.get("binance_order_id"):
-                    positions_msg += f"🎫 Binance Order: {pos['binance_order_id']}\n"
-                    if pos.get("binance_profit") is not None:
-                        binance_profit = pos["binance_profit"]
-                        positions_msg += f"   Binance P&L: ${binance_profit:,.2f}\n"
 
                 # Show SL/TP
                 if pos.get("stop_loss"):
                     sl = pos["stop_loss"]
-                    sl_dist = abs(current_price - sl)
-                    sl_pct = (sl_dist / current_price * 100) if current_price > 0 else 0
-                    positions_msg += f"🛑 Stop Loss: ${sl:,.2f} ({sl_pct:.2f}% away)\n"
+                    sl_dist_pct = abs((current_price - sl) / current_price * 100)
+                    msg += f"🛑 SL: ${sl:,.2f} ({sl_dist_pct:.2f}% away)\n"
 
                 if pos.get("take_profit"):
                     tp = pos["take_profit"]
-                    tp_dist = abs(tp - current_price)
-                    tp_pct = (tp_dist / current_price * 100) if current_price > 0 else 0
-                    positions_msg += f"🎯 Take Profit: ${tp:,.2f} ({tp_pct:.2f}% away)\n"
+                    tp_dist_pct = abs((tp - current_price) / current_price * 100)
+                    msg += f"🎯 TP: ${tp:,.2f} ({tp_dist_pct:.2f}% away)\n"
 
-                positions_msg += "\n"
+                msg += "\n"
 
-            # Add summary
-            total_exposure = portfolio_status.get("total_exposure", 0)
-            total_unrealized = portfolio_status.get("total_unrealized_pnl", 0)
-            unrealized_icon = "🟢" if total_unrealized >= 0 else "🔴"
-            unrealized_sign = "+" if total_unrealized >= 0 else ""
-
-            positions_msg += (
-                f"*Portfolio Summary*\n"
-                f"💼 Total Exposure: ${total_exposure:,.2f}\n"
-                f"{unrealized_icon} Total Unrealized P&L: {unrealized_sign}${total_unrealized:,.2f}\n\n"
-                f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+            # Summary
+            total_pnl = sum(
+                ((current_prices.get(p["asset"], p["entry_price"]) - p["entry_price"]) * p["quantity"]
+                 if p["side"] == "long" else
+                 (p["entry_price"] - current_prices.get(p["asset"], p["entry_price"])) * p["quantity"])
+                for p in positions.values()
             )
 
-            # Add keyboard
+            unrealized_icon = "🟢" if total_pnl >= 0 else "🔴"
+            unrealized_sign = "+" if total_pnl >= 0 else ""
+
+            msg += (
+                f"*Summary*\n"
+                f"{unrealized_icon} Total Unrealized: {unrealized_sign}${total_pnl:,.2f}\n\n"
+                f"🕐 Updated: {snapshot.timestamp.strftime('%H:%M:%S')}"
+            )
+
             keyboard = [
                 [
                     InlineKeyboardButton("🔄 Refresh", callback_data="positions"),
@@ -1148,14 +1105,15 @@ class TradingTelegramBot:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
-                positions_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
-            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
         except Exception as e:
             logger.error(f"Error in cmd_positions: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching positions.")
 
+
+    
+    
     async def cmd_VTM_status(self, update, context):
         """Show Dynamic Trade Manager status - """
         try:
@@ -1372,139 +1330,93 @@ class TradingTelegramBot:
     @admin_only
     async def cmd_close_asset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        ✅ FIXED: Handle /close <asset> [position_number] command
-        
-        Usage:
-            /close BTC           → Close ALL BTC positions
-            /close BTC 2         → Close 2nd BTC position only
-            /close GOLD          → Close ALL GOLD positions
+        ✅ Thread-safe close command using command queue
+        Usage: /close BTC or /close BTC 2
         """
         try:
             if not context.args:
                 await update.message.reply_text(
                     "⚠️ *Usage:*\n"
                     "`/close BTC` - Close ALL BTC positions\n"
-                    "`/close BTC 2` - Close 2nd BTC position\n"
-                    "`/close GOLD` - Close ALL GOLD positions",
+                    "`/close BTC 2` - Close 2nd BTC position",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return
 
             asset = context.args[0].upper()
-            
             if asset not in ["BTC", "GOLD"]:
+                await update.message.reply_text("⚠️ Invalid asset. Use: BTC or GOLD")
+                return
+
+            # Check for data manager
+            if not hasattr(self.trading_bot, 'data_manager_telegram'):
                 await update.message.reply_text(
-                    "⚠️ Invalid asset. Use: BTC or GOLD"
+                    "❌ Data manager not available.\n"
+                    "Close positions manually or restart bot."
                 )
                 return
 
-            # ================================================================
-            # CASE 1: Close Specific Position (Index provided)
-            # ================================================================
+            data_mgr = self.trading_bot.data_manager_telegram
+
+            # Determine if closing specific position or all
             if len(context.args) > 1:
+                # Close specific position
                 try:
-                    position_index = int(context.args[1]) - 1  # Convert to 0-indexed
+                    position_index = int(context.args[1]) - 1
                     if position_index < 0:
                         raise ValueError
                 except ValueError:
-                    await update.message.reply_text(
-                        "⚠️ Invalid position number. Use: `/close BTC 2`",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    await update.message.reply_text("⚠️ Invalid position number")
                     return
 
-                # Get positions for asset
-                positions = self.trading_bot.portfolio_manager.get_asset_positions(asset)
-                
-                if not positions or position_index >= len(positions):
-                    await update.message.reply_text(
-                        f"⚠️ Position #{position_index + 1} not found for {asset}"
-                    )
-                    return
-
-                # Get exit price
-                price = None
-                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
-                exchange = asset_cfg.get("exchange", "binance")
-                
-                if exchange == "binance" and self.trading_bot.binance_handler:
-                    price = self.trading_bot.binance_handler.get_current_price()
-                elif exchange == "mt5" and self.trading_bot.mt5_handler:
-                    price = self.trading_bot.mt5_handler.get_current_price()
-
-                # Close the specific position
-                result = self.trading_bot.portfolio_manager.close_position(
-                    position_id=positions[position_index].position_id,
-                    exit_price=price or positions[position_index].entry_price,
-                    reason="manual_telegram_specific"
+                command_id = f"close_{asset}_{position_index}_{datetime.now().timestamp()}"
+                data_mgr.queue_command(
+                    command_id=command_id,
+                    command_type="close_position",
+                    params={"asset": asset, "position_index": position_index}
                 )
+                await update.message.reply_text(f"⏳ Closing {asset} position #{position_index + 1}...")
 
-                if result:
-                    pnl_icon = "🟢" if result["pnl"] >= 0 else "🔴"
-                    await update.message.reply_text(
-                        f"{pnl_icon} *{asset} Position #{position_index + 1} Closed*\n\n"
-                        f"P&L: ${result['pnl']:,.2f} ({result['pnl_pct']*100:+.2f}%)",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ Failed to close {asset} position #{position_index + 1}"
-                    )
-
-            # ================================================================
-            # CASE 2: Close ALL Positions for Asset (No index provided)
-            # ================================================================
             else:
-                # Get exit price
-                price = None
-                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
-                exchange = asset_cfg.get("exchange", "binance")
-                
-                if exchange == "binance" and self.trading_bot.binance_handler:
-                    price = self.trading_bot.binance_handler.get_current_price()
-                elif exchange == "mt5" and self.trading_bot.mt5_handler:
-                    price = self.trading_bot.mt5_handler.get_current_price()
-                
-                # ✅ Use the new method to close all positions for asset
-                results = self.trading_bot.portfolio_manager.close_all_positions_for_asset(
-                    asset=asset,
-                    exit_price=price,
-                    reason="manual_telegram_all"
+                # Close all positions
+                command_id = f"close_all_{asset}_{datetime.now().timestamp()}"
+                data_mgr.queue_command(
+                    command_id=command_id,
+                    command_type="close_all_positions",
+                    params={"asset": asset}
                 )
-                
-                if not results:
-                    await update.message.reply_text(
-                        f"ℹ️ No open positions found for {asset}"
-                    )
-                else:
-                    # Calculate summary
-                    total_pnl = sum(r["pnl"] for r in results)
-                    pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
-                    
-                    # Build message with details
-                    msg = f"✅ *Closed ALL {asset} Positions*\n\n"
-                    msg += f"Trades Closed: {len(results)}\n"
-                    msg += f"{pnl_icon} Total P&L: ${total_pnl:,.2f}\n\n"
-                    
-                    # Show individual results
-                    for i, result in enumerate(results, 1):
-                        pnl = result["pnl"]
-                        pnl_pct = result["pnl_pct"] * 100
-                        side = result["side"].upper()
-                        icon = "🟢" if pnl >= 0 else "🔴"
-                        
-                        msg += f"{icon} #{i} {side}: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
-                    
-                    await update.message.reply_text(
-                        msg,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                await update.message.reply_text(f"⏳ Closing ALL {asset} positions...")
+
+            # Wait for result (non-blocking for Telegram thread)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                data_mgr.get_command_result,
+                command_id,
+                10.0
+            )
+
+            if result and result.get("success"):
+                trades = result["result"] if isinstance(result["result"], list) else [result["result"]]
+                total_pnl = sum(t["pnl"] for t in trades)
+                pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+
+                msg = f"{pnl_icon} *Closed {len(trades)} {asset} position(s)*\n\n"
+                for i, trade in enumerate(trades, 1):
+                    pnl = trade["pnl"]
+                    pnl_pct = trade["pnl_pct"] * 100
+                    icon = "🟢" if pnl >= 0 else "🔴"
+                    msg += f"{icon} #{i}: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+
+                msg += f"\n💰 Total: ${total_pnl:,.2f}"
+                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            else:
+                error = result.get("error", "Unknown error") if result else "Command timeout"
+                await update.message.reply_text(f"❌ Failed: {error}")
 
         except Exception as e:
             logger.error(f"Error in cmd_close_asset: {e}", exc_info=True)
-            await update.message.reply_text(
-                "❌ Error processing close command."
-            )
+            await update.message.reply_text("❌ Error processing command")
+
             
             
     async def cmd_preset_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
