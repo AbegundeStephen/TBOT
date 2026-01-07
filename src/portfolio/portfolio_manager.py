@@ -74,6 +74,7 @@ class Position:
 
         self.db_trade_id = None
         self.db_manager = None
+        
 
         # ✅ CRITICAL FIX: Initialize VTM
         self.trade_manager = None
@@ -453,7 +454,7 @@ class PortfolioManager:
     """
 
     def __init__(
-        self, config: Dict, mt5_handler=None, binance_client=None, db_manager=None
+        self, config: Dict, mt5_handler=None, binance_client=None, db_manager=None, execution_handlers: Dict = None
     ):
         self.config = config
         self.portfolio_config = config["portfolio"]
@@ -464,6 +465,7 @@ class PortfolioManager:
         self.mt5_handler = mt5_handler
         self.binance_client = binance_client
         self.db_manager = db_manager
+        self.execution_handlers = execution_handlers or {}
 
         self.mode = config["trading"].get("mode", "paper")
         self.is_paper_mode = self.mode.lower() == "paper"
@@ -486,6 +488,10 @@ class PortfolioManager:
         logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
         logger.info(f"Max Positions Per Asset: {self.max_positions_per_asset}")
+        logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
+        
+        if self.execution_handlers:
+            logger.info(f"✓ Execution handlers connected: {list(self.execution_handlers.keys())}")
 
         if not self.is_paper_mode:
             logger.info("✓ Using LIVE account balances from exchanges")
@@ -1215,13 +1221,7 @@ class PortfolioManager:
         reason: str = "manual",
     ) -> Optional[Dict]:
         """
-        Close a specific position
-
-        Args:
-            asset: Asset name (for backward compatibility, closes first position)
-            position_id: Specific position ID to close
-            exit_price: Exit price
-            reason: Close reason
+        ✅ FIXED: Close position on exchange AND portfolio
         """
         # Find position to close
         if position_id:
@@ -1234,13 +1234,71 @@ class PortfolioManager:
             if not positions:
                 logger.warning(f"No positions to close for {asset}")
                 return None
-            position = positions[0]  # Close first position
+            position = positions[0]
             position_id = position.position_id
         else:
             logger.error("Must provide either asset or position_id")
             return None
 
-        # Calculate P&L
+        # ================================================================
+        # ✅ STEP 1: CLOSE ON EXCHANGE FIRST (MT5 or Binance)
+        # ================================================================
+        exchange_closed = False
+        
+        if not self.is_paper_mode:
+            # Get the exchange for this asset
+            asset_cfg = self.config["assets"].get(position.asset, {})
+            exchange = asset_cfg.get("exchange", "binance")
+            
+            # Close on MT5
+            if exchange == "mt5" and position.mt5_ticket:
+                handler = self.execution_handlers.get("mt5")
+                if handler:
+                    try:
+                        logger.info(f"[MT5] Closing ticket {position.mt5_ticket}...")
+                        exchange_closed = handler._close_mt5_order(
+                            ticket=position.mt5_ticket,
+                            asset=position.asset,
+                            side=position.side
+                        )
+                        
+                        if not exchange_closed:
+                            logger.error(f"[MT5] Failed to close ticket {position.mt5_ticket}")
+                            # Continue anyway to remove from portfolio
+                    
+                    except Exception as e:
+                        logger.error(f"[MT5] Error closing position: {e}")
+                else:
+                    logger.warning("[MT5] Handler not available, position may remain open on MT5!")
+            
+            # Close on Binance
+            elif exchange == "binance" and position.binance_order_id:
+                handler = self.execution_handlers.get("binance")
+                if handler:
+                    try:
+                        logger.info(f"[BINANCE] Closing order {position.binance_order_id}...")
+                        # You'll need to implement this in your Binance handler
+                        exchange_closed = handler.close_position(
+                            symbol=position.symbol,
+                            side=position.side,
+                            quantity=position.quantity
+                        )
+                        
+                        if not exchange_closed:
+                            logger.error(f"[BINANCE] Failed to close order {position.binance_order_id}")
+                    
+                    except Exception as e:
+                        logger.error(f"[BINANCE] Error closing position: {e}")
+                else:
+                    logger.warning("[BINANCE] Handler not available!")
+        
+        else:
+            # Paper mode - always succeeds
+            exchange_closed = True
+
+        # ================================================================
+        # ✅ STEP 2: CALCULATE P&L (Using exchange profit if available)
+        # ================================================================
         if position.mt5_ticket and position.mt5_profit != 0.0:
             pnl = position.mt5_profit
         elif position.binance_order_id and position.binance_profit != 0.0:
@@ -1249,9 +1307,9 @@ class PortfolioManager:
             pnl = position.get_pnl(exit_price)
 
         pnl_pct = position.get_pnl_pct(exit_price)
-
         self.realized_pnl_today += pnl
 
+        # Update capital
         if self.is_paper_mode:
             self.current_capital += pnl
             self.equity = self.current_capital
@@ -1261,6 +1319,9 @@ class PortfolioManager:
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
 
+        # ================================================================
+        # ✅ STEP 3: CREATE TRADE RESULT
+        # ================================================================
         trade_result = {
             "asset": asset or position.asset,
             "position_id": position_id,
@@ -1273,24 +1334,19 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "entry_time": position.entry_time,
             "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds()
-            / 3600,
+            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
             "binance_order_id": position.binance_order_id,
+            "exchange_closed": exchange_closed,  # ✅ NEW: Track if exchange close succeeded
         }
 
-        # ✨ NEW: Log trade exit to database
-        if (
-            self.db_manager
-            and hasattr(position, "db_trade_id")
-            and position.db_trade_id
-        ):
+        # ================================================================
+        # ✅ STEP 4: LOG TO DATABASE
+        # ================================================================
+        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
             try:
-                holding_time = (
-                    datetime.now() - position.entry_time
-                ).total_seconds() / 3600
-
+                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,
@@ -1299,20 +1355,28 @@ class PortfolioManager:
                     pnl_pct=pnl_pct,
                     holding_time_hours=holding_time,
                     final_quantity=position.quantity,
-                    metadata={"exit_time": datetime.now().isoformat()},
+                    metadata={
+                        "exit_time": datetime.now().isoformat(),
+                        "exchange_closed": exchange_closed
+                    },
                 )
-
             except Exception as e:
                 logger.error(f"[DB] Error logging trade exit: {e}")
 
+        # ================================================================
+        # ✅ STEP 5: REMOVE FROM PORTFOLIO
+        # ================================================================
         self.closed_positions.append(trade_result)
         del self.positions[position_id]
 
         remaining_count = self.get_asset_position_count(position.asset, position.side)
+        
+        close_status = "✓" if exchange_closed else "⚠️"
         logger.info(
-            f"✓ Position closed: {position.asset} {position.side.upper()} "
+            f"{close_status} Position closed: {position.asset} {position.side.upper()} "
             f"@ ${exit_price:,.2f} | P&L: ${pnl:,.2f} ({pnl_pct:.2%}) "
             f"| Remaining: {remaining_count}/{self.max_positions_per_asset}"
+            f"{' [EXCHANGE CLOSE FAILED]' if not exchange_closed else ''}"
         )
 
         return trade_result

@@ -191,6 +191,29 @@ class TradingBot:
         self.dynamic_selector = DynamicPresetSelector(
             self.data_manager, self.config, telegram_bot=self.telegram_bot
         )
+        
+        preset_mode = self.config.get("aggregator_settings", {}).get("preset", "balanced")
+        if preset_mode == "auto":
+            logger.info("\n" + "=" * 70)
+            logger.info("🎯 AUTO PRESET MODE ENABLED")
+            logger.info("=" * 70)
+            logger.info("System will automatically select optimal preset per asset:")
+            logger.info("  • CONSERVATIVE: High risk/volatility conditions")
+            logger.info("  • BALANCED:     Normal market conditions")
+            logger.info("  • AGGRESSIVE:   Strong trending markets")
+            logger.info("  • SCALPER:      Ideal low-volatility conditions")
+            logger.info("=" * 70 + "\n")
+            
+            # Set initial presets for all enabled assets
+            logger.info("[AUTO PRESET] Analyzing market conditions for initial setup...")
+            for asset_name in self.strategies.keys():
+                if self.config["assets"][asset_name].get("enabled", False):
+                    initial_preset = self.dynamic_selector.get_preset_for_asset(asset_name)
+                    self.dynamic_selector.current_presets[asset_name] = initial_preset
+                    logger.info(f"  {asset_name:6} → {initial_preset.upper()}")
+        else:
+            logger.info(f"[PRESET] Using manual preset: {preset_mode.upper()}")
+        
         self.hybrid_selector = HybridAggregatorSelector(
             self.data_manager, self.config, telegram_bot=self.telegram_bot
         )
@@ -208,8 +231,7 @@ class TradingBot:
 
     def initialize_exchanges(self):
         """
-        ✅ FIXED: Initialize exchanges with proper Futures setup order
-        Key change: Enable Futures BEFORE auto-sync runs
+        ✅ FIXED: Initialize exchanges and link handlers to portfolio
         """
         logger.info("\n" + "-" * 70)
         logger.info("STEP 1: Initializing Exchange Connections")
@@ -270,7 +292,7 @@ class TradingBot:
             self.db_manager = None
 
         # ============================================================
-        # STEP 2: Initialize Portfolio Manager WITH Database
+        # STEP 2: Initialize Portfolio Manager
         # ============================================================
         logger.info("\n" + "-" * 70)
         logger.info("STEP 2: Initializing Portfolio Manager")
@@ -278,7 +300,6 @@ class TradingBot:
 
         try:
             import MetaTrader5 as mt5
-
             mt5_handler = mt5 if mt5_initialized else None
         except ImportError:
             mt5_handler = None
@@ -288,17 +309,11 @@ class TradingBot:
             self.portfolio_manager = PortfolioManager(
                 config=self.config,
                 mt5_handler=mt5_handler,
-                binance_client=self.data_manager.binance_client,  # ✅ Use SPOT client
+                binance_client=self.data_manager.binance_client,
+                db_manager=self.db_manager,  # ✅ Pass db_manager during init
             )
 
-            # Link database to portfolio
-            if self.db_manager:
-                self.portfolio_manager.db_manager = self.db_manager
-                logger.info("[DB] ✓ Database linked to portfolio manager")
-
-            logger.info(
-                f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
-            )
+            logger.info(f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})")
             logger.info(f"     Capital: ${self.portfolio_manager.current_capital:,.2f}")
 
             # Log system startup to database
@@ -312,8 +327,7 @@ class TradingBot:
                         "mode": self.portfolio_manager.mode,
                         "initial_capital": self.portfolio_manager.initial_capital,
                         "assets_enabled": [
-                            asset
-                            for asset, cfg in self.config["assets"].items()
+                            asset for asset, cfg in self.config["assets"].items()
                             if cfg.get("enabled", False)
                         ],
                     },
@@ -324,27 +338,23 @@ class TradingBot:
             raise
 
         # ============================================================
-        # STEP 3: Initialize Execution Handlers (WITHOUT AUTO-SYNC!)
+        # STEP 3: Initialize Execution Handlers
         # ============================================================
         logger.info("\n" + "-" * 70)
         logger.info("STEP 3: Initializing Execution Handlers")
         logger.info("-" * 70)
 
         # ✅ BINANCE HANDLER
-        if (
-            self.config["assets"]["BTC"].get("enabled", False)
-            and self.data_manager.get_futures_client() is not None
-        ):
+        if (self.config["assets"]["BTC"].get("enabled", False) and 
+            self.data_manager.get_futures_client() is not None):
             try:
-                # ✅ CRITICAL: Temporarily disable auto-sync
-                original_auto_sync = self.config["trading"].get(
-                    "auto_sync_on_startup", True
-                )
+                # Temporarily disable auto-sync
+                original_auto_sync = self.config["trading"].get("auto_sync_on_startup", True)
                 self.config["trading"]["auto_sync_on_startup"] = False
 
                 self.binance_handler = BinanceExecutionHandler(
                     config=self.config,
-                    client=self.data_manager.get_futures_client(),  # Use Futures client
+                    client=self.data_manager.get_futures_client(),
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
                 )
@@ -357,32 +367,21 @@ class TradingBot:
                     self.binance_handler.error_handler = self.error_handler
                     self.binance_handler.trading_bot = self
 
-                # ✅ STEP 3.5: Enable Futures BEFORE sync
+                # Enable Futures BEFORE sync
                 if self.config["assets"]["BTC"].get("enable_futures", False):
                     logger.info("\n[FUTURES] Enabling Futures handler...")
-
-                    from src.execution.binance_futures import (
-                        enable_futures_for_binance_handler,
-                    )
-
-                    futures_enabled = enable_futures_for_binance_handler(
-                        self.binance_handler
-                    )
-
+                    from src.execution.binance_futures import enable_futures_for_binance_handler
+                    
+                    futures_enabled = enable_futures_for_binance_handler(self.binance_handler)
+                    
                     if futures_enabled:
-                        logger.info(
-                            "[FUTURES] ✅ Futures API enabled for FUTURES trading"
-                        )
+                        logger.info("[FUTURES] ✅ Futures API enabled for FUTURES trading")
                     else:
-                        logger.warning(
-                            "[FUTURES] ⚠️ Futures unavailable, shorts simulated"
-                        )
+                        logger.warning("[FUTURES] ⚠️ Futures unavailable, shorts simulated")
 
-                # ✅ STEP 3.6: NOW do the sync (after Futures is enabled)
+                # NOW do the sync (after Futures is enabled)
                 if original_auto_sync and not self.portfolio_manager.is_paper_mode:
-                    logger.info(
-                        "\n[SYNC] Running position sync (after Futures setup)..."
-                    )
+                    logger.info("\n[SYNC] Running position sync (after Futures setup)...")
                     self.binance_handler.sync_positions_with_binance("BTC")
 
                 # Link database to handler
@@ -397,7 +396,7 @@ class TradingBot:
                 self.binance_handler = None
                 self.config["assets"]["BTC"]["enabled"] = False
 
-        # ✅ MT5 HANDLER (unchanged)
+        # ✅ MT5 HANDLER
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
                 self.mt5_handler = MT5ExecutionHandler(
@@ -426,6 +425,30 @@ class TradingBot:
 
         if not self.binance_handler and not self.mt5_handler:
             raise RuntimeError("No execution handlers available!")
+
+        # ============================================================
+        # ✅ STEP 4: LINK HANDLERS TO PORTFOLIO MANAGER
+        # ============================================================
+        logger.info("\n" + "-" * 70)
+        logger.info("STEP 4: Linking Execution Handlers to Portfolio")
+        logger.info("-" * 70)
+
+        # Create execution_handlers dict
+        execution_handlers = {}
+        
+        if self.binance_handler:
+            execution_handlers['binance'] = self.binance_handler
+            logger.info("[LINK] ✓ Binance handler linked")
+        
+        if self.mt5_handler:
+            execution_handlers['mt5'] = self.mt5_handler
+            logger.info("[LINK] ✓ MT5 handler linked")
+
+        # ✅ NEW: Pass handlers to Portfolio Manager
+        self.portfolio_manager.execution_handlers = execution_handlers
+
+        logger.info("[OK] Portfolio can now close positions on exchanges")
+        logger.info("-" * 70)
 
     def _initialize_telegram(self):
         """Initialize Telegram bot with error handling"""
@@ -704,39 +727,33 @@ class TradingBot:
         # STEP 3: Auto-Preset Selection (if enabled)
         # ================================================================
         if preset == "auto":
-            logger.info("\n🤖 AUTO-PRESET MODE ENABLED")
-            logger.info("Analyzing market conditions...")
-
-            try:
-                from src.execution.auto_preset_selector import DynamicPresetSelector
-
-                selector = DynamicPresetSelector(
-                    self.data_manager, self.config, telegram_bot=self.telegram_bot
-                )
-                asset_presets = {}
-
-                # Calculate preset for each enabled asset
-                for asset_name in self.strategies.keys():
-                    if self.config["assets"][asset_name].get("enabled", False):
-                        p = selector.get_preset_for_asset(asset_name)
-                        asset_presets[asset_name] = p
-
-                logger.info("\n📊 AUTO-PRESET RESULTS:")
-                for asset, selected_preset in asset_presets.items():
-                    logger.info(f"  {asset:6} → {selected_preset.upper()}")
-
-            except Exception as e:
-                logger.error(f"Auto-preset failed: {e}, using 'balanced'")
-                asset_presets = {name: "balanced" for name in self.strategies.keys()}
-
+            logger.info("\n🎯 AUTO-PRESET MODE ACTIVE")
+            logger.info("Analyzing market conditions for each asset...")
+            
+            asset_presets = {}
+            
+            # Get preset for each enabled asset
+            for asset_name in self.strategies.keys():
+                if self.config["assets"][asset_name].get("enabled", False):
+                    # Use the preset already calculated during init
+                    selected_preset = self.dynamic_selector.current_presets.get(
+                        asset_name, 
+                        "balanced"
+                    )
+                    asset_presets[asset_name] = selected_preset
+            
+            logger.info("\n📊 CURRENT PRESETS:")
+            for asset, selected_preset in asset_presets.items():
+                logger.info(f"  {asset:6} → {selected_preset.upper()}")
+            
         elif preset in ["conservative", "balanced", "aggressive", "scalper"]:
             logger.info(f"\nUsing manual preset: {preset.upper()}")
             asset_presets = {name: preset for name in self.strategies.keys()}
-
+        
         else:
             logger.warning(f"Unknown preset '{preset}', using 'balanced'")
             asset_presets = {name: "balanced" for name in self.strategies.keys()}
-
+        
         # Store selected presets
         self.selected_presets = asset_presets.copy()
 
@@ -954,7 +971,12 @@ class TradingBot:
             logger.info(f"  Type:       Hybrid (Dynamic Mode Selection)")
             logger.info(f"  AI:         {'Enabled' if ai_validator else 'Disabled'}")
             logger.info(f"  Note:       Intelligent mode switching enabled")
-
+        
+        if preset == "auto":
+            logger.info(f"\n🎯 AUTO PRESET: Active (Dynamic adjustment enabled)")
+            logger.info(f"  Cooldown:     {self.dynamic_selector.min_switch_interval} minutes")
+            logger.info(f"  Presets Used: {set(asset_presets.values())}")
+            
     def _format_ai_validation_direct(self, signal: int, df: pd.DataFrame) -> dict:
         """
         Direct AI validation formatting (fallback when aggregator doesn't have the method)
@@ -1917,62 +1939,51 @@ class TradingBot:
 
     def _reinitialize_aggregator(self, asset_name: str, preset: str):
         """
-        Reinitialize aggregator with new preset - FIXED for Council & Hybrid modes
+        Reinitialize aggregator with new preset
+        ✅ ENHANCED: Better logging for auto preset changes
         """
         try:
-            # 1. Load Presets
-            try:
-                CONFIG_PATH = Path("config/aggregator_presets.json")
-                with open(CONFIG_PATH, "r") as f:
-                    AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
-            except Exception:
-                # Fallback path if running from src/execution context
-                try:
-                    CONFIG_PATH = (
-                        Path(__file__).parents[2] / "config" / "aggregator_presets.json"
-                    )
-                    with open(CONFIG_PATH, "r") as f:
-                        AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
-                except Exception:
-                    logger.error("[REGIME] Could not load presets file")
-                    return
-
+            # Load Presets
+            CONFIG_PATH = Path("config/aggregator_presets.json")
+            with open(CONFIG_PATH, "r") as f:
+                AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
+            
             from src.execution.signal_aggregator import PerformanceWeightedAggregator
             from src.execution.council_aggregator import InstitutionalCouncilAggregator
-
-            # 2. Get strategies for this asset
+            
+            # Get strategies for this asset
             strategies = self.strategies.get(asset_name, {})
             if not strategies:
-                logger.warning(f"[REGIME] No strategies for {asset_name}")
+                logger.warning(f"[AUTO PRESET] No strategies for {asset_name}")
                 return
-
-            # 3. Get preset config
+            
+            # Get preset config
             asset_type = "BTC" if "BTC" in asset_name.upper() else "GOLD"
             preset_config = AGGREGATOR_PRESETS.get(asset_type, {}).get(preset)
-
+            
             if not preset_config:
-                logger.error(f"[REGIME] No config for {asset_name} {preset}")
+                logger.error(f"[AUTO PRESET] No config for {asset_name} {preset}")
                 return
-
-            # 4. Get AI validator if available
+            
+            # Get AI validator if available
             ai_validator = None
             if hasattr(self, "ai_validator") and self.ai_validator:
                 ai_validator = self.ai_validator
-
-            # 5. Determine Mode (Check Global Config)
+            
+            # Determine aggregator mode from config
             global_mode = (
                 self.config.get("aggregator_settings", {})
                 .get("mode", "performance")
                 .lower()
             )
-
-            # Use current aggregator state to confirm if we are in hybrid (fallback)
+            
+            # Check current aggregator state
             current_aggregator = self.aggregators.get(asset_name)
             is_hybrid_state = (
                 isinstance(current_aggregator, dict)
                 and current_aggregator.get("mode") == "hybrid"
             )
-
+            
             # Force hybrid if config says so OR state says so
             if global_mode == "hybrid" or is_hybrid_state:
                 mode_to_init = "hybrid"
@@ -1980,17 +1991,19 @@ class TradingBot:
                 mode_to_init = "council"
             else:
                 mode_to_init = "performance"
-
+            
             logger.info(
-                f"[REGIME] Reinitializing {asset_name} | Preset: {preset.upper()} | Mode: {mode_to_init.upper()}"
+                f"[AUTO PRESET] Reinitializing {asset_name}\n"
+                f"  Preset: {preset.upper()}\n"
+                f"  Mode:   {mode_to_init.upper()}"
             )
-
+            
             # ================================================================
             # RE-INITIALIZE BASED ON MODE
             # ================================================================
-
+            
             if mode_to_init == "hybrid":
-                # ✅ HYBRID MODE: Recreate both
+                # HYBRID MODE: Recreate both
                 perf_agg = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2004,7 +2017,7 @@ class TradingBot:
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
                 )
-
+                
                 council_agg = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2012,20 +2025,20 @@ class TradingBot:
                     asset_type=asset_type,
                     ai_validator=ai_validator,
                     enable_detailed_logging=False,
-                    config=preset_config,  # ✅ FIX: Pass config to Council
+                    config=preset_config,
                     trend_aligned_threshold=3.5,
                     counter_trend_threshold=4.0,
                 )
-
+                
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
                     "council": council_agg,
                     "mode": "hybrid",
                 }
-                logger.info(f"[REGIME] ✓ Hybrid aggregators refreshed for {asset_name}")
-
+                logger.info(f"[AUTO PRESET] ✓ Hybrid aggregators refreshed for {asset_name}")
+            
             elif mode_to_init == "council":
-                # ✅ COUNCIL MODE (Single)
+                # COUNCIL MODE
                 new_aggregator = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2033,15 +2046,15 @@ class TradingBot:
                     asset_type=asset_type,
                     ai_validator=ai_validator,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
-                    config=preset_config,  # ✅ FIX: Pass config to Council
+                    config=preset_config,
                     trend_aligned_threshold=3.5,
                     counter_trend_threshold=4.0,
                 )
                 self.aggregators[asset_name] = new_aggregator
-                logger.info(f"[REGIME] ✓ Council aggregator refreshed for {asset_name}")
-
+                logger.info(f"[AUTO PRESET] ✓ Council aggregator refreshed for {asset_name}")
+            
             else:
-                # ✅ PERFORMANCE MODE (Single)
+                # PERFORMANCE MODE
                 new_aggregator = PerformanceWeightedAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2057,12 +2070,11 @@ class TradingBot:
                 )
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(
-                    f"[REGIME] ✓ Performance aggregator refreshed for {asset_name}"
+                    f"[AUTO PRESET] ✓ Performance aggregator refreshed for {asset_name}"
                 )
-
+        
         except Exception as e:
-            logger.error(f"[REGIME] Aggregator reinit error: {e}", exc_info=True)
-
+            logger.error(f"[AUTO PRESET] Aggregator reinit error: {e}", exc_info=True)
     def _update_dynamic_presets(self):
         """
         Check market conditions and update presets if regime changed
@@ -2077,7 +2089,7 @@ class TradingBot:
             ]
 
             preset_changed = False
-
+            changes = []
             for asset_name in enabled_assets:
                 # Get optimal preset for current market conditions
                 new_preset = self.dynamic_selector.get_preset_for_asset(asset_name)
@@ -2088,19 +2100,25 @@ class TradingBot:
                     # If preset changed, reinitialize aggregator
                     if old_preset != new_preset:
                         logger.info(
-                            f"[REGIME] {asset_name}: Switching {old_preset} → {new_preset}"
-                        )
+                        f"[AUTO PRESET] {asset_name}: {old_preset.upper()} → {new_preset.upper()}"
+                    )
 
                         self.selected_presets[asset_name] = new_preset
                         self._reinitialize_aggregator(asset_name, new_preset)
                         preset_changed = True
-
-            if not preset_changed:
-                logger.debug("[REGIME] No preset changes needed")
-
-            # Log statistics
-            stats = self.dynamic_selector.get_statistics()
-            logger.debug(f"[REGIME] Total changes: {stats['total_changes']}")
+                        changes.append(f"{asset_name}: {old_preset} → {new_preset}")
+        
+                    if preset_changed:
+                        logger.info(f"[AUTO PRESET] ✓ Updated {len(changes)} preset(s)")
+                        for change in changes:
+                            logger.info(f"  • {change}")
+                        
+                        # Log statistics
+                        stats = self.dynamic_selector.get_statistics()
+                        logger.info(f"[AUTO PRESET] Total preset changes: {stats['total_changes']}")
+                        logger.info(f"[AUTO PRESET] Distribution: {stats['preset_distribution']}")
+                    else:
+                        logger.debug("[AUTO PRESET] No preset changes needed")
 
         except Exception as e:
             logger.error(f"[REGIME] Update error: {e}", exc_info=True)
@@ -2120,7 +2138,9 @@ class TradingBot:
             logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info("=" * 70)
 
-            self._update_dynamic_presets()
+            preset_mode = self.config.get("aggregator_settings", {}).get("preset", "balanced")
+            if preset_mode == "auto":
+                self._update_dynamic_presets()
             # Refresh capital if live
             if not self.portfolio_manager.is_paper_mode:
                 try:
