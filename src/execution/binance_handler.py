@@ -308,6 +308,31 @@ class HybridPositionSizer:
                     f"[RISK] SAFETY VIOLATION: Position ${position_size_usd:,.2f} exceeds 2% limit!"
                 )
                 position_size_usd = max_position_safety
+                
+            # ============================================================
+            # STEP 6.5: Check Total Open Risk (Aggregate Stop Loss Risk)
+            # ============================================================
+            # Max % of account we are willing to lose if ALL positions fail at once
+            max_total_risk_pct = self.config.get("risk_management", {}).get("max_total_open_risk", 0.10)
+            
+            # Calculate risk of existing positions
+            current_total_risk = 0.0
+            for pos in self.portfolio_manager.positions.values():
+                # If we stored risk_usd on the position, use it. Otherwise approximate:
+                dist = abs(pos.entry_price - (pos.stop_loss or pos.entry_price))
+                current_total_risk += (dist * pos.quantity)
+
+            # Calculate risk of NEW position
+            new_trade_risk = position_size_usd * stop_distance_pct
+            
+            if current_total_risk + new_trade_risk > (self.portfolio_manager.current_capital * max_total_risk_pct):
+                logger.warning(
+                    f"[RISK] Total Portfolio Risk Limit Hit!\n"
+                    f"  Current Risk: ${current_total_risk:.2f}\n"
+                    f"  New Trade:    ${new_trade_risk:.2f}\n"
+                    f"  Limit:        ${self.portfolio_manager.current_capital * max_total_risk_pct:.2f} ({max_total_risk_pct:.0%})"
+                )
+                return 0.0, {"error": "total_risk_limit_exceeded"}
             
             # ============================================================
             # STEP 7: Calculate ACTUAL risk with final position size
@@ -576,6 +601,15 @@ class BinanceExecutionHandler:
         Returns:
             True if action taken, False otherwise
         """
+        
+        if asset_name != "BTC":
+            logger.error(
+                f"[BINANCE HANDLER] ❌ WRONG ASSET!\n"
+                f"  This handler is for BTC ONLY\n"
+                f"  Received request for: {asset_name}\n"
+                f"  REJECTING EXECUTION"
+            )
+            return False
         
         try:
             # ============================================================
