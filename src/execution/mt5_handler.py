@@ -419,15 +419,20 @@ class MT5ExecutionHandler:
             if account_info:
                 # Check if we have enough margin
                 margin_free = account_info.margin_free
-                margin_required = 1000  # Rough estimate, adjust based on leverage
+                
+                # ✅ FIX: Lowered to $50. A 0.01 lot Gold trade usually requires ~$25-$45 margin.
+                # Setting this to 1000 prevented trading even with healthy free margin.
+                margin_required = 50.0 
                 
                 if margin_free < margin_required:
-                    return False, f"Insufficient margin: ${margin_free:.2f} free"
+                    return False, f"Insufficient margin: ${margin_free:.2f} free (Min required: ${margin_required})"
         
         except Exception as e:
             logger.debug(f"[MT5] Margin check warning: {e}")
 
         return True, f"OK - {current_count}/{max_per_asset} {side.upper()} positions open"
+    
+    
     
     def _is_trading_allowed(self, symbol: str) -> bool:
         """
