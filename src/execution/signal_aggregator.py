@@ -530,20 +530,12 @@ class PerformanceWeightedAggregator:
     ) -> dict:
         """
         CRITICAL FIX: Format AI validation results for visualization
-        Call this AFTER AI validation completes
-
-        Args:
-            final_signal: Final signal after AI validation
-            details: Signal details dict
-            df: Market data
-
-        Returns:
-            Formatted AI validation data ready for visualization
+        ✅ FIXED: Proper type conversions for pattern_detected and near_sr_level
         """
         try:
             # Initialize with safe defaults
             viz_data = {
-                "pattern_detected": False,
+                "pattern_detected": False,  # ← Must be bool
                 "validation_passed": False,
                 "pattern_name": "None",
                 "pattern_id": None,
@@ -551,7 +543,7 @@ class PerformanceWeightedAggregator:
                 "top3_patterns": [],
                 "top3_confidences": [],
                 "sr_analysis": {
-                    "near_sr_level": False,
+                    "near_sr_level": False,  # ← Must be bool
                     "level_type": "none",
                     "nearest_level": None,
                     "distance_pct": None,
@@ -563,16 +555,15 @@ class PerformanceWeightedAggregator:
                 "error": None,
             }
 
-            # Check if AI validator exists and was used
+            # Check if AI validator exists
             if not self.ai_validator or not self.ai_enabled:
                 viz_data["action"] = "ai_disabled"
                 return viz_data
 
-            # Get current price for S/R analysis
             current_price = float(df["close"].iloc[-1])
 
             # ================================================================
-            # STEP 1: Get S/R Analysis from AI Validator
+            # STEP 1: Get S/R Analysis
             # ================================================================
             try:
                 sr_result = self.ai_validator._check_support_resistance_fixed(
@@ -582,12 +573,17 @@ class PerformanceWeightedAggregator:
                     threshold=self.ai_validator.current_sr_threshold,
                 )
 
+                # ✅ FIX: Convert numpy.bool to Python bool
+                near_level = sr_result.get("near_level", False)
+                if isinstance(near_level, np.bool_):
+                    near_level = bool(near_level)
+
                 viz_data["sr_analysis"] = {
-                    "near_sr_level": sr_result.get("near_level", False),
+                    "near_sr_level": near_level,  # ← Now guaranteed Python bool
                     "level_type": sr_result.get("level_type", "none"),
                     "nearest_level": sr_result.get("nearest_level"),
                     "distance_pct": sr_result.get("distance_pct"),
-                    "levels": sr_result.get("all_levels", [])[:5],  # Top 5 levels
+                    "levels": sr_result.get("all_levels", [])[:5],
                     "total_levels_found": len(sr_result.get("all_levels", [])),
                 }
 
@@ -596,7 +592,7 @@ class PerformanceWeightedAggregator:
                 viz_data["error"] = f"S/R error: {str(e)}"
 
             # ================================================================
-            # STEP 2: Get Pattern Detection from AI Validator
+            # STEP 2: Get Pattern Detection
             # ================================================================
             try:
                 pattern_result = self.ai_validator._check_pattern(
@@ -605,15 +601,22 @@ class PerformanceWeightedAggregator:
                     min_confidence=self.ai_validator.current_pattern_threshold,
                 )
 
-                viz_data["pattern_detected"] = pattern_result.get("pattern_name", True)
-                viz_data["pattern_name"] = pattern_result.get("pattern_name", "None")
+                # ✅ FIX: pattern_detected should be BOOL, not string
+                pattern_confirmed = pattern_result.get("pattern_confirmed", False)
+                pattern_name = pattern_result.get("pattern_name", "None")
+                
+                # Convert to proper bool
+                if isinstance(pattern_confirmed, str):
+                    pattern_confirmed = pattern_confirmed not in ["None", "Noise", ""]
+                
+                viz_data["pattern_detected"] = bool(pattern_confirmed)  # ← Force bool
+                viz_data["pattern_name"] = pattern_name  # ← Separate field for name
                 viz_data["pattern_id"] = pattern_result.get("pattern_id")
                 viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
 
-                # Get top 3 patterns if available
+                # Get top 3 patterns
                 if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
                     try:
-                        # Get last 15 candles for pattern detection
                         snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
                         first_open = snippet[0, 0]
 
@@ -621,22 +624,17 @@ class PerformanceWeightedAggregator:
                             snippet_norm = snippet / first_open - 1
                             snippet_input = snippet_norm.reshape(1, 15, 4)
 
-                            # Get predictions
                             predictions = self.ai_validator.sniper.model.predict(
                                 snippet_input, verbose=0
                             )[0]
 
-                            # Get top 3
                             top3_indices = predictions.argsort()[-3:][::-1]
                             top3_confidences = predictions[top3_indices]
 
-                            # Map to pattern names
                             top3_patterns = []
                             for idx in top3_indices:
-                                pattern_name = (
-                                    self.ai_validator.reverse_pattern_map.get(
-                                        idx, f"Pattern_{idx}"
-                                    )
+                                pattern_name = self.ai_validator.reverse_pattern_map.get(
+                                    idx, f"Pattern_{idx}"
                                 )
                                 top3_patterns.append(pattern_name)
 
@@ -653,36 +651,25 @@ class PerformanceWeightedAggregator:
             # ================================================================
             # STEP 3: Determine Validation Status
             # ================================================================
-
-            # Check if signal was modified by AI
             original_signal = details.get("original_signal", final_signal)
 
             if final_signal == 0 and original_signal != 0:
-                # AI rejected the signal
                 viz_data["validation_passed"] = False
                 viz_data["action"] = "rejected"
 
-                # Collect rejection reasons
                 reasons = []
                 if not viz_data["sr_analysis"]["near_sr_level"]:
                     reasons.append("No nearby S/R level")
                 if not viz_data["pattern_detected"]:
                     reasons.append("No pattern detected")
-                if (
-                    viz_data["pattern_confidence"]
-                    < self.ai_validator.current_pattern_threshold
-                ):
-                    reasons.append(
-                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
-                    )
+                if viz_data["pattern_confidence"] < self.ai_validator.current_pattern_threshold:
+                    reasons.append(f"Low confidence ({viz_data['pattern_confidence']:.1%})")
 
                 viz_data["rejection_reasons"] = reasons
 
             elif final_signal != 0:
-                # Signal was approved (or bypassed)
                 viz_data["validation_passed"] = True
 
-                # Check if it was a bypass
                 if details.get("ai_bypassed", False):
                     viz_data["action"] = "bypassed"
                 elif details.get("signal_quality", 0) >= self.strong_signal_bypass:
@@ -690,8 +677,15 @@ class PerformanceWeightedAggregator:
                 else:
                     viz_data["action"] = "approved"
             else:
-                # HOLD signal
                 viz_data["action"] = "hold"
+
+            # ================================================================
+            # ✅ FINAL TYPE VALIDATION
+            # ================================================================
+            # Ensure all bools are Python bool, not numpy.bool
+            viz_data["pattern_detected"] = bool(viz_data["pattern_detected"])
+            viz_data["validation_passed"] = bool(viz_data["validation_passed"])
+            viz_data["sr_analysis"]["near_sr_level"] = bool(viz_data["sr_analysis"]["near_sr_level"])
 
             return viz_data
 
@@ -700,8 +694,20 @@ class PerformanceWeightedAggregator:
             return {
                 "pattern_detected": False,
                 "validation_passed": False,
-                "error": str(e),
+                "pattern_name": "ERROR",
+                "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
+                "sr_analysis": {
+                    "near_sr_level": False,
+                    "level_type": "none",
+                    "nearest_level": None,
+                    "distance_pct": None,
+                    "levels": [],
+                    "total_levels_found": 0,
+                },
                 "action": "error",
+                "error": str(e),
             }
 
     def _calculate_score(

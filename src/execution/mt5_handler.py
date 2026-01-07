@@ -16,13 +16,6 @@ logger = logging.getLogger(__name__)
 def count_mt5_positions(symbol: str, side: str = None) -> int:
     """
     Count actual open positions on MT5
-
-    Args:
-        symbol: MT5 symbol (e.g., "XAUUSD")
-        side: Optional filter - "long" or "short"
-
-    Returns:
-        Number of open positions
     """
     try:
         mt5_positions = mt5.positions_get(symbol=symbol)
@@ -49,7 +42,6 @@ def count_mt5_positions(symbol: str, side: str = None) -> int:
 
 class SizingMode:
     """Position sizing modes"""
-
     AUTOMATED = "automated"
     MANUAL_OVERRIDE = "override"
     REDUCED_RISK = "reduced_risk"
@@ -58,7 +50,6 @@ class SizingMode:
 
 class PositionSizingRequest:
     """Request object for position sizing with manual override support"""
-
     def __init__(
         self,
         asset: str,
@@ -86,12 +77,12 @@ class PositionSizingRequest:
 
 class HybridPositionSizer:
     """
-    ✅ FIXED: Risk-based position sizing with VTM integration
+    ✅ FIXED: Risk-based position sizing for Leveraged Assets (Forex/CFDs)
     
     Key Changes:
-    1. Sizes positions based on actual stop loss distance (not % of capital)
-    2. Calculates risk FIRST, then position size
-    3. Validates actual risk matches target (1.5-2%)
+    1. Removed hardcoded 2% notional value limit (allows leverage).
+    2. Uses 'max_position_usd' from config to control leverage.
+    3. Calculates size based strictly on Dollar Risk Amount ($ Risk / Stop % = Position Size).
     """
 
     def __init__(self, config: Dict, portfolio_manager):
@@ -126,23 +117,12 @@ class HybridPositionSizer:
         override_reason: str = None,
     ) -> Tuple[float, Dict]:
         """
-        ✅ FIXED: Calculate position size based on ACTUAL RISK
-        
-        Correct Formula:
-            Position Size = Risk Amount / Stop Loss Distance (in $)
-            
-        Example:
-            - Account: $10,000
-            - Risk: 1.5% = $150
-            - Entry: $45,000
-            - Stop: $43,650 (3% below entry)
-            - Stop Distance: $1,350
-            - Position Size: $150 / $1,350 = 0.111 BTC = $5,000
-            - Actual Risk: 0.111 * $1,350 = $150 ✓
+        Calculate position size based on Risk Amount / Stop Loss Distance.
+        Allows position size to exceed capital (Leverage) if defined in config.
         """
         try:
             # ============================================================
-            # STEP 1: Determine risk percentage to use
+            # STEP 1: Determine risk percentage
             # ============================================================
             if sizing_mode == SizingMode.ELEVATED_RISK:
                 risk_pct = self.max_risk_pct
@@ -153,7 +133,7 @@ class HybridPositionSizer:
             else:
                 risk_pct = self.target_risk_pct
             
-            # Calculate risk amount in dollars
+            # Calculate risk amount in dollars (Money you are willing to lose)
             risk_amount = self.portfolio_manager.current_capital * risk_pct
             
             # ============================================================
@@ -162,25 +142,24 @@ class HybridPositionSizer:
             asset_cfg = self.config["assets"][asset]
             risk_cfg = asset_cfg.get("risk", {})
             
-            min_stop_pct = risk_cfg.get("min_stop_distance_pct", 0.01)
+            min_stop_pct = risk_cfg.get("min_stop_distance_pct", 0.001)
             max_stop_pct = risk_cfg.get("max_stop_distance_pct", 0.10)
             
             stop_distance = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
             
+            # Prevent division by zero or extremely tight stops
+            if stop_distance_pct < 0.0001:
+                stop_distance_pct = 0.0001 # Minimum 0.01%
+            
             if stop_distance_pct < min_stop_pct:
-                logger.error(
-                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}"
+                logger.warning(
+                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}. Proceeding with caution."
                 )
-                return 0.0, {
-                    "error": "stop_too_tight",
-                    "stop_distance_pct": stop_distance_pct,
-                    "min_required": min_stop_pct
-                }
             
             if stop_distance_pct > max_stop_pct:
                 logger.warning(
-                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}"
+                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}. Adjusting logic."
                 )
                 stop_distance_pct = max_stop_pct
                 if signal == 1:  # LONG
@@ -190,21 +169,17 @@ class HybridPositionSizer:
                 stop_distance = abs(entry_price - stop_loss_price)
             
             # ============================================================
-            # STEP 3: Calculate position size from risk (✅ FIXED)
+            # STEP 3: Calculate position size from risk (The Leverage Enablement)
             # ============================================================
-            # ✅ CORRECT: Divide by DOLLAR distance, not percentage
+            # Formula: Position Size = Risk Amount / Stop Loss %
+            # Example: $150 Risk / 1% Stop = $15,000 Position
             position_size_usd = risk_amount / stop_distance_pct
-            
-            # ✅ Alternative (more explicit) calculation:
-            # units = risk_amount / stop_distance  # e.g., 0.111 BTC
-            # position_size_usd = units * entry_price  # e.g., $5,000
             
             logger.info(
                 f"[RISK] Position Calculation:\n"
                 f"  Risk Amount:     ${risk_amount:.2f}\n"
                 f"  Stop Distance:   ${stop_distance:.2f} ({stop_distance_pct:.2%})\n"
-                f"  Units:           {risk_amount / stop_distance:.6f}\n"
-                f"  Position Size:   ${position_size_usd:,.2f}"
+                f"  Calc Position:   ${position_size_usd:,.2f}"
             )
             
             # ============================================================
@@ -212,35 +187,25 @@ class HybridPositionSizer:
             # ============================================================
             if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
                 min_allowed = position_size_usd * 0.5
-                max_allowed = position_size_usd * 1.5
+                max_allowed = position_size_usd * 2.0 # Allow wider manual range
                 
                 if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
                     logger.warning(
-                        f"[OVERRIDE] Manual size ${manual_size_usd:,.2f} outside safe range "
-                        f"[${min_allowed:,.2f}, ${max_allowed:,.2f}] - Clamping"
+                        f"[OVERRIDE] Manual size ${manual_size_usd:,.2f} outside recommended range "
+                        f"[${min_allowed:,.2f}, ${max_allowed:,.2f}] - Using calculated"
                     )
-                    manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
-                
-                override_risk = manual_size_usd * stop_distance_pct
-                override_risk_pct = override_risk / self.portfolio_manager.current_capital
-                
-                logger.info(
-                    f"[OVERRIDE] Manual size applied\n"
-                    f"  Calculated:  ${position_size_usd:,.2f}\n"
-                    f"  Manual:      ${manual_size_usd:,.2f}\n"
-                    f"  New Risk:    {override_risk_pct:.2%} (${override_risk:.2f})"
-                )
-                
-                position_size_usd = manual_size_usd
+                else:
+                    logger.info(f"[OVERRIDE] Using manual size: ${manual_size_usd:,.2f}")
+                    position_size_usd = manual_size_usd
             
             # ============================================================
-            # STEP 5: Apply hard position limits
+            # STEP 5: Apply hard position limits from Config
             # ============================================================
             min_size = asset_cfg.get("min_position_usd", 100)
-            max_size = asset_cfg.get("max_position_usd", 6000)
+            max_size = asset_cfg.get("max_position_usd", 50000) # Increased default
             
             if position_size_usd < min_size:
-                logger.warning(f"[RISK] Position ${position_size_usd:.2f} below minimum ${min_size}")
+                logger.warning(f"[RISK] Position ${position_size_usd:.2f} below config min ${min_size}")
                 return 0.0, {
                     "error": "below_minimum",
                     "calculated_size": position_size_usd,
@@ -252,47 +217,66 @@ class HybridPositionSizer:
             
             if original_size > max_size:
                 logger.warning(
-                    f"[RISK] Position clamped to max: ${original_size:,.2f} → ${max_size:,.2f}"
+                    f"[RISK] Position clamped to config max: ${original_size:,.2f} → ${max_size:,.2f}"
                 )
             
             # ============================================================
-            # STEP 6: Check portfolio-level limits (✅ CRITICAL)
+            # STEP 6: Check portfolio-level limits (Leverage Aware)
             # ============================================================
-            max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
-            max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
+            # These settings must allow > 1.0 for leverage
+            max_exposure_mult = self.portfolio_cfg.get("max_portfolio_exposure", 5.0) 
+            max_single_asset_mult = self.portfolio_cfg.get("max_single_asset_exposure", 3.0)
             
             current_exposure = sum(
                 pos.quantity * pos.entry_price
                 for pos in self.portfolio_manager.positions.values()
             )
             
-            # ✅ CRITICAL CHECK: Ensure new position doesn't exceed portfolio limits
-            max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
+            # Allow exposure up to Capital * Multiplier
+            max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure_mult
+            
             if current_exposure + position_size_usd > max_portfolio_usd:
                 old_size = position_size_usd
                 position_size_usd = max(0, max_portfolio_usd - current_exposure)
                 logger.warning(
-                    f"[RISK] Portfolio limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}\n"
+                    f"[RISK] Portfolio leverage limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}\n"
                     f"  Current Exposure: ${current_exposure:,.2f}\n"
                     f"  Max Allowed:      ${max_portfolio_usd:,.2f}"
                 )
             
-            # ✅ CRITICAL CHECK: Single asset exposure
-            max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
+            # Single asset leverage check
+            max_asset_usd = self.portfolio_manager.current_capital * max_single_asset_mult
             if position_size_usd > max_asset_usd:
                 old_size = position_size_usd
                 position_size_usd = max_asset_usd
                 logger.warning(
-                    f"[RISK] Single asset limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
+                    f"[RISK] Single asset leverage limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
                 )
+                
+            # ============================================================
+            # STEP 6.5: Check Total Open Risk (Aggregate Stop Loss Risk)
+            # ============================================================
+            # Max % of account we are willing to lose if ALL positions fail at once
+            max_total_risk_pct = self.config.get("risk_management", {}).get("max_total_open_risk", 0.10)
             
-            # ✅ SAFETY CHECK: Never exceed 2% of capital per position
-            max_position_safety = self.portfolio_manager.current_capital * 0.02
-            if position_size_usd > max_position_safety:
-                logger.error(
-                    f"[RISK] SAFETY VIOLATION: Position ${position_size_usd:,.2f} exceeds 2% limit!"
+            # Calculate risk of existing positions
+            current_total_risk = 0.0
+            for pos in self.portfolio_manager.positions.values():
+                # If we stored risk_usd on the position, use it. Otherwise approximate:
+                dist = abs(pos.entry_price - (pos.stop_loss or pos.entry_price))
+                current_total_risk += (dist * pos.quantity)
+
+            # Calculate risk of NEW position
+            new_trade_risk = position_size_usd * stop_distance_pct
+            
+            if current_total_risk + new_trade_risk > (self.portfolio_manager.current_capital * max_total_risk_pct):
+                logger.warning(
+                    f"[RISK] Total Portfolio Risk Limit Hit!\n"
+                    f"  Current Risk: ${current_total_risk:.2f}\n"
+                    f"  New Trade:    ${new_trade_risk:.2f}\n"
+                    f"  Limit:        ${self.portfolio_manager.current_capital * max_total_risk_pct:.2f} ({max_total_risk_pct:.0%})"
                 )
-                position_size_usd = max_position_safety
+                return 0.0, {"error": "total_risk_limit_exceeded"}
             
             # ============================================================
             # STEP 7: Calculate ACTUAL risk with final position size
@@ -300,8 +284,8 @@ class HybridPositionSizer:
             actual_risk = position_size_usd * stop_distance_pct
             actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
             
-            # ✅ VERIFY: Actual risk should match target
-            if actual_risk_pct > self.max_risk_pct:
+            # Final Sanity Check on RISK (Not Size)
+            if actual_risk_pct > (self.max_risk_pct * 1.5): # Allow slight buffer for rounding
                 logger.error(
                     f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds max {self.max_risk_pct:.2%}!"
                 )
@@ -316,57 +300,23 @@ class HybridPositionSizer:
                 "signal": signal,
                 "confidence_score": confidence_score,
                 "market_condition": market_condition,
-                
-                # Entry and stop
                 "entry_price": entry_price,
                 "stop_loss_price": stop_loss_price,
                 "stop_distance_usd": stop_distance,
                 "stop_distance_pct": stop_distance_pct * 100,
-                
-                # Risk calculation
                 "target_risk_pct": risk_pct * 100,
                 "target_risk_usd": risk_amount,
                 "actual_risk_pct": actual_risk_pct * 100,
                 "actual_risk_usd": actual_risk,
-                
-                # Position sizing
                 "position_size_usd": position_size_usd,
                 "position_size_pct": (position_size_usd / self.portfolio_manager.current_capital) * 100,
                 "position_size_units": position_size_usd / entry_price,
-                
-                # Override info
                 "override_details": {
                     "mode": sizing_mode,
                     "reason": override_reason
                 } if sizing_mode != SizingMode.AUTOMATED else None,
-                
                 "timestamp": datetime.now().isoformat(),
             }
-            
-            # Log detailed sizing decision
-            logger.info(
-                f"\n{'='*80}\n"
-                f"[RISK-BASED SIZING] {asset} {['SHORT', 'HOLD', 'LONG'][signal+1]}\n"
-                f"{'='*80}\n"
-                f"📊 MARKET INFO:\n"
-                f"  Entry Price:    ${entry_price:,.2f}\n"
-                f"  Stop Loss:      ${stop_loss_price:,.2f}\n"
-                f"  Stop Distance:  ${stop_distance:,.2f} ({stop_distance_pct:.2%})\n"
-                + (f"  Confidence:     {confidence_score:.0%}\n" if confidence_score else "")
-                + f"  Condition:      {market_condition}\n"
-                f"\n"
-                f"💰 RISK CALCULATION:\n"
-                f"  Account:        ${self.portfolio_manager.current_capital:,.2f}\n"
-                f"  Target Risk:    {risk_pct:.2%} (${risk_amount:.2f})\n"
-                f"  Position Size:  ${position_size_usd:,.2f} ({metadata['position_size_pct']:.2f}% of capital)\n"
-                f"  Units:          {position_size_usd / entry_price:.6f}\n"
-                f"\n"
-                f"✅ ACTUAL RISK:\n"
-                f"  Dollar Risk:    ${actual_risk:.2f}\n"
-                f"  Risk %:         {actual_risk_pct:.2%}\n"
-                f"  Status:         {'✅ WITHIN TARGET' if abs(actual_risk_pct - risk_pct) < 0.005 else '⚠️  ADJUSTED'}\n"
-                f"{'='*80}"
-            )
             
             # Track overrides
             if sizing_mode != SizingMode.AUTOMATED:
@@ -421,12 +371,12 @@ class MT5ExecutionHandler:
 
 
     @handle_errors(
-    component="mt5_handler",
-    severity=ErrorSeverity.ERROR,
-    notify=True,
-    reraise=False,
-    default_return=0.0
-)
+        component="mt5_handler",
+        severity=ErrorSeverity.ERROR,
+        notify=True,
+        reraise=False,
+        default_return=0.0
+    )
     def get_current_price(self, symbol: str = None) -> float:
         """Get current market price"""
         if symbol is None:
@@ -442,13 +392,6 @@ class MT5ExecutionHandler:
     def can_open_position_side(self, asset_name: str, side: str) -> Tuple[bool, str]:
         """
         Check if we can open a position on a specific SIDE
-        
-        Args:
-            asset_name: Asset name (e.g., "GOLD")
-            side: "long" or "short"
-        
-        Returns:
-            Tuple of (can_open: bool, reason: str)
         """
         # Check if shorts are allowed in config
         if side == "short":
@@ -538,7 +481,7 @@ class MT5ExecutionHandler:
         signal_details: Dict = None,
     ) -> bool:
         """
-        ✅ FIXED: MT5 position opening with Auto-Filling Mode & Error Logging
+        ✅ FIXED: MT5 position opening with Abort on Min Lot Violation
         """
         try:
             import MetaTrader5 as mt5
@@ -625,15 +568,28 @@ class MT5ExecutionHandler:
                 return False
 
             # ============================================================
-            # STEP 4: Calculate Volume
+            # STEP 4: Calculate Volume & CHECK MINIMUMS (The Fix)
             # ============================================================
             contract_size = self.symbol_info.trade_contract_size
             volume_lots = position_size_usd / (current_price * contract_size)
             
-            # Align with steps and limits
+            # Align with steps
             volume_step = self.symbol_info.volume_step
             volume_lots = round(volume_lots / volume_step) * volume_step
-            volume_lots = max(self.symbol_info.volume_min, volume_lots)
+            
+            # ✅ SAFETY CHECK: Abort if calculated volume is below broker minimum
+            # This prevents the "rounding up to min" behavior that causes huge risk violations
+            if volume_lots < self.symbol_info.volume_min:
+                min_usd_value = self.symbol_info.volume_min * current_price * contract_size
+                logger.warning(
+                    f"[RISK] Trade Aborted: Calculated volume {volume_lots:.4f} < Min {self.symbol_info.volume_min}\n"
+                    f"  Requested Size: ${position_size_usd:.2f}\n"
+                    f"  Min Broker Size: ${min_usd_value:.2f}\n"
+                    f"  Action: SKIP to preserve capital safety."
+                )
+                return False
+
+            # Apply max limit only (clamping down is safe, clamping up is dangerous)
             volume_lots = min(self.symbol_info.volume_max, volume_lots)
             
             actual_usd = volume_lots * current_price * contract_size
@@ -768,6 +724,16 @@ class MT5ExecutionHandler:
         Returns:
             True if action taken, False otherwise
         """
+        
+        if asset_name != "GOLD":
+            logger.error(
+                f"[MT5 HANDLER] ❌ WRONG ASSET!\n"
+                f"  This handler is for GOLD ONLY\n"
+                f"  Received request for: {asset_name}\n"
+                f"  REJECTING EXECUTION"
+            )
+            return False
+    
         try:
             # ============================================================
             # STEP 1: Get current price
@@ -1218,54 +1184,6 @@ class MT5ExecutionHandler:
                 stop_loss = position.get("stop_loss")
                 take_profit = position.get("take_profit")
                 side = position.get("side")
-
-            price_tolerance = 0.01
-
-            if side == "long":
-                if stop_loss and current_price <= (stop_loss + price_tolerance):
-                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    return (
-                        True,
-                        f"stop_loss_hit (${current_price:.2f} <= ${stop_loss:.2f}, {pnl_pct:+.2f}%)",
-                    )
-
-                if take_profit and current_price >= (take_profit - price_tolerance):
-                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    return (
-                        True,
-                        f"take_profit_hit (${current_price:.2f} >= ${take_profit:.2f}, {pnl_pct:+.2f}%)",
-                    )
-
-            else:  # short
-                if stop_loss and current_price >= (stop_loss - price_tolerance):
-                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                    return (
-                        True,
-                        f"stop_loss_hit (${current_price:.2f} >= ${stop_loss:.2f}, {pnl_pct:+.2f}%)",
-                    )
-
-                if take_profit and current_price <= (take_profit + price_tolerance):
-                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                    return (
-                        True,
-                        f"take_profit_hit (${current_price:.2f} <= ${take_profit:.2f}, {pnl_pct:+.2f}%)",
-                    )
-
-            return False, ""
-
-        except Exception as e:
-            logger.error(f"Error checking SL/TP: {e}", exc_info=True)
-            return False, ""
-
-    def _check_stop_loss_take_profit(
-        self, position, current_price: float
-    ) -> Tuple[bool, str]:
-        """Check if stop-loss or take-profit is hit"""
-        try:
-            entry_price = position.entry_price
-            stop_loss = position.stop_loss
-            take_profit = position.take_profit
-            side = position.side
 
             price_tolerance = 0.01
 
