@@ -11,6 +11,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.global_error_handler import handle_errors, ErrorSeverity
+from datetime import datetime, timedelta, timezone
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,10 @@ class Position:
         self.trade_manager = None
         if use_dynamic_management and ohlc_data:
             try:
-                # ✅ Extract hybrid context from signal_details
+                # ✅ Extract hybrid context from signal_details (handle None case)
+                if signal_details is None:
+                    signal_details = {}
+                
                 hybrid_mode = signal_details.get('aggregator_mode')
                 mode_confidence = signal_details.get('mode_confidence', 0.5)
                 regime_analysis = signal_details.get('regime_analysis', {})
@@ -454,7 +458,12 @@ class PortfolioManager:
     """
 
     def __init__(
-        self, config: Dict, mt5_handler=None, binance_client=None, db_manager=None, execution_handlers: Dict = None
+        self, 
+        config: Dict, 
+        mt5_handler=None, 
+        binance_client=None, 
+        db_manager=None, 
+        execution_handlers: Dict = None
     ):
         self.config = config
         self.portfolio_config = config["portfolio"]
@@ -470,11 +479,18 @@ class PortfolioManager:
         self.mode = config["trading"].get("mode", "paper")
         self.is_paper_mode = self.mode.lower() == "paper"
 
+        # ✅ FIX 1: Remove paper_capital usage in live mode
         self.paper_capital = self.portfolio_config["initial_capital"]
-        self.initial_capital = self._fetch_total_capital()
+        
+        # ✅ FIX 2: Initialize with live balances (will raise error if unavailable in live mode)
+        self.initial_capital = self._fetch_total_capital(strict=True)
         self.current_capital = self.initial_capital
         self.equity = self.initial_capital
         self.peak_equity = self.initial_capital
+
+        # ✅ FIX 3: Track last balance refresh time
+        self.last_balance_refresh = datetime.now()
+        self.balance_refresh_interval = timedelta(minutes=5)  # Refresh every 5 min
 
         self.positions: Dict[str, Position] = {}
         self.closed_positions: List[Dict] = []
@@ -487,51 +503,106 @@ class PortfolioManager:
 
         logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
-        logger.info(f"Max Positions Per Asset: {self.max_positions_per_asset}")
-        logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         
-        if self.execution_handlers:
-            logger.info(f"✓ Execution handlers connected: {list(self.execution_handlers.keys())}")
-
         if not self.is_paper_mode:
-            logger.info("✓ Using LIVE account balances from exchanges")
+            logger.info("✓ Using LIVE account balances (will auto-refresh)")
+            logger.info(f"  - MT5 Handler: {'Connected' if mt5_handler else 'Not Connected'}")
+            logger.info(f"  - Binance Client: {'Connected' if binance_client else 'Not Connected'}")
         else:
-            logger.info("✓ Using PAPER account balances from exchanges")
+            logger.info("✓ Using PAPER mode with simulated capital")
 
-    def _fetch_total_capital(self) -> float:
-        """Fetch total available capital from exchanges"""
+
+    def _fetch_total_capital(self, strict: bool = False) -> float:
+        """
+        Fetch total available capital from exchanges
+        
+        Args:
+            strict: If True, raise error when live balances unavailable in live mode
+        
+        Returns:
+            Total capital in USD
+        
+        Raises:
+            RuntimeError: If strict=True and balances unavailable in live mode
+        """
         if self.is_paper_mode:
+            logger.info(f"[PAPER] Using simulated capital: ${self.paper_capital:,.2f}")
             return self.paper_capital
 
         total_capital = 0.0
+        errors = []
 
-        if self.config["assets"]["GOLD"].get("enabled", False):
+        # ✅ Fetch MT5 balance (GOLD)
+        if self.config["assets"].get("GOLD", {}).get("enabled", False):
             mt5_balance = self._fetch_mt5_balance()
-            if mt5_balance:
+            if mt5_balance is not None:
                 total_capital += mt5_balance
+                logger.info(f"[MT5] Balance: ${mt5_balance:,.2f}")
+            else:
+                errors.append("MT5 balance unavailable")
 
-        if self.config["assets"]["BTC"].get("enabled", False):
+        # ✅ Fetch Binance balance (BTC)
+        if self.config["assets"].get("BTC", {}).get("enabled", False):
             binance_balance = self._fetch_binance_balance()
-            if binance_balance:
+            if binance_balance is not None:
                 total_capital += binance_balance
+                logger.info(f"[BINANCE] Balance: ${binance_balance:,.2f}")
+            else:
+                errors.append("Binance balance unavailable")
 
-        return total_capital if total_capital > 0 else self.paper_capital
+        # ✅ FIX: Enforce strict mode in live trading
+        if strict and not self.is_paper_mode and total_capital == 0:
+            error_msg = (
+                f"CRITICAL: Unable to fetch live account balances! "
+                f"Errors: {', '.join(errors)}. "
+                f"Cannot proceed with live trading without valid balances."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        # ✅ FIX: Don't fallback to paper_capital in live mode
+        if total_capital == 0:
+            if self.is_paper_mode:
+                logger.warning("No balances fetched, using paper capital")
+                return self.paper_capital
+            else:
+                logger.error("No balances available from exchanges!")
+                return 0.0
+
+        logger.info(f"[TOTAL] Capital: ${total_capital:,.2f}")
+        return total_capital
+    
 
     def _fetch_mt5_balance(self) -> Optional[float]:
         """Fetch MT5 account balance"""
         try:
             import MetaTrader5 as mt5
 
+            if not mt5.initialize():
+                logger.error("[MT5] Failed to initialize")
+                return None
+
             account_info = mt5.account_info()
-            return account_info.equity if account_info else None
+            if account_info:
+                balance = account_info.balance
+                equity = account_info.equity
+                logger.debug(
+                    f"[MT5] Balance: ${balance:,.2f}, Equity: ${equity:,.2f}"
+                )
+                return equity  # Use equity (includes unrealized P&L)
+            else:
+                logger.error("[MT5] No account info available")
+                return None
+
         except Exception as e:
-            logger.error(f"[MT5] Error fetching balance: {e}")
+            logger.error(f"[MT5] Error fetching balance: {e}", exc_info=True)
             return None
 
     def _fetch_binance_balance(self) -> Optional[float]:
-        """Fetch Binance account balance"""
+        """Fetch Binance account balance (USDT + BTC converted to USD)"""
         try:
             if not self.binance_client:
+                logger.error("[BINANCE] Client not initialized")
                 return None
 
             account = self.binance_client.get_account()
@@ -539,34 +610,77 @@ class PortfolioManager:
 
             for balance in account["balances"]:
                 asset = balance["asset"]
-                total = float(balance["free"]) + float(balance["locked"])
+                free = float(balance["free"])
+                locked = float(balance["locked"])
+                total = free + locked
 
                 if total > 0:
                     if asset == "USDT":
                         total_balance += total
+                        logger.debug(f"[BINANCE] USDT: ${total:,.2f}")
                     elif asset == "BTC":
+                        # Convert BTC to USD
                         ticker = self.binance_client.get_symbol_ticker(symbol="BTCUSDT")
                         btc_price = float(ticker["price"])
-                        total_balance += total * btc_price
+                        usd_value = total * btc_price
+                        total_balance += usd_value
+                        logger.debug(
+                            f"[BINANCE] BTC: {total:.8f} @ ${btc_price:,.2f} = ${usd_value:,.2f}"
+                        )
 
-            return total_balance
+            return total_balance if total_balance > 0 else None
+
+        except BinanceAPIException as e:
+            logger.error(f"[BINANCE] API error: {e.status_code} - {e.message}")
+            return None
         except Exception as e:
-            logger.error(f"[BINANCE] Error fetching balance: {e}")
+            logger.error(f"[BINANCE] Error fetching balance: {e}", exc_info=True)
             return None
 
-    def refresh_capital(self) -> bool:
-        """Refresh capital from exchanges"""
+    def refresh_capital(self, force: bool = False) -> bool:
+        """
+        ✅ FIX: Refresh capital from exchanges with time-based throttling
+        
+        Args:
+            force: If True, bypass time check and force refresh
+        
+        Returns:
+            True if refresh successful
+        """
         if self.is_paper_mode:
             return True
 
-        new_capital = self._fetch_total_capital()
+        # ✅ FIX: Auto-refresh based on time interval
+        now = datetime.now()
+        time_since_refresh = now - self.last_balance_refresh
+
+        if not force and time_since_refresh < self.balance_refresh_interval:
+            logger.debug(
+                f"Skipping balance refresh (last: {time_since_refresh.seconds}s ago)"
+            )
+            return True
+
+        logger.info("Refreshing account balances from exchanges...")
+        new_capital = self._fetch_total_capital(strict=False)
+
         if new_capital > 0:
+            old_capital = self.current_capital
             self.current_capital = new_capital
             self.equity = new_capital
+            self.last_balance_refresh = now
+
             if self.equity > self.peak_equity:
                 self.peak_equity = self.equity
+
+            change = new_capital - old_capital
+            logger.info(
+                f"Balance refreshed: ${new_capital:,.2f} "
+                f"({'+' if change >= 0 else ''}{change:,.2f})"
+            )
             return True
-        return False
+        else:
+            logger.error("Failed to refresh balances from exchanges!")
+            return False
 
     def update_mt5_positions_profit(self):
         """
@@ -648,9 +762,15 @@ class PortfolioManager:
         self, asset: str, current_price: float, volatility: float = None
     ) -> float:
         """
-        Calculate position size in USD based on portfolio rules
-        Uses actual available capital from exchanges
+        ✅ FIX: Ensure fresh capital before calculating position size
         """
+        # ✅ Auto-refresh if stale
+        self.refresh_capital(force=False)
+
+        if self.current_capital <= 0:
+            logger.error("Cannot calculate position size: capital is 0!")
+            return 0.0
+
         asset_config = self.config["assets"][asset]
 
         # Base position size as percentage of capital
@@ -683,8 +803,36 @@ class PortfolioManager:
         max_position_usd = self.current_capital * max_position_pct
         position_size = min(position_size, max_position_usd)
 
-        logger.info(f"{asset} calculated position size: ${position_size:,.2f}")
+        logger.info(
+            f"{asset} position size: ${position_size:,.2f} "
+            f"({position_size/self.current_capital*100:.2f}% of capital)"
+        )
         return position_size
+    
+    
+    def validate_balance_before_trade(self) -> Tuple[bool, str]:
+        """
+        ✅ NEW: Validate that we have valid balances before opening trades
+        
+        Returns:
+            (is_valid, error_message)
+        """
+        if self.is_paper_mode:
+            return True, "OK"
+
+        # Force refresh to get latest balances
+        if not self.refresh_capital(force=True):
+            return False, "Failed to fetch account balances"
+
+        if self.current_capital <= 0:
+            return False, f"Invalid capital: ${self.current_capital:,.2f}"
+
+        # Check minimum capital requirements
+        min_capital = self.portfolio_config.get("min_capital_threshold", 1000)
+        if self.current_capital < min_capital:
+            return False, f"Capital below minimum: ${self.current_capital:,.2f} < ${min_capital:,.2f}"
+
+        return True, "OK"
 
     def check_portfolio_limits(self, new_position_usd: float, new_side: str = None, asset: str = None) -> bool:
         """
@@ -1472,11 +1620,17 @@ class PortfolioManager:
         logger.info(f"Trading session started at {self.session_start_time}")
 
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
-        """Get portfolio status with accurate position counts per asset"""
+        """
+        ✅ FIX: Auto-refresh balances when getting status
+        """
+        # ✅ Refresh if stale (respects time interval)
+        self.refresh_capital(force=False)
+
         if current_prices is None:
             current_prices = {
                 pos.asset: pos.entry_price for pos in self.positions.values()
             }
+
 
         total_exposure = 0.0
         total_unrealized_pnl = 0.0
@@ -1595,42 +1749,3 @@ class PortfolioManager:
         logger.info("All positions closed")
 
 
-# ====================================================================================
-# MT5 EXECUTION HANDLER UPDATE - Pass MT5 ticket to Portfolio Manager
-# ====================================================================================
-"""
-In your MT5ExecutionHandler._open_mt5_position() method, update the 
-portfolio_manager.add_position() call to include the MT5 ticket:
-
-OLD CODE:
-    success = self.portfolio_manager.add_position(
-        asset=asset,
-        symbol=symbol,
-        side=position_side,
-        entry_price=execution_price,
-        position_size_usd=actual_position_size,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        trailing_stop_pct=trailing_stop_pct,
-    )
-
-NEW CODE:
-    success = self.portfolio_manager.add_position(
-        asset=asset,
-        symbol=symbol,
-        side=position_side,
-        entry_price=execution_price,
-        position_size_usd=actual_position_size,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        trailing_stop_pct=trailing_stop_pct,
-        mt5_ticket=result.order,  
-    )
-
-Then in your main trading loop, call update_mt5_positions_profit() regularly:
-    
-    # Every iteration of your main loop
-    portfolio_manager.update_positions(current_prices)
-    
-This will automatically fetch real-time profit from MT5 and include it in P&L calculations.
-"""
