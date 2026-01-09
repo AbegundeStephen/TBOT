@@ -1,10 +1,10 @@
 """
-✅ FIXED DataManager - Properly handles separate Futures keys
-Key fixes:
-1. Creates separate clients for Spot and Futures
-2. Uses correct endpoints based on trading mode
-3. Doesn't force Futures API for data fetching (Spot is fine for OHLCV)
-4. Better error handling
+✅ ENHANCED DataManager - Hybrid Live/Testnet Strategy
+Key features:
+1. Uses LIVE API for historical data (full history available)
+2. Uses TESTNET for trade execution (safe testing)
+3. Automatically switches between contexts
+4. No API keys needed for historical data
 """
 
 import pandas as pd
@@ -20,22 +20,23 @@ logger = logging.getLogger(__name__)
 
 
 class DataManager:
-    """Unified data manager for multiple exchanges"""
+    """Unified data manager with smart Live/Testnet separation"""
 
     def __init__(self, config: Dict):
         self.config = config
-        self.binance_client = None  # For Spot data (OHLCV)
+        self.binance_client = None  # Primary client (testnet or live)
+        self.live_data_client = None  # Always live for historical data
         self.futures_client = None  # For Futures trading (separate)
         self.mt5_initialized = False
 
     def initialize_binance(self) -> bool:
         """
-        ✅ FIXED: Initialize Binance with proper separation of Spot vs Futures
+        ✅ ENHANCED: Initialize with smart Live/Testnet separation
         
-        Key Changes:
-        1. Always use Spot API for data fetching (OHLCV data)
-        2. Create separate Futures client if futures keys exist
-        3. Don't mix Spot and Futures endpoints
+        Strategy:
+        1. Primary client = testnet (for safe trade execution)
+        2. Live data client = always live public API (full historical data)
+        3. Futures client = separate if provided
         """
         try:
             api_config = self.config["api"]["binance"]
@@ -43,34 +44,60 @@ class DataManager:
             api_secret = api_config.get("api_secret", "")
 
             logger.info("=" * 70)
-            logger.info("INITIALIZING BINANCE API")
+            logger.info("INITIALIZING BINANCE API (HYBRID MODE)")
             logger.info("=" * 70)
 
-            if not api_key or not api_secret or api_key == "YOUR_BINANCE_API_KEY":
-                logger.warning("⚠️  Binance API keys not configured, using public API only")
-                self.binance_client = Client("", "")
-                logger.info("✅ Public Spot API initialized (no authentication)")
-                return True
+            # ============================================================
+            # STEP 1: Initialize LIVE DATA CLIENT (for historical data)
+            # ============================================================
+            logger.info("\n📊 Initializing LIVE data client (for historical analysis)...")
+            logger.info("   Purpose: Fetch complete historical OHLCV data")
+            logger.info("   Endpoint: https://api.binance.com (LIVE - Public API)")
+            
+            # Always create a live client for data (no keys needed = public access)
+            self.live_data_client = Client("", "")
+            
+            try:
+                self.live_data_client.ping()
+                logger.info("✅ Live data API connected successfully")
+                logger.info("   Note: This is PUBLIC access (read-only, no trading)")
+            except Exception as e:
+                logger.warning(f"⚠️  Live API connection issue: {e}")
+                logger.warning("   Will fall back to testnet (limited history)")
+                self.live_data_client = None
 
             # ============================================================
-            # STEP 1: Initialize SPOT client (for OHLCV data)
+            # STEP 2: Initialize PRIMARY CLIENT (testnet or live)
             # ============================================================
-            logger.info("\n📊 Initializing SPOT client (for price data)...")
+            if not api_key or not api_secret or api_key == "YOUR_BINANCE_API_KEY":
+                logger.warning("\n⚠️  Binance API keys not configured")
+                logger.info("   Using public API only (no trading capability)")
+                self.binance_client = Client("", "")
+                logger.info("✅ Public Spot API initialized")
+                return True
+
+            is_testnet = api_config.get("testnet", True)
             
-            if api_config.get("testnet", True):
+            logger.info(f"\n🔧 Initializing PRIMARY client ({'TESTNET' if is_testnet else 'LIVE'})...")
+            logger.info("   Purpose: Trade execution and account management")
+            
+            if is_testnet:
                 self.binance_client = Client(api_key, api_secret, testnet=True)
                 self.binance_client.API_URL = "https://testnet.binance.vision/api"
                 logger.info("   Endpoint: https://testnet.binance.vision/api (testnet)")
+                logger.warning("   ⚠️  Testnet has LIMITED historical data (~2 days)")
+                logger.info("   💡 Historical analysis will use live API automatically")
             else:
                 self.binance_client = Client(api_key, api_secret)
                 logger.info("   Endpoint: https://api.binance.com (LIVE)")
+                logger.warning("   ⚠️  WARNING: LIVE TRADING MODE - REAL MONEY AT RISK")
 
-            # Test Spot connection
+            # Test primary connection
             self.binance_client.ping()
-            logger.info("✅ Spot API connected successfully")
+            logger.info("✅ Primary API connected successfully")
 
             # ============================================================
-            # STEP 2: Initialize FUTURES client (if separate keys exist)
+            # STEP 3: Initialize FUTURES CLIENT (if separate keys exist)
             # ============================================================
             futures_config = self.config.get("api", {}).get("binance_futures")
             
@@ -89,6 +116,7 @@ class DataManager:
                         self.futures_client = Client(futures_key, futures_secret)
                         self.futures_client.API_URL = "https://fapi.binance.com"
                         logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
+                        logger.warning("   ⚠️  LIVE FUTURES TRADING - HIGH RISK")
                     
                     # Test Futures connection
                     try:
@@ -99,17 +127,23 @@ class DataManager:
                         logger.warning("   Will fall back to Spot keys for Futures")
                         self.futures_client = None
                 else:
-                    logger.warning("⚠️  Futures keys incomplete, will use Spot keys if needed")
+                    logger.info("⚠️  Futures keys incomplete, will use Spot keys if needed")
             else:
                 logger.info("\n📝 No separate Futures config found")
                 logger.info("   Will use Spot keys for Futures trading (if enabled)")
-                # Don't set futures_client - let execution handler decide
 
+            # ============================================================
+            # SUMMARY
+            # ============================================================
             logger.info("\n" + "=" * 70)
-            logger.info("BINANCE INITIALIZATION COMPLETE")
+            logger.info("BINANCE INITIALIZATION COMPLETE - HYBRID MODE")
             logger.info("=" * 70)
-            logger.info(f"Spot Client:    {'✅ Active' if self.binance_client else '❌ Inactive'}")
-            logger.info(f"Futures Client: {'✅ Active (separate keys)' if self.futures_client else '📝 Will use Spot keys'}")
+            logger.info(f"Live Data Client:  {'✅ Active (full history)' if self.live_data_client else '❌ Inactive'}")
+            logger.info(f"Primary Client:    {'✅ Active (testnet)' if is_testnet else '✅ Active (LIVE)'}")
+            logger.info(f"Futures Client:    {'✅ Active (separate keys)' if self.futures_client else '📝 Will use primary'}")
+            logger.info("\n📋 OPERATIONAL MODE:")
+            logger.info("   • Historical data → Live API (full history)")
+            logger.info("   • Trade execution → " + ("Testnet (safe)" if is_testnet else "LIVE (real money)"))
             logger.info("=" * 70 + "\n")
 
             return True
@@ -125,185 +159,45 @@ class DataManager:
 
     def get_futures_client(self) -> Optional[Client]:
         """
-        ✅ NEW: Get the appropriate client for Futures trading
-        Returns separate Futures client if available, otherwise Spot client
+        Get the appropriate client for Futures trading
+        Returns separate Futures client if available, otherwise primary client
         """
         if self.futures_client:
             return self.futures_client
         elif self.binance_client:
-            logger.debug("Using Spot client for Futures (no separate keys)")
+            logger.debug("Using primary client for Futures (no separate keys)")
             return self.binance_client
         else:
             return None
 
-    def initialize_mt5(self) -> bool:
-        """Initialize MT5 connection with detailed diagnostics"""
-        try:
-            import MetaTrader5 as mt5
-
-            if "api" not in self.config or "mt5" not in self.config["api"]:
-                logger.warning(
-                    "MT5 configuration not found in config. Skipping MT5 initialization."
-                )
-                return False
-
-            mt5_config = self.config["api"]["mt5"]
-
-            path = mt5_config.get("path")
-            login = mt5_config.get("login")
-            password = mt5_config.get("password")
-            server = mt5_config.get("server")
-
-            if path == "null" or path == "None":
-                path = None
-
-            if not all([login, password, server]):
-                logger.warning(
-                    "MT5 credentials incomplete. Skipping MT5 initialization."
-                )
-                return False
-
-            logger.info("=" * 60)
-            logger.info("MT5 INITIALIZATION DIAGNOSTICS")
-            logger.info("=" * 60)
-            logger.info(f"MT5 Path: {path if path else 'Auto-detect'}")
-            logger.info(f"Login: {login}")
-            logger.info(f"Server: {server}")
-            logger.info(
-                f"MT5 Python Package Version: {mt5.__version__ if hasattr(mt5, '__version__') else 'Unknown'}"
-            )
-
-            logger.info("\nStep 1: Initializing MT5 terminal...")
-
-            if not path:
-                logger.info("No MT5 path provided, attempting auto-detect")
-                init_result = mt5.initialize()
-            else:
-                logger.info(f"Initializing MT5 using explicit path: {path}")
-                init_result = mt5.initialize(
-                    path=path,
-                    login=int(login),
-                    password=str(password),
-                    server=str(server),
-                )
-
-            if not init_result:
-                error = mt5.last_error()
-                logger.error(f"MT5 initialize() failed: {error}")
-                logger.error("\nTROUBLESHOOTING STEPS:")
-                logger.error("1. Make sure MetaTrader 5 is RUNNING and logged in")
-                logger.error("2. Check if path is correct (should be folder, not .exe)")
-                logger.error("3. Run Python as Administrator")
-                logger.error("4. Check Windows Firewall settings")
-                logger.error("5. Try closing MT5 and reopening it")
-                return False
-
-            logger.info("MT5 terminal initialized successfully")
-
-            terminal_info = mt5.terminal_info()
-            if terminal_info:
-                logger.info(f"\nMT5 Terminal Info:")
-                logger.info(f"  Company: {terminal_info.company}")
-                logger.info(f"  Name: {terminal_info.name}")
-                logger.info(f"  Path: {terminal_info.path}")
-                logger.info(f"  Connected: {terminal_info.connected}")
-                logger.info(f"  Trade Allowed: {terminal_info.trade_allowed}")
-
-            logger.info(f"\nStep 2: Logging into account {login}...")
-
-            authorized = mt5.login(
-                login=int(login), password=str(password), server=str(server)
-            )
-
-            if not authorized:
-                error = mt5.last_error()
-                logger.error(f"MT5 login failed: {error}")
-                logger.error("\nPOSSIBLE CAUSES:")
-                logger.error("1. Wrong login/password/server combination")
-                logger.error("2. Account not approved for trading")
-                logger.error(
-                    "3. Server name incorrect (check in MT5: Tools > Options > Server)"
-                )
-                logger.error("4. Internet connection issue")
-
-                account_info = mt5.account_info()
-                if account_info:
-                    logger.info(
-                        f"Current account: {account_info.login} (trying to switch)"
-                    )
-
-                mt5.shutdown()
-                return False
-
-            logger.info("Login successful")
-
-            logger.info("\nStep 3: Verifying account access...")
-            account_info = mt5.account_info()
-
-            if account_info is None:
-                logger.error("Connected but cannot get account info")
-                mt5.shutdown()
-                return False
-
-            logger.info("\n" + "=" * 60)
-            logger.info("MT5 ACCOUNT INFORMATION")
-            logger.info("=" * 60)
-            logger.info(f"Account: {account_info.login}")
-            logger.info(f"Name: {account_info.name}")
-            logger.info(f"Server: {account_info.server}")
-            logger.info(f"Balance: ${account_info.balance:.2f}")
-            logger.info(f"Equity: ${account_info.equity:.2f}")
-            logger.info(f"Margin: ${account_info.margin:.2f}")
-            logger.info(f"Free Margin: ${account_info.margin_free:.2f}")
-            logger.info(f"Leverage: 1:{account_info.leverage}")
-            logger.info(f"Currency: {account_info.currency}")
-            logger.info(f"Trade Mode: {account_info.trade_mode}")
-            logger.info(f"Trade Allowed: {account_info.trade_allowed}")
-            logger.info("=" * 60)
-
-            logger.info("\nStep 4: Testing symbol access...")
-            test_symbol = "XAUUSD"
-            symbol_info = mt5.symbol_info(test_symbol)
-
-            if symbol_info is None:
-                logger.warning(f"Cannot access symbol {test_symbol}")
-                logger.warning(
-                    "This might be normal if symbol doesn't exist on this account"
-                )
-            else:
-                logger.info(f"Symbol {test_symbol} accessible")
-                logger.info(f"  Bid: {symbol_info.bid}")
-                logger.info(f"  Ask: {symbol_info.ask}")
-                logger.info(f"  Spread: {symbol_info.spread}")
-
-            logger.info("\n" + "=" * 60)
-            logger.info("MT5 INITIALIZATION COMPLETE")
-            logger.info("=" * 60 + "\n")
-
-            self.mt5_initialized = True
-            return True
-
-        except ImportError:
-            logger.error("MetaTrader5 module not installed")
-            logger.error("Install with: pip install MetaTrader5")
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected error during MT5 initialization: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return False
+    def _get_data_client(self, prefer_live: bool = True) -> Client:
+        """
+        ✅ NEW: Smart client selection for data fetching
+        
+        Args:
+            prefer_live: If True, use live client for full historical data
+        
+        Returns:
+            Best available client for data fetching
+        """
+        if prefer_live and self.live_data_client:
+            logger.debug("Using live API for historical data (full history available)")
+            return self.live_data_client
+        elif self.binance_client:
+            logger.debug("Using primary client for data")
+            return self.binance_client
+        else:
+            raise RuntimeError("No Binance client available")
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
     )
     def _fetch_klines_with_retry(
-        self, symbol: str, interval: str, startTime: int, endTime: int, limit: int
+        self, client: Client, symbol: str, interval: str, 
+        startTime: int, endTime: int, limit: int
     ):
-        """
-        ✅ ALWAYS uses SPOT client for OHLCV data
-        Futures and Spot have identical OHLCV data, so Spot is fine
-        """
-        return self.binance_client.get_klines(
+        """Fetch klines with retry logic"""
+        return client.get_klines(
             symbol=symbol,
             interval=interval,
             startTime=startTime,
@@ -318,25 +212,30 @@ class DataManager:
         start_date: str,
         end_date: Optional[str] = None,
         limit: int = 1000,
+        use_live_for_history: bool = True,
     ) -> pd.DataFrame:
         """
-        ✅ Fetch historical OHLCV data from Binance
-        Always uses SPOT endpoint (Spot and Futures have same OHLCV data)
+        ✅ ENHANCED: Fetch historical OHLCV data with smart client selection
+        
+        Args:
+            symbol: Trading pair (e.g., 'BTCUSDT')
+            interval: Timeframe (e.g., '1h', '4h', '1d')
+            start_date: Start date (format: 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS')
+            end_date: End date (optional, defaults to now)
+            limit: Bars per request (max 1000)
+            use_live_for_history: If True, prefer live API for full historical data
+        
+        Returns:
+            DataFrame with OHLCV data
         """
-        if self.binance_client is None:
-            raise RuntimeError("Binance client not initialized")
-
         try:
-            # Parse datetime strings that may include time
+            # Parse datetime strings
             start_dt = pd.to_datetime(start_date)
-
-            # If timezone-naive, assume UTC
             if start_dt.tz is None:
                 start_dt = start_dt.tz_localize("UTC")
             else:
                 start_dt = start_dt.tz_convert("UTC")
 
-            # Handle end_date properly
             if end_date:
                 end_dt = pd.to_datetime(end_date)
                 if end_dt.tz is None:
@@ -349,9 +248,20 @@ class DataManager:
             start_ts = int(start_dt.timestamp() * 1000)
             end_ts = int(end_dt.timestamp() * 1000)
 
-            logger.info(f"Fetching {symbol} data from {start_dt} to {end_dt} (UTC)")
-            logger.debug(f"Start timestamp: {start_ts} ({start_dt})")
-            logger.debug(f"End timestamp: {end_ts} ({end_dt})")
+            # ✅ SMART CLIENT SELECTION
+            # For historical analysis (>7 days), prefer live API
+            days_requested = (end_dt - start_dt).days
+            use_live = use_live_for_history and days_requested > 7
+            
+            client = self._get_data_client(prefer_live=use_live)
+            
+            if use_live and self.live_data_client:
+                logger.info(f"📊 Fetching {symbol} from LIVE API (full history)")
+            else:
+                logger.info(f"📊 Fetching {symbol} from {'testnet' if self.config['api']['binance'].get('testnet') else 'live'} API")
+            
+            logger.info(f"   Period: {start_dt} to {end_dt} (UTC)")
+            logger.info(f"   Requested: {days_requested} days of data")
 
             all_klines = []
             current_start = start_ts
@@ -363,6 +273,7 @@ class DataManager:
 
                 try:
                     klines = self._fetch_klines_with_retry(
+                        client=client,
                         symbol=symbol,
                         interval=interval,
                         startTime=current_start,
@@ -378,13 +289,10 @@ class DataManager:
                     break
 
                 all_klines.extend(klines)
-
                 last_timestamp = klines[-1][0]
 
                 if last_timestamp <= current_start:
-                    logger.warning(
-                        f"Duplicate timestamp detected, stopping to prevent infinite loop"
-                    )
+                    logger.warning("Duplicate timestamp detected, stopping")
                     break
 
                 current_start = last_timestamp + 1
@@ -394,7 +302,7 @@ class DataManager:
                 )
 
                 if len(klines) < limit:
-                    logger.debug("Reached end of available data (partial batch)")
+                    logger.debug("Reached end of available data")
                     break
 
                 if last_timestamp >= end_ts:
@@ -402,14 +310,10 @@ class DataManager:
                     break
 
             if iteration >= max_iterations:
-                logger.warning(
-                    f"Stopped after {max_iterations} iterations (safety limit)"
-                )
+                logger.warning(f"Stopped after {max_iterations} iterations")
 
             if not all_klines:
-                logger.error(
-                    f"No data received for {symbol} from {start_date} to {end_date}"
-                )
+                logger.error(f"❌ No data received for {symbol}")
                 return pd.DataFrame()
 
             # Convert to DataFrame
@@ -446,35 +350,112 @@ class DataManager:
             logger.info(f"   Date range: {df.index[0]} to {df.index[-1]}")
 
             # Validate data range
-            days_requested = (end_dt - start_dt).days
             days_received = (df.index[-1] - df.index[0]).days
 
             if df.index[0] > start_dt:
                 missing_days = (df.index[0] - start_dt).days
                 if missing_days > 1:
                     logger.warning(
-                        f"   ⚠️  Data starts at {df.index[0]}, but requested {start_dt}. "
-                        f"Missing {missing_days} days at the beginning."
+                        f"   ⚠️  Data starts at {df.index[0]}, requested {start_dt}"
                     )
+                    logger.warning(f"   Missing {missing_days} days at beginning")
+                    
+                    # Suggest switching to live API if using testnet
+                    if not use_live and self.live_data_client:
+                        logger.info("   💡 TIP: Use fetch_binance_data(..., use_live_for_history=True)")
+                        logger.info("      for complete historical data")
 
             if df.index[-1] < end_dt:
                 missing_hours = (end_dt - df.index[-1]).total_seconds() / 3600
                 if missing_hours > 2:
                     logger.warning(
-                        f"   ⚠️  Data ends at {df.index[-1]}, but requested {end_dt}. "
-                        f"Missing {missing_hours:.1f} hours at the end."
+                        f"   ⚠️  Data ends at {df.index[-1]}, requested {end_dt}"
                     )
+                    logger.warning(f"   Missing {missing_hours:.1f} hours at end")
 
             coverage_pct = (days_received / max(days_requested, 1)) * 100
-            logger.info(
-                f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)"
-            )
+            logger.info(f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)")
 
             return df
 
         except Exception as e:
             logger.error(f"Error fetching Binance data: {e}", exc_info=True)
             return pd.DataFrame()
+
+    def initialize_mt5(self) -> bool:
+        """Initialize MT5 connection with detailed diagnostics"""
+        try:
+            import MetaTrader5 as mt5
+
+            if "api" not in self.config or "mt5" not in self.config["api"]:
+                logger.warning("MT5 configuration not found. Skipping.")
+                return False
+
+            mt5_config = self.config["api"]["mt5"]
+
+            path = mt5_config.get("path")
+            login = mt5_config.get("login")
+            password = mt5_config.get("password")
+            server = mt5_config.get("server")
+
+            if path == "null" or path == "None":
+                path = None
+
+            if not all([login, password, server]):
+                logger.warning("MT5 credentials incomplete. Skipping.")
+                return False
+
+            logger.info("=" * 60)
+            logger.info("MT5 INITIALIZATION")
+            logger.info("=" * 60)
+            logger.info(f"Path: {path if path else 'Auto-detect'}")
+            logger.info(f"Login: {login}")
+            logger.info(f"Server: {server}")
+
+            if not path:
+                init_result = mt5.initialize()
+            else:
+                init_result = mt5.initialize(
+                    path=path,
+                    login=int(login),
+                    password=str(password),
+                    server=str(server),
+                )
+
+            if not init_result:
+                error = mt5.last_error()
+                logger.error(f"MT5 initialize() failed: {error}")
+                return False
+
+            authorized = mt5.login(
+                login=int(login), password=str(password), server=str(server)
+            )
+
+            if not authorized:
+                error = mt5.last_error()
+                logger.error(f"MT5 login failed: {error}")
+                mt5.shutdown()
+                return False
+
+            account_info = mt5.account_info()
+            if account_info is None:
+                logger.error("Cannot get account info")
+                mt5.shutdown()
+                return False
+
+            logger.info(f"✅ MT5 connected: {account_info.login}")
+            logger.info(f"   Balance: ${account_info.balance:.2f}")
+            logger.info("=" * 60)
+
+            self.mt5_initialized = True
+            return True
+
+        except ImportError:
+            logger.error("MetaTrader5 module not installed")
+            return False
+        except Exception as e:
+            logger.error(f"MT5 initialization error: {e}")
+            return False
 
     def fetch_mt5_data(
         self,
@@ -509,7 +490,6 @@ class DataManager:
             else:
                 end_dt = datetime.now()
 
-            # Convert to Python datetime
             start_dt = (
                 start_dt.to_pydatetime()
                 if hasattr(start_dt, "to_pydatetime")
@@ -524,9 +504,7 @@ class DataManager:
             rates = mt5.copy_rates_range(symbol, tf, start_dt, end_dt)
 
             if rates is None or len(rates) == 0:
-                logger.error(f"No data received from MT5 for {symbol}")
-                error = mt5.last_error()
-                logger.error(f"MT5 Error: {error}")
+                logger.error(f"No MT5 data for {symbol}")
                 return pd.DataFrame()
 
             df = pd.DataFrame(rates)
@@ -535,22 +513,19 @@ class DataManager:
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
             df = df.set_index("timestamp")
 
-            logger.info(f"✅ Fetched {len(df)} bars for {symbol} from MT5")
-            logger.info(f"   Date range: {df.index[0]} to {df.index[-1]}")
-
+            logger.info(f"✅ Fetched {len(df)} bars from MT5")
             return df
 
         except ImportError:
             logger.error("MetaTrader5 module not installed")
             return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error fetching MT5 data: {e}", exc_info=True)
+            logger.error(f"MT5 data fetch error: {e}")
             return pd.DataFrame()
 
     def clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Clean and validate OHLCV data"""
         if df.empty:
-            logger.warning("Cannot clean empty DataFrame")
             return df
 
         df = df.copy()
@@ -560,10 +535,7 @@ class DataManager:
         df = df.sort_index()
 
         if df.isnull().any().any():
-            null_counts = df.isnull().sum()
-            logger.warning(f"Found missing values:\n{null_counts[null_counts > 0]}")
-            df = df.ffill()
-            df = df.dropna()
+            df = df.ffill().dropna()
 
         invalid_bars = (
             (df["high"] < df["low"])
@@ -576,17 +548,12 @@ class DataManager:
         )
 
         if invalid_bars.any():
-            invalid_count = invalid_bars.sum()
-            logger.warning(f"Found {invalid_count} invalid OHLC bars, removing...")
+            logger.warning(f"Removing {invalid_bars.sum()} invalid bars")
             df = df[~invalid_bars]
 
         final_len = len(df)
-        removed = initial_len - final_len
-
-        if removed > 0:
-            logger.info(
-                f"Cleaned data: removed {removed} bars ({removed/initial_len*100:.1f}%)"
-            )
+        if initial_len - final_len > 0:
+            logger.info(f"Cleaned: removed {initial_len - final_len} bars")
 
         return df
 
@@ -595,28 +562,24 @@ class DataManager:
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Split data chronologically"""
         if df.empty:
-            logger.error("Cannot split empty DataFrame")
             return pd.DataFrame(), pd.DataFrame()
 
         split_idx = int(len(df) * train_pct)
-
-        if split_idx < 100:
-            logger.warning(f"Training set very small ({split_idx} bars)")
-
         train_df = df.iloc[:split_idx].copy()
         test_df = df.iloc[split_idx:].copy()
 
-        logger.info(f"Train set: {len(train_df)} bars ({train_pct*100:.0f}%)")
-        logger.info(f"Test set: {len(test_df)} bars ({(1-train_pct)*100:.0f}%)")
-        logger.info(f"Train period: {train_df.index[0]} to {train_df.index[-1]}")
-        logger.info(f"Test period: {test_df.index[0]} to {test_df.index[-1]}")
+        logger.info(f"Train: {len(train_df)} bars ({train_pct*100:.0f}%)")
+        logger.info(f"Test: {len(test_df)} bars ({(1-train_pct)*100:.0f}%)")
 
         return train_df, test_df
 
     def get_latest_data(
         self, symbol: str, interval: str, lookback_bars: int = 500
     ) -> pd.DataFrame:
-        """Get latest data for live trading"""
+        """
+        Get latest data for live trading
+        Uses primary client (testnet or live) for current data
+        """
         try:
             interval_map = {
                 "1m": timedelta(minutes=lookback_bars),
@@ -628,16 +591,16 @@ class DataManager:
             }
 
             delta = interval_map.get(interval, timedelta(hours=lookback_bars))
-            start_date = (datetime.now(timezone.utc) - delta).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            start_date = (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%d %H:%M:%S")
             end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+            # For live trading, use primary client (respect testnet setting)
             df = self.fetch_binance_data(
                 symbol=symbol,
                 interval=interval,
                 start_date=start_date,
                 end_date=end_date,
+                use_live_for_history=False,  # Use primary client for current data
             )
 
             df = self.clean_data(df)
@@ -662,4 +625,5 @@ class DataManager:
                 logger.error(f"Error shutting down MT5: {e}")
 
         self.binance_client = None
+        self.live_data_client = None
         self.futures_client = None
