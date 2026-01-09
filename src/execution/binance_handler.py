@@ -1097,16 +1097,16 @@ class BinanceExecutionHandler:
             is_futures = (
             hasattr(self, "futures_handler") and 
             self.futures_handler is not None and
-            self.config.get("assets", {}).get(asset_name, {}).get("enable_futures", False)
+            self.config.get("assets", {}).get(asset_name, {}).get("enable_futures", True)
         )
             quantity = self._round_quantity(quantity, self.symbol, is_futures)
             leverage = 1
-            margin_type = "SPOT"
+            margin_type = "CROSSED"
             
             if is_futures:
             # Fetch from config (using safe gets)
                 asset_conf = self.config.get("assets", {}).get(asset_name, {})
-                leverage = asset_conf.get("leverage", 10)
+                leverage = asset_conf.get("leverage", 20)
                 margin_type = asset_conf.get("margin_type", "CROSSED")
 
             MIN_BTC = 0.00001
