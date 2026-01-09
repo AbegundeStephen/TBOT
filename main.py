@@ -1278,12 +1278,16 @@ class TradingBot:
         # S/R Analysis
         sr_analysis = ai_validation.get("sr_analysis", {})
 
-        logger.info(f"S/R Analysis:")
+        nearest = sr_analysis.get("nearest_level")
+        distance = sr_analysis.get("distance_pct")
+
+        logger.info("S/R Analysis:")
         logger.info(f"  Near Level: {sr_analysis.get('near_sr_level', False)}")
         logger.info(f"  Type:       {sr_analysis.get('level_type', 'N/A')}")
-        logger.info(f"  Nearest:    ${sr_analysis.get('nearest_level', 0):,.2f}")
-        logger.info(f"  Distance:   {sr_analysis.get('distance_pct', 0):.2f}%")
+        logger.info(f"  Nearest:    ${nearest:,.2f}" if isinstance(nearest, (int, float)) else "  Nearest:    N/A")
+        logger.info(f"  Distance:   {distance:.2f}%" if isinstance(distance, (int, float)) else "  Distance:   N/A")
         logger.info(f"  Total Levels: {sr_analysis.get('total_levels_found', 0)}")
+
 
         # Validation status
         validation_passed = ai_validation.get("validation_passed", False)
