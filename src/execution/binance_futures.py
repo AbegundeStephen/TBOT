@@ -30,6 +30,13 @@ class BinanceFuturesHandler:
         self.symbol = symbol
         self.filters = {}
         
+        self.quantity_precision = 3  # Default for BTCUSDT
+        self.price_precision = 2     # Default for BTCUSDT
+        self.tick_size = 0.01        # Default tick size
+        self.step_size = 0.001       # Default step size
+        self.min_qty = 0.001         # Default min quantity
+        self.min_notional = 5.0      # Default min notional
+        
         # Verify Futures API access and load filters
         try:
             self.client.futures_account()
@@ -40,26 +47,48 @@ class BinanceFuturesHandler:
             raise
 
     def _load_symbol_filters(self):
-        """Load LOT_SIZE and MIN_NOTIONAL filters for the symbol"""
+        """Load LOT_SIZE, PRICE_FILTER, and MIN_NOTIONAL filters for the symbol"""
         try:
             info = self.client.futures_exchange_info()
             for s in info['symbols']:
                 if s['symbol'] == self.symbol:
-                    # Quantity Precision (step size)
+                    # ✅ Get base precision from symbol info
+                    self.quantity_precision = int(s.get('quantityPrecision', 3))
+                    self.price_precision = int(s.get('pricePrecision', 2))
+                    
+                    # ✅ Parse filters
                     for f in s['filters']:
                         if f['filterType'] == 'LOT_SIZE':
-                            self.filters['step_size'] = float(f['stepSize'])
-                            self.filters['min_qty'] = float(f['minQty'])
+                            self.step_size = float(f['stepSize'])
+                            self.min_qty = float(f['minQty'])
+                            self.filters['step_size'] = self.step_size
+                            self.filters['min_qty'] = self.min_qty
+                            
+                        elif f['filterType'] == 'PRICE_FILTER':
+                            self.tick_size = float(f['tickSize'])
+                            self.filters['tick_size'] = self.tick_size
+                            
                         elif f['filterType'] == 'MIN_NOTIONAL':
-                            self.filters['min_notional'] = float(f.get('notional', 5.0))
+                            self.min_notional = float(f.get('notional', 5.0))
+                            self.filters['min_notional'] = self.min_notional
                     
-                    self.filters['precision'] = int(s.get('quantityPrecision', 3))
-                    logger.info(f"[FUTURES] Filters loaded: Step={self.filters['step_size']}, MinNotional=${self.filters.get('min_notional', 5.0)}")
+                    # ✅ Store precision in filters for backward compatibility
+                    self.filters['precision'] = self.quantity_precision
+                    
+                    logger.info(
+                        f"[FUTURES] Filters loaded for {self.symbol}:\n"
+                        f"  Quantity: precision={self.quantity_precision}, step={self.step_size}, min={self.min_qty}\n"
+                        f"  Price:    precision={self.price_precision}, tick={self.tick_size}\n"
+                        f"  Notional: min=${self.min_notional}"
+                    )
                     return
+                    
+            logger.warning(f"[FUTURES] Symbol {self.symbol} not found in exchange info")
+            
         except Exception as e:
             logger.error(f"[FUTURES] Failed to load filters: {e}")
-            # Fallback defaults for BTC
-            self.filters = {'step_size': 0.001, 'min_qty': 0.001, 'min_notional': 5.0, 'precision': 3}
+            # Fallback defaults already set in __init__
+            logger.info(f"[FUTURES] Using default precision values for {self.symbol}")
 
     def _adjust_quantity(self, quantity: float) -> float:
         """Round quantity to valid step size"""
