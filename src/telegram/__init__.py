@@ -2040,25 +2040,109 @@ class TradingTelegramBot:
             )
 
     async def notify_trade_opened(
-        self, asset: str, side: str, price: float, size: float, sl: float, tp: float, leverage: int = 1, margin_type: str = "SPOT", is_futures: bool = False
+        self, 
+        asset: str, 
+        side: str, 
+        price: float, 
+        size: float, 
+        sl: float, 
+        tp: float, 
+        leverage: int = 1, 
+        margin_type: str = "SPOT", 
+        is_futures: bool = False
     ):
-        """Notify when a trade is opened"""
-        side_icon = "🟢" if side.lower() == "long" else "🔴"
-        type_str = f"⚡ Futures {leverage}x ({margin_type})" if is_futures else "Spot"
-
-        msg = (
-            f"{side_icon} *Trade Opened: {asset}*\n\n"
-            f"⚙️ Type: {type_str}\n"
-            f"Side: {side.upper()}\n"
-            f"Entry Price: ${price:,.2f}\n"
-            f"Size: ${size:,.2f}\n"
-            f"🛑 Stop Loss: ${sl:,.2f}\n"
-            f"🎯 Take Profit: ${tp:,.2f}\n\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        await self.send_notification(msg)
-
+        """
+        ✅ FIXED: Notify when a trade is opened with correct futures/spot detection
+        
+        Args:
+            asset: Asset name (e.g., "BTC", "GOLD")
+            side: "long" or "short"
+            price: Entry price
+            size: Position size in USD
+            sl: Stop loss price
+            tp: Take profit price
+            leverage: Leverage multiplier (default 1)
+            margin_type: "SPOT", "CROSSED", "ISOLATED"
+            is_futures: True if futures/margin trading
+        """
+        try:
+            # Determine icons and labels
+            side_icon = "🟢" if side.lower() == "long" else "🔴"
+            
+            # ✅ FIX: Better type detection and formatting
+            if is_futures:
+                if leverage > 1:
+                    type_str = f"⚡ Futures {leverage}x ({margin_type})"
+                else:
+                    type_str = f"⚡ Margin ({margin_type})"
+            else:
+                type_str = "💰 Spot"
+            
+            # Calculate risk metrics
+            if sl and sl > 0:
+                if side.lower() == "long":
+                    sl_distance_pct = ((price - sl) / price) * 100
+                else:
+                    sl_distance_pct = ((sl - price) / price) * 100
+                sl_risk_usd = size * (sl_distance_pct / 100)
+            else:
+                sl_distance_pct = 0
+                sl_risk_usd = 0
+            
+            if tp and tp > 0:
+                if side.lower() == "long":
+                    tp_distance_pct = ((tp - price) / price) * 100
+                else:
+                    tp_distance_pct = ((price - tp) / price) * 100
+                tp_profit_usd = size * (tp_distance_pct / 100)
+            else:
+                tp_distance_pct = 0
+                tp_profit_usd = 0
+            
+            # Build message
+            msg = (
+                f"{side_icon} *Trade Opened: {asset}*\n\n"
+                f"⚙️ Type: {type_str}\n"
+                f"📊 Side: {side.upper()}\n"
+                f"💵 Entry: ${price:,.2f}\n"
+                f"💰 Size: ${size:,.2f}\n\n"
+            )
+            
+            # Add SL info if available
+            if sl and sl > 0:
+                msg += (
+                    f"🛑 Stop Loss: ${sl:,.2f}\n"
+                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n\n"
+                )
+            else:
+                msg += "🛑 Stop Loss: VTM Dynamic\n\n"
+            
+            # Add TP info if available
+            if tp and tp > 0:
+                msg += (
+                    f"🎯 Take Profit: ${tp:,.2f}\n"
+                    f"   └─ Target: {tp_distance_pct:.2f}% (${tp_profit_usd:.2f})\n\n"
+                )
+            else:
+                msg += "🎯 Take Profit: VTM Dynamic\n\n"
+            
+            # Add risk-reward ratio if both SL and TP exist
+            if sl and tp and sl > 0 and tp > 0:
+                rr_ratio = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
+                msg += f"📈 Risk/Reward: 1:{rr_ratio:.2f}\n\n"
+            
+            # Add timestamp
+            msg += f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # Send notification
+            await self.send_notification(msg)
+            
+            logger.info(f"[TELEGRAM] Trade opened notification sent for {asset}")
+            
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Error sending trade opened notification: {e}", exc_info=True)
+        
+        
     async def notify_trade_closed(
         self, asset: str, side: str, pnl: float, pnl_pct: float, reason: str
     ):

@@ -143,6 +143,7 @@ class Position:
                     low=ohlc_data["low"],
                     close=ohlc_data["close"],
                     account_balance=account_balance or 10000,  # Fallback
+                    quantity_override=quantity,
                     account_risk=account_risk,  # ✅ Adjusted
                     atr_period=14,
                     enable_early_profit_lock=True,
@@ -1039,9 +1040,9 @@ class PortfolioManager:
         side: str,
         entry_price: float,
         position_size_usd: float,
-        stop_loss: float = None,  # ❌ IGNORED - VTM calculates
-        take_profit: float = None,  # ❌ IGNORED - VTM calculates
-        trailing_stop_pct: float = None,  # ❌ IGNORED - VTM manages
+        stop_loss: float = None,
+        take_profit: float = None,
+        trailing_stop_pct: float = None,
         mt5_ticket: int = None,
         binance_order_id: int = None,
         ohlc_data: dict = None,
@@ -1049,14 +1050,14 @@ class PortfolioManager:
         entry_time: datetime = None,
         signal_details: dict = None, 
         leverage: int = 1,
-        margin_type: str = "SPOT",
-        is_futures: bool = False,
+        margin_type: str = "CROSSED",
+        is_futures: bool = True,
     ) -> bool:
         """
-        Add a new position with hybrid aware VTM support and Preset Risk Overrides
+        Add a new position with hybrid aware VTM support
         """
         
-        # 1. Check if we can open this position (limits, hedging, etc)
+        # 1. Check if we can open this position
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
             logger.warning(f"Cannot open position: {reason}")
@@ -1072,8 +1073,17 @@ class PortfolioManager:
             return False
         
         quantity = position_size_usd / entry_price
+        logger.info(
+            f"[PORTFOLIO] Adding {side.upper()} position:\n"
+            f"  Size:     ${position_size_usd:,.2f}\n"
+            f"  Quantity: {quantity:.8f}\n"
+            f"  Entry:    ${entry_price:,.2f}"
+        )
         
-        # 3. Create the Position object
+        # ============================================================================
+        # 3. CREATE POSITION OBJECT
+        # ✅ VTM is initialized INSIDE Position.__init__() - don't do it here!
+        # ============================================================================
         position = Position(
             asset=asset,
             symbol=symbol,
@@ -1082,82 +1092,43 @@ class PortfolioManager:
             quantity=quantity,
             entry_time=entry_time or datetime.now(),
             signal_details=signal_details,
-            stop_loss=None,  # VTM will set this
-            take_profit=None, # VTM will set this
-            trailing_stop_pct=None, # VTM will manage this
+            stop_loss=stop_loss,  # May be None if VTM will calculate
+            take_profit=take_profit,
+            trailing_stop_pct=trailing_stop_pct,
             mt5_ticket=mt5_ticket,
             binance_order_id=binance_order_id,
             ohlc_data=ohlc_data,
             account_balance=self.current_capital,
-            use_dynamic_management=use_dynamic_management,
+            use_dynamic_management=use_dynamic_management,  # ← This triggers VTM init in Position.__init__()
             leverage=leverage,
             margin_type=margin_type,
             is_futures=is_futures
         )
-
-        # 4. Initialize Veteran Trade Manager with Config & Overrides
-        if use_dynamic_management and ohlc_data:
-            try:
-                # --- A. LOAD BASE CONFIG ---
-                # Load the default risk profile for this asset from config.json
-                asset_risk_config = self.config["assets"][asset].get("risk", {}).copy()
-                
-                # Ensure required metadata exists
-                asset_risk_config["name"] = asset
-                asset_risk_config["volatility"] = "high" if asset == "BTC" else "medium"
-
-                # --- B. APPLY PRESET OVERRIDES (e.g. Scalper Mode) ---
-                # Check if the signal carried specific risk instructions
-                preset_config = signal_details.get("preset_config", {}) if signal_details else {}
-                risk_overrides = preset_config.get("risk_overrides", {})
-                
-                if risk_overrides:
-                    logger.info(f"\n[RISK] ⚡ Applying PRESET OVERRIDES to {asset} {side.upper()}")
-                    # Merge overrides into the risk config (overwriting defaults)
-                    asset_risk_config.update(risk_overrides)
-                    
-                    # Log specific changes for verification
-                    logger.info(f"       Mode:       {preset_config.get('name', 'Custom Preset')}")
-                    logger.info(f"       Stop Range: {asset_risk_config.get('min_stop_pct'):.2%} - {asset_risk_config.get('max_stop_pct'):.2%}")
-                    logger.info(f"       Targets:    {asset_risk_config.get('partial_targets')}")
-                    logger.info(f"       Time Stop:  {asset_risk_config.get('time_stop_bars')} bars")
-
-                # --- C. INITIALIZE VTM ---
-                # Initialize VTM with the final, merged configuration
-                # Note: We pass account_risk from config, but VTM might adjust it based on the profile
-                account_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
-
-                position.trade_manager = VeteranTradeManager(
-                    entry_price=entry_price,
-                    side=side,
-                    asset=asset,
-                    high=ohlc_data["high"],
-                    low=ohlc_data["low"],
-                    close=ohlc_data["close"],
-                    account_balance=self.current_capital,
-                    account_risk=account_risk, 
-                    atr_period=14,
-                    enable_early_profit_lock=True,
-                    early_lock_threshold_pct=asset_risk_config.get("breakeven_profit_threshold", 0.01),
-                    signal_details=signal_details,
-                    custom_profile=asset_risk_config  # <--- Passes the fully overridden config
-                )
-
-                # --- D. SYNC POSITION LEVELS ---
-                # Update the Position object with VTM's calculated levels
-                position.stop_loss = position.trade_manager.initial_stop_loss
-                if position.trade_manager.take_profit_levels:
-                    position.take_profit = position.trade_manager.take_profit_levels[0]
-
-                logger.info(f"[VTM] Initialized for {asset}. SL: ${position.stop_loss:,.2f}")
-
-            except Exception as e:
-                logger.error(f"[VTM] Initialization failed for {asset}: {e}", exc_info=True)
-                # Fallback to manual levels if VTM fails
-                position.stop_loss = stop_loss
-                position.take_profit = take_profit
         
-        # 5. Store Position
+        # ============================================================================
+        # ❌ REMOVE THIS ENTIRE SECTION (Lines ~550-620):
+        # ============================================================================
+        # if use_dynamic_management and ohlc_data:
+        #     try:
+        #         asset_risk_config = self.config["assets"][asset].get("risk", {}).copy()
+        #         # ... (preset overrides code) ...
+        #         position.trade_manager = VeteranTradeManager(...)  ← DELETE THIS
+        #         position.stop_loss = position.trade_manager.initial_stop_loss
+        #         # ...
+        #     except Exception as e:
+        #         logger.error(f"[VTM] Initialization failed: {e}")
+        
+        # ✅ VTM was already initialized in Position.__init__()!
+        # Just verify it worked:
+        if use_dynamic_management and ohlc_data:
+            if position.trade_manager:
+                logger.info(f"[VTM] Initialized for {asset}. SL: ${position.stop_loss:,.2f}")
+            else:
+                logger.warning(f"[VTM] Failed to initialize for {asset}")
+        
+        # ============================================================================
+        # 5. STORE POSITION
+        # ============================================================================
         self.positions[position.position_id] = position
         
         # 6. Database Logging
@@ -1247,6 +1218,44 @@ class PortfolioManager:
             )
 
         return len(positions_to_close)
+    
+    def get_asset_balance(self, asset: str) -> float:
+        """
+        Get balance for a specific asset's exchange
+        
+        Args:
+            asset: "BTC" or "GOLD"
+        
+        Returns:
+            Balance in USD for that asset's exchange
+        """
+        if self.is_paper_mode:
+            # In paper mode, split capital proportionally
+            if asset == "BTC":
+                return self.paper_capital * 0.9  # 90% for BTC
+            elif asset == "GOLD":
+                return self.paper_capital * 0.1  # 10% for Gold
+            return self.paper_capital
+        
+        # Live mode - fetch from specific exchange
+        if asset == "GOLD":
+            balance = self._fetch_mt5_balance()
+            if balance:
+                logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (MT5)")
+                return balance
+        
+        elif asset == "BTC":
+            balance = self._fetch_binance_balance()
+            if balance:
+                logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (Binance)")
+                return balance
+        
+        # Fallback: use proportion of total capital
+        logger.warning(f"[ASSET BALANCE] Could not fetch {asset} balance, using estimate")
+        
+        # Estimate based on asset weight in config
+        asset_weight = self.config["assets"].get(asset, {}).get("weight", 0.5)
+        return self.current_capital * asset_weight
     
     def close_all_positions(self, prices: Dict[str, float] = None):
         """

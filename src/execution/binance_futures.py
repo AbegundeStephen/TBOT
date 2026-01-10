@@ -220,7 +220,7 @@ class BinanceFuturesHandler:
         take_profit: float = None
     ) -> Optional[Dict]:
         """
-        ✅ FIXED: Enhanced error handling and precision validation
+        ✅ FIXED: Cancel existing stops before placing new ones
         """
         try:
             # Determine Binance side
@@ -236,11 +236,11 @@ class BinanceFuturesHandler:
             
             logger.info(f"[FUTURES] Opening {side_label}: {quantity:.{self.quantity_precision}f} {self.symbol}")
             
-            # ✅ Get current price for validation
+            # Get current price for validation
             ticker = self.client.futures_symbol_ticker(symbol=self.symbol)
             current_price = float(ticker['price'])
             
-            # ✅ Validate entry order
+            # Validate entry order
             is_valid, error_msg = self._validate_order(current_price, quantity)
             if not is_valid:
                 logger.error(f"[FUTURES] Entry validation failed: {error_msg}")
@@ -268,21 +268,31 @@ class BinanceFuturesHandler:
                 f"  Entry:    ${avg_price:,.2f}"
             )
             
-            # 2. CRITICAL: Place Stop Loss with Retries
+            # ============================================================
+            # 2. ✅ FIX: Cancel existing stop orders BEFORE placing new one
+            # ============================================================
             if stop_loss:
-                sl_success = False
+                logger.info(f"[SL] Cancelling existing stop orders for {side_label}...")
+                self._cancel_existing_stop_orders(side)
+                
+                # Small delay to ensure cancellation is processed
+                time.sleep(0.2)
+                
+                # Now place the new stop loss
                 sl_side = SIDE_SELL if side == "long" else SIDE_BUY
                 
-                # ✅ Validate SL price before attempting
+                # Validate SL price
                 if side == "long" and stop_loss >= current_price:
                     logger.error(f"[FUTURES] Invalid SL: ${stop_loss} >= entry ${current_price}")
-                    stop_loss = current_price * 0.97  # Emergency fallback
+                    stop_loss = current_price * 0.97
                     stop_loss = self._round_price(stop_loss)
                 elif side == "short" and stop_loss <= current_price:
                     logger.error(f"[FUTURES] Invalid SL: ${stop_loss} <= entry ${current_price}")
                     stop_loss = current_price * 1.03
                     stop_loss = self._round_price(stop_loss)
                 
+                # Place stop loss with retry logic
+                sl_success = False
                 for attempt in range(1, 4):
                     try:
                         self.client.futures_create_order(
@@ -299,7 +309,7 @@ class BinanceFuturesHandler:
                         logger.warning(f"  ⚠️ SL Attempt {attempt}/3 failed: {e}")
                         time.sleep(0.5)
                 
-                # 3. EMERGENCY FAILSAFE
+                # 3. EMERGENCY FAILSAFE (unchanged)
                 if not sl_success:
                     logger.critical(f"[FUTURES] 🛑 CRITICAL: SL FAILED 3x! EMERGENCY CLOSE.")
                     close_side = SIDE_SELL if side == "long" else SIDE_BUY
@@ -316,11 +326,10 @@ class BinanceFuturesHandler:
                         logger.critical(f"[FUTURES] ☠️ EMERGENCY CLOSE FAILED: {close_error}")
                     return None
             
-            # 4. Place Take Profit (Enhanced with validation)
+            # 4. Place Take Profit (unchanged)
             if take_profit:
                 tp_side = SIDE_SELL if side == "long" else SIDE_BUY
                 
-                # ✅ CRITICAL FIX: Validate TP before placing
                 if side == "long" and take_profit <= current_price:
                     logger.warning(f"[FUTURES] Invalid TP: ${take_profit} <= entry ${current_price}, skipping")
                     take_profit = None
@@ -329,14 +338,12 @@ class BinanceFuturesHandler:
                     take_profit = None
                 
                 if take_profit:
-                    # ✅ Validate TP order value
                     tp_notional = take_profit * quantity
                     if tp_notional < self.min_notional:
                         logger.warning(
                             f"[FUTURES] TP notional ${tp_notional:.2f} < ${self.min_notional}, "
                             f"adjusting quantity"
                         )
-                        # Increase quantity slightly to meet minimum
                         adjusted_qty = (self.min_notional / take_profit) * 1.01
                         adjusted_qty = self._round_quantity(adjusted_qty)
                         
@@ -346,35 +353,20 @@ class BinanceFuturesHandler:
                         else:
                             logger.warning(f"[FUTURES] Cannot adjust TP quantity, skipping TP")
                             take_profit = None
-                
-                if take_profit:
-                    try:
-                        tp_order = self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=tp_side,
-                            type=FUTURE_ORDER_TYPE_LIMIT,
-                            price=take_profit,
-                            quantity=quantity,
-                            timeInForce='GTC',
-                            reduceOnly=True
-                        )
-                        logger.info(f"  ✓ TP Placed: ${take_profit:,.{self.price_precision}f}")
-                    except Exception as e:
-                        error_code = str(e)
-                        
-                        # ✅ Enhanced error diagnostics
-                        if "-11111" in error_code:
-                            logger.error(
-                                f"  ✗ TP Precision Error:\n"
-                                f"    Price: {take_profit:.{self.price_precision}f} "
-                                f"(precision={self.price_precision}, tick={self.tick_size})\n"
-                                f"    Quantity: {quantity:.{self.quantity_precision}f} "
-                                f"(precision={self.quantity_precision}, step={self.step_size})\n"
-                                f"    Raw Error: {e}"
+                    
+                    if take_profit:
+                        try:
+                            tp_order = self.client.futures_create_order(
+                                symbol=self.symbol,
+                                side=tp_side,
+                                type=FUTURE_ORDER_TYPE_LIMIT,
+                                price=take_profit,
+                                quantity=quantity,
+                                timeInForce='GTC',
+                                reduceOnly=True
                             )
-                        elif "-4131" in error_code:
-                            logger.warning(f"  ⚠️ TP rejected: Price outside allowed range")
-                        else:
+                            logger.info(f"  ✓ TP Placed: ${take_profit:,.{self.price_precision}f}")
+                        except Exception as e:
                             logger.warning(f"  ⚠️ TP Failed: {e}")
             
             return order
@@ -473,6 +465,57 @@ class BinanceFuturesHandler:
             
         except Exception as e:
             logger.error(f"[FUTURES] Failed to close {side.upper()}: {e}")
+            return False
+        
+    def _cancel_existing_stop_orders(self, side: str) -> bool:
+        """
+        Cancel all existing stop-loss orders for the given side
+        This is CRITICAL before placing new stop orders to avoid -4130 error
+        
+        Args:
+            side: "long" or "short"
+        
+        Returns:
+            True if successful or no orders to cancel
+        """
+        try:
+            # Get all open orders
+            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            
+            if not open_orders:
+                logger.debug(f"[SL] No open orders for {self.symbol}")
+                return True
+            
+            # Determine which stop side to look for
+            # LONG positions have SELL stops, SHORT positions have BUY stops
+            target_stop_side = "SELL" if side == "long" else "BUY"
+            
+            cancelled_count = 0
+            for order in open_orders:
+                order_type = order.get('type', '')
+                order_side = order.get('side', '')
+                
+                # Look for STOP_MARKET orders on the opposite side
+                if order_type == 'STOP_MARKET' and order_side == target_stop_side:
+                    order_id = order.get('orderId')
+                    
+                    try:
+                        self.client.futures_cancel_order(
+                            symbol=self.symbol,
+                            orderId=order_id
+                        )
+                        cancelled_count += 1
+                        logger.info(f"[SL] Cancelled existing stop order {order_id}")
+                    except Exception as e:
+                        logger.warning(f"[SL] Failed to cancel order {order_id}: {e}")
+            
+            if cancelled_count > 0:
+                logger.info(f"[SL] Cancelled {cancelled_count} existing stop order(s)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[SL] Error cancelling stop orders: {e}")
             return False
 
     def get_position_info(self, side: str = None) -> Optional[Dict]:
