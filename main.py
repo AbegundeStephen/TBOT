@@ -2834,38 +2834,49 @@ class TradingBot:
                 if new_position_ids:
                     for position_id in new_position_ids:
                         new_pos = next(
-                            (
-                                p
-                                for p in positions_after
-                                if p.position_id == position_id
-                            ),
+                            (p for p in positions_after if p.position_id == position_id),
                             None,
                         )
-                        if (
-                            new_pos
-                            and self.telegram_bot
-                            and self._telegram_ready.is_set()
-                        ):
+                        if new_pos and self.telegram_bot and self._telegram_ready.is_set():
                             try:
+                                # ✅ FIX: Safely extract position attributes with proper defaults
+                                leverage = getattr(new_pos, "leverage", 1)
+                                margin_type = getattr(new_pos, "margin_type", "FUTURES")
+                                is_futures = getattr(new_pos, "is_futures", False)
+                                
+                                # ✅ FIX: Handle None values for SL/TP
+                                sl = new_pos.stop_loss if new_pos.stop_loss else 0.0
+                                tp = new_pos.take_profit if new_pos.take_profit else 0.0
+                                
+                                # Debug logging
+                                logger.info(
+                                    f"[TELEGRAM] Sending notification for {asset_name}:\n"
+                                    f"  Leverage:    {leverage}\n"
+                                    f"  Margin Type: {margin_type}\n"
+                                    f"  Is Futures:  {is_futures}\n"
+                                    f"  Stop Loss:   ${sl:,.2f}\n"
+                                    f"  Take Profit: ${tp:,.2f}"
+                                )
+                                
+                                # ✅ FIX: Ensure async call is awaited
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
                                         asset=asset_name,
                                         side=new_pos.side,
                                         price=new_pos.entry_price,
                                         size=new_pos.quantity * new_pos.entry_price,
-                                        sl=new_pos.stop_loss,
-                                        tp=new_pos.take_profit,
-                                        leverage=getattr(new_pos, "leverage", 1),
-                                        margin_type=getattr(
-                                            new_pos, "margin_type", "SPOT"
-                                        ),
-                                        is_futures=getattr(
-                                            new_pos, "is_futures", False
-                                        ),
+                                        sl=sl,
+                                        tp=tp,
+                                        leverage=leverage,
+                                        margin_type=margin_type,
+                                        is_futures=is_futures,
                                     )
                                 )
+                                
+                                logger.info(f"[TELEGRAM] ✓ Trade opened notification sent")
+                                
                             except Exception as e:
-                                logger.error(f"[TELEGRAM] Notification failed: {e}")
+                                logger.error(f"[TELEGRAM] Notification failed: {e}", exc_info=True)
 
                 # Send Notifications (Closed Positions)
                 if closed_position_ids:

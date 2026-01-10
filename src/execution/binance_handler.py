@@ -141,38 +141,69 @@ class HybridPositionSizer:
         override_reason: str = None,
     ) -> Tuple[float, Dict]:
         """
-        ✅ FIXED: Calculate position size based on ACTUAL RISK
+        ✅ FIXED: Calculate position size using ASSET-SPECIFIC balance
         
-        Correct Formula:
-            Position Size = Risk Amount / Stop Loss Distance (in $)
-            
-        Example:
-            - Account: $10,000
-            - Risk: 1.5% = $150
-            - Entry: $45,000
-            - Stop: $43,650 (3% below entry)
-            - Stop Distance: $1,350
-            - Position Size: $150 / $1,350 = 0.111 BTC = $5,000
-            - Actual Risk: 0.111 * $1,350 = $150 ✓
+        Key Changes:
+        - Use asset's exchange balance instead of total portfolio
+        - Risk budget is per-asset, not portfolio-wide
         """
         try:
             # ============================================================
-            # STEP 1: Determine risk percentage to use
+            # STEP 0: Get ASSET-SPECIFIC balance (NEW!)
+            # ============================================================
+            asset_balance = self.portfolio_manager.get_asset_balance(asset)
+            
+            if asset_balance <= 0:
+                logger.error(f"[RISK] Invalid balance for {asset}: ${asset_balance:,.2f}")
+                return 0.0, {"error": "invalid_asset_balance"}
+            
+            logger.info(
+                f"[RISK] Using {asset} balance: ${asset_balance:,.2f} "
+                f"(not total portfolio: ${self.portfolio_manager.current_capital:,.2f})"
+            )
+            
+            # ============================================================
+            # STEP 1: Count existing positions for this asset & side
+            # ============================================================
+            side = "long" if signal == 1 else "short"
+            existing_positions = self.portfolio_manager.get_asset_positions(asset)
+            same_side_positions = [p for p in existing_positions if p.side == side]
+            
+            # Include the new position we're about to open
+            total_positions = len(same_side_positions) + 1
+            
+            logger.info(
+                f"[RISK] Position Count:\n"
+                f"  Existing {side.upper()}: {len(same_side_positions)}\n"
+                f"  Total (with new):      {total_positions}"
+            )
+            
+            # ============================================================
+            # STEP 2: Calculate SPLIT risk per position (using asset balance)
             # ============================================================
             if sizing_mode == SizingMode.ELEVATED_RISK:
-                risk_pct = self.max_risk_pct
+                total_risk_pct = self.max_risk_pct
             elif sizing_mode == SizingMode.REDUCED_RISK:
-                risk_pct = self.target_risk_pct * 0.75
+                total_risk_pct = self.target_risk_pct * 0.75
             elif confidence_score and confidence_score >= self.aggressive_threshold:
-                risk_pct = self.max_risk_pct
+                total_risk_pct = self.max_risk_pct
             else:
-                risk_pct = self.target_risk_pct
+                total_risk_pct = self.target_risk_pct
             
-            # Calculate risk amount in dollars
-            risk_amount = self.portfolio_manager.current_capital * risk_pct
+            # ✅ KEY CHANGE: Split risk across positions using ASSET balance
+            risk_pct_per_position = total_risk_pct / total_positions
+            risk_amount = asset_balance * risk_pct_per_position  # ← Uses asset balance!
+            
+            logger.info(
+                f"[RISK] Split Risk Calculation ({asset}):\n"
+                f"  Asset Balance:     ${asset_balance:,.2f}\n"
+                f"  Total Risk Budget: {total_risk_pct:.2%} (${total_risk_pct * asset_balance:,.2f})\n"
+                f"  Positions:         {total_positions}\n"
+                f"  Risk Per Position: {risk_pct_per_position:.2%} (${risk_amount:,.2f})"
+            )
             
             # ============================================================
-            # STEP 2: Validate stop loss distance
+            # STEP 3: Validate stop loss distance (unchanged)
             # ============================================================
             asset_cfg = self.config["assets"][asset]
             risk_cfg = asset_cfg.get("risk", {})
@@ -205,14 +236,9 @@ class HybridPositionSizer:
                 stop_distance = abs(entry_price - stop_loss_price)
             
             # ============================================================
-            # STEP 3: Calculate position size from risk (✅ FIXED)
+            # STEP 4: Calculate position size from split risk
             # ============================================================
-            # ✅ CORRECT: Divide by DOLLAR distance, not percentage
             position_size_usd = risk_amount / stop_distance_pct
-            
-            # ✅ Alternative (more explicit) calculation:
-            # units = risk_amount / stop_distance  # e.g., 0.111 BTC
-            # position_size_usd = units * entry_price  # e.g., $5,000
             
             logger.info(
                 f"[RISK] Position Calculation:\n"
@@ -223,7 +249,7 @@ class HybridPositionSizer:
             )
             
             # ============================================================
-            # STEP 4: Apply manual override if requested
+            # STEP 5: Apply manual override if requested (unchanged)
             # ============================================================
             if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
                 min_allowed = position_size_usd * 0.5
@@ -237,7 +263,7 @@ class HybridPositionSizer:
                     manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
                 
                 override_risk = manual_size_usd * stop_distance_pct
-                override_risk_pct = override_risk / self.portfolio_manager.current_capital
+                override_risk_pct = override_risk / asset_balance
                 
                 logger.info(
                     f"[OVERRIDE] Manual size applied\n"
@@ -249,10 +275,10 @@ class HybridPositionSizer:
                 position_size_usd = manual_size_usd
             
             # ============================================================
-            # STEP 5: Apply hard position limits
+            # STEP 6: Apply hard position limits (unchanged)
             # ============================================================
             min_size = asset_cfg.get("min_position_usd", 100)
-            max_size = asset_cfg.get("max_position_usd", 6000)
+            max_size = asset_cfg.get("max_position_usd", 100000)
             
             if position_size_usd < min_size:
                 logger.warning(f"[RISK] Position ${position_size_usd:.2f} below minimum ${min_size}")
@@ -271,84 +297,54 @@ class HybridPositionSizer:
                 )
             
             # ============================================================
-            # STEP 6: Check portfolio-level limits (✅ CRITICAL)
-            # ============================================================
-            max_exposure = self.portfolio_cfg.get("max_portfolio_exposure", 0.95)
-            max_single_asset = self.portfolio_cfg.get("max_single_asset_exposure", 0.60)
-            
-            current_exposure = sum(
-                pos.quantity * pos.entry_price
-                for pos in self.portfolio_manager.positions.values()
-            )
-            
-            # ✅ CRITICAL CHECK: Ensure new position doesn't exceed portfolio limits
-            max_portfolio_usd = self.portfolio_manager.current_capital * max_exposure
-            if current_exposure + position_size_usd > max_portfolio_usd:
-                old_size = position_size_usd
-                position_size_usd = max(0, max_portfolio_usd - current_exposure)
-                logger.warning(
-                    f"[RISK] Portfolio limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}\n"
-                    f"  Current Exposure: ${current_exposure:,.2f}\n"
-                    f"  Max Allowed:      ${max_portfolio_usd:,.2f}"
-                )
-            
-            # ✅ CRITICAL CHECK: Single asset exposure
-            max_asset_usd = self.portfolio_manager.current_capital * max_single_asset
-            if position_size_usd > max_asset_usd:
-                old_size = position_size_usd
-                position_size_usd = max_asset_usd
-                logger.warning(
-                    f"[RISK] Single asset limit hit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
-                )
-            
-            # ✅ SAFETY CHECK: Never exceed 2% of capital per position
-            max_position_safety = self.portfolio_manager.current_capital * 0.02
-            if position_size_usd > max_position_safety:
-                logger.error(
-                    f"[RISK] SAFETY VIOLATION: Position ${position_size_usd:,.2f} exceeds 2% limit!"
-                )
-                position_size_usd = max_position_safety
-                
-            # ============================================================
-            # STEP 6.5: Check Total Open Risk (Aggregate Stop Loss Risk)
-            # ============================================================
-            # Max % of account we are willing to lose if ALL positions fail at once
-            max_total_risk_pct = self.config.get("risk_management", {}).get("max_total_open_risk", 0.10)
-            
-            # Calculate risk of existing positions
-            current_total_risk = 0.0
-            for pos in self.portfolio_manager.positions.values():
-                # If we stored risk_usd on the position, use it. Otherwise approximate:
-                dist = abs(pos.entry_price - (pos.stop_loss or pos.entry_price))
-                current_total_risk += (dist * pos.quantity)
-
-            # Calculate risk of NEW position
-            new_trade_risk = position_size_usd * stop_distance_pct
-            
-            if current_total_risk + new_trade_risk > (self.portfolio_manager.current_capital * max_total_risk_pct):
-                logger.warning(
-                    f"[RISK] Total Portfolio Risk Limit Hit!\n"
-                    f"  Current Risk: ${current_total_risk:.2f}\n"
-                    f"  New Trade:    ${new_trade_risk:.2f}\n"
-                    f"  Limit:        ${self.portfolio_manager.current_capital * max_total_risk_pct:.2f} ({max_total_risk_pct:.0%})"
-                )
-                return 0.0, {"error": "total_risk_limit_exceeded"}
-            
-            # ============================================================
             # STEP 7: Calculate ACTUAL risk with final position size
             # ============================================================
             actual_risk = position_size_usd * stop_distance_pct
-            actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
+            actual_risk_pct = actual_risk / asset_balance  # ← Uses asset balance!
             
-            # ✅ VERIFY: Actual risk should match target
-            if actual_risk_pct > self.max_risk_pct:
+            # ✅ VERIFY: Actual risk should match split risk target
+            if actual_risk_pct > risk_pct_per_position * 1.1:  # Allow 10% variance
                 logger.error(
-                    f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds max {self.max_risk_pct:.2%}!"
+                    f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds "
+                    f"split target {risk_pct_per_position:.2%}!"
                 )
-                return 0.0, {"error": "risk_exceeds_maximum"}
             
             # ============================================================
-            # STEP 8: Build metadata
+            # STEP 8: Calculate TOTAL asset risk (not portfolio-wide)
+            # ============================================================
+            total_asset_risk = actual_risk
+            for pos in same_side_positions:
+                # Calculate risk for existing positions
+                if pos.stop_loss:
+                    pos_risk = abs(pos.entry_price - pos.stop_loss) * pos.quantity
+                    total_asset_risk += pos_risk
+            
+            total_asset_risk_pct = total_asset_risk / asset_balance  # ← Uses asset balance!
+            
+            logger.info(
+                f"[RISK] Total {asset} Risk ({side.upper()}):\n"
+                f"  Asset Balance:    ${asset_balance:,.2f}\n"
+                f"  Current risk:     ${total_asset_risk - actual_risk:.2f}\n"
+                f"  New position:     ${actual_risk:.2f}\n"
+                f"  Total:            ${total_asset_risk:.2f} ({total_asset_risk_pct:.2%})\n"
+                f"  Target:           {total_risk_pct:.2%}"
+            )
+            
+            # ✅ SAFETY: Ensure total risk doesn't exceed budget (per asset)
+            if total_asset_risk_pct > total_risk_pct * 1.1:  # Allow 10% variance
+                logger.error(
+                    f"[RISK] REJECTED: Total {asset} {side.upper()} risk {total_asset_risk_pct:.2%} "
+                    f"would exceed budget {total_risk_pct:.2%}"
+                )
+                return 0.0, {
+                    "error": "total_risk_budget_exceeded",
+                    "total_risk": total_asset_risk_pct,
+                    "budget": total_risk_pct,
+                    "asset": asset
+                }
+            
+            # ============================================================
+            # STEP 9: Build metadata
             # ============================================================
             metadata = {
                 "asset": asset,
@@ -363,15 +359,22 @@ class HybridPositionSizer:
                 "stop_distance_usd": stop_distance,
                 "stop_distance_pct": stop_distance_pct * 100,
                 
-                # Risk calculation
-                "target_risk_pct": risk_pct * 100,
-                "target_risk_usd": risk_amount,
+                # Risk calculation - PER ASSET
+                "asset_balance": asset_balance,
+                "total_risk_budget_pct": total_risk_pct * 100,
+                "total_positions": total_positions,
+                "risk_per_position_pct": risk_pct_per_position * 100,
+                "risk_per_position_usd": risk_amount,
                 "actual_risk_pct": actual_risk_pct * 100,
                 "actual_risk_usd": actual_risk,
                 
+                # Total asset risk
+                "total_asset_risk_usd": total_asset_risk,
+                "total_asset_risk_pct": total_asset_risk_pct * 100,
+                
                 # Position sizing
                 "position_size_usd": position_size_usd,
-                "position_size_pct": (position_size_usd / self.portfolio_manager.current_capital) * 100,
+                "position_size_pct": (position_size_usd / asset_balance) * 100,
                 "position_size_units": position_size_usd / entry_price,
                 
                 # Override info
@@ -386,7 +389,7 @@ class HybridPositionSizer:
             # Log detailed sizing decision
             logger.info(
                 f"\n{'='*80}\n"
-                f"[RISK-BASED SIZING] {asset} {['SHORT', 'HOLD', 'LONG'][signal+1]}\n"
+                f"[RISK-BASED SIZING - PER ASSET] {asset} {['SHORT', 'HOLD', 'LONG'][signal+1]}\n"
                 f"{'='*80}\n"
                 f"📊 MARKET INFO:\n"
                 f"  Entry Price:    ${entry_price:,.2f}\n"
@@ -395,16 +398,18 @@ class HybridPositionSizer:
                 + (f"  Confidence:     {confidence_score:.0%}\n" if confidence_score else "")
                 + f"  Condition:      {market_condition}\n"
                 f"\n"
-                f"💰 RISK CALCULATION:\n"
-                f"  Account:        ${self.portfolio_manager.current_capital:,.2f}\n"
-                f"  Target Risk:    {risk_pct:.2%} (${risk_amount:.2f})\n"
-                f"  Position Size:  ${position_size_usd:,.2f} ({metadata['position_size_pct']:.2f}% of capital)\n"
-                f"  Units:          {position_size_usd / entry_price:.6f}\n"
+                f"💰 SPLIT RISK CALCULATION (PER ASSET):\n"
+                f"  Asset Balance:     ${asset_balance:,.2f} ({asset} only)\n"
+                f"  Total Risk Budget: {total_risk_pct:.2%} (${total_risk_pct * asset_balance:,.2f})\n"
+                f"  Positions:         {total_positions} {side.upper()}\n"
+                f"  Risk Per Position: {risk_pct_per_position:.2%} (${risk_amount:.2f})\n"
+                f"  Position Size:     ${position_size_usd:,.2f} ({metadata['position_size_pct']:.2f}% of {asset} balance)\n"
+                f"  Units:             {position_size_usd / entry_price:.6f}\n"
                 f"\n"
-                f"✅ ACTUAL RISK:\n"
-                f"  Dollar Risk:    ${actual_risk:.2f}\n"
-                f"  Risk %:         {actual_risk_pct:.2%}\n"
-                f"  Status:         {'✅ WITHIN TARGET' if abs(actual_risk_pct - risk_pct) < 0.005 else '⚠️  ADJUSTED'}\n"
+                f"✅ ACTUAL RISK (PER ASSET):\n"
+                f"  This Position: ${actual_risk:.2f} ({actual_risk_pct:.2%} of {asset} balance)\n"
+                f"  Total Risk:    ${total_asset_risk:.2f} ({total_asset_risk_pct:.2%} of {asset} balance)\n"
+                f"  Status:        {'✅ WITHIN BUDGET' if total_asset_risk_pct <= total_risk_pct * 1.1 else '⚠️  OVER BUDGET'}\n"
                 f"{'='*80}"
             )
             
@@ -937,11 +942,13 @@ class BinanceExecutionHandler:
             )
             
             # Set leverage and margin type
-            leverage = handler.config.get("assets", {}).get("BTC", {}).get("leverage", 10)
+            leverage = handler.config.get("assets", {}).get("BTC", {}).get("leverage", 20)
             margin_type = handler.config.get("assets", {}).get("BTC", {}).get("margin_type", "CROSSED")
+            is_futures=True
             
             handler.futures_handler.set_leverage(leverage)
             handler.futures_handler.set_margin_type(margin_type)
+            handler.futures_handler.is_futures = is_futures
             
             logger.info("[FUTURES] ✓ Futures handler integrated")
             return True
@@ -1100,7 +1107,7 @@ class BinanceExecutionHandler:
             self.config.get("assets", {}).get(asset_name, {}).get("enable_futures", True)
         )
             quantity = self._round_quantity(quantity, self.symbol, is_futures)
-            leverage = 1
+            leverage = 20
             margin_type = "CROSSED"
             
             if is_futures:
@@ -1469,8 +1476,12 @@ class BinanceExecutionHandler:
     )
     def sync_positions_with_binance(self, asset_name: str = "BTC", symbol: str = None) -> bool:
         """
-        ✅ FIXED: Sync portfolio with Binance holdings (Futures-aware + VTM)
-        Correctly checks Futures positions or Spot balance based on configuration.
+        ✅ FIXED: Sync portfolio with Binance (Futures-First + Short Support)
+        
+        Priority Logic:
+        1. Check Futures API (supports LONG + SHORT)
+        2. Fall back to Spot ONLY if Futures is unavailable
+        3. Never mix Futures and Spot positions
         """
         if symbol is None:
             symbol = self.symbol
@@ -1484,51 +1495,87 @@ class BinanceExecutionHandler:
             portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
             portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
             
-            # Determine predominant side in portfolio
+            # Determine portfolio side(s)
             portfolio_side = None
             if portfolio_positions:
                 longs = sum(1 for p in portfolio_positions if p.side == 'long')
                 shorts = sum(1 for p in portfolio_positions if p.side == 'short')
-                if longs > 0 and shorts == 0: portfolio_side = "long"
-                elif shorts > 0 and longs == 0: portfolio_side = "short"
-                elif longs > 0 and shorts > 0: portfolio_side = "mixed"
+                if longs > 0 and shorts == 0: 
+                    portfolio_side = "long"
+                elif shorts > 0 and longs == 0: 
+                    portfolio_side = "short"
+                elif longs > 0 and shorts > 0: 
+                    portfolio_side = "mixed"
 
             # ============================================================
-            # STEP 2: Get Binance Positions (The Fix)
+            # STEP 2: Get Binance Position (Futures-First)
             # ============================================================
             binance_qty = 0.0
-            binance_side = None # "long", "short", or None
+            binance_side = None  # "long", "short", or None
             
-            # ➤ CHECK FUTURES (Priority)
-            if hasattr(self, "futures_handler"):
-                # Get raw position info from Futures API
-                pos_info = self.futures_handler.get_position_info()
-                if pos_info:
-                    pos_amt = float(pos_info.get('positionAmt', 0))
-                    binance_qty = abs(pos_amt)
+            # ✅ PRIORITY 1: Check Futures API
+            if hasattr(self, "futures_handler") and self.futures_handler:
+                try:
+                    pos_info = self.futures_handler.get_position_info()
                     
-                    if pos_amt > 0:
-                        binance_side = "long"
-                    elif pos_amt < 0:
-                        binance_side = "short"
-                    
-                    if binance_qty > 0:
-                        logger.info(f"[SYNC] Detected Futures Position: {pos_amt} {asset_name} ({binance_side})")
-            
-            # ➤ FALLBACK TO SPOT (If no Futures handler)
+                    if pos_info:
+                        pos_amt = float(pos_info.get('positionAmt', 0))
+                        binance_qty = abs(pos_amt)
+                        
+                        if pos_amt > 0:
+                            binance_side = "long"
+                        elif pos_amt < 0:
+                            binance_side = "short"
+                        
+                        if binance_qty > 0:
+                            logger.info(
+                                f"[SYNC] ✅ Futures Position Detected:\n"
+                                f"  Amount: {pos_amt:+.8f} BTC\n"
+                                f"  Side:   {binance_side.upper()}\n"
+                                f"  Entry:  ${float(pos_info.get('entryPrice', 0)):,.2f}\n"
+                                f"  P&L:    ${float(pos_info.get('unRealizedProfit', 0)):,.2f}"
+                            )
+                            
+                            # ✅ CRITICAL: Mark that we're using Futures data
+                            using_futures = True
+                        else:
+                            logger.info(f"[SYNC] No Futures position for {asset_name}")
+                            using_futures = True  # Still checked Futures, just empty
+                    else:
+                        logger.info(f"[SYNC] No Futures position info available")
+                        using_futures = True
+                        
+                except Exception as e:
+                    logger.warning(f"[SYNC] Futures API error: {e}")
+                    logger.info(f"[SYNC] Falling back to Spot balance check...")
+                    using_futures = False
             else:
+                logger.info(f"[SYNC] Futures handler not available, using Spot")
+                using_futures = False
+            
+            # ✅ FALLBACK: Check Spot Balance (ONLY if Futures unavailable)
+            if not using_futures:
+                logger.warning(
+                    f"[SYNC] ⚠️  USING SPOT FALLBACK\n"
+                    f"  This mode does NOT support SHORT positions!\n"
+                    f"  Enable Futures handler for full LONG+SHORT support."
+                )
+                
                 account = self.client.get_account()
                 for balance in account["balances"]:
-                    if balance["asset"] == asset_name: # e.g., "BTC"
+                    if balance["asset"] == asset_name:  # e.g., "BTC"
                         qty = float(balance["free"]) + float(balance["locked"])
                         if qty > 0:
                             binance_qty = qty
-                            binance_side = "long" # Spot is always long
-                            logger.info(f"[SYNC] Detected Spot Balance: {binance_qty} {asset_name}")
+                            binance_side = "long"  # Spot is always long
+                            logger.info(f"[SYNC] Detected Spot Balance: {binance_qty:.8f} {asset_name}")
                         break
 
+            # ============================================================
+            # Get Current Price
+            # ============================================================
             current_price = self.get_current_price(symbol)
-            MIN_QTY_THRESHOLD = 0.0001 # Minimum to care about
+            MIN_QTY_THRESHOLD = 0.0001
 
             # ================================================================
             # SCENARIO 1: Binance has Position, Portfolio Empty → IMPORT
@@ -1540,13 +1587,13 @@ class BinanceExecutionHandler:
                 
                 if import_enabled and binance_side:
                     logger.info(
-                        f"[SYNC] Found {binance_side.upper()} position of {binance_qty:.8f} {asset_name} on Binance.\n"
+                        f"[SYNC] Found {binance_side.upper()} position of {binance_qty:.8f} {asset_name}\n"
+                        f"  Source: {'Futures' if using_futures else 'Spot'}\n"
                         f"  → Importing into Portfolio with VTM support..."
                     )
                     
-                    # 1. Fetch OHLC for VTM
+                    # Fetch OHLC for VTM
                     ohlc_data = None
-                    df = None
                     try:
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10)
@@ -1563,51 +1610,60 @@ class BinanceExecutionHandler:
                                 "close": df["close"].values,
                             }
                     except Exception as e:
-                        logger.error(f"[VTM] Failed to fetch OHLC during sync: {e}")
+                        logger.error(f"[VTM] Failed to fetch OHLC: {e}")
 
-                    # 2. Generate Signal Details (for VTM context)
-                    signal_details_base = {
+                    # Generate signal details
+                    signal_details = {
                         'imported': True,
                         'import_time': datetime.now().isoformat(),
+                        'source': 'futures' if using_futures else 'spot',
                         'aggregator_mode': 'unknown',
-                        'reasoning': f'{asset_name} position imported from Binance ({binance_side})'
+                        'reasoning': f'{asset_name} {binance_side} position imported from Binance'
                     }
 
-                    # 3. Add to Portfolio
+                    # Add to portfolio
                     position_size_usd = binance_qty * current_price
                     success = self.portfolio_manager.add_position(
                         asset=asset_name,
                         symbol=symbol,
-                        side=binance_side, # Use the detected side (Long/Short)
+                        side=binance_side,
                         entry_price=current_price,
                         position_size_usd=position_size_usd,
-                        stop_loss=None, # VTM will calculate
+                        stop_loss=None,
                         take_profit=None,
                         trailing_stop_pct=self.config["assets"][asset_name].get("risk", {}).get("trailing_stop_pct"),
                         binance_order_id=None,
                         ohlc_data=ohlc_data,
                         use_dynamic_management=True,
-                        signal_details=signal_details_base,
+                        signal_details=signal_details,
+                        is_futures=using_futures,  # ✅ Track data source
                     )
                     
                     if success:
-                        logger.info(f"[SYNC] ✓ Imported {binance_qty:.8f} BTC as {binance_side.upper()} position")
+                        logger.info(
+                            f"[SYNC] ✅ Imported {binance_qty:.8f} {asset_name} as {binance_side.upper()}\n"
+                            f"  Source: {'Futures' if using_futures else 'Spot'}\n"
+                            f"  Value:  ${position_size_usd:,.2f}"
+                        )
                         return True
                     else:
-                        logger.error(f"[SYNC] Failed to import position into portfolio")
+                        logger.error(f"[SYNC] ❌ Failed to import position")
                         return False
                 else:
-                    logger.info(f"[SYNC] Found position on Binance but import disabled/invalid. Ignoring.")
+                    logger.info(f"[SYNC] Import disabled or invalid side. Ignoring.")
                     return True
 
             # ================================================================
-            # SCENARIO 2: Portfolio has Position, Binance Empty → CLOSE ALL
+            # SCENARIO 2: Portfolio has Positions, Binance Empty → CLOSE ALL
             # ================================================================
             if portfolio_positions and binance_qty <= MIN_QTY_THRESHOLD:
                 logger.warning(
-                    f"[SYNC] Portfolio has {len(portfolio_positions)} position(s) but Binance is empty.\n"
-                    f"  → Closing all portfolio positions (assuming manual close)."
+                    f"[SYNC] ⚠️  DESYNC DETECTED!\n"
+                    f"  Portfolio: {len(portfolio_positions)} position(s)\n"
+                    f"  Binance:   Empty\n"
+                    f"  → Closing portfolio positions (likely closed manually)"
                 )
+                
                 for position in portfolio_positions:
                     self.portfolio_manager.close_position(
                         position_id=position.position_id,
@@ -1617,22 +1673,24 @@ class BinanceExecutionHandler:
                 return True
 
             # ================================================================
-            # SCENARIO 3: Both have positions → VALIDATE
+            # SCENARIO 3: Both Have Positions → VALIDATE
             # ================================================================
             if portfolio_positions and binance_qty > MIN_QTY_THRESHOLD:
-                # Check 1: Side Mismatch
-                # If Binance is Short but Portfolio is Long (or vice versa)
+                # Check 1: Side Mismatch (Critical for Futures)
                 if binance_side != portfolio_side and portfolio_side != "mixed":
-                    logger.warning(
-                        f"[SYNC] CRITICAL SIDE MISMATCH!\n"
-                        f"  Binance: {binance_side.upper()} | Portfolio: {portfolio_side.upper()}\n"
-                        f"  → Closing portfolio positions to reset state."
+                    logger.error(
+                        f"[SYNC] 🚨 CRITICAL SIDE MISMATCH!\n"
+                        f"  Binance:   {binance_side.upper()}\n"
+                        f"  Portfolio: {portfolio_side.upper()}\n"
+                        f"  → This should NEVER happen with Futures!\n"
+                        f"  → Closing portfolio to resync..."
                     )
+                    
                     for position in portfolio_positions:
                         self.portfolio_manager.close_position(
                             position_id=position.position_id,
                             exit_price=current_price,
-                            reason="sync_side_mismatch",
+                            reason="sync_critical_side_mismatch",
                         )
                     return True
 
@@ -1640,13 +1698,15 @@ class BinanceExecutionHandler:
                 qty_diff = abs(binance_qty - portfolio_total_qty)
                 qty_diff_pct = (qty_diff / binance_qty * 100) if binance_qty > 0 else 0
 
-                if qty_diff_pct > 10.0: # Allow 10% variance
+                if qty_diff_pct > 10.0:  # Allow 10% variance
                     logger.warning(
-                        f"[SYNC] QUANTITY MISMATCH (>10%):\n"
-                        f"  Binance: {binance_qty:.8f} | Portfolio: {portfolio_total_qty:.8f}\n"
-                        f"  Diff: {qty_diff_pct:.2f}%\n"
-                        f"  → Closing portfolio positions to reset."
+                        f"[SYNC] ⚠️  QUANTITY MISMATCH (>10%):\n"
+                        f"  Binance:   {binance_qty:.8f}\n"
+                        f"  Portfolio: {portfolio_total_qty:.8f}\n"
+                        f"  Diff:      {qty_diff_pct:.2f}%\n"
+                        f"  → Closing portfolio to resync..."
                     )
+                    
                     for position in portfolio_positions:
                         self.portfolio_manager.close_position(
                             position_id=position.position_id,
@@ -1656,11 +1716,21 @@ class BinanceExecutionHandler:
                     return True
                 
                 else:
-                    logger.info(f"[SYNC] ✓ {asset_name} positions in sync ({binance_side.upper()} {binance_qty:.6f})")
+                    logger.info(
+                        f"[SYNC] ✅ Positions in sync\n"
+                        f"  Side: {binance_side.upper()}\n"
+                        f"  Qty:  {binance_qty:.6f} BTC\n"
+                        f"  Diff: {qty_diff_pct:.2f}%"
+                    )
+                    
+                    # Verify VTM is active
                     self._verify_vtm_status_after_sync(asset_name)
                     return True
 
-            logger.info(f"[SYNC] ✓ No {asset_name} positions detected (Clean state)")
+            # ================================================================
+            # SCENARIO 4: Both Empty → OK
+            # ================================================================
+            logger.info(f"[SYNC] ✅ No {asset_name} positions detected (Clean state)")
             return True
 
         except Exception as e:

@@ -305,6 +305,7 @@ class VeteranTradeManager:
         close: np.ndarray,
         account_balance: float,
         signal_details: Dict,
+        quantity_override: Optional[float] = None, 
         account_risk: float = 0.015,
         atr_period: int = 14,
         custom_profile: Optional[Dict] = None,
@@ -318,6 +319,7 @@ class VeteranTradeManager:
         self.low = low
         self.close = close
         self.account_balance = account_balance
+        self.quantity_override = quantity_override
         self.account_risk = account_risk
         self.atr_period = atr_period
         self.signal_details = signal_details
@@ -513,9 +515,39 @@ class VeteranTradeManager:
 
             self.current_stop_loss = self.initial_stop_loss
 
-            risk_amount = self.account_balance * self.account_risk
-            trade_risk = abs(self.entry_price - self.initial_stop_loss)
-            self.position_size = risk_amount / trade_risk
+            if self.quantity_override is not None:
+                # Use the quantity calculated by the handler (already includes split risk)
+                self.position_size = self.quantity_override
+                
+                # Calculate what the actual risk is with this quantity
+                trade_risk = abs(self.entry_price - self.initial_stop_loss)
+                actual_dollar_risk = self.position_size * trade_risk
+                actual_risk_pct = actual_dollar_risk / self.account_balance
+                
+                logger.info(
+                    f"[VTM] Using handler's quantity: {self.position_size:.6f}\n"
+                    f"  Position value: ${self.position_size * self.entry_price:,.2f}\n"
+                    f"  Actual risk:    ${actual_dollar_risk:,.2f} ({actual_risk_pct:.2%})"
+                )
+            else:
+                # Fallback: Calculate quantity from account_risk (old behavior)
+                risk_amount = self.account_balance * self.account_risk
+                trade_risk = abs(self.entry_price - self.initial_stop_loss)
+                self.position_size = risk_amount / trade_risk
+                
+                logger.warning(
+                    f"[VTM] No quantity override - calculated from risk\n"
+                    f"  Risk: {self.account_risk:.2%} = ${risk_amount:,.2f}\n"
+                    f"  Position: {self.position_size:.6f}"
+                )
+            
+            # Position size validation (keep existing check)
+            if self.position_size * self.entry_price > self.account_balance * 2:
+                logger.error(f"[VTM] Position size too large!")
+                raise ValueError("Position exceeds 2x account balance")
+            
+            dollar_risk = abs(self.entry_price - self.initial_stop_loss) * self.position_size
+            logger.info(f"[VTM] $ Risk: ${dollar_risk:,.2f} ({dollar_risk/self.account_balance:.2%})")
 
             # FIXED: Position size validation
             if self.position_size * self.entry_price > self.account_balance * 2:
