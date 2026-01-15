@@ -120,6 +120,8 @@ class HybridPositionSizer:
         self.max_risk_pct = self.portfolio_cfg.get("max_risk_per_trade", 0.020)
         self.aggressive_threshold = self.portfolio_cfg.get("aggressive_risk_threshold", 0.70)
         
+        self.rebalancer = None
+        
         logger.info(
             f"[RISK SIZER] Initialized\n"
             f"  Target Risk: {self.target_risk_pct:.2%}\n"
@@ -128,8 +130,9 @@ class HybridPositionSizer:
         )
         
     def set_rebalancer(self, rebalancer: PositionRebalancer):
+        """Set the rebalancer (called by handler after initialization)"""
         self.rebalancer = rebalancer
-        logger.info("[RISK SIZER] Rebalancer connected")
+        logger.info("[RISK SIZER] ✓ Rebalancer connected")
 
     def calculate_size_risk_based(
         self,
@@ -144,7 +147,7 @@ class HybridPositionSizer:
         override_reason: str = None,
     ) -> Tuple[float, Dict]:
         """
-        ✅ FIXED: Calculate position size with automatic rebalancing of existing positions
+        ✅ FIXED: Calculate position size with automatic rebalancing
         """
         try:
             # Get asset balance
@@ -153,12 +156,14 @@ class HybridPositionSizer:
                 logger.error(f"[RISK] Invalid balance for {asset}: ${asset_balance:,.2f}")
                 return 0.0, {"error": "invalid_asset_balance"}
             
-            # Get side and existing positions
+            logger.info(
+                f"[RISK] Using {asset} balance: ${asset_balance:,.2f}"
+            )
+            
+            # Get existing positions
             side = "long" if signal == 1 else "short"
             existing_positions = self.portfolio_manager.get_asset_positions(asset)
             same_side_positions = [p for p in existing_positions if p.side == side]
-            
-            # Total positions INCLUDING the new one
             total_positions = len(same_side_positions) + 1
             
             logger.info(
@@ -203,12 +208,13 @@ class HybridPositionSizer:
                     existing_total_risk += pos_risk
                     
                     # Check if this position uses more than its split allocation
-                    if pos_risk > risk_amount_per_position * 1.1:  # 10% tolerance
+                    over_pct = (pos_risk / risk_amount_per_position) - 1.0
+                    if over_pct > 0.10:  # 10% tolerance
                         positions_over_budget.append({
                             'position': pos,
                             'current_risk': pos_risk,
                             'target_risk': risk_amount_per_position,
-                            'excess': pos_risk - risk_amount_per_position
+                            'over_pct': over_pct
                         })
             
             existing_risk_pct = existing_total_risk / asset_balance
@@ -234,7 +240,7 @@ class HybridPositionSizer:
             )
             
             # ================================================================
-            # STEP 4: Handle insufficient budget
+            # STEP 4: Handle insufficient budget with REBALANCING
             # ================================================================
             if available_for_new < risk_amount_per_position * 0.5:  # Less than 50% of target
                 logger.warning(
@@ -249,57 +255,70 @@ class HybridPositionSizer:
                     f"{'='*80}\n"
                 )
                 
-                # ✅ OPTION A: Automatically rebalance (if enabled in config)
+                # ✅ Check if auto-rebalancing is enabled
                 auto_rebalance = self.config.get("risk_management", {}).get(
                     "auto_rebalance_positions", False
                 )
                 
+                # ✅ CRITICAL: Check if rebalancer is available
                 if auto_rebalance and positions_over_budget and self.rebalancer:
+                    logger.info(f"[REBALANCE] Starting rebalancing of {len(positions_over_budget)} position(s)...")
+                    
+                    rebalanced_count = 0
+                    
                     for item in positions_over_budget:
                         pos = item['position']
                         target_risk = item['target_risk']
                         stop_distance = abs(pos.entry_price - pos.stop_loss)
                         new_quantity = target_risk / stop_distance
-                        reduction = pos.quantity - new_quantity
-
-                        if reduction > 0.00001:
-                            logger.info(f"  Reducing position {pos.position_id} by {reduction:.6f}...")
-                            success = self.rebalancer.reduce_position_size(
-                                position=pos,
-                                target_quantity=new_quantity,
-                                reason="risk_rebalancing"
-                            )
-                            if not success:
-                                logger.error(f"  Failed to rebalance position {pos.position_id}")
-                                return 0.0, {"error": "rebalancing_failed"}
-
+                        
+                        logger.info(
+                            f"  Position {pos.position_id}:\n"
+                            f"    Current: {pos.quantity:.6f} (${item['current_risk']:,.2f} risk)\n"
+                            f"    Target:  {new_quantity:.6f} (${target_risk:,.2f} risk)"
+                        )
+                        
+                        # Execute rebalancing
+                        success = self.rebalancer.reduce_position_size(
+                            position=pos,
+                            target_quantity=new_quantity,
+                            reason=f"risk_split_{total_positions}_positions"
+                        )
+                        
+                        if success:
+                            rebalanced_count += 1
+                            logger.info(f"  ✅ Rebalanced successfully")
+                        else:
+                            logger.error(f"  ❌ Rebalancing failed")
+                            return 0.0, {"error": "rebalancing_failed"}
+                    
                     # Recalculate available budget after rebalancing
-                    new_existing_total_risk = 0.0
-                    for pos in same_side_positions:
-                        if pos.stop_loss:
-                            pos_risk = abs(pos.entry_price - pos.stop_loss) * pos.quantity
-                            new_existing_total_risk += pos_risk
-
-                    available_for_new = total_budget - new_existing_total_risk
-                    available_for_new_pct = available_for_new / asset_balance
-
-                    logger.info(
-                        f"[REBALANCE] Budget recalculated:\n"
-                        f"  Available: ${available_for_new:,.2f} ({available_for_new_pct:.2%})"
+                    existing_total_risk = sum(
+                        abs(p.entry_price - p.stop_loss) * p.quantity
+                        for p in same_side_positions
+                        if p.stop_loss
                     )
-
-                    # Proceed to open new position if budget is sufficient
-                    if available_for_new >= risk_amount_per_position * 0.8:  # 80% threshold
-                        pass  # Continue to STEP 5
-                    else:
-                        logger.error(f"[REBALANCE] Still insufficient budget after rebalancing")
+                    
+                    available_for_new = total_budget - existing_total_risk
+                    available_for_new_pct = available_for_new / asset_balance
+                    
+                    logger.info(
+                        f"[REBALANCE] Results:\n"
+                        f"  Rebalanced:  {rebalanced_count}/{len(positions_over_budget)}\n"
+                        f"  New Available: ${available_for_new:,.2f} ({available_for_new_pct:.2%})"
+                    )
+                    
+                    # Check if we now have enough budget
+                    if available_for_new < risk_amount_per_position * 0.5:
+                        logger.error(
+                            f"[REBALANCE] Still insufficient budget after rebalancing\n"
+                            f"  This should not happen - please investigate"
+                        )
                         return 0.0, {"error": "insufficient_budget_post_rebalance"}
-
                 
-                # ✅ OPTION B: Reject if auto-rebalance disabled
-                else:
+                elif not auto_rebalance:
                     logger.error(
-                        f"[RISK] REJECTED: Insufficient budget\n"
+                        f"[RISK] REJECTED: Auto-rebalancing DISABLED\n"
                         f"  Enable 'auto_rebalance_positions' in config to fix automatically\n"
                         f"  Or manually close/reduce existing positions"
                     )
@@ -309,6 +328,20 @@ class HybridPositionSizer:
                         "required_risk": risk_pct_per_position,
                         "suggestion": "Enable auto_rebalance or reduce existing positions"
                     }
+                
+                elif not self.rebalancer:
+                    logger.error(
+                        f"[RISK] REJECTED: Rebalancer NOT CONNECTED\n"
+                        f"  This is a bug - rebalancer should be set during initialization"
+                    )
+                    return 0.0, {"error": "rebalancer_not_available"}
+                
+                else:
+                    logger.error(
+                        f"[RISK] REJECTED: No positions to rebalance but budget still insufficient\n"
+                        f"  This should not happen - please investigate"
+                    )
+                    return 0.0, {"error": "budget_calculation_error"}
             
             # ================================================================
             # STEP 5: Size new position (normal flow)
@@ -376,7 +409,7 @@ class HybridPositionSizer:
             actual_risk = position_size_usd * stop_distance_pct
             actual_risk_pct = actual_risk / asset_balance
             
-            # Calculate new total
+            # Calculate new total (AFTER rebalancing if it happened)
             new_total_risk = existing_total_risk + actual_risk
             new_total_risk_pct = new_total_risk / asset_balance
             
@@ -419,7 +452,7 @@ class HybridPositionSizer:
                 "total_asset_risk_pct": new_total_risk_pct * 100,
                 "position_size_usd": position_size_usd,
                 "positions_over_budget": len(positions_over_budget),
-                "rebalancing_required": len(positions_over_budget) > 0,
+                "rebalancing_performed": len(positions_over_budget) > 0 and auto_rebalance and self.rebalancer is not None,
                 "timestamp": datetime.now().isoformat(),
             }
             
@@ -452,19 +485,9 @@ class BinanceExecutionHandler:
         self.client = client
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
-        self.sizer = HybridPositionSizer(config, portfolio_manager)
         
-        self.futures_handler = BinanceFuturesHandler(client=client, symbol=config["assets"]["BTC"]["symbol"])
-        self.sizer.set_rebalancer(PositionRebalancer(self.futures_handler, self.portfolio_manager))
-        logger.info("[HANDLER] ✓ Auto-rebalancing enabled")
-
-        """ if hasattr(self, 'futures_handler') and self.futures_handler:
-            rebalancer = PositionRebalancer(
-                futures_handler=self.futures_handler,
-                portfolio_manager=self.portfolio_manager
-            )
-            self.sizer.set_rebalancer(rebalancer)
-            logger.info("[HANDLER] ✓ Auto-rebalancing enabled") """
+        # ✅ STEP 1: Initialize sizer (without rebalancer yet)
+        self.sizer = HybridPositionSizer(config, portfolio_manager)
         
         self.asset_config = config["assets"]["BTC"]
         self.risk_config = config["risk_management"]
@@ -479,16 +502,57 @@ class BinanceExecutionHandler:
         )
         self.is_paper_mode = self.mode.lower() == "paper"
 
+        # ✅ STEP 2: Initialize Futures handler (if enabled)
+        self.futures_handler = None
+        futures_enabled = self.asset_config.get("enable_futures", False)
+        
+        if futures_enabled:
+            try:
+                logger.info("[HANDLER] Initializing Binance Futures...")
+                self.futures_handler = BinanceFuturesHandler(
+                    client=client, 
+                    symbol=self.symbol
+                )
+                
+                # Set leverage and margin type
+                leverage = self.asset_config.get("leverage", 20)
+                margin_type = self.asset_config.get("margin_type", "CROSSED")
+                
+                self.futures_handler.set_leverage(leverage)
+                self.futures_handler.set_margin_type(margin_type)
+                
+                logger.info(
+                    f"[HANDLER] ✓ Futures initialized\n"
+                    f"  Leverage: {leverage}x\n"
+                    f"  Margin:   {margin_type}"
+                )
+                
+                # ✅ STEP 3: NOW connect rebalancer to sizer
+                rebalancer = PositionRebalancer(
+                    futures_handler=self.futures_handler,
+                    portfolio_manager=self.portfolio_manager
+                )
+                self.sizer.set_rebalancer(rebalancer)
+                logger.info("[HANDLER] ✓ Auto-rebalancing enabled")
+                
+            except Exception as e:
+                logger.error(f"[HANDLER] Futures initialization failed: {e}")
+                self.futures_handler = None
+        else:
+            logger.info("[HANDLER] Futures trading disabled in config")
+
         logger.info(
-            f"BinanceExecutionHandler with HybridPositionSizer initialized - Mode: {self.mode.upper()}"
+            f"BinanceExecutionHandler initialized - Mode: {self.mode.upper()}"
         )
 
+        # ✅ STEP 4: Auto-sync on startup (if enabled)
         if self.mode.lower() != "paper" and self.trading_config.get(
             "auto_sync_on_startup", True
         ):
             logger.info("[INIT] Auto-syncing positions with Binance...")
             self.sync_positions_with_binance("BTC")
-
+            
+            
     def can_open_binance_position(
         self, asset: str = "BTC", side: str = "long"
     ) -> Tuple[bool, str]:
