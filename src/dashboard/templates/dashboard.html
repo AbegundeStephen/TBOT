@@ -296,6 +296,28 @@
             content: '▼';
             font-size: 10px;
         }
+
+        /* NEW: Style for the Debrief button (same as docs-btn but no arrow) */
+        .nav-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-decoration: none; /* For anchor tags */
+        }
+        
+        .nav-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
         
         .dropdown-menu {
             display: none;
@@ -494,7 +516,6 @@
 </head>
 <body>
     <div class="container">
-        <!-- Header -->
         <div class="header">
             <h1>
                 <div class="header-left">
@@ -502,22 +523,27 @@
                     <span id="status-badge" class="status-badge status-offline">Offline</span>
                 </div>
                 
-                <div class="docs-dropdown">
-                    <button class="docs-btn" id="docs-btn">
-                        📚 Docs
-                    </button>
-                    <div class="dropdown-menu" id="docs-menu">
-                        <div class="dropdown-item" data-doc="vtm">📊 VTM Docs</div>
-                        <div class="dropdown-item" data-doc="ai-validator">🤖 AI Validator Docs</div>
-                        <div class="dropdown-item" data-doc="signal-aggregator">📡 Signal Aggregator Docs</div>
-                        <div class="dropdown-item" data-doc="bots">🔧 Bots Docs</div>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <a href="/debrief" class="nav-btn">
+                        🎬 Trade Debrief
+                    </a>
+
+                    <div class="docs-dropdown">
+                        <button class="docs-btn" id="docs-btn">
+                            📚 Docs
+                        </button>
+                        <div class="dropdown-menu" id="docs-menu">
+                            <div class="dropdown-item" data-doc="vtm">📊 VTM Docs</div>
+                            <div class="dropdown-item" data-doc="ai-validator">🤖 AI Validator Docs</div>
+                            <div class="dropdown-item" data-doc="signal-aggregator">📡 Signal Aggregator Docs</div>
+                            <div class="dropdown-item" data-doc="bots">🔧 Bots Docs</div>
+                        </div>
                     </div>
                 </div>
             </h1>
             <p id="last-update" class="refresh-time">Loading...</p>
         </div>
 
-        <!-- Stats Grid -->
         <div class="stats-grid" id="stats-grid">
             <div class="stat-card">
                 <div class="stat-label">Portfolio Value</div>
@@ -541,7 +567,6 @@
             </div>
         </div>
 
-        <!-- Charts -->
         <div class="charts-grid">
             <div class="chart-card">
                 <h3>📈 Portfolio Value (24h)</h3>
@@ -553,7 +578,6 @@
             </div>
         </div>
 
-        <!-- Trades Section -->
         <div class="trades-section">
             <h3>Recent Trades</h3>
             <div class="tabs">
@@ -585,7 +609,6 @@
         </div>
     </div>
     
-    <!-- Signal Details Modal -->
     <div class="modal" id="signal-modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -593,8 +616,7 @@
                 <button class="modal-close" id="modal-close">&times;</button>
             </div>
             <div class="modal-body" id="modal-body">
-                <!-- Signal details will be loaded here -->
-            </div>
+                </div>
         </div>
     </div>
 
@@ -1254,14 +1276,6 @@
             }
         }
        
-        function updateLastRefreshTime() {
-            const now = new Date().toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            });
-            document.getElementById('last-update').textContent = `Last updated: ${now}`;
-        }
         function updateLastRefreshTime() {
             const now = new Date().toLocaleTimeString('en-US', {
                 hour: '2-digit',
