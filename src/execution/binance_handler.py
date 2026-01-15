@@ -126,6 +126,10 @@ class HybridPositionSizer:
             f"  Max Risk:    {self.max_risk_pct:.2%}\n"
             f"  Aggressive:  >{self.aggressive_threshold:.0%} confidence"
         )
+        
+    def set_rebalancer(self, rebalancer: PositionRebalancer):
+        self.rebalancer = rebalancer
+        logger.info("[RISK SIZER] Rebalancer connected")
 
     def calculate_size_risk_based(
         self,
@@ -250,47 +254,47 @@ class HybridPositionSizer:
                     "auto_rebalance_positions", False
                 )
                 
-                if auto_rebalance and positions_over_budget:
-                    logger.info(f"[REBALANCE] Reducing {len(positions_over_budget)} position(s)...")
-                    
+                if auto_rebalance and positions_over_budget and self.rebalancer:
                     for item in positions_over_budget:
                         pos = item['position']
                         target_risk = item['target_risk']
-                        
-                        # Calculate new quantity that matches target risk
                         stop_distance = abs(pos.entry_price - pos.stop_loss)
                         new_quantity = target_risk / stop_distance
                         reduction = pos.quantity - new_quantity
-                        
-                        if reduction > 0.00001:  # Meaningful reduction
-                            logger.info(
-                                f"  Position {pos.position_id}:\n"
-                                f"    Current: {pos.quantity:.6f} (${item['current_risk']:,.2f} risk)\n"
-                                f"    Target:  {new_quantity:.6f} (${target_risk:,.2f} risk)\n"
-                                f"    Reduce:  {reduction:.6f}"
+
+                        if reduction > 0.00001:
+                            logger.info(f"  Reducing position {pos.position_id} by {reduction:.6f}...")
+                            success = self.rebalancer.reduce_position_size(
+                                position=pos,
+                                target_quantity=new_quantity,
+                                reason="risk_rebalancing"
                             )
-                            
-                            # Execute partial close on exchange
-                            # (You'll need to implement this in your handlers)
-                            # For now, just log the intent
-                            logger.warning(
-                                f"    ⚠️  AUTO-REBALANCE NOT IMPLEMENTED YET\n"
-                                f"    Would reduce position by {reduction:.6f} units"
-                            )
-                    
+                            if not success:
+                                logger.error(f"  Failed to rebalance position {pos.position_id}")
+                                return 0.0, {"error": "rebalancing_failed"}
+
                     # Recalculate available budget after rebalancing
-                    # (For now, we'll proceed with rejection)
-                    logger.error(
-                        f"[REBALANCE] Auto-rebalance not fully implemented\n"
-                        f"  → Rejecting new position to prevent over-risk"
+                    new_existing_total_risk = 0.0
+                    for pos in same_side_positions:
+                        if pos.stop_loss:
+                            pos_risk = abs(pos.entry_price - pos.stop_loss) * pos.quantity
+                            new_existing_total_risk += pos_risk
+
+                    available_for_new = total_budget - new_existing_total_risk
+                    available_for_new_pct = available_for_new / asset_balance
+
+                    logger.info(
+                        f"[REBALANCE] Budget recalculated:\n"
+                        f"  Available: ${available_for_new:,.2f} ({available_for_new_pct:.2%})"
                     )
-                    return 0.0, {
-                        "error": "total_risk_budget_exceeded",
-                        "requires_rebalancing": True,
-                        "positions_to_rebalance": len(positions_over_budget),
-                        "available_risk": available_for_new_pct,
-                        "required_risk": risk_pct_per_position
-                    }
+
+                    # Proceed to open new position if budget is sufficient
+                    if available_for_new >= risk_amount_per_position * 0.8:  # 80% threshold
+                        pass  # Continue to STEP 5
+                    else:
+                        logger.error(f"[REBALANCE] Still insufficient budget after rebalancing")
+                        return 0.0, {"error": "insufficient_budget_post_rebalance"}
+
                 
                 # ✅ OPTION B: Reject if auto-rebalance disabled
                 else:
@@ -449,14 +453,18 @@ class BinanceExecutionHandler:
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
         self.sizer = HybridPositionSizer(config, portfolio_manager)
+        
+        self.futures_handler = BinanceFuturesHandler(client=client, symbol=config["assets"]["BTC"]["symbol"])
+        self.sizer.set_rebalancer(PositionRebalancer(self.futures_handler, self.portfolio_manager))
+        logger.info("[HANDLER] ✓ Auto-rebalancing enabled")
 
-        if hasattr(self, 'futures_handler') and self.futures_handler:
+        """ if hasattr(self, 'futures_handler') and self.futures_handler:
             rebalancer = PositionRebalancer(
                 futures_handler=self.futures_handler,
                 portfolio_manager=self.portfolio_manager
             )
             self.sizer.set_rebalancer(rebalancer)
-            logger.info("[HANDLER] ✓ Auto-rebalancing enabled")
+            logger.info("[HANDLER] ✓ Auto-rebalancing enabled") """
         
         self.asset_config = config["assets"]["BTC"]
         self.risk_config = config["risk_management"]
