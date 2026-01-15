@@ -779,6 +779,56 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[MT5] Critical Error: {e}", exc_info=True)
             return False
+        
+    def _is_market_open_for_closing(self, symbol: str) -> Tuple[bool, str]:
+        """
+        ✅ NEW: Check if market is open for closing positions
+        
+        Returns:
+            (is_open, message)
+        """
+        try:
+            import MetaTrader5 as mt5
+            
+            # 1. Get symbol info
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                return False, f"Symbol {symbol} not found"
+
+            # 2. Check if market session is active
+            # trade_mode values:
+            # 0 = SYMBOL_TRADE_MODE_DISABLED (trading disabled)
+            # 1 = SYMBOL_TRADE_MODE_LONGONLY (only long positions)
+            # 2 = SYMBOL_TRADE_MODE_SHORTONLY (only short positions)  
+            # 3 = SYMBOL_TRADE_MODE_CLOSEONLY (only closing allowed)
+            # 4 = SYMBOL_TRADE_MODE_FULL (full trading)
+            
+            if info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                return False, "Market is CLOSED - Trading disabled"
+            
+            # Even in CLOSEONLY mode, we can close positions
+            if info.trade_mode >= mt5.SYMBOL_TRADE_MODE_CLOSEONLY:
+                return True, "OK"
+            
+            # 3. Check for tick data (additional validation)
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return False, "Market is CLOSED - No price quotes available"
+            
+            # 4. Check if last tick is recent (within 5 minutes)
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc)
+            tick_time = datetime.fromtimestamp(tick.time, timezone.utc)
+            time_diff = (current_time - tick_time).total_seconds()
+            
+            if time_diff > 300:  # 5 minutes
+                return False, f"Market is CLOSED - Last quote was {int(time_diff/60)} minutes ago"
+            
+            return True, "OK"
+            
+        except Exception as e:
+            logger.error(f"[MT5] Error checking market status: {e}")
+            return False, f"Error checking market status: {str(e)}"
 
 
     @handle_errors(
@@ -1207,17 +1257,31 @@ class MT5ExecutionHandler:
 
     def _close_mt5_order(self, ticket: int, asset: str, side: str) -> bool:
         """
-        Close a specific MT5 order by ticket
-
+        ✅ FIXED: Close MT5 order with market hours validation
+        
         Returns:
-            True if successful, False otherwise
+            True if successfully closed, False otherwise
         """
         try:
+            # ✅ FIX 1: Check if market is open for closing
+            is_open, market_msg = self._is_market_open_for_closing(self.symbol)
+            
+            if not is_open:
+                logger.error(
+                    f"[MT5] ❌ CANNOT CLOSE POSITION\n"
+                    f"  Ticket: {ticket}\n"
+                    f"  Asset:  {asset}\n"
+                    f"  Reason: {market_msg}\n"
+                    f"  → Position will remain open until market reopens"
+                )
+                return False
+            
             # Find the position by ticket
             mt5_positions = mt5.positions_get(ticket=ticket)
 
             if mt5_positions is None or len(mt5_positions) == 0:
-                logger.warning(f"[MT5] Position ticket {ticket} not found")
+                logger.warning(f"[MT5] Position ticket {ticket} not found on exchange")
+                # Return False - position doesn't exist on MT5
                 return False
 
             mt5_position = mt5_positions[0]
@@ -1231,6 +1295,10 @@ class MT5ExecutionHandler:
 
             # Get current price
             tick = mt5.symbol_info_tick(mt5_position.symbol)
+            if tick is None:
+                logger.error(f"[MT5] Cannot get current price for {mt5_position.symbol}")
+                return False
+                
             close_price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
 
             # Build close request
@@ -1257,13 +1325,23 @@ class MT5ExecutionHandler:
             else:
                 error_msg = result.comment if result else "No result"
                 error_code = result.retcode if result else "N/A"
-                logger.error(
-                    f"[MT5] ✗ Failed to close ticket {ticket}: {error_msg} (code: {error_code})"
-                )
+                
+                # ✅ FIX 2: Specific error messages
+                if result and result.retcode == 10018:  # Market closed
+                    logger.error(
+                        f"[MT5] ✗ MARKET CLOSED - Cannot close ticket {ticket}\n"
+                        f"  Error: {error_msg}\n"
+                        f"  → Position remains open, try again when market opens"
+                    )
+                else:
+                    logger.error(
+                        f"[MT5] ✗ Failed to close ticket {ticket}: {error_msg} (code: {error_code})"
+                    )
+                
                 return False
 
         except Exception as e:
-            logger.error(f"[MT5] Error closing ticket {ticket}: {e}")
+            logger.error(f"[MT5] Error closing ticket {ticket}: {e}", exc_info=True)
             return False
 
     def _check_stop_loss_take_profit(

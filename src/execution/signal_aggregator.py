@@ -127,7 +127,7 @@ class PerformanceWeightedAggregator:
                 "min_confidence_to_use": 0.08,
                 "min_signal_quality": 0.28,
                 "hold_contribution_pct": 0.20,
-                "opposition_penalty": 0.5,
+                "opposition_penalty": 0.75,
             }
         else:  # GOLD (Default)
             self.config = {
@@ -142,7 +142,7 @@ class PerformanceWeightedAggregator:
                 "min_confidence_to_use": 0.06,
                 "min_signal_quality": 0.25,
                 "hold_contribution_pct": 0.18,
-                "opposition_penalty": 0.5,
+                "opposition_penalty": 0.75,
             }
         
         # 2. Update with passed config (Merge instead of Overwrite)
@@ -171,23 +171,14 @@ class PerformanceWeightedAggregator:
         logger.info("=" * 80)
         logger.info(f"🎯   PerformanceWeightedAggregator - {self.asset_type}")
         logger.info("=" * 80)
-        logger.info("")
-        logger.info("   ✓ TIGHTER HYSTERESIS: ±0.15% (BTC) / ±0.10% (GOLD)")
-        logger.info("   ✓ Multi-factor regime: EMA + momentum + volatility")
+        logger.info("   ✓ STRICT MODE: Counter-trend trades blocked > 50% conf")
+        logger.info("   ✓ RANGING SAFEGUARD: Max 1 trade when trend is weak")
         logger.info("   ✓ DYNAMIC threshold adjustment")
         if self.ai_enabled:
             logger.info("   ✓ AI VALIDATION: Active with circuit breaker")
         else:
             logger.info("   ⚠ AI VALIDATION: Disabled")
-        logger.info("")
-        logger.info("📊 STRATEGY ROLES:")
-        logger.info("   Mean Reversion:   DECISION MAKER (weight: 0.50)")
-        logger.info("   Trend Following:  DECISION MAKER (weight: 0.50)")
-        logger.info(
-            f"   EMA 50/{'200' if self.asset_type == 'BTC' else '100'}:       REGIME DETECTOR"
-        )
         logger.info("=" * 80)
-        logger.info("")
 
     def get_statistics(self) -> Dict:
         """Return comprehensive statistics"""
@@ -269,40 +260,43 @@ class PerformanceWeightedAggregator:
 
     def _detect_regime(self, df: pd.DataFrame) -> Tuple[bool, float]:
         """
-        Multi-factor regime detection with  cold-start handling
+        Multi-factor regime detection with cold-start handling
         Returns: (is_bull, confidence)
         """
         try:
             MIN_DATA_POINTS = 50
+
+            # ===============================
+            # 1️⃣ Cold-start & data sufficiency
+            # ===============================
             if len(df) < MIN_DATA_POINTS:
                 logger.warning(
                     f"Insufficient data for regime detection: {len(df)} rows"
                 )
                 self.stats["regime_detection_failures"] += 1
 
-                #  Better fallback logic
                 if self.previous_regime is not None:
-                    # Use previous regime
                     return self.previous_regime, 0.3
 
-                # Emergency fallback: simple momentum check
                 if len(df) >= 20:
                     recent_momentum = (
                         df["close"].iloc[-1] - df["close"].iloc[-20]
                     ) / df["close"].iloc[-20]
                     emergency_regime = recent_momentum > 0
                     logger.info(
-                        f"[REGIME] Emergency mode: {'BULL' if emergency_regime else 'BEAR'} (20-day momentum: {recent_momentum:.2%})"
+                        f"[REGIME] Emergency mode: {'BULL' if emergency_regime else 'BEAR'} "
+                        f"(20-day momentum: {recent_momentum:.2%})"
                     )
                     return emergency_regime, 0.3
 
-                # Last resort: default to BEAR (conservative)
                 logger.warning(
                     "[REGIME] Insufficient data - defaulting to BEAR (conservative)"
                 )
                 return False, 0.3
 
-            # Generate features
+            # ===============================
+            # 2️⃣ Feature generation
+            # ===============================
             features_df = self.s_ema.generate_features(df.tail(250))
             if features_df.empty or len(features_df) < MIN_DATA_POINTS:
                 logger.warning(f"EMA features insufficient: {len(features_df)} rows")
@@ -314,18 +308,9 @@ class PerformanceWeightedAggregator:
 
             latest = features_df.iloc[-1]
 
-            # Core indicators
             ema_fast = latest.get("ema_fast", np.nan)
             ema_slow = latest.get("ema_slow", np.nan)
             ema_diff_pct = latest.get("ema_diff_pct", 0.0)
-
-            # Asset-specific hysteresis thresholds
-            if self.asset_type == "BTC":
-                BULLISH_THRESHOLD = 0.15
-                BEARISH_THRESHOLD = -0.15
-            else:  # GOLD
-                BULLISH_THRESHOLD = 0.10
-                BEARISH_THRESHOLD = -0.10
 
             if pd.isna(ema_fast) or pd.isna(ema_slow):
                 logger.warning("Invalid EMA values")
@@ -335,10 +320,18 @@ class PerformanceWeightedAggregator:
                 )
                 return fallback_regime, 0.3
 
-            # Calculate supporting indicators
+            # ===============================
+            # 3️⃣ Thresholds (asset-specific)
+            # ===============================
+            if self.asset_type == "BTC":
+                BULLISH_THRESHOLD = 0.15
+                BEARISH_THRESHOLD = -0.15
+            else:  # GOLD
+                BULLISH_THRESHOLD = 0.10
+                BEARISH_THRESHOLD = -0.10
+
             close_prices = features_df["close"].values
 
-            # Multi-timeframe momentum
             ret_20 = (
                 (close_prices[-1] - close_prices[-20]) / close_prices[-20]
                 if len(close_prices) >= 20
@@ -350,131 +343,107 @@ class PerformanceWeightedAggregator:
                 else 0.0
             )
 
-            # Volatility
             if len(close_prices) >= 21:
                 returns = np.diff(close_prices[-21:]) / close_prices[-21:-1]
                 vol_20 = np.std(returns) * np.sqrt(252)
             else:
                 vol_20 = 0.2
 
-            # Technical indicators
             adx = latest.get("adx", 20)
             macd_hist = latest.get("macd_hist", 0)
             rsi = latest.get("rsi", 50)
 
-            # Multi-factor regime scoring
+            # ===============================
+            # 4️⃣ Multi-factor scoring
+            # ===============================
             bullish_score = 0
             bearish_score = 0
 
-            # Factor 1: EMA positioning (most important)
+            # EMA positioning (dominant factor)
             if ema_diff_pct > BULLISH_THRESHOLD:
                 bullish_score += 3
             elif ema_diff_pct < BEARISH_THRESHOLD:
                 bearish_score += 3
 
-            # Factor 2: Short-term momentum
+            # Short-term momentum
             if ret_20 > 0.02:
                 bullish_score += 2
             elif ret_20 < -0.02:
                 bearish_score += 2
 
-            # Factor 3: Medium-term momentum
+            # Medium-term momentum
             if ret_50 > 0.05:
                 bullish_score += 2
             elif ret_50 < -0.05:
                 bearish_score += 2
 
-            # Factor 4: MACD histogram
+            # MACD
             if macd_hist > 0:
                 bullish_score += 1
             elif macd_hist < 0:
                 bearish_score += 1
 
-            # Factor 5: ADX (strong trend)
+            # ADX trend strength
             if adx > 25:
                 if ema_diff_pct > 0:
                     bullish_score += 1
                 else:
                     bearish_score += 1
 
-            # Factor 6: RSI extremes
+            # RSI
             if rsi > 60:
                 bullish_score += 1
             elif rsi < 40:
                 bearish_score += 1
 
-            # Regime decision with hysteresis
+            # ===============================
+            # 5️⃣ Hysteresis-based decision
+            # ===============================
             if self.previous_regime is None:
                 is_bull = bullish_score > bearish_score
             else:
                 if self.previous_regime:
-                    # Currently BULLISH - need clear bearish signals to flip
-                    if bearish_score > bullish_score + 2:
-                        is_bull = False
-                        logger.info(
-                            f"   🔄 Regime flip: BULL→BEAR (scores: bull={bullish_score}, bear={bearish_score})"
-                        )
-                    else:
-                        is_bull = True
+                    is_bull = not (bearish_score > bullish_score + 2)
                 else:
-                    # Currently BEARISH - need clear bullish signals to flip
-                    if bullish_score > bearish_score + 2:
-                        is_bull = True
-                        logger.info(
-                            f"   🔄 Regime flip: BEAR→BULL (scores: bull={bullish_score}, bear={bearish_score})"
-                        )
-                    else:
-                        is_bull = False
+                    is_bull = bullish_score > bearish_score + 2
 
-            # Confidence calculation
+            # ===============================
+            # 6️⃣ Confidence scoring
+            # ===============================
             confidence = 0.5
+
             if abs(ema_diff_pct) > 0.5:
                 confidence += 0.15
+
             if (is_bull and ret_20 > 0.03) or (not is_bull and ret_20 < -0.03):
                 confidence += 0.15
+
             if adx > 25:
                 confidence += 0.1
-            score_diff = abs(bullish_score - bearish_score)
-            if score_diff >= 4:
+
+            if abs(bullish_score - bearish_score) >= 4:
                 confidence += 0.1
+
             confidence = min(1.0, max(0.3, confidence))
 
-            # Logging
+            # ===============================
+            # 7️⃣ Logging & stats
+            # ===============================
             if self.previous_regime is not None and self.previous_regime != is_bull:
                 self.stats["regime_changes"] += 1
-                regime_name = "🚀 BULL MARKET" if is_bull else "🐻 BEAR MARKET"
-                logger.info("")
-                logger.info("=" * 70)
                 logger.info(
-                    f"⚡ REGIME CHANGE #{self.stats['regime_changes']} → {regime_name}"
+                    f"⚡ REGIME FLIP → {'BULL' if is_bull else 'BEAR'} | "
+                    f"Scores B:{bullish_score} / R:{bearish_score} | "
+                    f"Confidence: {confidence:.2f}"
                 )
-                logger.info(
-                    f"   EMA Fast: ${ema_fast:.2f} | Slow: ${ema_slow:.2f} | Diff: {ema_diff_pct:.2f}%"
-                )
-                logger.info(f"   Momentum: 20d={ret_20:.2%} | 50d={ret_50:.2%}")
-                logger.info(f"   Scores: Bull={bullish_score} | Bear={bearish_score}")
-                logger.info(
-                    f"   ADX: {adx:.1f} | MACD: {macd_hist:.3f} | RSI: {rsi:.1f}"
-                )
-                logger.info(f"   Confidence: {confidence:.2f}")
-                logger.info("=" * 70)
-                logger.info("")
 
             elif not self.regime_initialized:
-                regime_name = "🚀 BULL MARKET" if is_bull else "🐻 BEAR MARKET"
-                logger.info("")
-                logger.info("=" * 70)
-                logger.info(f"🎬 INITIAL REGIME → {regime_name}")
-                logger.info(f"   Scores: Bull={bullish_score} | Bear={bearish_score}")
                 logger.info(
-                    f"   EMA Diff: {ema_diff_pct:.2f}% | Momentum: {ret_20:.2%}"
+                    f"🎬 INITIAL REGIME → {'BULL' if is_bull else 'BEAR'} | "
+                    f"Confidence: {confidence:.2f}"
                 )
-                logger.info(f"   Confidence: {confidence:.2f}")
-                logger.info("=" * 70)
-                logger.info("")
                 self.regime_initialized = True
 
-            # Update tracking
             self.previous_regime = is_bull
             if is_bull:
                 self.stats["bull_regime_count"] += 1
@@ -483,13 +452,32 @@ class PerformanceWeightedAggregator:
 
             return is_bull, confidence
 
+        # ======================================================
+        # 8️⃣ HARD FALLBACK: EMA-only regime detection
+        # ======================================================
         except Exception as e:
-            logger.error(f"Error detecting regime: {e}", exc_info=True)
+            logger.error(f"Primary regime detection failed: {e}", exc_info=True)
             self.stats["regime_detection_failures"] += 1
-            fallback_regime = (
-                self.previous_regime if self.previous_regime is not None else False
-            )
-            return fallback_regime, 0.3
+
+            try:
+                ema_signal, ema_conf = self.s_ema.generate_signal(df)
+                is_bull = ema_signal >= 0
+
+                self.previous_regime = is_bull
+                if is_bull:
+                    self.stats["bull_regime_count"] += 1
+                else:
+                    self.stats["bear_regime_count"] += 1
+
+                return is_bull, ema_conf
+
+            except Exception as e:
+                logger.error(f"EMA fallback failed: {e}", exc_info=True)
+                fallback_regime = (
+                    self.previous_regime if self.previous_regime is not None else False
+                )
+                return fallback_regime, 0.3
+
 
     def calculate_regime_adjusted_thresholds(
         self, is_bull: bool, regime_confidence: float
@@ -822,6 +810,42 @@ class PerformanceWeightedAggregator:
             # Store originals for logging
             mr_original = mr_signal
             tf_original = tf_signal
+            
+            # ==============================================================================
+            # ✅ NEW: STRICT TREND ENFORCEMENT & RANGING LOGIC
+            # ==============================================================================
+            ranging_threshold = 0.50  # Confidence below this = Ranging/Chop
+            is_ranging = regime_conf <= ranging_threshold
+            max_trades_override = None
+            filter_reason = ""
+
+            if is_ranging:
+                # RANGING MODE: Allow bi-directional but restrict risk
+                max_trades_override = 1
+                filter_reason = "Ranging Mode (Max 1 Trade)"
+                logger.info(f"[FILTER] ⚠️ Ranging Market (Conf: {regime_conf:.2f}). Enforcing Max 1 Trade.")
+            else:
+                # TRENDING MODE: Hard Directional Filter
+                if is_bull:
+                    # BLOCK ALL SHORTS
+                    if tf_signal == -1:
+                        tf_signal = 0
+                        filter_reason += "TF Short Blocked; "
+                    if mr_signal == -1:
+                        mr_signal = 0
+                        filter_reason += "MR Short Blocked; "
+                else: # Bear
+                    # BLOCK ALL LONGS
+                    if tf_signal == 1:
+                        tf_signal = 0
+                        filter_reason += "TF Long Blocked; "
+                    if mr_signal == 1:
+                        mr_signal = 0
+                        filter_reason += "MR Long Blocked; "
+                
+                if filter_reason:
+                    logger.info(f"[FILTER] 🛑 STRICT TREND: {filter_reason}")
+
 
             # ================================================================
             # FIX: Initialize signal_quality early for AI validation

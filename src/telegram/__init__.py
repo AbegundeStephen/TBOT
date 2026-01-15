@@ -881,7 +881,11 @@ class TradingTelegramBot:
                 "/stop\\_trading - Pause trading (keep positions)\n"
                 "/close\\_all - Close all open positions\n"
                 "/close BTC - Close BTC position\n"
-                "/close GOLD - Close GOLD position\n\n"
+                "/close BTC 1 - Close first BTC position\n"
+                "/close BTC 2 - Close second BTC position\n"
+                "/close GOLD - Close GOLD position\n"
+                "/close GOLD 1 - Close first GOLD position\n"
+                "/close GOLD 2 - Close second GOLD position\n\n"
                 "⚠️ *Control commands are restricted to authorized users*"
             )
         else:
@@ -1260,7 +1264,7 @@ class TradingTelegramBot:
     @admin_only
     async def cmd_close_asset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        ✅ FIXED: Handle /close <asset> [position_number] command
+        ✅ FIXED: Handle /close <asset> [position_number] command with market hours check
         
         Usage:
             /close BTC           → Close ALL BTC positions
@@ -1285,6 +1289,30 @@ class TradingTelegramBot:
                     "⚠️ Invalid asset. Use: BTC or GOLD"
                 )
                 return
+
+            # ================================================================
+            # ✅ NEW: Check if market is open for this asset
+            # ================================================================
+            asset_cfg = self.trading_bot.config["assets"].get(asset, {})
+            exchange = asset_cfg.get("exchange", "binance")
+            
+            if exchange == "mt5":
+                # Check GOLD market hours
+                mt5_handler = self.trading_bot.mt5_handler
+                if mt5_handler:
+                    symbol = asset_cfg.get("symbol", "XAUUSD")
+                    is_open, market_msg = mt5_handler._is_market_open_for_closing(symbol)
+                    
+                    if not is_open:
+                        await update.message.reply_text(
+                            f"⏰ *{asset} Market Closed*\n\n"
+                            f"Cannot close positions:\n"
+                            f"{market_msg}\n\n"
+                            f"Please wait until the market reopens.\n"
+                            f"Positions will remain open and safe.",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        return
 
             # ================================================================
             # CASE 1: Close Specific Position (Index provided)
@@ -1312,31 +1340,37 @@ class TradingTelegramBot:
 
                 # Get exit price
                 price = None
-                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
-                exchange = asset_cfg.get("exchange", "binance")
-                
                 if exchange == "binance" and self.trading_bot.binance_handler:
                     price = self.trading_bot.binance_handler.get_current_price()
                 elif exchange == "mt5" and self.trading_bot.mt5_handler:
                     price = self.trading_bot.mt5_handler.get_current_price()
 
-                # Close the specific position
+                # ✅ FIX: Attempt to close the position
                 result = self.trading_bot.portfolio_manager.close_position(
                     position_id=positions[position_index].position_id,
                     exit_price=price or positions[position_index].entry_price,
                     reason="manual_telegram_specific"
                 )
 
+                # ✅ Check if close succeeded
                 if result:
                     pnl_icon = "🟢" if result["pnl"] >= 0 else "🔴"
                     await update.message.reply_text(
                         f"{pnl_icon} *{asset} Position #{position_index + 1} Closed*\n\n"
-                        f"P&L: ${result['pnl']:,.2f} ({result['pnl_pct']*100:+.2f}%)",
+                        f"P&L: ${result['pnl']:,.2f} ({result['pnl_pct']*100:+.2f}%)\n"
+                        f"Reason: Manual close via Telegram",
                         parse_mode=ParseMode.MARKDOWN
                     )
                 else:
+                    # ✅ Position close failed
                     await update.message.reply_text(
-                        f"❌ Failed to close {asset} position #{position_index + 1}"
+                        f"❌ *Failed to close {asset} position #{position_index + 1}*\n\n"
+                        f"Possible reasons:\n"
+                        f"• Market is closed\n"
+                        f"• Exchange connection issue\n"
+                        f"• Position no longer exists on exchange\n\n"
+                        f"Position remains in portfolio. Check logs for details.",
+                        parse_mode=ParseMode.MARKDOWN
                     )
 
             # ================================================================
@@ -1345,15 +1379,12 @@ class TradingTelegramBot:
             else:
                 # Get exit price
                 price = None
-                asset_cfg = self.trading_bot.config["assets"].get(asset, {})
-                exchange = asset_cfg.get("exchange", "binance")
-                
                 if exchange == "binance" and self.trading_bot.binance_handler:
                     price = self.trading_bot.binance_handler.get_current_price()
                 elif exchange == "mt5" and self.trading_bot.mt5_handler:
                     price = self.trading_bot.mt5_handler.get_current_price()
                 
-                # ✅ Use the new method to close all positions for asset
+                # ✅ Use the method to close all positions for asset
                 results = self.trading_bot.portfolio_manager.close_all_positions_for_asset(
                     asset=asset,
                     exit_price=price,
@@ -1362,7 +1393,9 @@ class TradingTelegramBot:
                 
                 if not results:
                     await update.message.reply_text(
-                        f"ℹ️ No open positions found for {asset}"
+                        f"ℹ️ No open positions found for {asset}, or all close attempts failed.\n\n"
+                        f"If positions exist but couldn't be closed, check if market is open.",
+                        parse_mode=ParseMode.MARKDOWN
                     )
                 else:
                     # Calculate summary
@@ -1374,14 +1407,17 @@ class TradingTelegramBot:
                     msg += f"Trades Closed: {len(results)}\n"
                     msg += f"{pnl_icon} Total P&L: ${total_pnl:,.2f}\n\n"
                     
-                    # Show individual results
-                    for i, result in enumerate(results, 1):
+                    # Show individual results (max 5)
+                    for i, result in enumerate(results[:5], 1):
                         pnl = result["pnl"]
                         pnl_pct = result["pnl_pct"] * 100
                         side = result["side"].upper()
                         icon = "🟢" if pnl >= 0 else "🔴"
                         
                         msg += f"{icon} #{i} {side}: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+                    
+                    if len(results) > 5:
+                        msg += f"\n... and {len(results) - 5} more"
                     
                     await update.message.reply_text(
                         msg,
@@ -1391,7 +1427,10 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Error in cmd_close_asset: {e}", exc_info=True)
             await update.message.reply_text(
-                "❌ Error processing close command."
+                f"❌ *Error Processing Close Command*\n\n"
+                f"Details: {str(e)[:200]}\n\n"
+                f"Check bot logs for more information.",
+                parse_mode=ParseMode.MARKDOWN
             )
             
             

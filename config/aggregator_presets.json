@@ -16,7 +16,7 @@
         "hold_contribution_pct": 0.15,
         "allow_single_override": true,
         "single_override_threshold": 0.75,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5
@@ -36,7 +36,7 @@
         "hold_contribution_pct": 0.17,
         "allow_single_override": true,
         "single_override_threshold": 0.72,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 3.5,
         "council_counter_trend": 4.0
@@ -56,12 +56,13 @@
         "hold_contribution_pct": 0.18,
         "allow_single_override": true,
         "single_override_threshold": 0.70,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.60,
         "verbose": false,
         "council_trend_aligned": 3.0,
         "council_counter_trend": 3.5
       },
       "scalper": {
+        "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
         "description": "Lowest thresholds for high frequency. Focus: Volume & Speed.",
         "buy_threshold": 0.24,
         "sell_threshold": 0.30,
@@ -78,7 +79,7 @@
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.05,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.60,
         "council_trend_aligned": 2.5,
         "council_counter_trend": 3.5
       }
@@ -99,7 +100,7 @@
         "hold_contribution_pct": 0.12,
         "allow_single_override": true,
         "single_override_threshold": 0.75,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5
@@ -119,7 +120,7 @@
         "hold_contribution_pct": 0.14,
         "allow_single_override": true,
         "single_override_threshold": 0.72,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 3.5,
         "council_counter_trend": 4.0
@@ -139,12 +140,13 @@
         "hold_contribution_pct": 0.15,
         "allow_single_override": true,
         "single_override_threshold": 0.70,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.60,
         "verbose": false,
         "council_trend_aligned": 3.0,
         "council_counter_trend": 3.5
       },
       "scalper": {
+        "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
         "description": "High frequency GOLD settings. Focus: Volume & Speed.",
         "buy_threshold": 0.23,
         "sell_threshold": 0.30,
@@ -161,7 +163,7 @@
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.06,
-        "opposition_penalty": 0.5,
+        "opposition_penalty": 0.60,
         "council_trend_aligned": 2.5,
         "council_counter_trend": 3.5
       }

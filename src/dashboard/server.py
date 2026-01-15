@@ -7,11 +7,24 @@ Serves the real-time dashboard and provides API endpoints
 from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
 import os
+import sys
+import pandas as pd
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 import logging
 
+current_dir = os.path.dirname(os.path.abspath(__file__))  # src/dashboard
+src_dir = os.path.dirname(current_dir)  # src
+project_root = os.path.dirname(src_dir)  # TBOT root
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from src.analysis.storyteller import TradeStoryteller
+from src.analysis.gemini_exporter import GeminiExporter
+from src.database.database_manager import TradingDatabaseManager
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Setup logging
@@ -25,325 +38,505 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for real-time updates
 
 
-
-
 # Load from environment or config
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'YOUR_SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'YOUR_SUPABASE_KEY')
+SUPABASE_URL = os.getenv("SUPABASE_URL", "YOUR_SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Initialize DB Manager (For Analysis Tools)
+db_manager = TradingDatabaseManager(SUPABASE_URL, SUPABASE_KEY)
 
 # ============================================================================
 # ROUTES
 # ============================================================================
 
-@app.route('/')
+
+@app.route("/")
 def index():
     """Serve the main dashboard"""
     try:
         # Read the HTML dashboard file
-        with open('templates/dashboard.html', 'r', encoding='utf-8') as f:
+        with open("templates/dashboard.html", "r", encoding="utf-8") as f:
             dashboard_html = f.read()
 
-        
         # Inject Supabase credentials (client-safe anon key)
         dashboard_html = dashboard_html.replace(
-            "'YOUR_SUPABASE_URL'", 
-            f"'{SUPABASE_URL}'"
+            "'YOUR_SUPABASE_URL'", f"'{SUPABASE_URL}'"
         )
         dashboard_html = dashboard_html.replace(
             "'YOUR_SUPABASE_ANON_KEY'",
-            f"'{os.getenv('SUPABASE_ANON_KEY', SUPABASE_KEY)}'"
+            f"'{os.getenv('SUPABASE_ANON_KEY', SUPABASE_KEY)}'",
         )
-        
+
         return render_template_string(dashboard_html)
-        
+
     except Exception as e:
         logger.error(f"Error serving dashboard: {e}")
-        return jsonify({'error': 'Failed to load dashboard'}), 500
+        return jsonify({"error": "Failed to load dashboard"}), 500
 
 
-@app.route('/api/stats')
+@app.route("/debrief")
+def debrief_page():
+    """Serve the Daily/Weekly Debrief Page"""
+    try:
+        # Try multiple possible locations for the template
+        possible_paths = [
+            "src/dashboard/templates/daily_recap.html",
+            "templates/daily_recap.html",
+            os.path.join(current_dir, "templates", "daily_recap.html"),
+            os.path.join(
+                project_root, "src", "dashboard", "templates", "daily_recap.html"
+            ),
+        ]
+
+        template_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                template_path = path
+                logger.info(f"Found template at: {path}")
+                break
+
+        if not template_path:
+            error_msg = f"daily_recap.html not found. Searched in:\n"
+            error_msg += "\n".join(f"  - {p}" for p in possible_paths)
+            logger.error(error_msg)
+            return error_msg, 404
+
+        with open(template_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        return render_template_string(content)
+
+    except Exception as e:
+        logger.error(f"Error serving debrief: {e}")
+        return f"Error loading debrief page: {str(e)}", 500
+
+
+# ============================================================================
+# API - ANALYSIS & FEEDBACK LOOP
+# ============================================================================
+
+
+@app.route("/api/debrief_data")
+def get_debrief_data():
+    """Get structured data for the visual debrief"""
+    try:
+        date_ref = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+        mode = request.args.get("mode", "daily")
+
+        storyteller = TradeStoryteller(db_manager)
+        data = storyteller.generate_report(mode, date_ref)
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Debrief data error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/export_gemini")
+def export_gemini_report():
+    """Generate text prompt for Gemini analysis"""
+    try:
+        date_ref = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+        mode = request.args.get("mode", "daily")
+
+        exporter = GeminiExporter(db_manager)
+        report_text = exporter.generate_report(mode, date_ref)
+
+        return jsonify({"status": "success", "report": report_text})
+    except Exception as e:
+        logger.error(f"Gemini export error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/history/<asset>")
+def get_history(asset):
+    """
+    Serves candle data for the chart from local CSVs.
+    Used by the Lightweight Charts in /debrief
+    """
+    start = request.args.get("start")
+    end = request.args.get("end")
+
+    # Map friendly names to CSV filenames
+    # Assuming standard TBOT structure
+    filename_map = {
+        "BTC": "BTCUSDT_1h.csv",
+        "GOLD": "XAUUSDm_1h.csv",
+        "XAU": "XAUUSDm_1h.csv",
+    }
+
+    csv_file = filename_map.get(asset.upper())
+    if not csv_file:
+        return jsonify([])
+
+    # Check multiple locations
+    paths = [
+        f"data/historical/{csv_file}",
+        f"data/raw/{csv_file}",
+        f"data/processed/{csv_file}",
+    ]
+
+    csv_path = None
+    for p in paths:
+        if os.path.exists(p):
+            csv_path = p
+            break
+
+    if not csv_path:
+        return jsonify([])
+
+    try:
+        df = pd.read_csv(csv_path)
+        # Ensure timestamp column exists and is datetime
+        if "timestamp" not in df.columns and "time" in df.columns:
+            df.rename(columns={"time": "timestamp"}, inplace=True)
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        # Filter
+        if start:
+            df = df[df["timestamp"] >= start]
+        if end:
+            df = df[df["timestamp"] <= end]
+
+        # Format for Lightweight Charts (Unix timestamp)
+        chart_data = []
+        for _, row in df.iterrows():
+            chart_data.append(
+                {
+                    "time": int(row["timestamp"].timestamp()),
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                }
+            )
+
+        return jsonify(chart_data)
+
+    except Exception as e:
+        logger.error(f"History fetch error: {e}")
+        return jsonify([])
+
+
+@app.route("/api/stats")
 def get_stats():
     """Get current portfolio statistics"""
     try:
         # Get latest portfolio snapshot
-        snapshot = supabase.table('portfolio_snapshots')\
-            .select('*')\
-            .order('timestamp', desc=True)\
-            .limit(1)\
+        snapshot = (
+            supabase.table("portfolio_snapshots")
+            .select("*")
+            .order("timestamp", desc=True)
+            .limit(1)
             .execute()
-        
+        )
+
         # Get performance stats
-        trades = supabase.table('trades')\
-            .select('*')\
-            .eq('status', 'closed')\
-            .execute()
-        
+        trades = supabase.table("trades").select("*").eq("status", "closed").execute()
+
         stats = {
-            'portfolio': snapshot.data[0] if snapshot.data else None,
-            'trade_count': len(trades.data) if trades.data else 0,
-            'win_rate': calculate_win_rate(trades.data) if trades.data else 0,
-            'timestamp': datetime.now().isoformat()
+            "portfolio": snapshot.data[0] if snapshot.data else None,
+            "trade_count": len(trades.data) if trades.data else 0,
+            "win_rate": calculate_win_rate(trades.data) if trades.data else 0,
+            "timestamp": datetime.now().isoformat(),
         }
-        
+
         return jsonify(stats)
-        
+
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/trades/open')
+@app.route("/api/trades/open")
 def get_open_trades():
     """Get all open trades"""
     try:
-        result = supabase.table('trades')\
-            .select('*')\
-            .eq('status', 'open')\
-            .order('entry_time', desc=True)\
+        result = (
+            supabase.table("trades")
+            .select("*")
+            .eq("status", "open")
+            .order("entry_time", desc=True)
             .execute()
-        
-        return jsonify({'trades': result.data})
-        
+        )
+
+        return jsonify({"trades": result.data})
+
     except Exception as e:
         logger.error(f"Error getting open trades: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/trades/closed')
+@app.route("/api/trades/closed")
 def get_closed_trades():
     """Get recent closed trades"""
     try:
-        limit = request.args.get('limit', 20, type=int)
-        
-        result = supabase.table('trades')\
-            .select('*')\
-            .eq('status', 'closed')\
-            .order('exit_time', desc=True)\
-            .limit(limit)\
+        limit = request.args.get("limit", 20, type=int)
+
+        result = (
+            supabase.table("trades")
+            .select("*")
+            .eq("status", "closed")
+            .order("exit_time", desc=True)
+            .limit(limit)
             .execute()
-        
-        return jsonify({'trades': result.data})
-        
+        )
+
+        return jsonify({"trades": result.data})
+
     except Exception as e:
         logger.error(f"Error getting closed trades: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/signals')
+@app.route("/api/signals")
 def get_signals():
     """Get recent trading signals"""
     try:
-        limit = request.args.get('limit', 20, type=int)
-        
-        result = supabase.table('signals')\
-            .select('*')\
-            .order('timestamp', desc=True)\
-            .limit(limit)\
+        limit = request.args.get("limit", 20, type=int)
+
+        result = (
+            supabase.table("signals")
+            .select("*")
+            .order("timestamp", desc=True)
+            .limit(limit)
             .execute()
-        
-        return jsonify({'signals': result.data})
-        
+        )
+
+        return jsonify({"signals": result.data})
+
     except Exception as e:
         logger.error(f"Error getting signals: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/portfolio/history')
+@app.route("/api/portfolio/history")
 def get_portfolio_history():
     """Get portfolio value history"""
     try:
-        hours = request.args.get('hours', 24, type=int)
+        hours = request.args.get("hours", 24, type=int)
         start_time = datetime.now() - timedelta(hours=hours)
-        
-        result = supabase.table('portfolio_snapshots')\
-            .select('timestamp, total_value, unrealized_pnl')\
-            .gte('timestamp', start_time.isoformat())\
-            .order('timestamp', desc=False)\
+
+        result = (
+            supabase.table("portfolio_snapshots")
+            .select("timestamp, total_value, unrealized_pnl")
+            .gte("timestamp", start_time.isoformat())
+            .order("timestamp", desc=False)
             .execute()
-        
-        return jsonify({'history': result.data})
-        
+        )
+
+        return jsonify({"history": result.data})
+
     except Exception as e:
         logger.error(f"Error getting portfolio history: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/performance')
+@app.route("/api/performance")
 def get_performance():
     """Get performance metrics"""
     try:
-        days = request.args.get('days', 7, type=int)
+        days = request.args.get("days", 7, type=int)
         start_date = datetime.now() - timedelta(days=days)
-        
+
         # Get trades in date range
-        trades = supabase.table('trades')\
-            .select('*')\
-            .eq('status', 'closed')\
-            .gte('exit_time', start_date.isoformat())\
+        trades = (
+            supabase.table("trades")
+            .select("*")
+            .eq("status", "closed")
+            .gte("exit_time", start_date.isoformat())
             .execute()
-        
+        )
+
         if not trades.data:
-            return jsonify({
-                'total_trades': 0,
-                'win_rate': 0,
-                'total_pnl': 0,
-                'avg_win': 0,
-                'avg_loss': 0,
-                'profit_factor': 0
-            })
-        
+            return jsonify(
+                {
+                    "total_trades": 0,
+                    "win_rate": 0,
+                    "total_pnl": 0,
+                    "avg_win": 0,
+                    "avg_loss": 0,
+                    "profit_factor": 0,
+                }
+            )
+
         # Calculate metrics
         total_trades = len(trades.data)
-        winning_trades = [t for t in trades.data if t['pnl'] > 0]
-        losing_trades = [t for t in trades.data if t['pnl'] < 0]
-        
+        winning_trades = [t for t in trades.data if t["pnl"] > 0]
+        losing_trades = [t for t in trades.data if t["pnl"] < 0]
+
         win_count = len(winning_trades)
         loss_count = len(losing_trades)
-        
-        total_pnl = sum(t['pnl'] for t in trades.data)
-        avg_win = sum(t['pnl'] for t in winning_trades) / win_count if win_count > 0 else 0
-        avg_loss = sum(t['pnl'] for t in losing_trades) / loss_count if loss_count > 0 else 0
-        
-        profit_factor = abs(avg_win * win_count / (avg_loss * loss_count)) if loss_count > 0 and avg_loss != 0 else 0
-        
-        return jsonify({
-            'total_trades': total_trades,
-            'winning_trades': win_count,
-            'losing_trades': loss_count,
-            'win_rate': (win_count / total_trades * 100) if total_trades > 0 else 0,
-            'total_pnl': total_pnl,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor,
-            'best_trade': max(trades.data, key=lambda x: x['pnl'])['pnl'] if trades.data else 0,
-            'worst_trade': min(trades.data, key=lambda x: x['pnl'])['pnl'] if trades.data else 0
-        })
-        
+
+        total_pnl = sum(t["pnl"] for t in trades.data)
+        avg_win = (
+            sum(t["pnl"] for t in winning_trades) / win_count if win_count > 0 else 0
+        )
+        avg_loss = (
+            sum(t["pnl"] for t in losing_trades) / loss_count if loss_count > 0 else 0
+        )
+
+        profit_factor = (
+            abs(avg_win * win_count / (avg_loss * loss_count))
+            if loss_count > 0 and avg_loss != 0
+            else 0
+        )
+
+        return jsonify(
+            {
+                "total_trades": total_trades,
+                "winning_trades": win_count,
+                "losing_trades": loss_count,
+                "win_rate": (win_count / total_trades * 100) if total_trades > 0 else 0,
+                "total_pnl": total_pnl,
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+                "profit_factor": profit_factor,
+                "best_trade": (
+                    max(trades.data, key=lambda x: x["pnl"])["pnl"]
+                    if trades.data
+                    else 0
+                ),
+                "worst_trade": (
+                    min(trades.data, key=lambda x: x["pnl"])["pnl"]
+                    if trades.data
+                    else 0
+                ),
+            }
+        )
+
     except Exception as e:
         logger.error(f"Error getting performance: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/system/events')
+@app.route("/api/system/events")
 def get_system_events():
     """Get recent system events"""
     try:
-        limit = request.args.get('limit', 50, type=int)
-        severity = request.args.get('severity')
-        
-        query = supabase.table('system_events')\
-            .select('*')\
-            .order('timestamp', desc=True)\
+        limit = request.args.get("limit", 50, type=int)
+        severity = request.args.get("severity")
+
+        query = (
+            supabase.table("system_events")
+            .select("*")
+            .order("timestamp", desc=True)
             .limit(limit)
-        
+        )
+
         if severity:
-            query = query.eq('severity', severity)
-        
+            query = query.eq("severity", severity)
+
         result = query.execute()
-        
-        return jsonify({'events': result.data})
-        
+
+        return jsonify({"events": result.data})
+
     except Exception as e:
         logger.error(f"Error getting system events: {e}")
-        return jsonify({'error': str(e)}), 500
-    
-@app.route('/templates/<path:filename>')
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/templates/<path:filename>")
 def serve_template(filename):
     """Serve documentation template files"""
     try:
-        file_path = os.path.join('templates', filename)
-        
+        file_path = os.path.join("templates", filename)
+
         # Security check - ensure file is in templates directory
-        if not os.path.abspath(file_path).startswith(os.path.abspath('templates')):
-            return jsonify({'error': 'Invalid file path'}), 403
-        
+        if not os.path.abspath(file_path).startswith(os.path.abspath("templates")):
+            return jsonify({"error": "Invalid file path"}), 403
+
         if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found'}), 404
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
+            return jsonify({"error": "File not found"}), 404
+
+        with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
-        
-        return content, 200, {'Content-Type': 'text/html; charset=utf-8'}
-        
+
+        return content, 200, {"Content-Type": "text/html; charset=utf-8"}
+
     except Exception as e:
         logger.error(f"Error serving template {filename}: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/health')
+@app.route("/api/health")
 def health_check():
     """Health check endpoint"""
     try:
         # Test database connection
-        result = supabase.table('trades').select('id').limit(1).execute()
-        
+        result = supabase.table("trades").select("id").limit(1).execute()
+
         # Get last activity
-        snapshot = supabase.table('portfolio_snapshots')\
-            .select('timestamp')\
-            .order('timestamp', desc=True)\
-            .limit(1)\
+        snapshot = (
+            supabase.table("portfolio_snapshots")
+            .select("timestamp")
+            .order("timestamp", desc=True)
+            .limit(1)
             .execute()
-        
-        last_activity = snapshot.data[0]['timestamp'] if snapshot.data else None
-        
+        )
+
+        last_activity = snapshot.data[0]["timestamp"] if snapshot.data else None
+
         # Determine if bot is active (activity in last 10 minutes)
         is_active = False
         if last_activity:
-            last_time = datetime.fromisoformat(last_activity.replace('Z', '+00:00'))
-            is_active = (datetime.now(last_time.tzinfo) - last_time).total_seconds() < 600
-        
-        return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'bot_active': is_active,
-            'last_activity': last_activity,
-            'timestamp': datetime.now().isoformat()
-        })
-        
+            last_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+            is_active = (
+                datetime.now(last_time.tzinfo) - last_time
+            ).total_seconds() < 600
+
+        return jsonify(
+            {
+                "status": "healthy",
+                "database": "connected",
+                "bot_active": is_active,
+                "last_activity": last_activity,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return jsonify({
-            'status': 'unhealthy',
-            'error': str(e)
-        }), 500
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def calculate_win_rate(trades):
     """Calculate win rate from trades"""
     if not trades:
         return 0
-    winning = sum(1 for t in trades if t.get('pnl', 0) > 0)
-    return (winning / len(trades) * 100)
+    winning = sum(1 for t in trades if t.get("pnl", 0) > 0)
+    return winning / len(trades) * 100
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Check configuration
-    if SUPABASE_URL == 'YOUR_SUPABASE_URL':
+    if SUPABASE_URL == "YOUR_SUPABASE_URL":
         logger.error("❌ Please set SUPABASE_URL in environment or code")
         exit(1)
-    
+
     logger.info("=" * 80)
     logger.info("🚀 TOM's Trading Bot Dashboard Server")
     logger.info("=" * 80)
     logger.info(f"Dashboard: http://localhost:5000")
     logger.info(f"API Docs:  http://localhost:5000/api/health")
+    logger.info(f"Debrief:   http://localhost:5000/debrief")
     logger.info("=" * 80)
-    
+
     # Run server
     app.run(
-        host='0.0.0.0',  # Allow external connections
+        host="0.0.0.0",  # Allow external connections
         port=5000,
         debug=True,  # Set to False in production
-        threaded=True
+        threaded=True,
     )
