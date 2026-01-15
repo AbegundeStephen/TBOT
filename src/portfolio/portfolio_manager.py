@@ -30,9 +30,9 @@ class Position:
         entry_time: datetime,
         signal_details: dict = None,
         position_id: str = None,
-        stop_loss: float = None, # ❌ IGNORED by VTM
-        take_profit: float = None, # ❌ IGNORED by VTM
-        trailing_stop_pct: float = None, # ❌ IGNORED by VTM
+        stop_loss: float = None,  # ❌ IGNORED by VTM
+        take_profit: float = None,  # ❌ IGNORED by VTM
+        trailing_stop_pct: float = None,  # ❌ IGNORED by VTM
         mt5_ticket: int = None,
         binance_order_id: int = None,
         ohlc_data: dict = None,
@@ -54,7 +54,7 @@ class Position:
         self.leverage = leverage
         self.margin_type = margin_type
         self.is_futures = is_futures
-        
+
         self.stop_loss = None
         self.take_profit = None
         self.trailing_stop_pct = None
@@ -75,7 +75,6 @@ class Position:
 
         self.db_trade_id = None
         self.db_manager = None
-        
 
         # ✅ CRITICAL FIX: Initialize VTM
         self.trade_manager = None
@@ -84,56 +83,56 @@ class Position:
                 # ✅ Extract hybrid context from signal_details (handle None case)
                 if signal_details is None:
                     signal_details = {}
-                
-                hybrid_mode = signal_details.get('aggregator_mode')
-                mode_confidence = signal_details.get('mode_confidence', 0.5)
-                regime_analysis = signal_details.get('regime_analysis', {})
-                
+
+                hybrid_mode = signal_details.get("aggregator_mode")
+                mode_confidence = signal_details.get("mode_confidence", 0.5)
+                regime_analysis = signal_details.get("regime_analysis", {})
+
                 # Get regime details
-                trend_strength = regime_analysis.get('trend_strength', 'weak')
-                volatility_regime = regime_analysis.get('volatility_regime', 'normal')
-                price_clarity = regime_analysis.get('price_clarity', 'mixed')
-                momentum_aligned = regime_analysis.get('momentum_aligned', False)
-                at_key_level = regime_analysis.get('at_key_level', False)
-                
+                trend_strength = regime_analysis.get("trend_strength", "weak")
+                volatility_regime = regime_analysis.get("volatility_regime", "normal")
+                price_clarity = regime_analysis.get("price_clarity", "mixed")
+                momentum_aligned = regime_analysis.get("momentum_aligned", False)
+                at_key_level = regime_analysis.get("at_key_level", False)
+
                 logger.info(f"\n[VTM+HYBRID] Initializing with intelligent context:")
                 logger.info(f"  Mode:        {hybrid_mode or 'N/A'}")
                 logger.info(f"  Confidence:  {mode_confidence:.2%}")
                 logger.info(f"  Trend:       {trend_strength}")
                 logger.info(f"  Volatility:  {volatility_regime}")
                 logger.info(f"  Clarity:     {price_clarity}")
-                
+
                 # --------------------------------------------------------
                 # Adjust VTM parameters based on hybrid intelligence
                 # --------------------------------------------------------
                 account_risk = 0.015  # Base 1.5%
                 early_lock_threshold_pct = 0.01  # Base 1%
-                
+
                 # Council + strong trend = More aggressive
-                if hybrid_mode == 'council' and trend_strength == 'strong':
+                if hybrid_mode == "council" and trend_strength == "strong":
                     account_risk *= 1.2  # 1.5% → 1.8%
                     early_lock_threshold_pct = 0.008  # Lock @ 0.8%
                     logger.info("  → Council strong trend: Risk↑ Lock↓")
-                
+
                 # Performance + choppy = More conservative
-                elif hybrid_mode == 'performance' and volatility_regime == 'high':
+                elif hybrid_mode == "performance" and volatility_regime == "high":
                     account_risk *= 0.8  # 1.5% → 1.2%
                     early_lock_threshold_pct = 0.007  # Lock @ 0.7%
                     logger.info("  → Performance choppy: Risk↓ Lock↓")
-                
+
                 # High confidence boost
                 if mode_confidence > 0.75 and momentum_aligned:
                     account_risk *= 1.1
                     logger.info(f"  → High confidence ({mode_confidence:.0%}): Risk↑")
-                
+
                 # Noisy price = Reduce risk
-                if price_clarity == 'noisy':
+                if price_clarity == "noisy":
                     account_risk *= 0.85
                     logger.info("  → Noisy price: Risk↓")
-                
+
                 # Enforce bounds
                 account_risk = max(0.008, min(account_risk, 0.025))
-                
+
                 # ✅ Initialize VTM with optimized parameters
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
@@ -150,7 +149,7 @@ class Position:
                     early_lock_threshold_pct=early_lock_threshold_pct,  # ✅ Adjusted
                     signal_details=signal_details,
                 )
-                
+
                 # ✅ Use VTM's calculated levels (overrides any passed values)
                 self.stop_loss = self.trade_manager.initial_stop_loss
                 self.take_profit = (
@@ -158,17 +157,17 @@ class Position:
                     if self.trade_manager.take_profit_levels
                     else None
                 )
-                
+
                 logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
                 logger.info(f"  Account Risk: {account_risk:.3f}")
                 logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
                 logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
                 logger.info(f"  Take Profit:  ${self.take_profit:,.2f}")
-                
+
             except Exception as e:
                 logger.error(f"[VTM] Initialization failed: {e}", exc_info=True)
                 self.trade_manager = None
-                
+
                 # ✅ Fallback to basic levels if VTM fails
                 if stop_loss:
                     self.stop_loss = stop_loss
@@ -176,11 +175,11 @@ class Position:
                     self.take_profit = take_profit
                 if trailing_stop_pct:
                     self.trailing_stop_pct = trailing_stop_pct
-        
+
         else:
             # ✅ No VTM - use passed levels
             logger.debug(f"[VTM] Not initialized (missing OHLC or signal_details)")
-            
+
             if stop_loss:
                 self.stop_loss = stop_loss
             if take_profit:
@@ -459,12 +458,12 @@ class PortfolioManager:
     """
 
     def __init__(
-        self, 
-        config: Dict, 
-        mt5_handler=None, 
-        binance_client=None, 
-        db_manager=None, 
-        execution_handlers: Dict = None
+        self,
+        config: Dict,
+        mt5_handler=None,
+        binance_client=None,
+        db_manager=None,
+        execution_handlers: Dict = None,
     ):
         self.config = config
         self.portfolio_config = config["portfolio"]
@@ -482,7 +481,7 @@ class PortfolioManager:
 
         # ✅ FIX 1: Remove paper_capital usage in live mode
         self.paper_capital = self.portfolio_config["initial_capital"]
-        
+
         # ✅ FIX 2: Initialize with live balances (will raise error if unavailable in live mode)
         self.initial_capital = self._fetch_total_capital(strict=True)
         self.current_capital = self.initial_capital
@@ -504,25 +503,28 @@ class PortfolioManager:
 
         logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
-        
+
         if not self.is_paper_mode:
             logger.info("✓ Using LIVE account balances (will auto-refresh)")
-            logger.info(f"  - MT5 Handler: {'Connected' if mt5_handler else 'Not Connected'}")
-            logger.info(f"  - Binance Client: {'Connected' if binance_client else 'Not Connected'}")
+            logger.info(
+                f"  - MT5 Handler: {'Connected' if mt5_handler else 'Not Connected'}"
+            )
+            logger.info(
+                f"  - Binance Client: {'Connected' if binance_client else 'Not Connected'}"
+            )
         else:
             logger.info("✓ Using PAPER mode with simulated capital")
-
 
     def _fetch_total_capital(self, strict: bool = False) -> float:
         """
         Fetch total available capital from exchanges
-        
+
         Args:
             strict: If True, raise error when live balances unavailable in live mode
-        
+
         Returns:
             Total capital in USD
-        
+
         Raises:
             RuntimeError: If strict=True and balances unavailable in live mode
         """
@@ -572,7 +574,6 @@ class PortfolioManager:
 
         logger.info(f"[TOTAL] Capital: ${total_capital:,.2f}")
         return total_capital
-    
 
     def _fetch_mt5_balance(self) -> Optional[float]:
         """Fetch MT5 account balance"""
@@ -587,9 +588,7 @@ class PortfolioManager:
             if account_info:
                 balance = account_info.balance
                 equity = account_info.equity
-                logger.debug(
-                    f"[MT5] Balance: ${balance:,.2f}, Equity: ${equity:,.2f}"
-                )
+                logger.debug(f"[MT5] Balance: ${balance:,.2f}, Equity: ${equity:,.2f}")
                 return equity  # Use equity (includes unrealized P&L)
             else:
                 logger.error("[MT5] No account info available")
@@ -637,16 +636,14 @@ class PortfolioManager:
         except Exception as e:
             logger.error(f"[BINANCE] Error fetching balance: {e}", exc_info=True)
             return None
-        
-    
 
     def refresh_capital(self, force: bool = False) -> bool:
         """
         ✅ FIX: Refresh capital from exchanges with time-based throttling
-        
+
         Args:
             force: If True, bypass time check and force refresh
-        
+
         Returns:
             True if refresh successful
         """
@@ -811,12 +808,11 @@ class PortfolioManager:
             f"({position_size/self.current_capital*100:.2f}% of capital)"
         )
         return position_size
-    
-    
+
     def validate_balance_before_trade(self) -> Tuple[bool, str]:
         """
         ✅ NEW: Validate that we have valid balances before opening trades
-        
+
         Returns:
             (is_valid, error_message)
         """
@@ -833,68 +829,78 @@ class PortfolioManager:
         # Check minimum capital requirements
         min_capital = self.portfolio_config.get("min_capital_threshold", 1000)
         if self.current_capital < min_capital:
-            return False, f"Capital below minimum: ${self.current_capital:,.2f} < ${min_capital:,.2f}"
+            return (
+                False,
+                f"Capital below minimum: ${self.current_capital:,.2f} < ${min_capital:,.2f}",
+            )
 
         return True, "OK"
 
-    def check_portfolio_limits(self, new_position_usd: float, new_side: str = None, asset: str = None) -> bool:
+    def check_portfolio_limits(
+        self, new_position_usd: float, new_side: str = None, asset: str = None
+    ) -> bool:
         """
         ✅ FIXED: Check portfolio limits with proper hedging support
-        
+
         Args:
             new_position_usd: Size of new position in USD
             new_side: "long" or "short" (for hedging calculation)
             asset: Asset name (to check per-asset hedging)
-        
+
         Returns:
             True if within limits, False otherwise
         """
-        
+
         # Get limits
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
         max_exposure_usd = self.current_capital * max_exposure_pct
-        
+
         # Calculate current exposures
         long_exposure = sum(
-            pos.quantity * pos.entry_price 
-            for pos in self.positions.values() 
+            pos.quantity * pos.entry_price
+            for pos in self.positions.values()
             if pos.side == "long"
         )
-        
+
         short_exposure = sum(
-            pos.quantity * pos.entry_price 
-            for pos in self.positions.values() 
+            pos.quantity * pos.entry_price
+            for pos in self.positions.values()
             if pos.side == "short"
         )
-        
+
         current_gross_exposure = long_exposure + short_exposure
         current_net_exposure = abs(long_exposure - short_exposure)
-        
+
         # ✅ Check if hedging is allowed
         allow_hedging = self.config.get("trading", {}).get(
             "allow_simultaneous_long_short", False
         )
-        
+
         # ✅ If we have asset info, check if it's a hedge
         is_hedge = False
         if asset and new_side:
             opposite_side = "short" if new_side == "long" else "long"
             opposite_positions = [
-                p for p in self.positions.values() 
+                p
+                for p in self.positions.values()
                 if p.asset == asset and p.side == opposite_side
             ]
             is_hedge = len(opposite_positions) > 0
-        
+
         # ✅ Calculate new exposure based on whether we allow hedging
         if allow_hedging and (is_hedge or new_side):
             # Use NET exposure for hedged strategies
             if new_side == "long":
-                new_net_exposure = abs((long_exposure + new_position_usd) - short_exposure)
+                new_net_exposure = abs(
+                    (long_exposure + new_position_usd) - short_exposure
+                )
             elif new_side == "short":
-                new_net_exposure = abs(long_exposure - (short_exposure + new_position_usd))
+                new_net_exposure = abs(
+                    long_exposure - (short_exposure + new_position_usd)
+                )
             else:
                 new_net_exposure = current_net_exposure + new_position_usd
-            
+
             if new_net_exposure > max_exposure_usd:
                 logger.warning(
                     f"Portfolio NET exposure limit exceeded:\n"
@@ -906,29 +912,29 @@ class PortfolioManager:
                     f"  Limit:         ${max_exposure_usd:,.2f}"
                 )
                 return False
-            
+
             logger.info(
                 f"[EXPOSURE] NET: ${new_net_exposure:,.2f} / ${max_exposure_usd:,.2f} "
                 f"({new_net_exposure/max_exposure_usd*100:.1f}%)"
                 f"{' [HEDGE]' if is_hedge else ''}"
             )
-        
+
         else:
             # Use GROSS exposure for directional strategies
             new_gross_exposure = current_gross_exposure + new_position_usd
-            
+
             if new_gross_exposure > max_exposure_usd:
                 logger.warning(
                     f"Portfolio GROSS exposure limit: "
                     f"${new_gross_exposure:,.2f} > ${max_exposure_usd:,.2f}"
                 )
                 return False
-            
+
             logger.info(
                 f"[EXPOSURE] GROSS: ${new_gross_exposure:,.2f} / ${max_exposure_usd:,.2f} "
                 f"({new_gross_exposure/max_exposure_usd*100:.1f}%)"
             )
-        
+
         # Check drawdown limit
         drawdown = (
             (self.peak_equity - self.equity) / self.peak_equity
@@ -936,11 +942,11 @@ class PortfolioManager:
             else 0
         )
         max_drawdown = self.portfolio_config["max_drawdown"]
-        
+
         if drawdown >= max_drawdown:
             logger.warning(f"Max drawdown: {drawdown:.2%} >= {max_drawdown:.2%}")
             return False
-        
+
         return True
 
     def get_asset_positions(self, asset: str, side: str = None) -> List[Position]:
@@ -1014,26 +1020,27 @@ class PortfolioManager:
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """Check both long and short separately"""
         current_count = self.get_asset_position_count(asset, side)
-        
+
         if current_count >= self.max_positions_per_asset:
             return False, f"Max {side} positions reached"
-        
+
         # Check if opposite side exists (if simultaneous trading disabled)
-        if not self.config.get("trading", {}).get("allow_simultaneous_long_short", False):
+        if not self.config.get("trading", {}).get(
+            "allow_simultaneous_long_short", False
+        ):
             opposite_side = "short" if side == "long" else "long"
             opposite_count = self.get_asset_position_count(asset, opposite_side)
             if opposite_count > 0:
                 return False, f"Have opposite {opposite_side} position"
-        
-        return True, "OK"
 
+        return True, "OK"
 
     @handle_errors(
         component="portfolio_manager",
         severity=ErrorSeverity.ERROR,
         notify=True,
         reraise=False,
-        default_return=False
+        default_return=False,
     )
     def add_position(
         self,
@@ -1050,7 +1057,7 @@ class PortfolioManager:
         ohlc_data: dict = None,
         use_dynamic_management: bool = True,
         entry_time: datetime = None,
-        signal_details: dict = None, 
+        signal_details: dict = None,
         leverage: int = 1,
         margin_type: str = "CROSSED",
         is_futures: bool = True,
@@ -1058,36 +1065,36 @@ class PortfolioManager:
         """
         Add a new position with hybrid aware VTM support
         """
-        
+
         # 1. Determine Max Positions allowed for this specific trade
         max_allowed = self.max_positions_per_asset
-        
+
         # ✅ NEW: Check for Aggregator Override (Ranging Mode)
-        if signal_details and signal_details.get('max_trades_override'):
-            max_allowed = signal_details['max_trades_override']
-            
+        if signal_details and signal_details.get("max_trades_override"):
+            max_allowed = signal_details["max_trades_override"]
+
             # Check current open positions for this asset
             current_total = self.get_asset_position_count(asset)
-            
+
             if current_total >= max_allowed:
-                 logger.warning(f"[SAFEGUARD] 🛡️ Ranging Mode Active: Max positions capped at {max_allowed}. Cannot open new trade.")
-                 return False
+                logger.warning(
+                    f"[SAFEGUARD] 🛡️ Ranging Mode Active: Max positions capped at {max_allowed}. Cannot open new trade."
+                )
+                return False
 
         # 1. Check if we can open this position
         can_open, reason = self.can_open_position(asset, side)
         if not can_open:
             logger.warning(f"Cannot open position: {reason}")
             return False
-        
+
         # 2. Check portfolio exposure limits
         if not self.check_portfolio_limits(
-            new_position_usd=position_size_usd,
-            new_side=side,
-            asset=asset
+            new_position_usd=position_size_usd, new_side=side, asset=asset
         ):
             logger.warning(f"Portfolio limits exceeded for {asset} {side.upper()}")
             return False
-        
+
         quantity = position_size_usd / entry_price
         logger.info(
             f"[PORTFOLIO] Adding {side.upper()} position:\n"
@@ -1095,7 +1102,7 @@ class PortfolioManager:
             f"  Quantity: {quantity:.8f}\n"
             f"  Entry:    ${entry_price:,.2f}"
         )
-        
+
         # ============================================================================
         # 3. CREATE POSITION OBJECT
         # ✅ VTM is initialized INSIDE Position.__init__() - don't do it here!
@@ -1118,21 +1125,22 @@ class PortfolioManager:
             use_dynamic_management=use_dynamic_management,  # ← This triggers VTM init in Position.__init__()
             leverage=leverage,
             margin_type=margin_type,
-            is_futures=is_futures
+            is_futures=is_futures,
         )
-        
-       
+
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
-                logger.info(f"[VTM] Initialized for {asset}. SL: ${position.stop_loss:,.2f}")
+                logger.info(
+                    f"[VTM] Initialized for {asset}. SL: ${position.stop_loss:,.2f}"
+                )
             else:
                 logger.warning(f"[VTM] Failed to initialize for {asset}")
-        
+
         # ============================================================================
         # 5. STORE POSITION
         # ============================================================================
         self.positions[position.position_id] = position
-        
+
         # 6. Database Logging
         if self.db_manager:
             try:
@@ -1153,19 +1161,25 @@ class PortfolioManager:
                     metadata={
                         "trailing_stop_pct": trailing_stop_pct,
                         "entry_time": position.entry_time.isoformat(),
-                        "preset_used": signal_details.get("preset_config", {}).get("name", "default") if signal_details else "manual"
+                        "preset_used": (
+                            signal_details.get("preset_config", {}).get(
+                                "name", "default"
+                            )
+                            if signal_details
+                            else "manual"
+                        ),
                     },
                 )
-                
+
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
-                
+
                 if is_new:
                     logger.debug(f"[DB] New trade created: {trade_id}")
-            
+
             except Exception as e:
                 logger.error(f"[DB] Error logging trade entry: {e}")
-        
+
         # 7. Final Logging
         current_count = self.get_asset_position_count(asset, side)
         logger.info(
@@ -1173,7 +1187,7 @@ class PortfolioManager:
             f"@ ${entry_price:,.2f} | Size: ${position_size_usd:,.2f} "
             f"| ID: {position.position_id}"
         )
-        
+
         return True
 
     def update_positions_with_ohlc(self, ohlc_data_dict: dict):
@@ -1220,14 +1234,14 @@ class PortfolioManager:
             )
 
         return len(positions_to_close)
-    
+
     def get_asset_balance(self, asset: str) -> float:
         """
         Get balance for a specific asset's exchange
-        
+
         Args:
             asset: "BTC" or "GOLD"
-        
+
         Returns:
             Balance in USD for that asset's exchange
         """
@@ -1238,27 +1252,29 @@ class PortfolioManager:
             elif asset == "GOLD":
                 return self.paper_capital * 0.1  # 10% for Gold
             return self.paper_capital
-        
+
         # Live mode - fetch from specific exchange
         if asset == "GOLD":
             balance = self._fetch_mt5_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (MT5)")
                 return balance
-        
+
         elif asset == "BTC":
             balance = self._fetch_binance_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (Binance)")
                 return balance
-        
+
         # Fallback: use proportion of total capital
-        logger.warning(f"[ASSET BALANCE] Could not fetch {asset} balance, using estimate")
-        
+        logger.warning(
+            f"[ASSET BALANCE] Could not fetch {asset} balance, using estimate"
+        )
+
         # Estimate based on asset weight in config
         asset_weight = self.config["assets"].get(asset, {}).get("weight", 0.5)
         return self.current_capital * asset_weight
-    
+
     def close_all_positions(self, prices: Dict[str, float] = None):
         """
         ✅ FIXED: Close all open positions
@@ -1272,52 +1288,46 @@ class PortfolioManager:
         for pid in position_ids:
             if pid not in self.positions:
                 continue
-                
+
             position = self.positions[pid]
             asset_name = position.asset
-            
+
             # Get correct exit price using ASSET name
             exit_price = (
                 prices.get(asset_name, position.entry_price)
                 if prices
                 else position.entry_price
             )
-            
+
             # ✅ FIX: Use keyword arguments to ensure data goes to correct parameters
             self.close_position(
-                position_id=pid,           # ← String position ID
-                exit_price=exit_price,     # ← Float price
-                reason="manual_close_all"
+                position_id=pid,  # ← String position ID
+                exit_price=exit_price,  # ← Float price
+                reason="manual_close_all",
             )
 
         logger.info("All positions closed")
 
     def close_all_positions_for_asset(
-        self, 
-        asset: str, 
-        exit_price: float = None, 
-        reason: str = "manual_close_asset"
+        self, asset: str, exit_price: float = None, reason: str = "manual_close_asset"
     ) -> List[Dict]:
         """
         ✅ NEW: Close ALL open positions for a specific asset (e.g., BTC)
         Used by Telegram 'Close BTC' buttons to ensure total exit.
-        
+
         Args:
             asset: Asset name (e.g., "BTC", "GOLD")
             exit_price: Exit price (optional, will fetch if not provided)
             reason: Close reason
-        
+
         Returns:
             List of trade results for closed positions
         """
         logger.info(f"Closing ALL positions for {asset}...")
-        
+
         # Find all positions matching the asset
-        positions_to_close = [
-            p for p in self.positions.values() 
-            if p.asset == asset
-        ]
-        
+        positions_to_close = [p for p in self.positions.values() if p.asset == asset]
+
         if not positions_to_close:
             logger.warning(f"No positions found for {asset} to close.")
             return []
@@ -1326,52 +1336,53 @@ class PortfolioManager:
         for pos in positions_to_close:
             # Determine exit price if not provided
             current_exit_price = exit_price
-            
+
             if current_exit_price is None:
                 # Try to get real-time price from handlers
-                if hasattr(self, 'mt5_handler') and pos.mt5_ticket:
+                if hasattr(self, "mt5_handler") and pos.mt5_ticket:
                     try:
                         import MetaTrader5 as mt5
+
                         tick = mt5.symbol_info_tick(pos.symbol)
                         if tick:
                             current_exit_price = (tick.ask + tick.bid) / 2
                     except:
                         pass
-                
-                elif hasattr(self, 'binance_handler') and pos.binance_order_id:
+
+                elif hasattr(self, "binance_handler") and pos.binance_order_id:
                     try:
                         # Get from binance handler if available
                         # (you'll need to pass handlers to portfolio manager for this)
                         pass
                     except:
                         pass
-                
+
                 # Fallback to entry price if live price unavailable
                 if current_exit_price is None:
                     current_exit_price = pos.entry_price
-            
+
             # Close the individual position
             result = self.close_position(
                 position_id=pos.position_id,
                 exit_price=current_exit_price,
-                reason=reason
+                reason=reason,
             )
-            
+
             if result:
                 results.append(result)
-        
+
         logger.info(
             f"Successfully closed {len(results)}/{len(positions_to_close)} positions for {asset}"
         )
         return results
-    
+
     @handle_errors(
-    component="portfolio_manager",
-    severity=ErrorSeverity.ERROR,
-    notify=True,
-    reraise=False,
-    default_return=None
-)
+        component="portfolio_manager",
+        severity=ErrorSeverity.ERROR,
+        notify=True,
+        reraise=False,
+        default_return=None,
+    )
     def close_position(
         self,
         asset: str = None,
@@ -1381,7 +1392,7 @@ class PortfolioManager:
     ) -> Optional[Dict]:
         """
         ✅ FIXED: Close position - Validates exchange close before removing from portfolio
-        
+
         Returns:
             Trade result dict if successful, None if failed
         """
@@ -1407,29 +1418,33 @@ class PortfolioManager:
         # ================================================================
         exchange_closed = False
         close_error_msg = None
-        
+
         if not self.is_paper_mode:
             # Get the exchange for this asset
             asset_cfg = self.config["assets"].get(position.asset, {})
             exchange = asset_cfg.get("exchange", "binance")
-            
+
             # Close on MT5
             if exchange == "mt5" and position.mt5_ticket:
                 handler = self.execution_handlers.get("mt5")
                 if handler:
                     try:
-                        logger.info(f"[MT5] Attempting to close ticket {position.mt5_ticket}...")
+                        logger.info(
+                            f"[MT5] Attempting to close ticket {position.mt5_ticket}..."
+                        )
                         exchange_closed = handler._close_mt5_order(
                             ticket=position.mt5_ticket,
                             asset=position.asset,
-                            side=position.side
+                            side=position.side,
                         )
-                        
+
                         # ✅ FIX: If close failed, check why
                         if not exchange_closed:
                             # Check if market is open
-                            is_open, market_msg = handler._is_market_open_for_closing(position.symbol)
-                            
+                            is_open, market_msg = handler._is_market_open_for_closing(
+                                position.symbol
+                            )
+
                             if not is_open:
                                 close_error_msg = f"Market closed: {market_msg}"
                                 logger.error(
@@ -1440,46 +1455,54 @@ class PortfolioManager:
                                 )
                             else:
                                 close_error_msg = "Order rejection (check logs)"
-                            
+
                             # ✅ CRITICAL: Do NOT remove from portfolio if exchange close failed
                             return None
-                    
+
                     except Exception as e:
                         close_error_msg = f"Exception: {str(e)}"
-                        logger.error(f"[MT5] Error closing position: {e}", exc_info=True)
+                        logger.error(
+                            f"[MT5] Error closing position: {e}", exc_info=True
+                        )
                         # ✅ Do NOT remove from portfolio on error
                         return None
                 else:
                     close_error_msg = "MT5 handler not available"
                     logger.error("[MT5] Handler not available, cannot close position!")
                     return None
-            
+
             # Close on Binance
             elif exchange == "binance" and position.binance_order_id:
                 handler = self.execution_handlers.get("binance")
                 if handler:
                     try:
-                        logger.info(f"[BINANCE] Closing order {position.binance_order_id}...")
-                        exchange_closed = handler.close_position(
-                            symbol=position.symbol,
-                            side=position.side,
-                            quantity=position.quantity
+                        logger.info(
+                            f"[BINANCE] Closing order {position.binance_order_id}..."
                         )
-                        
+                        exchange_closed = handler._close_position(
+                        side=position.side,
+                        quantity=position.quantity,
+                        order_id=position.binance_order_id,  # Pass the order ID if available
+                    )
+
                         if not exchange_closed:
                             close_error_msg = "Binance order rejection"
-                            logger.error(f"[BINANCE] Failed to close order {position.binance_order_id}")
+                            logger.error(
+                                f"[BINANCE] Failed to close order {position.binance_order_id}"
+                            )
                             return None
-                    
+
                     except Exception as e:
                         close_error_msg = f"Exception: {str(e)}"
-                        logger.error(f"[BINANCE] Error closing position: {e}", exc_info=True)
+                        logger.error(
+                            f"[BINANCE] Error closing position: {e}", exc_info=True
+                        )
                         return None
                 else:
                     close_error_msg = "Binance handler not available"
                     logger.error("[BINANCE] Handler not available!")
                     return None
-        
+
         else:
             # Paper mode - always succeeds
             exchange_closed = True
@@ -1533,7 +1556,8 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "entry_time": position.entry_time,
             "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
+            "holding_time": (datetime.now() - position.entry_time).total_seconds()
+            / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
             "binance_order_id": position.binance_order_id,
@@ -1543,9 +1567,15 @@ class PortfolioManager:
         # ================================================================
         # ✅ STEP 4: LOG TO DATABASE
         # ================================================================
-        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+        if (
+            self.db_manager
+            and hasattr(position, "db_trade_id")
+            and position.db_trade_id
+        ):
             try:
-                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
+                holding_time = (
+                    datetime.now() - position.entry_time
+                ).total_seconds() / 3600
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,
@@ -1556,7 +1586,7 @@ class PortfolioManager:
                     final_quantity=position.quantity,
                     metadata={
                         "exit_time": datetime.now().isoformat(),
-                        "exchange_closed": exchange_closed
+                        "exchange_closed": exchange_closed,
                     },
                 )
                 logger.debug(f"[DB] Trade exit logged: {position.db_trade_id}")
@@ -1570,7 +1600,7 @@ class PortfolioManager:
         del self.positions[position_id]
 
         remaining_count = self.get_asset_position_count(position.asset, position.side)
-        
+
         logger.info(
             f"✓ Position closed successfully:\n"
             f"  Asset:     {position.asset} {position.side.upper()}\n"
@@ -1582,12 +1612,12 @@ class PortfolioManager:
         return trade_result
 
     @handle_errors(
-    component="portfolio_manager",
-    severity=ErrorSeverity.WARNING,
-    notify=False,  # Don't notify for update errors
-    reraise=False,
-    default_return=None
-)
+        component="portfolio_manager",
+        severity=ErrorSeverity.WARNING,
+        notify=False,  # Don't notify for update errors
+        reraise=False,
+        default_return=None,
+    )
     def update_positions(self, prices: Dict[str, float] = None):
         """Update all positions with current prices and exchange profit"""
         # Update exchange positions with real-time profit
@@ -1683,7 +1713,6 @@ class PortfolioManager:
                 pos.asset: pos.entry_price for pos in self.positions.values()
             }
 
-
         total_exposure = 0.0
         total_unrealized_pnl = 0.0
 
@@ -1777,9 +1806,9 @@ class PortfolioManager:
                     "binance_profit": (
                         pos.binance_profit if pos.binance_order_id else None
                     ),
-                    "leverage": getattr(pos, 'leverage', 1),
-                    "margin_type": getattr(pos, 'margin_type', "SPOT"),
-                    "is_futures": getattr(pos, 'is_futures', False),
+                    "leverage": getattr(pos, "leverage", 1),
+                    "margin_type": getattr(pos, "margin_type", "SPOT"),
+                    "is_futures": getattr(pos, "is_futures", False),
                 }
                 for pos in self.positions.values()
             },
@@ -1799,5 +1828,3 @@ class PortfolioManager:
             self.close_position(asset, exit_price, reason="shutdown")
 
         logger.info("All positions closed")
-
-
