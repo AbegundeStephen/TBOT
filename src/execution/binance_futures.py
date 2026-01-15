@@ -272,13 +272,62 @@ class BinanceFuturesHandler:
             # 2. ✅ FIX: Cancel existing stop orders BEFORE placing new one
             # ============================================================
             if stop_loss:
-                logger.info(f"[SL] Cancelling existing stop orders for {side_label}...")
-                self._cancel_existing_stop_orders(side)
+                logger.info(f"[SL] Preparing to place stop loss for {side_label}...")
                 
-                # Small delay to ensure cancellation is processed
-                time.sleep(0.2)
+                # Step 1: Cancel ALL existing stop orders (not just same side)
+                try:
+                    logger.info(f"[SL] Cancelling ALL existing stop orders...")
+                    cancelled_orders = self.client.futures_cancel_all_open_orders(symbol=self.symbol)
+                    
+                    if cancelled_orders:
+                        logger.info(f"[SL] ✓ Cancelled {len(cancelled_orders)} existing order(s)")
+                    else:
+                        logger.debug(f"[SL] No existing orders to cancel")
+                        
+                except Exception as e:
+                    # Error -2011 means "Unknown order sent" - no orders to cancel, which is fine
+                    if "-2011" in str(e) or "Unknown order" in str(e):
+                        logger.debug(f"[SL] No existing orders (expected)")
+                    else:
+                        logger.warning(f"[SL] Cancel error (continuing anyway): {e}")
                 
-                # Now place the new stop loss
+                # Step 2: Wait for cancellation to process on exchange
+                time.sleep(0.5)  # Increased from 0.2 to 0.5 seconds
+                
+                # Step 3: Verify no stop orders exist before placing new one
+                max_verification_attempts = 3
+                for verify_attempt in range(1, max_verification_attempts + 1):
+                    try:
+                        open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+                        stop_orders = [o for o in open_orders if o.get('type') == 'STOP_MARKET']
+                        
+                        if not stop_orders:
+                            logger.info(f"[SL] ✓ Verified: No stop orders exist (attempt {verify_attempt})")
+                            break
+                        else:
+                            logger.warning(
+                                f"[SL] ⚠️ Found {len(stop_orders)} existing stop order(s) "
+                                f"(attempt {verify_attempt}/{max_verification_attempts})"
+                            )
+                            
+                            # Try cancelling again
+                            for order in stop_orders:
+                                try:
+                                    self.client.futures_cancel_order(
+                                        symbol=self.symbol,
+                                        orderId=order['orderId']
+                                    )
+                                    logger.info(f"[SL] Cancelled lingering order {order['orderId']}")
+                                except Exception as cancel_err:
+                                    logger.error(f"[SL] Failed to cancel {order['orderId']}: {cancel_err}")
+                            
+                            time.sleep(0.5)
+                            
+                    except Exception as verify_err:
+                        logger.warning(f"[SL] Verification error: {verify_err}")
+                        break
+                
+                # Step 4: Validate and place stop loss
                 sl_side = SIDE_SELL if side == "long" else SIDE_BUY
                 
                 # Validate SL price
@@ -291,39 +340,87 @@ class BinanceFuturesHandler:
                     stop_loss = current_price * 1.03
                     stop_loss = self._round_price(stop_loss)
                 
-                # Place stop loss with retry logic
+                # Step 5: Place stop loss with enhanced retry logic
                 sl_success = False
+                sl_last_error = None
+                
                 for attempt in range(1, 4):
                     try:
+                        logger.info(f"[SL] Attempt {attempt}/3: Placing stop @ ${stop_loss:,.{self.price_precision}f}")
+                        
                         self.client.futures_create_order(
                             symbol=self.symbol,
                             side=sl_side,
                             type=FUTURE_ORDER_TYPE_STOP_MARKET,
                             stopPrice=stop_loss,
-                            closePosition=True
+                            closePosition=True  # This closes the entire position when hit
                         )
+                        
                         logger.info(f"  ✓ SL Placed: ${stop_loss:,.{self.price_precision}f}")
                         sl_success = True
                         break
+                        
                     except Exception as e:
-                        logger.warning(f"  ⚠️ SL Attempt {attempt}/3 failed: {e}")
-                        time.sleep(0.5)
+                        sl_last_error = str(e)
+                        
+                        # Check if it's the -4130 error (stop already exists)
+                        if "-4130" in sl_last_error:
+                            logger.error(
+                                f"  ❌ SL Attempt {attempt}/3 FAILED with -4130\n"
+                                f"  This means a stop order STILL exists on the exchange!\n"
+                                f"  Trying more aggressive cancellation..."
+                            )
+                            
+                            # Emergency: try to cancel ALL orders again
+                            try:
+                                self.client.futures_cancel_all_open_orders(symbol=self.symbol)
+                                time.sleep(1.0)  # Longer wait
+                            except:
+                                pass
+                                
+                        else:
+                            logger.warning(f"  ⚠️ SL Attempt {attempt}/3 failed: {e}")
+                        
+                        if attempt < 3:
+                            time.sleep(0.5 * attempt)  # Exponential backoff
                 
-                # 3. EMERGENCY FAILSAFE (unchanged)
+                # Step 6: Emergency failsafe
                 if not sl_success:
-                    logger.critical(f"[FUTURES] 🛑 CRITICAL: SL FAILED 3x! EMERGENCY CLOSE.")
+                    logger.critical(
+                        f"\n{'='*80}\n"
+                        f"🛑 CRITICAL: STOP LOSS PLACEMENT FAILED!\n"
+                        f"{'='*80}\n"
+                        f"Last Error: {sl_last_error}\n"
+                        f"Side: {side_label}\n"
+                        f"Quantity: {quantity:.{self.quantity_precision}f}\n"
+                        f"Entry: ${avg_price:,.2f}\n"
+                        f"\n"
+                        f"⚠️  POSITION IS NOW UNPROTECTED!\n"
+                        f"Executing EMERGENCY CLOSE to prevent unlimited loss...\n"
+                        f"{'='*80}\n"
+                    )
+                    
                     close_side = SIDE_SELL if side == "long" else SIDE_BUY
                     try:
-                        self.client.futures_create_order(
+                        emergency_order = self.client.futures_create_order(
                             symbol=self.symbol,
                             side=close_side,
                             type=FUTURE_ORDER_TYPE_MARKET,
                             quantity=quantity,
                             reduceOnly=True
                         )
-                        logger.critical(f"[FUTURES] ✓ EMERGENCY CLOSE SUCCESSFUL")
+                        logger.critical(
+                            f"[FUTURES] ✓ EMERGENCY CLOSE SUCCESSFUL\n"
+                            f"  Order ID: {emergency_order.get('orderId')}\n"
+                            f"  Reason: Stop loss placement failed after 3 attempts"
+                        )
                     except Exception as close_error:
-                        logger.critical(f"[FUTURES] ☠️ EMERGENCY CLOSE FAILED: {close_error}")
+                        logger.critical(
+                            f"[FUTURES] ☠️ EMERGENCY CLOSE ALSO FAILED!\n"
+                            f"  Error: {close_error}\n"
+                            f"  ⚠️  MANUAL INTERVENTION REQUIRED!\n"
+                            f"  Check Binance Futures UI immediately!"
+                        )
                     return None
             
             # 4. Place Take Profit (unchanged)
