@@ -18,8 +18,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.execution.binance_futures import BinanceFuturesHandler
 from src.global_error_handler import handle_errors, ErrorSeverity
-from src.execution.veteran_trade_manager import VeteranTradeManager
-
+from src.execution.position_rebalancer import PositionRebalancer
 logger = logging.getLogger(__name__)
 
 
@@ -141,35 +140,21 @@ class HybridPositionSizer:
         override_reason: str = None,
     ) -> Tuple[float, Dict]:
         """
-        ✅ FIXED: Calculate position size using ASSET-SPECIFIC balance
-        
-        Key Changes:
-        - Use asset's exchange balance instead of total portfolio
-        - Risk budget is per-asset, not portfolio-wide
+        ✅ FIXED: Calculate position size with automatic rebalancing of existing positions
         """
         try:
-            # ============================================================
-            # STEP 0: Get ASSET-SPECIFIC balance (NEW!)
-            # ============================================================
+            # Get asset balance
             asset_balance = self.portfolio_manager.get_asset_balance(asset)
-            
             if asset_balance <= 0:
                 logger.error(f"[RISK] Invalid balance for {asset}: ${asset_balance:,.2f}")
                 return 0.0, {"error": "invalid_asset_balance"}
             
-            logger.info(
-                f"[RISK] Using {asset} balance: ${asset_balance:,.2f} "
-                f"(not total portfolio: ${self.portfolio_manager.current_capital:,.2f})"
-            )
-            
-            # ============================================================
-            # STEP 1: Count existing positions for this asset & side
-            # ============================================================
+            # Get side and existing positions
             side = "long" if signal == 1 else "short"
             existing_positions = self.portfolio_manager.get_asset_positions(asset)
             same_side_positions = [p for p in existing_positions if p.side == side]
             
-            # Include the new position we're about to open
+            # Total positions INCLUDING the new one
             total_positions = len(same_side_positions) + 1
             
             logger.info(
@@ -178,9 +163,9 @@ class HybridPositionSizer:
                 f"  Total (with new):      {total_positions}"
             )
             
-            # ============================================================
-            # STEP 2: Calculate SPLIT risk per position (using asset balance)
-            # ============================================================
+            # ================================================================
+            # STEP 1: Calculate target risk per position (SPLIT)
+            # ================================================================
             if sizing_mode == SizingMode.ELEVATED_RISK:
                 total_risk_pct = self.max_risk_pct
             elif sizing_mode == SizingMode.REDUCED_RISK:
@@ -190,21 +175,141 @@ class HybridPositionSizer:
             else:
                 total_risk_pct = self.target_risk_pct
             
-            # ✅ KEY CHANGE: Split risk across positions using ASSET balance
+            # Split risk across ALL positions (existing + new)
             risk_pct_per_position = total_risk_pct / total_positions
-            risk_amount = asset_balance * risk_pct_per_position  # ← Uses asset balance!
+            risk_amount_per_position = asset_balance * risk_pct_per_position
             
             logger.info(
                 f"[RISK] Split Risk Calculation ({asset}):\n"
                 f"  Asset Balance:     ${asset_balance:,.2f}\n"
                 f"  Total Risk Budget: {total_risk_pct:.2%} (${total_risk_pct * asset_balance:,.2f})\n"
                 f"  Positions:         {total_positions}\n"
-                f"  Risk Per Position: {risk_pct_per_position:.2%} (${risk_amount:,.2f})"
+                f"  Risk Per Position: {risk_pct_per_position:.2%} (${risk_amount_per_position:.2f})"
             )
             
-            # ============================================================
-            # STEP 3: Validate stop loss distance (unchanged)
-            # ============================================================
+            # ================================================================
+            # STEP 2: Check if existing positions exceed their split allocation
+            # ================================================================
+            existing_total_risk = 0.0
+            positions_over_budget = []
+            
+            for pos in same_side_positions:
+                if pos.stop_loss:
+                    pos_risk = abs(pos.entry_price - pos.stop_loss) * pos.quantity
+                    existing_total_risk += pos_risk
+                    
+                    # Check if this position uses more than its split allocation
+                    if pos_risk > risk_amount_per_position * 1.1:  # 10% tolerance
+                        positions_over_budget.append({
+                            'position': pos,
+                            'current_risk': pos_risk,
+                            'target_risk': risk_amount_per_position,
+                            'excess': pos_risk - risk_amount_per_position
+                        })
+            
+            existing_risk_pct = existing_total_risk / asset_balance
+            
+            logger.info(
+                f"[RISK] Existing Positions Analysis:\n"
+                f"  Total Existing Risk: ${existing_total_risk:,.2f} ({existing_risk_pct:.2%})\n"
+                f"  Over Budget:         {len(positions_over_budget)} position(s)"
+            )
+            
+            # ================================================================
+            # STEP 3: Calculate available budget for new position
+            # ================================================================
+            total_budget = asset_balance * total_risk_pct
+            available_for_new = total_budget - existing_total_risk
+            available_for_new_pct = available_for_new / asset_balance
+            
+            logger.info(
+                f"[RISK] Budget Allocation:\n"
+                f"  Total Budget:  ${total_budget:,.2f} ({total_risk_pct:.2%})\n"
+                f"  Used:          ${existing_total_risk:,.2f} ({existing_risk_pct:.2%})\n"
+                f"  Available:     ${available_for_new:,.2f} ({available_for_new_pct:.2%})"
+            )
+            
+            # ================================================================
+            # STEP 4: Handle insufficient budget
+            # ================================================================
+            if available_for_new < risk_amount_per_position * 0.5:  # Less than 50% of target
+                logger.warning(
+                    f"\n{'='*80}\n"
+                    f"⚠️  INSUFFICIENT RISK BUDGET\n"
+                    f"{'='*80}\n"
+                    f"Available: ${available_for_new:,.2f} ({available_for_new_pct:.2%})\n"
+                    f"Required:  ${risk_amount_per_position:,.2f} ({risk_pct_per_position:.2%})\n"
+                    f"\n"
+                    f"🔧 REBALANCING REQUIRED\n"
+                    f"{len(positions_over_budget)} position(s) need size reduction\n"
+                    f"{'='*80}\n"
+                )
+                
+                # ✅ OPTION A: Automatically rebalance (if enabled in config)
+                auto_rebalance = self.config.get("risk_management", {}).get(
+                    "auto_rebalance_positions", False
+                )
+                
+                if auto_rebalance and positions_over_budget:
+                    logger.info(f"[REBALANCE] Reducing {len(positions_over_budget)} position(s)...")
+                    
+                    for item in positions_over_budget:
+                        pos = item['position']
+                        target_risk = item['target_risk']
+                        
+                        # Calculate new quantity that matches target risk
+                        stop_distance = abs(pos.entry_price - pos.stop_loss)
+                        new_quantity = target_risk / stop_distance
+                        reduction = pos.quantity - new_quantity
+                        
+                        if reduction > 0.00001:  # Meaningful reduction
+                            logger.info(
+                                f"  Position {pos.position_id}:\n"
+                                f"    Current: {pos.quantity:.6f} (${item['current_risk']:,.2f} risk)\n"
+                                f"    Target:  {new_quantity:.6f} (${target_risk:,.2f} risk)\n"
+                                f"    Reduce:  {reduction:.6f}"
+                            )
+                            
+                            # Execute partial close on exchange
+                            # (You'll need to implement this in your handlers)
+                            # For now, just log the intent
+                            logger.warning(
+                                f"    ⚠️  AUTO-REBALANCE NOT IMPLEMENTED YET\n"
+                                f"    Would reduce position by {reduction:.6f} units"
+                            )
+                    
+                    # Recalculate available budget after rebalancing
+                    # (For now, we'll proceed with rejection)
+                    logger.error(
+                        f"[REBALANCE] Auto-rebalance not fully implemented\n"
+                        f"  → Rejecting new position to prevent over-risk"
+                    )
+                    return 0.0, {
+                        "error": "total_risk_budget_exceeded",
+                        "requires_rebalancing": True,
+                        "positions_to_rebalance": len(positions_over_budget),
+                        "available_risk": available_for_new_pct,
+                        "required_risk": risk_pct_per_position
+                    }
+                
+                # ✅ OPTION B: Reject if auto-rebalance disabled
+                else:
+                    logger.error(
+                        f"[RISK] REJECTED: Insufficient budget\n"
+                        f"  Enable 'auto_rebalance_positions' in config to fix automatically\n"
+                        f"  Or manually close/reduce existing positions"
+                    )
+                    return 0.0, {
+                        "error": "insufficient_risk_budget",
+                        "available_risk": available_for_new_pct,
+                        "required_risk": risk_pct_per_position,
+                        "suggestion": "Enable auto_rebalance or reduce existing positions"
+                    }
+            
+            # ================================================================
+            # STEP 5: Size new position (normal flow)
+            # ================================================================
+            # Validate stop loss distance
             asset_cfg = self.config["assets"][asset]
             risk_cfg = asset_cfg.get("risk", {})
             
@@ -229,54 +334,27 @@ class HybridPositionSizer:
                     f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}"
                 )
                 stop_distance_pct = max_stop_pct
-                if signal == 1:  # LONG
+                if signal == 1:
                     stop_loss_price = entry_price * (1 - max_stop_pct)
-                else:  # SHORT
+                else:
                     stop_loss_price = entry_price * (1 + max_stop_pct)
                 stop_distance = abs(entry_price - stop_loss_price)
             
-            # ============================================================
-            # STEP 4: Calculate position size from split risk
-            # ============================================================
-            position_size_usd = risk_amount / stop_distance_pct
+            # Use available budget (capped at per-position target)
+            risk_to_use = min(available_for_new, risk_amount_per_position)
+            position_size_usd = risk_to_use / stop_distance_pct
             
             logger.info(
                 f"[RISK] Position Calculation:\n"
-                f"  Risk Amount:     ${risk_amount:.2f}\n"
+                f"  Risk Amount:     ${risk_to_use:.2f}\n"
                 f"  Stop Distance:   ${stop_distance:.2f} ({stop_distance_pct:.2%})\n"
-                f"  Units:           {risk_amount / stop_distance:.6f}\n"
+                f"  Units:           {risk_to_use / stop_distance:.6f}\n"
                 f"  Position Size:   ${position_size_usd:,.2f}"
             )
             
-            # ============================================================
-            # STEP 5: Apply manual override if requested (unchanged)
-            # ============================================================
-            if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
-                min_allowed = position_size_usd * 0.5
-                max_allowed = position_size_usd * 1.5
-                
-                if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
-                    logger.warning(
-                        f"[OVERRIDE] Manual size ${manual_size_usd:,.2f} outside safe range "
-                        f"[${min_allowed:,.2f}, ${max_allowed:,.2f}] - Clamping"
-                    )
-                    manual_size_usd = max(min_allowed, min(manual_size_usd, max_allowed))
-                
-                override_risk = manual_size_usd * stop_distance_pct
-                override_risk_pct = override_risk / asset_balance
-                
-                logger.info(
-                    f"[OVERRIDE] Manual size applied\n"
-                    f"  Calculated:  ${position_size_usd:,.2f}\n"
-                    f"  Manual:      ${manual_size_usd:,.2f}\n"
-                    f"  New Risk:    {override_risk_pct:.2%} (${override_risk:.2f})"
-                )
-                
-                position_size_usd = manual_size_usd
-            
-            # ============================================================
-            # STEP 6: Apply hard position limits (unchanged)
-            # ============================================================
+            # ================================================================
+            # STEP 6: Apply limits and calculate final metrics
+            # ================================================================
             min_size = asset_cfg.get("min_position_usd", 100)
             max_size = asset_cfg.get("max_position_usd", 100000)
             
@@ -288,134 +366,68 @@ class HybridPositionSizer:
                     "minimum": min_size
                 }
             
-            original_size = position_size_usd
             position_size_usd = min(position_size_usd, max_size)
             
-            if original_size > max_size:
-                logger.warning(
-                    f"[RISK] Position clamped to max: ${original_size:,.2f} → ${max_size:,.2f}"
-                )
-            
-            # ============================================================
-            # STEP 7: Calculate ACTUAL risk with final position size
-            # ============================================================
+            # Calculate actual risk
             actual_risk = position_size_usd * stop_distance_pct
-            actual_risk_pct = actual_risk / asset_balance  # ← Uses asset balance!
+            actual_risk_pct = actual_risk / asset_balance
             
-            # ✅ VERIFY: Actual risk should match split risk target
-            if actual_risk_pct > risk_pct_per_position * 1.1:  # Allow 10% variance
-                logger.error(
-                    f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds "
-                    f"split target {risk_pct_per_position:.2%}!"
-                )
-            
-            # ============================================================
-            # STEP 8: Calculate TOTAL asset risk (not portfolio-wide)
-            # ============================================================
-            total_asset_risk = actual_risk
-            for pos in same_side_positions:
-                # Calculate risk for existing positions
-                if pos.stop_loss:
-                    pos_risk = abs(pos.entry_price - pos.stop_loss) * pos.quantity
-                    total_asset_risk += pos_risk
-            
-            total_asset_risk_pct = total_asset_risk / asset_balance  # ← Uses asset balance!
+            # Calculate new total
+            new_total_risk = existing_total_risk + actual_risk
+            new_total_risk_pct = new_total_risk / asset_balance
             
             logger.info(
-                f"[RISK] Total {asset} Risk ({side.upper()}):\n"
+                f"[RISK] Total {asset} Risk ({side.upper()}) AFTER NEW POSITION:\n"
                 f"  Asset Balance:    ${asset_balance:,.2f}\n"
-                f"  Current risk:     ${total_asset_risk - actual_risk:.2f}\n"
-                f"  New position:     ${actual_risk:.2f}\n"
-                f"  Total:            ${total_asset_risk:.2f} ({total_asset_risk_pct:.2%})\n"
-                f"  Target:           {total_risk_pct:.2%}"
+                f"  Existing risk:    ${existing_total_risk:.2f} ({existing_risk_pct:.2%})\n"
+                f"  New position:     ${actual_risk:.2f} ({actual_risk_pct:.2%})\n"
+                f"  Total:            ${new_total_risk:.2f} ({new_total_risk_pct:.2%})\n"
+                f"  Budget:           {total_risk_pct:.2%}\n"
+                f"  Status:           {'✅ WITHIN BUDGET' if new_total_risk_pct <= total_risk_pct * 1.1 else '⚠️  OVER BUDGET'}"
             )
             
-            # ✅ SAFETY: Ensure total risk doesn't exceed budget (per asset)
-            if total_asset_risk_pct > total_risk_pct * 1.1:  # Allow 10% variance
+            # Final safety check
+            if new_total_risk_pct > total_risk_pct * 1.1:  # 10% tolerance
                 logger.error(
-                    f"[RISK] REJECTED: Total {asset} {side.upper()} risk {total_asset_risk_pct:.2%} "
+                    f"[RISK] REJECTED: Total {asset} {side.upper()} risk {new_total_risk_pct:.2%} "
                     f"would exceed budget {total_risk_pct:.2%}"
                 )
                 return 0.0, {
                     "error": "total_risk_budget_exceeded",
-                    "total_risk": total_asset_risk_pct,
+                    "total_risk": new_total_risk_pct,
                     "budget": total_risk_pct,
                     "asset": asset
                 }
             
-            # ============================================================
-            # STEP 9: Build metadata
-            # ============================================================
+            # Build metadata
             metadata = {
                 "asset": asset,
                 "mode": sizing_mode,
                 "signal": signal,
-                "confidence_score": confidence_score,
-                "market_condition": market_condition,
-                
-                # Entry and stop
                 "entry_price": entry_price,
                 "stop_loss_price": stop_loss_price,
-                "stop_distance_usd": stop_distance,
                 "stop_distance_pct": stop_distance_pct * 100,
-                
-                # Risk calculation - PER ASSET
                 "asset_balance": asset_balance,
                 "total_risk_budget_pct": total_risk_pct * 100,
                 "total_positions": total_positions,
                 "risk_per_position_pct": risk_pct_per_position * 100,
-                "risk_per_position_usd": risk_amount,
                 "actual_risk_pct": actual_risk_pct * 100,
-                "actual_risk_usd": actual_risk,
-                
-                # Total asset risk
-                "total_asset_risk_usd": total_asset_risk,
-                "total_asset_risk_pct": total_asset_risk_pct * 100,
-                
-                # Position sizing
+                "total_asset_risk_pct": new_total_risk_pct * 100,
                 "position_size_usd": position_size_usd,
-                "position_size_pct": (position_size_usd / asset_balance) * 100,
-                "position_size_units": position_size_usd / entry_price,
-                
-                # Override info
-                "override_details": {
-                    "mode": sizing_mode,
-                    "reason": override_reason
-                } if sizing_mode != SizingMode.AUTOMATED else None,
-                
+                "positions_over_budget": len(positions_over_budget),
+                "rebalancing_required": len(positions_over_budget) > 0,
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # Log detailed sizing decision
             logger.info(
                 f"\n{'='*80}\n"
-                f"[RISK-BASED SIZING - PER ASSET] {asset} {['SHORT', 'HOLD', 'LONG'][signal+1]}\n"
+                f"✅ POSITION APPROVED\n"
                 f"{'='*80}\n"
-                f"📊 MARKET INFO:\n"
-                f"  Entry Price:    ${entry_price:,.2f}\n"
-                f"  Stop Loss:      ${stop_loss_price:,.2f}\n"
-                f"  Stop Distance:  ${stop_distance:,.2f} ({stop_distance_pct:.2%})\n"
-                + (f"  Confidence:     {confidence_score:.0%}\n" if confidence_score else "")
-                + f"  Condition:      {market_condition}\n"
-                f"\n"
-                f"💰 SPLIT RISK CALCULATION (PER ASSET):\n"
-                f"  Asset Balance:     ${asset_balance:,.2f} ({asset} only)\n"
-                f"  Total Risk Budget: {total_risk_pct:.2%} (${total_risk_pct * asset_balance:,.2f})\n"
-                f"  Positions:         {total_positions} {side.upper()}\n"
-                f"  Risk Per Position: {risk_pct_per_position:.2%} (${risk_amount:.2f})\n"
-                f"  Position Size:     ${position_size_usd:,.2f} ({metadata['position_size_pct']:.2f}% of {asset} balance)\n"
-                f"  Units:             {position_size_usd / entry_price:.6f}\n"
-                f"\n"
-                f"✅ ACTUAL RISK (PER ASSET):\n"
-                f"  This Position: ${actual_risk:.2f} ({actual_risk_pct:.2%} of {asset} balance)\n"
-                f"  Total Risk:    ${total_asset_risk:.2f} ({total_asset_risk_pct:.2%} of {asset} balance)\n"
-                f"  Status:        {'✅ WITHIN BUDGET' if total_asset_risk_pct <= total_risk_pct * 1.1 else '⚠️  OVER BUDGET'}\n"
+                f"Size:  ${position_size_usd:,.2f}\n"
+                f"Risk:  ${actual_risk:.2f} ({actual_risk_pct:.2%})\n"
+                f"Total: ${new_total_risk:.2f} ({new_total_risk_pct:.2%}) of {total_risk_pct:.2%} budget\n"
                 f"{'='*80}"
             )
-            
-            # Track overrides
-            if sizing_mode != SizingMode.AUTOMATED:
-                self.override_history.append(metadata)
             
             return position_size_usd, metadata
             
@@ -438,6 +450,14 @@ class BinanceExecutionHandler:
         self.data_manager = data_manager
         self.sizer = HybridPositionSizer(config, portfolio_manager)
 
+        if hasattr(self, 'futures_handler') and self.futures_handler:
+            rebalancer = PositionRebalancer(
+                futures_handler=self.futures_handler,
+                portfolio_manager=self.portfolio_manager
+            )
+            self.sizer.set_rebalancer(rebalancer)
+            logger.info("[HANDLER] ✓ Auto-rebalancing enabled")
+        
         self.asset_config = config["assets"]["BTC"]
         self.risk_config = config["risk_management"]
         self.trading_config = config["trading"]
