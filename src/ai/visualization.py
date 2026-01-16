@@ -1064,7 +1064,7 @@ class TelegramChartSender:
                 logger.error("[TELEGRAM] Chart generation failed")
                 return
 
-            # Prepare caption (ASCII symbols)
+            # Prepare caption (ASCII symbols) - escape Markdown special chars
             signal_type = (
                 "[+] BUY" if signal == 1 else "[-] SELL" if signal == -1 else "[=] HOLD"
             )
@@ -1072,12 +1072,43 @@ class TelegramChartSender:
             regime = details.get("regime", "UNKNOWN")
             reasoning = details.get("reasoning", "N/A")
 
+            # Escape Markdown special characters in dynamic content
+            def escape_markdown(text: str) -> str:
+                """Escape special Markdown characters"""
+                special_chars = [
+                    "_",
+                    "*",
+                    "[",
+                    "]",
+                    "(",
+                    ")",
+                    "~",
+                    "`",
+                    ">",
+                    "#",
+                    "+",
+                    "-",
+                    "=",
+                    "|",
+                    "{",
+                    "}",
+                    ".",
+                    "!",
+                ]
+                for char in special_chars:
+                    text = text.replace(char, f"\\{char}")
+                return text
+
+            asset_escaped = escape_markdown(asset_name)
+            regime_escaped = escape_markdown(regime)
+            reasoning_escaped = escape_markdown(reasoning[:100])
+
             caption = (
-                f"*{asset_name} AI Decision Chart*\n\n"
+                f"*{asset_escaped} AI Decision Chart*\n\n"
                 f"Signal: {signal_type}\n"
                 f"Quality: {quality:.1%}\n"
-                f"Regime: {regime}\n"
-                f"Reasoning: {reasoning[:100]}\n\n"
+                f"Regime: {regime_escaped}\n"
+                f"Reasoning: {reasoning_escaped}\n\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
