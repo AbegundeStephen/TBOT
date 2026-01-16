@@ -472,44 +472,20 @@ class BinanceFuturesHandler:
             logger.error(f"[FUTURES] Failed to execute position: {e}", exc_info=True)
             return None
 
-    def close_short_position(
-        self, 
-        quantity: float = None,
-        order_id: int = None
-    ) -> bool:
-        """
-        Close a SHORT position (buy back)
-        """
-        return self._close_position(
-            side="short",
-            quantity=quantity,
-            order_id=order_id
-        )
+    def close_short_position(self, quantity: float = None, order_id: int = None) -> bool:
+        """Close a SHORT position (buy back)"""
+        return self._close_position(side="short", quantity=quantity, order_id=order_id)
 
-    def close_long_position(
-        self, 
-        quantity: float = None,
-        order_id: int = None
-    ) -> bool:
-        """
-        Close a LONG position (sell back)
-        """
-        return self._close_position(
-            side="long",
-            quantity=quantity,
-            order_id=order_id
-        )
+    def close_long_position(self, quantity: float = None, order_id: int = None) -> bool:
+        """Close a LONG position (sell back)"""
+        return self._close_position(side="long", quantity=quantity, order_id=order_id)
 
-    def _close_position(
-        self,
-        side: str,
-        quantity: float = None,
-        order_id: int = None
-    ) -> bool:
+    def _close_position(self, side: str, quantity: float = None, order_id: int = None) -> bool:
         """
-        Close LONG or SHORT position
+        ✅ FIXED: Close LONG or SHORT position with detailed error reporting
         """
         try:
+            # Step 1: Get position info if quantity not provided
             if quantity is None:
                 position = self.get_position_info(side=side)
                 if position:
@@ -527,41 +503,77 @@ class BinanceFuturesHandler:
                     logger.warning("[FUTURES] No open position found")
                     return False
             
-            # Round quantity
+            # Step 2: Round quantity to valid precision
             quantity = self._round_quantity(quantity)
             
             close_side = SIDE_SELL if side == "long" else SIDE_BUY
             side_label = side.upper()
             
-            logger.info(f"[FUTURES] Closing {side_label}: {quantity:.{self.quantity_precision}f} {self.symbol}")
-            
-            order = self.client.futures_create_order(
-                symbol=self.symbol,
-                side=close_side,
-                type=FUTURE_ORDER_TYPE_MARKET,
-                quantity=quantity,
-                reduceOnly=True
-            )
-            
             logger.info(
-                f"[FUTURES] ✓ {side_label} closed\n"
-                f"  Order ID: {order.get('orderId')}\n"
-                f"  Quantity: {quantity:.{self.quantity_precision}f} BTC\n"
-                f"  Exit:     ${float(order.get('avgPrice', 0)):,.2f}\n"
-                f"  Status:   {order.get('status')}"
+                f"[FUTURES] Closing {side_label}: {quantity:.{self.quantity_precision}f} {self.symbol}"
             )
             
-            # Cancel remaining SL/TP orders
+            # Step 3: Execute market close order with reduceOnly=True
             try:
-                self.client.futures_cancel_all_open_orders(symbol=self.symbol)
-                logger.debug("[FUTURES] Cancelled SL/TP orders")
-            except Exception as e:
-                logger.debug(f"[FUTURES] No orders to cancel: {e}")
-            
-            return True
+                order = self.client.futures_create_order(
+                    symbol=self.symbol,
+                    side=close_side,
+                    type=FUTURE_ORDER_TYPE_MARKET,
+                    quantity=quantity,
+                    reduceOnly=True  # ← Critical: This ensures we're closing, not opening
+                )
+                
+                logger.info(
+                    f"[FUTURES] ✓ {side_label} closed\n"
+                    f"  Order ID:  {order.get('orderId')}\n"
+                    f"  Quantity:  {quantity:.{self.quantity_precision}f} BTC\n"
+                    f"  Exit:      ${float(order.get('avgPrice', 0)):,.2f}\n"
+                    f"  Status:    {order.get('status')}"
+                )
+                
+                # Step 4: Cancel any remaining SL/TP orders
+                try:
+                    cancelled = self.client.futures_cancel_all_open_orders(symbol=self.symbol)
+                    if cancelled:
+                        logger.debug(f"[FUTURES] Cancelled {len(cancelled)} remaining order(s)")
+                except Exception as e:
+                    # -2011 means no orders to cancel, which is fine
+                    if "-2011" not in str(e):
+                        logger.debug(f"[FUTURES] Cancel orders: {e}")
+                
+                return True
+                
+            except Exception as order_error:
+                logger.error(
+                    f"[FUTURES] ❌ Order execution failed\n"
+                    f"  Side:     {side_label}\n"
+                    f"  Quantity: {quantity:.{self.quantity_precision}f}\n"
+                    f"  Error:    {str(order_error)}"
+                )
+                
+                # Check if it's a known error
+                error_str = str(order_error)
+                if "ReduceOnly Order is rejected" in error_str:
+                    logger.error(
+                        f"[FUTURES] No position exists to close!\n"
+                        f"  This usually means position was already closed manually"
+                    )
+                elif "Insufficient balance" in error_str:
+                    logger.error(f"[FUTURES] Insufficient balance to close position")
+                elif "Invalid quantity" in error_str:
+                    logger.error(
+                        f"[FUTURES] Invalid quantity: {quantity:.{self.quantity_precision}f}\n"
+                        f"  Min: {self.min_qty}, Step: {self.step_size}"
+                    )
+                
+                return False
             
         except Exception as e:
-            logger.error(f"[FUTURES] Failed to close {side.upper()}: {e}")
+            logger.error(
+                f"[FUTURES] ❌ Failed to close {side.upper()} position\n"
+                f"  Error: {str(e)}",
+                exc_info=True
+            )
             return False
         
     def _cancel_existing_stop_orders(self, side: str) -> bool:
@@ -893,30 +905,64 @@ def patch_close_position_method(handler):
         """
         
         # If Futures enabled, use it for both directions
-        if hasattr(handler, 'futures_handler'):
+        if hasattr(handler, 'futures_handler') and handler.futures_handler:
             try:
                 side = position.side
-                logger.info(f"[FUTURES] Closing {side.upper()} position via Futures API")
+                quantity = position.quantity
+                order_id = position.binance_order_id
                 
-                # Get P&L from Futures
+                logger.info(
+                    f"[FUTURES] Closing {side.upper()} position via Futures API\n"
+                    f"  Position ID: {position.position_id}\n"
+                    f"  Order ID:    {order_id}\n"
+                    f"  Quantity:    {quantity:.6f}\n"
+                    f"  Reason:      {reason}"
+                )
+                
+                # Get current P&L from Futures before closing
                 futures_position = handler.futures_handler.get_position_info(side=side)
-                futures_pnl = float(futures_position.get('unRealizedProfit', 0)) if futures_position else 0
+                if futures_position:
+                    futures_pnl = float(futures_position.get('unRealizedProfit', 0))
+                    logger.info(f"  Unrealized P&L: ${futures_pnl:,.2f}")
+                else:
+                    logger.warning(f"  Could not fetch Futures position info")
+                    futures_pnl = 0
                 
-                # Close on Futures
+                # ✅ CRITICAL FIX: Close on Futures with proper error handling
+                success = False
+                
                 if side == "long":
                     success = handler.futures_handler.close_long_position(
-                        quantity=position.quantity,
-                        order_id=position.binance_order_id
+                        quantity=quantity,
+                        order_id=order_id
+                    )
+                elif side == "short":
+                    success = handler.futures_handler.close_short_position(
+                        quantity=quantity,
+                        order_id=order_id
                     )
                 else:
-                    success = handler.futures_handler.close_short_position(
-                        quantity=position.quantity,
-                        order_id=position.binance_order_id
-                    )
-                
-                if not success:
-                    logger.error(f"[FUTURES] Failed to close {side.upper()} position")
+                    logger.error(f"[FUTURES] Invalid side: {side}")
                     return False
+                
+                # ✅ Check if close was successful
+                if not success:
+                    logger.error(
+                        f"[FUTURES] ❌ Failed to close {side.upper()} position\n"
+                        f"  Position ID: {position.position_id}\n"
+                        f"  Order ID:    {order_id}\n"
+                        f"  Quantity:    {quantity:.6f}\n"
+                        f"  Reason:      Futures API returned False\n"
+                        f"  Action:      Position remains open on exchange"
+                    )
+                    return False
+                
+                # ✅ Success - log details
+                logger.info(
+                    f"[FUTURES] ✅ {side.upper()} position closed successfully\n"
+                    f"  Position ID: {position.position_id}\n"
+                    f"  Final P&L:   ${futures_pnl:,.2f}"
+                )
                 
                 # Close in portfolio
                 trade_result = handler.portfolio_manager.close_position(
@@ -926,19 +972,28 @@ def patch_close_position_method(handler):
                 )
                 
                 if trade_result:
-                    logger.info(f"[OK] {side.upper()} position closed successfully")
-                    logger.info(f"  Futures P&L: ${futures_pnl:,.2f}")
+                    logger.info(f"[OK] Portfolio updated after {side.upper()} close")
                     return True
                 else:
-                    logger.error("[FAIL] Portfolio close failed")
+                    logger.error(
+                        f"[FAIL] Portfolio close failed for {side.upper()}\n"
+                        f"  Warning: Position closed on exchange but not in portfolio!"
+                    )
                     return False
                 
             except Exception as e:
-                logger.error(f"[FUTURES] Error closing {position.side.upper()}: {e}", exc_info=True)
+                logger.error(
+                    f"[FUTURES] ❌ Exception closing {position.side.upper()} position\n"
+                    f"  Position ID: {position.position_id}\n"
+                    f"  Error:       {str(e)}\n"
+                    f"  Traceback:",
+                    exc_info=True
+                )
                 return False
         
         # Fallback to original method (Spot) if Futures disabled
         else:
+            logger.warning(f"[FUTURES] Handler not available, using fallback method")
             return original_close_position(
                 position=position,
                 current_price=current_price,
@@ -949,6 +1004,7 @@ def patch_close_position_method(handler):
     # Replace method
     handler._close_position = _close_position_with_futures
     logger.info("[FUTURES] _close_position method patched for LONG+SHORT")
+
 
 
 def enable_futures_for_binance_handler(handler):
