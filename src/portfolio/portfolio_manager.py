@@ -1384,11 +1384,11 @@ class PortfolioManager:
         default_return=None,
     )
     @handle_errors(
-    component="portfolio_manager",
-    severity=ErrorSeverity.ERROR,
-    notify=True,
-    reraise=False,
-    default_return=None,
+        component="portfolio_manager",
+        severity=ErrorSeverity.ERROR,
+        notify=True,
+        reraise=False,
+        default_return=None,
     )
     def close_position(
         self,
@@ -1433,7 +1433,9 @@ class PortfolioManager:
                 handler = self.execution_handlers.get("mt5")
                 if handler:
                     try:
-                        logger.info(f"[MT5] Attempting to close ticket {position.mt5_ticket}...")
+                        logger.info(
+                            f"[MT5] Attempting to close ticket {position.mt5_ticket}..."
+                        )
                         exchange_closed = handler._close_mt5_order(
                             ticket=position.mt5_ticket,
                             asset=position.asset,
@@ -1441,7 +1443,9 @@ class PortfolioManager:
                         )
 
                         if not exchange_closed:
-                            is_open, market_msg = handler._is_market_open_for_closing(position.symbol)
+                            is_open, market_msg = handler._is_market_open_for_closing(
+                                position.symbol
+                            )
                             if not is_open:
                                 close_error_msg = f"Market closed: {market_msg}"
                                 logger.error(
@@ -1456,7 +1460,9 @@ class PortfolioManager:
 
                     except Exception as e:
                         close_error_msg = f"Exception: {str(e)}"
-                        logger.error(f"[MT5] Error closing position: {e}", exc_info=True)
+                        logger.error(
+                            f"[MT5] Error closing position: {e}", exc_info=True
+                        )
                         return None
                 else:
                     close_error_msg = "MT5 handler not available"
@@ -1468,25 +1474,31 @@ class PortfolioManager:
                 handler = self.execution_handlers.get("binance")
                 if handler:
                     try:
-                        logger.info(f"[BINANCE] Closing order {position.binance_order_id}...")
-                        
+                        logger.info(
+                            f"[BINANCE] Closing order {position.binance_order_id}..."
+                        )
+
                         # ✅ CRITICAL FIX: Pass the POSITION object, not individual params
                         # The patched _close_position expects: (position, current_price, asset_name, reason)
                         exchange_closed = handler._close_position(
-                            position=position,              # ← Pass Position object
-                            current_price=exit_price,       # ← Current/exit price
-                            asset_name=position.asset,      # ← Asset name
-                            reason=reason                    # ← Close reason
+                            position=position,  # ← Pass Position object
+                            current_price=exit_price,  # ← Current/exit price
+                            asset_name=position.asset,  # ← Asset name
+                            reason=reason,  # ← Close reason
                         )
 
                         if not exchange_closed:
                             close_error_msg = "Binance order rejection"
-                            logger.error(f"[BINANCE] Failed to close order {position.binance_order_id}")
+                            logger.error(
+                                f"[BINANCE] Failed to close order {position.binance_order_id}"
+                            )
                             return None
 
                     except Exception as e:
                         close_error_msg = f"Exception: {str(e)}"
-                        logger.error(f"[BINANCE] Error closing position: {e}", exc_info=True)
+                        logger.error(
+                            f"[BINANCE] Error closing position: {e}", exc_info=True
+                        )
                         return None
                 else:
                     close_error_msg = "Binance handler not available"
@@ -1546,7 +1558,8 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "entry_time": position.entry_time,
             "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
+            "holding_time": (datetime.now() - position.entry_time).total_seconds()
+            / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
             "binance_order_id": position.binance_order_id,
@@ -1556,9 +1569,15 @@ class PortfolioManager:
         # ================================================================
         # ✅ STEP 4: LOG TO DATABASE
         # ================================================================
-        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+        if (
+            self.db_manager
+            and hasattr(position, "db_trade_id")
+            and position.db_trade_id
+        ):
             try:
-                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
+                holding_time = (
+                    datetime.now() - position.entry_time
+                ).total_seconds() / 3600
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,

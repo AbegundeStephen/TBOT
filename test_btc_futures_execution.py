@@ -23,9 +23,10 @@ from src.execution.binance_futures import enable_futures_for_binance_handler
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("TEST_SCRIPT")
+
 
 def load_config():
     """Load configuration"""
@@ -33,9 +34,10 @@ def load_config():
     if not config_path.exists():
         logger.warning("config.json not found, using template")
         config_path = Path("config/config.template.json")
-    
+
     with open(config_path, "r") as f:
         return json.load(f)
+
 
 def run_test():
     logger.info("=" * 60)
@@ -44,7 +46,7 @@ def run_test():
 
     # 1. Load Config
     config = load_config()
-    
+
     if not config["assets"]["BTC"].get("enabled", False):
         logger.error("❌ BTC is disabled in config!")
         return
@@ -55,7 +57,7 @@ def run_test():
         if db_config.get("enabled"):
             db_manager = TradingDatabaseManager(
                 supabase_url=db_config["supabase_url"],
-                supabase_key=db_config["supabase_key"]
+                supabase_key=db_config["supabase_key"],
             )
             logger.info("✅ Database Manager initialized")
         else:
@@ -72,9 +74,9 @@ def run_test():
         client = Client(
             api_key=api_config["api_key"],
             api_secret=api_config["api_secret"],
-            testnet=api_config.get("testnet", False)
+            testnet=api_config.get("testnet", False),
         )
-        
+
         # Test Futures connection
         client.futures_ping()
         logger.info("✅ Binance Futures Client connected")
@@ -85,9 +87,7 @@ def run_test():
     # 4. Initialize Portfolio Manager
     try:
         portfolio_manager = PortfolioManager(
-            config=config,
-            binance_client=client,
-            db_manager=db_manager
+            config=config, binance_client=client, db_manager=db_manager
         )
         logger.info("✅ Portfolio Manager initialized")
         logger.info(f"   Capital: ${portfolio_manager.current_capital:,.2f}")
@@ -100,17 +100,17 @@ def run_test():
         # ✅ CRITICAL: Disable auto-sync temporarily
         original_auto_sync = config["trading"].get("auto_sync_on_startup", True)
         config["trading"]["auto_sync_on_startup"] = False
-        
+
         handler = BinanceExecutionHandler(
             client=client,
             config=config,
             portfolio_manager=portfolio_manager,
-            data_manager=db_manager
+            data_manager=db_manager,
         )
-        
+
         # Restore original setting
         config["trading"]["auto_sync_on_startup"] = original_auto_sync
-        
+
         logger.info("✅ Binance Execution Handler initialized")
     except Exception as e:
         logger.critical(f"❌ Handler initialization failed: {e}")
@@ -164,13 +164,13 @@ def run_test():
             "volatility_ratio": 1.0,
             "price_clarity": "clear",
             "momentum_aligned": True,
-            "at_key_level": False
+            "at_key_level": False,
         },
         "ai_validation": {
             "pattern_name": "Test Pattern",
             "pattern_confidence": 0.99,
-            "validation_passed": True
-        }
+            "validation_passed": True,
+        },
     }
 
     # Execute the trade
@@ -181,13 +181,13 @@ def run_test():
             asset_name="BTC",
             confidence_score=0.95,
             market_condition="bull",
-            signal_details=signal_details  # ✅ Pass complete details
+            signal_details=signal_details,  # ✅ Pass complete details
         )
 
         if success:
             logger.info("\n✅ ✅ TRADE EXECUTION SUCCESSFUL! ✅ ✅")
             logger.info("Check your Binance Futures Open Positions.")
-            
+
             # Show position details
             positions = portfolio_manager.get_asset_positions("BTC")
             if positions:
@@ -197,18 +197,18 @@ def run_test():
                 logger.info(f"  Side:        {pos.side.upper()}")
                 logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
                 logger.info(f"  Quantity:    {pos.quantity:.6f} BTC")
-                
+
                 # ✅ FIX: Handle None values safely
                 if pos.stop_loss:
                     logger.info(f"  Stop Loss:   ${pos.stop_loss:,.2f}")
                 else:
                     logger.info(f"  Stop Loss:   VTM Managed")
-                
+
                 if pos.take_profit:
                     logger.info(f"  Take Profit: ${pos.take_profit:,.2f}")
                 else:
                     logger.info(f"  Take Profit: VTM Managed")
-                
+
                 logger.info(f"  Futures:     {getattr(pos, 'is_futures', 'Unknown')}")
                 logger.info(f"  Leverage:    {getattr(pos, 'leverage', 'Unknown')}x")
         else:
@@ -217,10 +217,11 @@ def run_test():
 
     except Exception as e:
         logger.error(f"\n❌ CRASH DURING EXECUTION: {e}", exc_info=True)
-        
+
     logger.info("\n" + "=" * 60)
     logger.info("TEST COMPLETE")
     logger.info("=" * 60)
+
 
 if __name__ == "__main__":
     run_test()
