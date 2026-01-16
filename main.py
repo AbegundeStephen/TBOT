@@ -20,7 +20,6 @@ import signal
 from threading import Thread, Event
 from typing import Optional, Tuple, Dict
 from types import SimpleNamespace
-from src.data.historical_updater import HistoricalDataUpdater
 
 
 # Windows encoding fix
@@ -64,6 +63,8 @@ from src.ai.visualization import (
     should_send_chart,
 )
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
+from src.data.historical_updater import HistoricalDataUpdater
+
 
 import pickle
 
@@ -235,11 +236,10 @@ class TradingBot:
         )
 
         logger.info("[ERROR HANDLER] Global error handler initialized")
-        
+
         self.historical_updater = HistoricalDataUpdater(
-        data_manager=self.data_manager,
-        config=self.config
-    )
+            data_manager=self.data_manager, config=self.config
+        )
         self._last_history_update = None
 
     def initialize_exchanges(self):
@@ -1291,10 +1291,17 @@ class TradingBot:
         logger.info("S/R Analysis:")
         logger.info(f"  Near Level: {sr_analysis.get('near_sr_level', False)}")
         logger.info(f"  Type:       {sr_analysis.get('level_type', 'N/A')}")
-        logger.info(f"  Nearest:    ${nearest:,.2f}" if isinstance(nearest, (int, float)) else "  Nearest:    N/A")
-        logger.info(f"  Distance:   {distance:.2f}%" if isinstance(distance, (int, float)) else "  Distance:   N/A")
+        logger.info(
+            f"  Nearest:    ${nearest:,.2f}"
+            if isinstance(nearest, (int, float))
+            else "  Nearest:    N/A"
+        )
+        logger.info(
+            f"  Distance:   {distance:.2f}%"
+            if isinstance(distance, (int, float))
+            else "  Distance:   N/A"
+        )
         logger.info(f"  Total Levels: {sr_analysis.get('total_levels_found', 0)}")
-
 
         # Validation status
         validation_passed = ai_validation.get("validation_passed", False)
@@ -2174,12 +2181,14 @@ class TradingBot:
             logger.info("\n" + "=" * 70)
             logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info("=" * 70)
-            
+
             # ✨ NEW: Update historical data every hour (or every 12 cycles if running every 5 min)
             current_time = datetime.now()
-            if (self._last_history_update is None or 
-                (current_time - self._last_history_update).total_seconds() > 3600):  # 1 hour
-                
+            if (
+                self._last_history_update is None
+                or (current_time - self._last_history_update).total_seconds() > 3600
+            ):  # 1 hour
+
                 logger.info("[HISTORY] Updating historical CSV files...")
                 try:
                     self.historical_updater.update_all_enabled_assets()
@@ -2853,20 +2862,28 @@ class TradingBot:
                 if new_position_ids:
                     for position_id in new_position_ids:
                         new_pos = next(
-                            (p for p in positions_after if p.position_id == position_id),
+                            (
+                                p
+                                for p in positions_after
+                                if p.position_id == position_id
+                            ),
                             None,
                         )
-                        if new_pos and self.telegram_bot and self._telegram_ready.is_set():
+                        if (
+                            new_pos
+                            and self.telegram_bot
+                            and self._telegram_ready.is_set()
+                        ):
                             try:
                                 # ✅ FIX: Safely extract position attributes with proper defaults
                                 leverage = getattr(new_pos, "leverage", 1)
                                 margin_type = getattr(new_pos, "margin_type", "FUTURES")
                                 is_futures = getattr(new_pos, "is_futures", False)
-                                
+
                                 # ✅ FIX: Handle None values for SL/TP
                                 sl = new_pos.stop_loss if new_pos.stop_loss else 0.0
                                 tp = new_pos.take_profit if new_pos.take_profit else 0.0
-                                
+
                                 # Debug logging
                                 logger.info(
                                     f"[TELEGRAM] Sending notification for {asset_name}:\n"
@@ -2876,7 +2893,7 @@ class TradingBot:
                                     f"  Stop Loss:   ${sl:,.2f}\n"
                                     f"  Take Profit: ${tp:,.2f}"
                                 )
-                                
+
                                 # ✅ FIX: Ensure async call is awaited
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
@@ -2891,11 +2908,16 @@ class TradingBot:
                                         is_futures=is_futures,
                                     )
                                 )
-                                
-                                logger.info(f"[TELEGRAM] ✓ Trade opened notification sent")
-                                
+
+                                logger.info(
+                                    f"[TELEGRAM] ✓ Trade opened notification sent"
+                                )
+
                             except Exception as e:
-                                logger.error(f"[TELEGRAM] Notification failed: {e}", exc_info=True)
+                                logger.error(
+                                    f"[TELEGRAM] Notification failed: {e}",
+                                    exc_info=True,
+                                )
 
                 # Send Notifications (Closed Positions)
                 if closed_position_ids:
