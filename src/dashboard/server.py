@@ -159,64 +159,99 @@ def get_history(asset):
     end = request.args.get("end")
 
     # Map friendly names to CSV filenames
-    # Assuming standard TBOT structure
     filename_map = {
         "BTC": "BTCUSDT_1h.csv",
         "GOLD": "XAUUSDm_1h.csv",
         "XAU": "XAUUSDm_1h.csv",
     }
 
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     csv_file = filename_map.get(asset.upper())
     if not csv_file:
         return jsonify([])
 
     # Check multiple locations
     paths = [
-        f"data/historical/{csv_file}",
-        f"data/raw/{csv_file}",
-        f"data/processed/{csv_file}",
+        os.path.join(BASE_DIR, "data", "raw", csv_file),
     ]
 
+    print("[DEBUG] CWD:", os.getcwd())
+    print("[DEBUG] Checking paths:")
     csv_path = None
     for p in paths:
+        print(" -", p)
         if os.path.exists(p):
             csv_path = p
             break
 
     if not csv_path:
+        print(f"[ERROR] CSV file not found for {asset}: {csv_file}")
         return jsonify([])
 
     try:
         df = pd.read_csv(csv_path)
-        # Ensure timestamp column exists and is datetime
-        if "timestamp" not in df.columns and "time" in df.columns:
-            df.rename(columns={"time": "timestamp"}, inplace=True)
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # Handle different column names for timestamp
+        timestamp_col = None
+        for col in ["timestamp", "time", "date", "datetime"]:
+            if col in df.columns:
+                timestamp_col = col
+                break
 
-        # Filter
+        if not timestamp_col:
+            print(f"[ERROR] No timestamp column in {csv_path}")
+            print(f"Available columns: {df.columns.tolist()}")
+            return jsonify([])
+
+        # Rename to standard 'timestamp' for consistency
+        if timestamp_col != "timestamp":
+            df.rename(columns={timestamp_col: "timestamp"}, inplace=True)
+
+        # Convert to datetime with UTC
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
+        # Parse start/end parameters
         if start:
-            df = df[df["timestamp"] >= start]
-        if end:
-            df = df[df["timestamp"] <= end]
+            try:
+                start_dt = pd.to_datetime(start, utc=True)
+                df = df[df["timestamp"] >= start_dt]
+            except Exception as e:
+                print(f"[WARNING] Could not parse start date '{start}': {e}")
 
-        # Format for Lightweight Charts (Unix timestamp)
+        if end:
+            try:
+                end_dt = pd.to_datetime(end, utc=True)
+                df = df[df["timestamp"] <= end_dt]
+            except Exception as e:
+                print(f"[WARNING] Could not parse end date '{end}': {e}")
+
+        print(f"[INFO] Filtered {len(df)} candles for {asset} from {start} to {end}")
+
+        if len(df) == 0:
+            print(
+                f"[WARNING] No data in date range. CSV range: {pd.to_datetime(pd.read_csv(csv_path)[timestamp_col]).min()} to {pd.to_datetime(pd.read_csv(csv_path)[timestamp_col]).max()}"
+            )
+
+        # Format for Lightweight Charts (Unix timestamp in SECONDS)
         chart_data = []
         for _, row in df.iterrows():
             chart_data.append(
                 {
                     "time": int(row["timestamp"].timestamp()),
-                    "open": row["open"],
-                    "high": row["high"],
-                    "low": row["low"],
-                    "close": row["close"],
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
                 }
             )
 
         return jsonify(chart_data)
 
     except Exception as e:
-        logger.error(f"History fetch error: {e}")
+        print(f"[ERROR] Failed to load history for {asset}: {e}")
+        import traceback
+
+        traceback.print_exc()
         return jsonify([])
 
 

@@ -20,6 +20,7 @@ import signal
 from threading import Thread, Event
 from typing import Optional, Tuple, Dict
 from types import SimpleNamespace
+from src.data.historical_updater import HistoricalDataUpdater
 
 
 # Windows encoding fix
@@ -234,6 +235,12 @@ class TradingBot:
         )
 
         logger.info("[ERROR HANDLER] Global error handler initialized")
+        
+        self.historical_updater = HistoricalDataUpdater(
+        data_manager=self.data_manager,
+        config=self.config
+    )
+        self._last_history_update = None
 
     def initialize_exchanges(self):
         """
@@ -2167,6 +2174,18 @@ class TradingBot:
             logger.info("\n" + "=" * 70)
             logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info("=" * 70)
+            
+            # ✨ NEW: Update historical data every hour (or every 12 cycles if running every 5 min)
+            current_time = datetime.now()
+            if (self._last_history_update is None or 
+                (current_time - self._last_history_update).total_seconds() > 3600):  # 1 hour
+                
+                logger.info("[HISTORY] Updating historical CSV files...")
+                try:
+                    self.historical_updater.update_all_enabled_assets()
+                    self._last_history_update = current_time
+                except Exception as e:
+                    logger.error(f"[HISTORY] Update failed: {e}")
 
             preset_mode = self.config.get("aggregator_settings", {}).get(
                 "preset", "balanced"
