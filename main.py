@@ -63,7 +63,7 @@ from src.ai.visualization import (
     should_send_chart,
 )
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
-from update.historical_updater import HistoricalDataUpdater
+from src.update.historical_updater import HistoricalDataUpdater
 
 
 import pickle
