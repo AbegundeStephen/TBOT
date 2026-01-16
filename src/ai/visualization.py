@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Decision Visualization System - 
+AI Decision Visualization System -
 Generates detailed charts showing:
 - Candlestick patterns with 15min data
 - Support/Resistance levels from 4H analysis
@@ -605,9 +605,12 @@ class AIVisualizationGenerator:
             # Handle string format
             if isinstance(ai_details, str):
                 ax.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     f"AI Status: {ai_details}",
-                    ha="center", va="center", fontsize=12
+                    ha="center",
+                    va="center",
+                    fontsize=12,
                 )
                 ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
                 ax.axis("off")
@@ -616,9 +619,12 @@ class AIVisualizationGenerator:
             # Check if dict is valid
             if not ai_details or not isinstance(ai_details, dict):
                 ax.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     "Pattern Detection: Not Available",
-                    ha="center", va="center", fontsize=12
+                    ha="center",
+                    va="center",
+                    fontsize=12,
                 )
                 ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
                 ax.axis("off")
@@ -629,18 +635,18 @@ class AIVisualizationGenerator:
             # ================================================================
             pattern_name = ai_details.get("pattern_name", "Unknown")
             confidence = ai_details.get("pattern_confidence", 0)
-            
-            
+
             no_pattern_names = ["None", "Unknown", "Noise", "ERROR", None]
-            has_no_pattern = (
-                pattern_name in no_pattern_names and confidence < 0.05
-            )
-            
+            has_no_pattern = pattern_name in no_pattern_names and confidence < 0.05
+
             if has_no_pattern:
                 ax.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     "No Pattern Detected",
-                    ha="center", va="center", fontsize=12
+                    ha="center",
+                    va="center",
+                    fontsize=12,
                 )
                 ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
                 ax.axis("off")
@@ -650,7 +656,7 @@ class AIVisualizationGenerator:
             # Show pattern even if pattern_detected is False
             # (As long as we have valid pattern data with confidence > 5%)
             # ================================================================
-            
+
             # Get top 3 patterns
             top3_patterns = ai_details.get("top3_patterns", [])
             top3_confidences = ai_details.get("top3_confidences", [])
@@ -664,8 +670,7 @@ class AIVisualizationGenerator:
                 ]
 
                 ax.barh(
-                    y_pos, top3_confidences, 
-                    color=colors, alpha=0.7, edgecolor="white"
+                    y_pos, top3_confidences, color=colors, alpha=0.7, edgecolor="white"
                 )
                 ax.set_yticks(y_pos)
                 ax.set_yticklabels(top3_patterns)
@@ -678,25 +683,28 @@ class AIVisualizationGenerator:
             else:
                 # Fallback: show single pattern as text
                 ax.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     f"{pattern_name}\nConfidence: {confidence:.1%}",
-                    ha="center", va="center", fontsize=12
+                    ha="center",
+                    va="center",
+                    fontsize=12,
                 )
 
             # Update title to show pattern name and confidence
             ax.set_title(
                 f"Pattern: {pattern_name} ({confidence:.1%})",
                 fontsize=11,
-                fontweight="bold"
+                fontweight="bold",
             )
             ax.grid(True, alpha=0.3, axis="x")
 
             # Add validation status
             validation_passed = ai_details.get("validation_passed", False)
-            
+
             # Check action field for better status
             action = ai_details.get("action", "unknown")
-            
+
             if action == "rejected":
                 validation_status = "[X] REJECTED"
                 status_color = "red"
@@ -714,10 +722,12 @@ class AIVisualizationGenerator:
                 status_color = "lime" if validation_passed else "red"
 
             ax.text(
-                0.98, 0.02,
+                0.98,
+                0.02,
                 validation_status,
                 transform=ax.transAxes,
-                ha="right", va="bottom",
+                ha="right",
+                va="bottom",
                 fontsize=10,
                 fontweight="bold",
                 color=status_color,
@@ -727,9 +737,12 @@ class AIVisualizationGenerator:
         except Exception as e:
             logger.error(f"[VIZ] Pattern plot error: {e}", exc_info=True)
             ax.text(
-                0.5, 0.5,
+                0.5,
+                0.5,
                 "Error displaying pattern",
-                ha="center", va="center", fontsize=10
+                ha="center",
+                va="center",
+                fontsize=10,
             )
             ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
             ax.axis("off")
@@ -802,7 +815,7 @@ class AIVisualizationGenerator:
 
     def _plot_ai_validation(self, ax, details: Dict):
         """
-         AI validation summary with comprehensive data display
+        AI validation summary with comprehensive data display
         """
         try:
             ax.axis("off")

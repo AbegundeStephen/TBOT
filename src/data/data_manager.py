@@ -32,7 +32,7 @@ class DataManager:
     def initialize_binance(self) -> bool:
         """
         ✅ ENHANCED: Initialize with smart Live/Testnet separation
-        
+
         Strategy:
         1. Primary client = testnet (for safe trade execution)
         2. Live data client = always live public API (full historical data)
@@ -50,13 +50,15 @@ class DataManager:
             # ============================================================
             # STEP 1: Initialize LIVE DATA CLIENT (for historical data)
             # ============================================================
-            logger.info("\n📊 Initializing LIVE data client (for historical analysis)...")
+            logger.info(
+                "\n📊 Initializing LIVE data client (for historical analysis)..."
+            )
             logger.info("   Purpose: Fetch complete historical OHLCV data")
             logger.info("   Endpoint: https://api.binance.com (LIVE - Public API)")
-            
+
             # Always create a live client for data (no keys needed = public access)
             self.live_data_client = Client("", "")
-            
+
             try:
                 self.live_data_client.ping()
                 logger.info("✅ Live data API connected successfully")
@@ -77,10 +79,12 @@ class DataManager:
                 return True
 
             is_testnet = api_config.get("testnet", True)
-            
-            logger.info(f"\n🔧 Initializing PRIMARY client ({'TESTNET' if is_testnet else 'LIVE'})...")
+
+            logger.info(
+                f"\n🔧 Initializing PRIMARY client ({'TESTNET' if is_testnet else 'LIVE'})..."
+            )
             logger.info("   Purpose: Trade execution and account management")
-            
+
             if is_testnet:
                 self.binance_client = Client(api_key, api_secret, testnet=True)
                 self.binance_client.API_URL = "https://testnet.binance.vision/api"
@@ -100,24 +104,30 @@ class DataManager:
             # STEP 3: Initialize FUTURES CLIENT (if separate keys exist)
             # ============================================================
             futures_config = self.config.get("api", {}).get("binance_futures")
-            
+
             if futures_config:
                 logger.info("\n🚀 Initializing FUTURES client (separate keys)...")
-                
+
                 futures_key = futures_config.get("api_key", "")
                 futures_secret = futures_config.get("api_secret", "")
-                
+
                 if futures_key and futures_secret:
                     if futures_config.get("testnet", True):
-                        self.futures_client = Client(futures_key, futures_secret, testnet=True)
-                        self.futures_client.API_URL = "https://testnet.binancefuture.com"
-                        logger.info("   Endpoint: https://testnet.binancefuture.com (testnet)")
+                        self.futures_client = Client(
+                            futures_key, futures_secret, testnet=True
+                        )
+                        self.futures_client.API_URL = (
+                            "https://testnet.binancefuture.com"
+                        )
+                        logger.info(
+                            "   Endpoint: https://testnet.binancefuture.com (testnet)"
+                        )
                     else:
                         self.futures_client = Client(futures_key, futures_secret)
                         self.futures_client.API_URL = "https://fapi.binance.com"
                         logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
                         logger.warning("   ⚠️  LIVE FUTURES TRADING - HIGH RISK")
-                    
+
                     # Test Futures connection
                     try:
                         self.futures_client.futures_ping()
@@ -127,7 +137,9 @@ class DataManager:
                         logger.warning("   Will fall back to Spot keys for Futures")
                         self.futures_client = None
                 else:
-                    logger.info("⚠️  Futures keys incomplete, will use Spot keys if needed")
+                    logger.info(
+                        "⚠️  Futures keys incomplete, will use Spot keys if needed"
+                    )
             else:
                 logger.info("\n📝 No separate Futures config found")
                 logger.info("   Will use Spot keys for Futures trading (if enabled)")
@@ -138,12 +150,21 @@ class DataManager:
             logger.info("\n" + "=" * 70)
             logger.info("BINANCE INITIALIZATION COMPLETE - HYBRID MODE")
             logger.info("=" * 70)
-            logger.info(f"Live Data Client:  {'✅ Active (full history)' if self.live_data_client else '❌ Inactive'}")
-            logger.info(f"Primary Client:    {'✅ Active (testnet)' if is_testnet else '✅ Active (LIVE)'}")
-            logger.info(f"Futures Client:    {'✅ Active (separate keys)' if self.futures_client else '📝 Will use primary'}")
+            logger.info(
+                f"Live Data Client:  {'✅ Active (full history)' if self.live_data_client else '❌ Inactive'}"
+            )
+            logger.info(
+                f"Primary Client:    {'✅ Active (testnet)' if is_testnet else '✅ Active (LIVE)'}"
+            )
+            logger.info(
+                f"Futures Client:    {'✅ Active (separate keys)' if self.futures_client else '📝 Will use primary'}"
+            )
             logger.info("\n📋 OPERATIONAL MODE:")
             logger.info("   • Historical data → Live API (full history)")
-            logger.info("   • Trade execution → " + ("Testnet (safe)" if is_testnet else "LIVE (real money)"))
+            logger.info(
+                "   • Trade execution → "
+                + ("Testnet (safe)" if is_testnet else "LIVE (real money)")
+            )
             logger.info("=" * 70 + "\n")
 
             return True
@@ -154,6 +175,7 @@ class DataManager:
         except Exception as e:
             logger.error(f"❌ Failed to initialize Binance API: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return False
 
@@ -173,10 +195,10 @@ class DataManager:
     def _get_data_client(self, prefer_live: bool = True) -> Client:
         """
         ✅ NEW: Smart client selection for data fetching
-        
+
         Args:
             prefer_live: If True, use live client for full historical data
-        
+
         Returns:
             Best available client for data fetching
         """
@@ -193,8 +215,13 @@ class DataManager:
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
     )
     def _fetch_klines_with_retry(
-        self, client: Client, symbol: str, interval: str, 
-        startTime: int, endTime: int, limit: int
+        self,
+        client: Client,
+        symbol: str,
+        interval: str,
+        startTime: int,
+        endTime: int,
+        limit: int,
     ):
         """Fetch klines with retry logic"""
         return client.get_klines(
@@ -216,7 +243,7 @@ class DataManager:
     ) -> pd.DataFrame:
         """
         ✅ ENHANCED: Fetch historical OHLCV data with smart client selection
-        
+
         Args:
             symbol: Trading pair (e.g., 'BTCUSDT')
             interval: Timeframe (e.g., '1h', '4h', '1d')
@@ -224,7 +251,7 @@ class DataManager:
             end_date: End date (optional, defaults to now)
             limit: Bars per request (max 1000)
             use_live_for_history: If True, prefer live API for full historical data
-        
+
         Returns:
             DataFrame with OHLCV data
         """
@@ -252,14 +279,16 @@ class DataManager:
             # For historical analysis (>7 days), prefer live API
             days_requested = (end_dt - start_dt).days
             use_live = use_live_for_history and days_requested > 7
-            
+
             client = self._get_data_client(prefer_live=use_live)
-            
+
             if use_live and self.live_data_client:
                 logger.info(f"📊 Fetching {symbol} from LIVE API (full history)")
             else:
-                logger.info(f"📊 Fetching {symbol} from {'testnet' if self.config['api']['binance'].get('testnet') else 'live'} API")
-            
+                logger.info(
+                    f"📊 Fetching {symbol} from {'testnet' if self.config['api']['binance'].get('testnet') else 'live'} API"
+                )
+
             logger.info(f"   Period: {start_dt} to {end_dt} (UTC)")
             logger.info(f"   Requested: {days_requested} days of data")
 
@@ -359,10 +388,12 @@ class DataManager:
                         f"   ⚠️  Data starts at {df.index[0]}, requested {start_dt}"
                     )
                     logger.warning(f"   Missing {missing_days} days at beginning")
-                    
+
                     # Suggest switching to live API if using testnet
                     if not use_live and self.live_data_client:
-                        logger.info("   💡 TIP: Use fetch_binance_data(..., use_live_for_history=True)")
+                        logger.info(
+                            "   💡 TIP: Use fetch_binance_data(..., use_live_for_history=True)"
+                        )
                         logger.info("      for complete historical data")
 
             if df.index[-1] < end_dt:
@@ -374,7 +405,9 @@ class DataManager:
                     logger.warning(f"   Missing {missing_hours:.1f} hours at end")
 
             coverage_pct = (days_received / max(days_requested, 1)) * 100
-            logger.info(f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)")
+            logger.info(
+                f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)"
+            )
 
             return df
 
@@ -591,7 +624,9 @@ class DataManager:
             }
 
             delta = interval_map.get(interval, timedelta(hours=lookback_bars))
-            start_date = (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%d %H:%M:%S")
+            start_date = (datetime.now(timezone.utc) - delta).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
             end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
             # For live trading, use primary client (respect testnet setting)
@@ -619,6 +654,7 @@ class DataManager:
         if self.mt5_initialized:
             try:
                 import MetaTrader5 as mt5
+
                 mt5.shutdown()
                 logger.info("MT5 shutdown complete")
             except Exception as e:
