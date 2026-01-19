@@ -72,6 +72,8 @@ import pickle
 from src.telegram import TradingTelegramBot
 from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
+from src.execution.mtf_integration import MTFRegimeIntegration
+
 
 
 def setup_logging(config):
@@ -189,6 +191,8 @@ class TradingBot:
         # Initialize components in CORRECT order
         self._initialize_telegram()
         self._initialize_strategies()
+        self.mtf_integration = None
+        self._current_regime_data = {}
 
         self.dynamic_selector = DynamicPresetSelector(
             self.data_manager, self.config, telegram_bot=self.telegram_bot
@@ -705,6 +709,100 @@ class TradingBot:
             self.ai_monitor = None
             self.ai_tuner = None
 
+            return False
+
+    def run_mtf_regime_analysis(self):
+        """
+        Run multi-timeframe regime analysis for all enabled assets
+        Scheduled to run every 4 hours
+        """
+        try:
+            if not self.mtf_integration:
+                logger.debug("[MTF] Not initialized, skipping analysis")
+                return
+
+            logger.info("\n" + "=" * 70)
+            logger.info(f"[MTF] Running Multi-Timeframe Regime Analysis")
+            logger.info(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("=" * 70)
+
+            enabled_assets = [
+                name
+                for name, cfg in self.config["assets"].items()
+                if cfg.get("enabled", False)
+            ]
+
+            for asset_name in enabled_assets:
+                try:
+                    asset_cfg = self.config["assets"][asset_name]
+                    symbol = asset_cfg.get("symbol")
+                    exchange = asset_cfg.get("exchange", "binance")
+
+                    # Force refresh to get latest data
+                    regime_data = self.mtf_integration.get_regime_for_trading(
+                        asset_name=asset_name, symbol=symbol, exchange=exchange
+                    )
+
+                    # Store in cache for aggregators and trading logic
+                    self._current_regime_data[asset_name] = regime_data
+
+                    # Log summary
+                    logger.info(f"\n[MTF] {asset_name} Analysis:")
+                    logger.info(f"  Regime:           {regime_data['regime'].upper()}")
+                    logger.info(
+                        f"  Direction:        {'BULL' if regime_data['is_bull'] else 'BEAR'}"
+                    )
+                    logger.info(f"  Confidence:       {regime_data['confidence']:.2%}")
+                    logger.info(
+                        f"  TF Agreement:     {regime_data['timeframe_agreement']:.2%}"
+                    )
+                    logger.info(
+                        f"  Recommended Mode: {regime_data['recommended_mode'].upper()}"
+                    )
+                    logger.info(
+                        f"  Risk Level:       {regime_data['risk_level'].upper()}"
+                    )
+                    logger.info(
+                        f"  Volatility:       {regime_data['volatility'].upper()}"
+                    )
+                    logger.info(
+                        f"  Counter-Trend:    {'✓ Allowed' if regime_data['allow_counter_trend'] else '✗ Blocked'}"
+                    )
+                    logger.info(f"  Max Positions:    {regime_data['max_positions']}")
+
+                except Exception as e:
+                    logger.error(f"[MTF] Error analyzing {asset_name}: {e}")
+
+            logger.info("=" * 70 + "\n")
+
+        except Exception as e:
+            logger.error(f"[MTF] Analysis error: {e}", exc_info=True)
+
+    def initialize_mtf_regime_detection(self):
+        """
+        Initialize multi-timeframe regime detection
+        Should be called AFTER AI and DB initialization
+        """
+        try:
+            logger.info("\n" + "=" * 70)
+            logger.info("[MTF] Initializing Multi-Timeframe Regime Detection")
+            logger.info("=" * 70)
+
+            self.mtf_integration = MTFRegimeIntegration(
+                data_manager=self.data_manager,
+                db_manager=self.db_manager,
+                ai_validator=self.ai_validator,
+                telegram_bot=self.telegram_bot,
+            )
+
+            logger.info("[MTF] ✅ Multi-Timeframe Regime Detection Ready")
+            logger.info("=" * 70 + "\n")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"[MTF] Initialization failed: {e}", exc_info=True)
+            self.mtf_integration = None
             return False
 
     def _initialize_aggregators(self):
@@ -1240,6 +1338,41 @@ class TradingBot:
             logger.error(f"[AI VIZ {context}] ❌ Validation FAILED")
 
         return all_valid
+
+    def _detect_regime(
+        self, df: pd.DataFrame, asset_name: str = "BTC"
+    ) -> Tuple[bool, float]:
+        """
+        ✅ ENHANCED: Use MTF regime detection if available, fallback to original logic
+        """
+        try:
+            # PRIORITY 1: Use MTF Regime Detection if available
+            if self.mtf_integration and hasattr(self, "_current_regime_data"):
+                mtf_regime = self._current_regime_data.get(asset_name)
+
+                if mtf_regime:
+                    is_bull = mtf_regime["is_bull"]
+                    confidence = mtf_regime["confidence"]
+
+                    logger.debug(f"[REGIME] {asset_name}: Using MTF regime")
+                    logger.debug(f"  Direction: {'BULL' if is_bull else 'BEAR'}")
+                    logger.debug(f"  Confidence: {confidence:.2%}")
+
+                    # Update previous regime for continuity
+                    self.previous_regime = is_bull
+
+                    return is_bull, confidence
+
+            # FALLBACK: Your existing single-timeframe detection
+            logger.debug(f"[REGIME] {asset_name}: Using fallback detection")
+
+            # ... YOUR EXISTING _detect_regime CODE HERE ...
+            # (Keep all your existing logic as fallback)
+
+        except Exception as e:
+            logger.error(f"[REGIME] Detection failed: {e}", exc_info=True)
+            # Emergency fallback
+            return False, 0.5
 
     def _log_ai_validation_summary(self, asset_name: str, details: dict):
         """
@@ -2695,7 +2828,7 @@ class TradingBot:
     )
     def trade_asset(self, asset_name: str):
         """
-        Execute trading logic and LOG TO DB ONLY ON SUCCESS
+        ✅ FIXED: Execute trading logic with proper MTF filtering for ALL aggregator types
         """
         asset_cfg = self.config["assets"][asset_name]
         if not asset_cfg.get("enabled", False):
@@ -2716,11 +2849,11 @@ class TradingBot:
 
         try:
             logger.info(f"\n{'-' * 70}")
-            logger.info(f"[TRADE ASSET] Processing {asset_name} ONLY")
+            logger.info(f"[TRADE ASSET] Processing {asset_name}")
             logger.info(f"{'-' * 70}")
 
             # ============================================================
-            # 1. Fetch FRESH Data & Signal (Re-calculation ensures accuracy)
+            # 1. Fetch FRESH Data & Signal
             # ============================================================
             end_time = datetime.now(timezone.utc)
 
@@ -2760,7 +2893,9 @@ class TradingBot:
                 logger.warning(f"[SKIP] {asset_name}: No aggregator available")
                 return
 
-            # Get Signal (Hybrid or Single)
+            # ============================================================
+            # 2. Generate Signal (Hybrid or Single)
+            # ============================================================
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
@@ -2771,6 +2906,7 @@ class TradingBot:
             else:
                 signal, details = aggregator.get_aggregated_signal(df)
 
+            # Get current price
             try:
                 current_price = handler.get_current_price(symbol)
             except:
@@ -2778,30 +2914,131 @@ class TradingBot:
 
             details["price"] = current_price
 
-            # Log Signal Quality to Console (BUT DO NOT WRITE TO DB YET)
+            # Log Signal Quality
             logger.info(
-                f"[SIGNAL] {asset_name} Signal: {signal} (Quality: {details.get('signal_quality', 0):.2f})"
+                f"[SIGNAL] {asset_name} Signal: {signal} "
+                f"(Quality: {details.get('signal_quality', 0):.2f})"
             )
 
             if details.get("aggregator_mode"):
                 logger.info(
-                    f"  Mode: {details['aggregator_mode'].upper()} | Conf: {details.get('mode_confidence', 0):.2%}"
+                    f"  Mode: {details['aggregator_mode'].upper()} | "
+                    f"Conf: {details.get('mode_confidence', 0):.2%}"
                 )
 
-            # Skip if HOLD signal
+            # ============================================================
+            # ✅ FIX: Apply MTF Filtering AFTER signal generation
+            # This applies to ALL aggregator types (hybrid, council, performance)
+            # ============================================================
+            if (
+                signal != 0
+                and hasattr(self, "_current_regime_data")
+                and asset_name in self._current_regime_data
+            ):
+                mtf_regime = self._current_regime_data[asset_name]
+
+                logger.info(f"\n[MTF FILTER] Checking regime filters:")
+                logger.info(f"  Current Regime: {mtf_regime['regime'].upper()}")
+                logger.info(
+                    f"  Direction:      {'BULL' if mtf_regime['is_bull'] else 'BEAR'}"
+                )
+                logger.info(f"  Confidence:     {mtf_regime['confidence']:.2%}")
+                logger.info(
+                    f"  Recommended:    {mtf_regime['recommended_mode'].upper()}"
+                )
+                logger.info(f"  Risk Level:     {mtf_regime['risk_level'].upper()}")
+
+                # --------------------------------------------------------
+                # Filter 1: Counter-trend blocking
+                # --------------------------------------------------------
+                if not mtf_regime.get("allow_counter_trend", True):
+                    is_counter_trend = (signal == 1 and not mtf_regime["is_bull"]) or (
+                        signal == -1 and mtf_regime["is_bull"]
+                    )
+
+                    if is_counter_trend:
+                        logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
+                        logger.info(
+                            f"  Signal Direction: {'LONG' if signal == 1 else 'SHORT'}"
+                        )
+                        logger.info(
+                            f"  MTF Regime:       {'BULL' if mtf_regime['is_bull'] else 'BEAR'}"
+                        )
+                        logger.info(
+                            f"  Reason:           MTF confidence {mtf_regime['confidence']:.2%} "
+                            f"blocks counter-trend"
+                        )
+                        return  # ← Block the trade
+
+                # --------------------------------------------------------
+                # Filter 2: Max positions limit
+                # --------------------------------------------------------
+                max_positions = mtf_regime.get("max_positions", 3)
+                current_positions = len(
+                    self.portfolio_manager.get_asset_positions(asset_name)
+                )
+
+                if current_positions >= max_positions:
+                    logger.warning(f"[MTF FILTER] ✗ BLOCKED: Max positions reached")
+                    logger.info(
+                        f"  Current: {current_positions}, Max: {max_positions} "
+                        f"(MTF Risk: {mtf_regime['risk_level'].upper()})"
+                    )
+                    return  # ← Block the trade
+
+                # --------------------------------------------------------
+                # Filter 3: High risk adjustment
+                # --------------------------------------------------------
+                if mtf_regime.get("risk_level") == "high":
+                    logger.info(
+                        f"[MTF FILTER] ⚠️  High risk regime - position size reduced to 70%"
+                    )
+                    details["mtf_risk_multiplier"] = 0.7
+                elif mtf_regime.get("risk_level") == "low":
+                    logger.info(
+                        f"[MTF FILTER] ✅ Low risk regime - position size increased to 120%"
+                    )
+                    details["mtf_risk_multiplier"] = 1.2
+                else:
+                    details["mtf_risk_multiplier"] = 1.0
+
+                # --------------------------------------------------------
+                # Filter 4: Volatility adjustment
+                # --------------------------------------------------------
+                if mtf_regime.get("volatility") == "high":
+                    logger.info(
+                        f"[MTF FILTER] ⚠️  High volatility - wider stops recommended"
+                    )
+                    details["mtf_volatility_adjustment"] = 1.5
+                else:
+                    details["mtf_volatility_adjustment"] = 1.0
+
+                # Add complete MTF data to signal details
+                details["mtf_regime"] = mtf_regime
+
+                logger.info(f"[MTF FILTER] ✓ All filters passed")
+
+            elif signal != 0:
+                logger.debug(
+                    "[MTF FILTER] No MTF data available, skipping regime filters"
+                )
+
+            # ============================================================
+            # 3. Check HOLD Signal
+            # ============================================================
             if signal == 0:
-                logger.info(f"[HOLD] {asset_name}: No action taken.")
+                logger.info(f"[HOLD] {asset_name}: No action taken")
                 return
 
             # ============================================================
-            # 2. Check Limits & Cooldowns
+            # 4. Check Trading Limits & Cooldowns
             # ============================================================
             if not self.check_trading_limits():
-                logger.info(f"[LIMIT] Trading limits reached.")
+                logger.info(f"[LIMIT] Trading limits reached")
                 return
 
             if not self.check_min_time_between_trades(asset_name):
-                logger.info(f"[COOLDOWN] {asset_name} is in cooldown.")
+                logger.info(f"[COOLDOWN] {asset_name} is in cooldown")
                 return
 
             # Store BEFORE state
@@ -2809,7 +3046,7 @@ class TradingBot:
             position_ids_before = {p.position_id for p in positions_before}
 
             # ============================================================
-            # 3. Execute Trade
+            # 5. Execute Trade
             # ============================================================
             success = False
             try:
@@ -2842,7 +3079,7 @@ class TradingBot:
                 return
 
             # ============================================================
-            # 4. Handle Success & DB Logging
+            # 6. Handle Success & DB Logging
             # ============================================================
             if success:
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
@@ -2855,7 +3092,8 @@ class TradingBot:
                 self.last_trade_times[asset_name] = datetime.now()
 
                 logger.info(
-                    f"[SUCCESS] {asset_name} Trade Executed (Daily count: {self.trade_count_today})"
+                    f"[SUCCESS] {asset_name} Trade Executed "
+                    f"(Daily count: {self.trade_count_today})"
                 )
 
                 # Send Telegram Notifications (New Positions)
@@ -2875,16 +3113,13 @@ class TradingBot:
                             and self._telegram_ready.is_set()
                         ):
                             try:
-                                # ✅ FIX: Safely extract position attributes with proper defaults
                                 leverage = getattr(new_pos, "leverage", 1)
                                 margin_type = getattr(new_pos, "margin_type", "FUTURES")
                                 is_futures = getattr(new_pos, "is_futures", False)
 
-                                # ✅ FIX: Handle None values for SL/TP
                                 sl = new_pos.stop_loss if new_pos.stop_loss else 0.0
                                 tp = new_pos.take_profit if new_pos.take_profit else 0.0
 
-                                # Debug logging
                                 logger.info(
                                     f"[TELEGRAM] Sending notification for {asset_name}:\n"
                                     f"  Leverage:    {leverage}\n"
@@ -2894,7 +3129,6 @@ class TradingBot:
                                     f"  Take Profit: ${tp:,.2f}"
                                 )
 
-                                # ✅ FIX: Ensure async call is awaited
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
                                         asset=asset_name,
@@ -2956,10 +3190,8 @@ class TradingBot:
                     try:
                         logger.info(f"[VIZ] Preparing chart for {asset_name}...")
 
-                        # Fetch 4H data for S/R analysis
                         df_4h = self._fetch_4h_data(asset_name)
 
-                        # ✅ NEW: Validate AI details before sending
                         logger.info(f"[VIZ] Validating AI details structure...")
                         is_valid = self._log_ai_validation_summary(asset_name, details)
 
@@ -2969,7 +3201,6 @@ class TradingBot:
                                 f"attempting repair..."
                             )
 
-                            # Attempt to repair/regenerate AI validation
                             if not details.get("ai_validation") or not isinstance(
                                 details["ai_validation"], dict
                             ):
@@ -2980,7 +3211,6 @@ class TradingBot:
                                     self._format_ai_validation_direct(signal, df)
                                 )
 
-                                # Validate again
                                 is_valid = self._validate_ai_details_structure(
                                     details["ai_validation"], asset_name
                                 )
@@ -2992,7 +3222,6 @@ class TradingBot:
                                         f"[VIZ] ❌ Repair failed, chart may be incomplete"
                                     )
 
-                        # Send chart (even if validation failed - better to have partial chart)
                         logger.info(f"[VIZ] Sending chart to Telegram...")
                         self._send_telegram_notification(
                             self.chart_sender.send_decision_chart(
@@ -3012,7 +3241,7 @@ class TradingBot:
                             f"[VIZ] Chart generation error: {e}", exc_info=True
                         )
 
-                # ✅✅✅ DATABASE LOGGING (Only on Success) ✅✅✅
+                # ✅ DATABASE LOGGING (Only on Success)
                 if self.db_manager:
                     try:
                         logger.info(
@@ -3038,7 +3267,7 @@ class TradingBot:
                             ai_validated=details.get("ai_validated", False),
                             ai_modified=details.get("ai_modified", False),
                             ai_details=details.get("ai_validation"),
-                            executed=True,  # ✅ MARK AS EXECUTED
+                            executed=True,
                         )
 
                         # Link signal to trade ID if available
@@ -3072,7 +3301,8 @@ class TradingBot:
 
             else:
                 logger.warning(
-                    f"[SKIP] {asset_name}: Execution returned False (limits/cooldowns/handler failure)"
+                    f"[SKIP] {asset_name}: Execution returned False "
+                    f"(limits/cooldowns/handler failure)"
                 )
 
         except Exception as e:
@@ -3485,6 +3715,16 @@ class TradingBot:
             self.initialize_exchanges()
             self.load_models()
 
+            self.initialize_mtf_regime_detection()
+
+            if self.mtf_integration:
+                logger.info("[MTF] Running initial regime analysis...")
+                self.run_mtf_regime_analysis()
+
+            # Start Telegram (existing code continues)
+            if self.telegram_bot:
+                logger.info("\n[TELEGRAM] Starting bot thread...")
+
             # ✨  Start Telegram in dedicated thread
             if self.telegram_bot:
                 logger.info("\n[TELEGRAM] Starting bot thread...")
@@ -3511,6 +3751,8 @@ class TradingBot:
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
 
+            schedule.every(4).hours.do(self.run_mtf_regime_analysis)
+
             # Schedule trading cycles
             check_interval = self.config["trading"].get("check_interval_seconds", 300)
             schedule.every(check_interval).seconds.do(self.run_trading_cycle)
@@ -3523,6 +3765,7 @@ class TradingBot:
             logger.info(
                 f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
             )
+            logger.info(f"[MTF] Regime updates: Every 4 hours")
             logger.info(f"Press Ctrl+C to stop\n")
 
             # Run initial cycle

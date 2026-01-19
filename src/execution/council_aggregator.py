@@ -1,6 +1,6 @@
 """
-Institutional Council Aggregator - Hybrid Approach
-Combines your existing multi-strategy system with Gemini's weighted council logic
+Institutional Council Aggregator - Bidirectional Version
+Supports both BUY and SELL signals with symmetric logic
 """
 
 import pandas as pd
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class InstitutionalCouncilAggregator:
     """
-    "BlackRock-Style" Weighted Council with AI Validation
+    "BlackRock-Style" Weighted Council with Bidirectional Signals
     
     Council Members (Judges):
     1. TREND (1.5 pts)     - The Boss: EMA alignment
@@ -30,6 +30,8 @@ class InstitutionalCouncilAggregator:
     Regime Rules:
     - Trend-aligned: Need 3.5+ (simple majority)
     - Counter-trend: Need 4.0+ (unanimous overrule)
+    
+    NEW: Symmetric scoring for both BUY and SELL signals
     """
     
     def __init__(
@@ -62,21 +64,12 @@ class InstitutionalCouncilAggregator:
         self.ai_validator = ai_validator
         self.detailed_logging = enable_detailed_logging
         
-        # ================================================================
-        # CONFIGURATION MERGE FIX
-        # ================================================================
-        # Start with hardcoded defaults (contains technical keys like 'rsi_bullish_zone')
+        # Configuration merge
         self.config = self._get_default_config()
-        
-        # If a preset config is provided, UPDATE defaults instead of replacing them
         if config:
             self.config.update(config)
 
-        # ================================================================
-        # DYNAMIC THRESHOLD LOADING
-        # ================================================================
-        # Prioritize values from the merged config (presets).
-        # If not found, fall back to the arguments passed to __init__.
+        # Dynamic threshold loading
         self.trend_aligned_threshold = self.config.get(
             'council_trend_aligned', trend_aligned_threshold
         )
@@ -105,8 +98,10 @@ class InstitutionalCouncilAggregator:
             'buy_signals': 0,
             'sell_signals': 0,
             'hold_signals': 0,
-            'trend_aligned_trades': 0,
-            'counter_trend_trades': 0,
+            'trend_aligned_buys': 0,
+            'trend_aligned_sells': 0,
+            'counter_trend_buys': 0,
+            'counter_trend_sells': 0,
             'avg_score_on_trade': [],
             'avg_score_on_hold': [],
         }
@@ -125,7 +120,9 @@ class InstitutionalCouncilAggregator:
         if self.asset_type == "BTC":
             return {
                 'rsi_bullish_zone': (40, 65),
+                'rsi_bearish_zone': (35, 60),
                 'rsi_oversold_bonus': 30,
+                'rsi_overbought_bonus': 70,
                 'sr_proximity_pct': 0.015,  # 1.5%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.60,
@@ -134,7 +131,9 @@ class InstitutionalCouncilAggregator:
         else:  # GOLD
             return {
                 'rsi_bullish_zone': (35, 60),
+                'rsi_bearish_zone': (40, 65),
                 'rsi_oversold_bonus': 25,
+                'rsi_overbought_bonus': 75,
                 'sr_proximity_pct': 0.010,  # 1.0%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
@@ -154,22 +153,21 @@ class InstitutionalCouncilAggregator:
         logger.info(f"   4. PATTERN    ({self.w_pattern:.1f} pt)  - AI candlesticks")
         logger.info(f"   5. VOLUME     ({self.w_volume:.1f} pt)  - Volume confirmation")
         logger.info("")
-        logger.info("   DECISION RULES:")
+        logger.info("   DECISION RULES (Bidirectional):")
         logger.info(f"   • Trend-aligned:  ≥ {self.trend_aligned_threshold:.1f} / 5.0")
         logger.info(f"   • Counter-trend:  ≥ {self.counter_trend_threshold:.1f} / 5.0")
         logger.info("")
         logger.info(f"   AI Validation: {'ENABLED' if self.ai_validator else 'DISABLED'}")
         logger.info("=" * 80)
         logger.info("")
-        
     
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
         """
-        Main council decision logic with FIXED confidence extraction
+        Main council decision logic with bidirectional support
         
         Returns:
             signal: 1 (BUY), -1 (SELL), 0 (HOLD)
-            details: Comprehensive breakdown with ALL confidence fields
+            details: Comprehensive breakdown
         """
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
@@ -179,80 +177,133 @@ class InstitutionalCouncilAggregator:
             is_bull, regime_conf = self._detect_regime(df)
             regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
             
-            # ================================================================
-            # FIX 1: Extract strategy signals AND confidences
-            # ================================================================
+            # Extract strategy signals
             mr_signal, mr_conf = 0, 0.0
             tf_signal, tf_conf = 0, 0.0
             ema_signal, ema_conf = 0, 0.0
             
-            # Mean Reversion
             if self.s_mean_reversion:
                 try:
                     mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
                 except Exception as e:
                     logger.error(f"[COUNCIL] MR signal error: {e}")
             
-            # Trend Following
             if self.s_trend_following:
                 try:
                     tf_signal, tf_conf = self.s_trend_following.generate_signal(df)
                 except Exception as e:
                     logger.error(f"[COUNCIL] TF signal error: {e}")
             
-            # EMA Strategy (for regime)
             if self.s_ema:
                 try:
                     ema_signal, ema_conf = self.s_ema.generate_signal(df)
                 except Exception as e:
                     logger.error(f"[COUNCIL] EMA signal error: {e}")
             
-            # Initialize council scorecard
-            scores = {
+            # ================================================================
+            # BIDIRECTIONAL SCORING: Evaluate both BUY and SELL
+            # ================================================================
+            
+            # BUY scorecard
+            buy_scores = {
                 'trend': 0.0,
                 'structure': 0.0,
                 'momentum': 0.0,
                 'pattern': 0.0,
                 'volume': 0.0,
             }
-            explanations = []
+            buy_explanations = []
             
-            # Run all judges (unchanged)
-            trend_score, trend_exp = self._judge_trend(df, is_bull)
-            scores['trend'] = trend_score
-            explanations.append(trend_exp)
+            # SELL scorecard
+            sell_scores = {
+                'trend': 0.0,
+                'structure': 0.0,
+                'momentum': 0.0,
+                'pattern': 0.0,
+                'volume': 0.0,
+            }
+            sell_explanations = []
             
-            structure_score, structure_exp = self._judge_structure(df)
-            scores['structure'] = structure_score
-            explanations.append(structure_exp)
+            # Run all judges for both directions
+            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull)
+            buy_explanations.append(trend_exp['buy'])
+            sell_explanations.append(trend_exp['sell'])
             
-            momentum_score, momentum_exp = self._judge_momentum(df)
-            scores['momentum'] = momentum_score
-            explanations.append(momentum_exp)
+            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df)
+            buy_explanations.append(structure_exp['buy'])
+            sell_explanations.append(structure_exp['sell'])
             
-            pattern_score, pattern_exp = self._judge_pattern(df)
-            scores['pattern'] = pattern_score
-            explanations.append(pattern_exp)
+            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df)
+            buy_explanations.append(momentum_exp['buy'])
+            sell_explanations.append(momentum_exp['sell'])
             
-            volume_score, volume_exp = self._judge_volume(df)
-            scores['volume'] = volume_score
-            explanations.append(volume_exp)
+            buy_scores['pattern'], sell_scores['pattern'], pattern_exp = self._judge_pattern_bidirectional(df)
+            buy_explanations.append(pattern_exp['buy'])
+            sell_explanations.append(pattern_exp['sell'])
             
-            # Calculate total score
-            total_score = sum(scores.values())
+            buy_scores['volume'], sell_scores['volume'], volume_exp = self._judge_volume_bidirectional(df)
+            buy_explanations.append(volume_exp['buy'])
+            sell_explanations.append(volume_exp['sell'])
             
-            # Decision logic
+            # Calculate total scores
+            buy_total = sum(buy_scores.values())
+            sell_total = sum(sell_scores.values())
+            
+            # ================================================================
+            # DECISION LOGIC: Choose strongest direction
+            # ================================================================
             signal = 0
             decision_type = "HOLD"
+            chosen_scores = {}
+            chosen_explanations = []
+            total_score = 0.0
+            required_score = 0.0
             
-            if trend_score > 0 and total_score >= self.trend_aligned_threshold:
+            # BUY decision
+            if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
                 decision_type = "BUY (Trend-Aligned)"
-                self.stats['trend_aligned_trades'] += 1
-            elif trend_score == 0 and total_score >= self.counter_trend_threshold:
+                self.stats['trend_aligned_buys'] += 1
+                chosen_scores = buy_scores
+                chosen_explanations = buy_explanations
+                total_score = buy_total
+                required_score = self.trend_aligned_threshold
+                
+            elif not is_bull and buy_total >= self.counter_trend_threshold:
                 signal = 1
                 decision_type = "BUY (Counter-Trend Reversal)"
-                self.stats['counter_trend_trades'] += 1
+                self.stats['counter_trend_buys'] += 1
+                chosen_scores = buy_scores
+                chosen_explanations = buy_explanations
+                total_score = buy_total
+                required_score = self.counter_trend_threshold
+            
+            # SELL decision (only if no BUY signal)
+            elif not is_bull and sell_total >= self.trend_aligned_threshold:
+                signal = -1
+                decision_type = "SELL (Trend-Aligned)"
+                self.stats['trend_aligned_sells'] += 1
+                chosen_scores = sell_scores
+                chosen_explanations = sell_explanations
+                total_score = sell_total
+                required_score = self.trend_aligned_threshold
+                
+            elif is_bull and sell_total >= self.counter_trend_threshold:
+                signal = -1
+                decision_type = "SELL (Counter-Trend Reversal)"
+                self.stats['counter_trend_sells'] += 1
+                chosen_scores = sell_scores
+                chosen_explanations = sell_explanations
+                total_score = sell_total
+                required_score = self.counter_trend_threshold
+            
+            else:
+                # HOLD - show both scores
+                decision_type = f"HOLD (BUY: {buy_total:.1f}, SELL: {sell_total:.1f})"
+                chosen_scores = {'buy': buy_scores, 'sell': sell_scores}
+                chosen_explanations = buy_explanations + sell_explanations
+                total_score = max(buy_total, sell_total)
+                required_score = self.trend_aligned_threshold
             
             # Update statistics
             if signal == 1:
@@ -265,57 +316,47 @@ class InstitutionalCouncilAggregator:
                 self.stats['hold_signals'] += 1
                 self.stats['avg_score_on_hold'].append(total_score)
             
-            required_score = self.trend_aligned_threshold if trend_score > 0 else self.counter_trend_threshold
-            
-            # ================================================================
-            # FIX 2: Calculate signal_quality (normalize council score to 0-1)
-            # ================================================================
-            # Council score is out of 5.0, normalize to 0-1
+            # Calculate signal quality
             base_quality = min(total_score / 5.0, 1.0)
-            
-            # Boost quality if multiple judges agree
-            judge_agreement = sum(1 for s in scores.values() if s > 0) / len(scores)
+            if signal != 0:
+                judge_agreement = sum(1 for s in chosen_scores.values() if s > 0) / len(chosen_scores)
+            else:
+                judge_agreement = 0.5
             signal_quality = base_quality * (0.8 + 0.2 * judge_agreement)
             signal_quality = min(signal_quality, 1.0)
             
-            # ================================================================
-            # FIX 3: Build comprehensive details dict with ALL fields
-            # ================================================================
+            # Build details dict
             details = {
                 'timestamp': timestamp,
                 'signal': signal,
                 'decision_type': decision_type,
                 'total_score': total_score,
                 'required_score': required_score,
-                'scores': scores,
+                'scores': chosen_scores,
+                'buy_scores': buy_scores,
+                'sell_scores': sell_scores,
+                'buy_total': buy_total,
+                'sell_total': sell_total,
                 'regime': regime_name,
                 'regime_confidence': regime_conf,
-                'explanations': explanations,
+                'explanations': chosen_explanations,
                 'signal_quality': signal_quality,
-                
-                # ✅ FIX: Add reasoning string for compatibility
                 'reasoning': f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})",
-                
-                # ✅ FIX: Add individual strategy signals and confidences
                 'mr_signal': mr_signal,
                 'mr_confidence': mr_conf,
                 'tf_signal': tf_signal,
                 'tf_confidence': tf_conf,
                 'ema_signal': ema_signal,
                 'ema_confidence': ema_conf,
-                
-                # ✅ FIX: Add buy/sell scores for compatibility
-                'buy_score': total_score if signal == 1 else 0.0,
-                'sell_score': total_score if signal == -1 else 0.0,
-                
-                # Council-specific metadata
+                'buy_score': buy_total,
+                'sell_score': sell_total,
                 'aggregator_type': 'council',
                 'judge_agreement': judge_agreement,
             }
             
             # Log decision
             if self.detailed_logging or signal != 0:
-                self._log_decision(details)
+                self._log_decision_bidirectional(details)
             
             # Store history
             self.decision_history.append({
@@ -325,26 +366,22 @@ class InstitutionalCouncilAggregator:
                 'regime': regime_name,
             })
             
-            # AI validation (if enabled and signal is not HOLD)
+            # AI validation
             if self.ai_validator and signal != 0:
-                # Store original signal for comparison
                 original_signal = signal
                 
-                # Run AI validation
                 validated_signal, ai_details = self.ai_validator.validate_signal(
                     signal=signal,
                     signal_details=details,
                     df=df,
                 )
                 
-                # Check if AI modified the signal
                 if validated_signal != signal:
                     logger.warning(f"[AI] Overruled: {signal} → {validated_signal}")
                     signal = validated_signal
                     details['ai_modified'] = True
                     details['signal'] = signal
                 
-                # ✅ NEW: Format AI validation for visualization
                 try:
                     formatted_ai = self._format_ai_validation_for_viz(
                         final_signal=signal,
@@ -352,61 +389,27 @@ class InstitutionalCouncilAggregator:
                         df=df
                     )
                     details['ai_validation'] = formatted_ai
-                    
-                    logger.debug(
-                        f"[COUNCIL] AI validation formatted: "
-                        f"Pattern={formatted_ai.get('pattern_name')}, "
-                        f"Confidence={formatted_ai.get('pattern_confidence', 0):.2%}"
-                    )
-                    
                 except Exception as e:
                     logger.error(f"[COUNCIL] AI formatting failed: {e}")
-                    
-                    # ✅ Fallback: Create minimal valid structure
                     details['ai_validation'] = {
                         "pattern_detected": False,
                         "pattern_name": "Error",
                         "pattern_confidence": 0.0,
-                        "pattern_id": None,
-                        "top3_patterns": [],
-                        "top3_confidences": [],
-                        "sr_analysis": {
-                            "near_sr_level": False,
-                            "level_type": "none",
-                            "nearest_level": None,
-                            "distance_pct": None,
-                            "levels": [],
-                            "total_levels_found": 0,
-                        },
                         "validation_passed": signal != 0,
                         "action": "error_formatting",
                         "error": str(e),
                     }
             
             elif self.ai_validator and signal == 0:
-                # Even for HOLD signals, provide minimal AI validation structure
                 details['ai_validation'] = {
                     "pattern_detected": False,
                     "pattern_name": "None",
                     "pattern_confidence": 0.0,
-                    "pattern_id": None,
-                    "top3_patterns": [],
-                    "top3_confidences": [],
-                    "sr_analysis": {
-                        "near_sr_level": False,
-                        "level_type": "none",
-                        "nearest_level": None,
-                        "distance_pct": None,
-                        "levels": [],
-                        "total_levels_found": 0,
-                    },
                     "validation_passed": True,
                     "action": "hold",
                 }
             
             return signal, details
-
-
             
         except Exception as e:
             logger.error(f"[COUNCIL] Error: {e}", exc_info=True)
@@ -416,7 +419,6 @@ class InstitutionalCouncilAggregator:
                 'signal': 0,
                 'total_score': 0.0,
                 'signal_quality': 0.0,
-                # Add default confidence fields to prevent crashes
                 'mr_signal': 0,
                 'mr_confidence': 0.0,
                 'tf_signal': 0,
@@ -425,25 +427,336 @@ class InstitutionalCouncilAggregator:
                 'ema_confidence': 0.0,
                 'reasoning': f"error: {str(e)[:50]}",
             }
-        
-        
-    def _format_ai_validation_for_viz(
-        self, final_signal: int, details: dict, df: pd.DataFrame
-    ) -> dict:
+    
+    # ========================================================================
+    # BIDIRECTIONAL JUDGES
+    # ========================================================================
+    
+    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, float, Dict]:
         """
-        ✅ NEW: Format AI validation results for visualization
-        IDENTICAL to PerformanceWeightedAggregator implementation
+        JUDGE 1: TREND (Bidirectional)
         
-        Args:
-            final_signal: Final signal after AI validation
-            details: Signal details dict
-            df: Market data
-
-        Returns:
-            Formatted AI validation data ready for visualization
+        BUY Rules:
+        - Price > EMA50 AND EMA20 > EMA50 = 1.5 pts
+        - Price > EMA50 BUT EMA20 < EMA50 = 0.75 pts
+        
+        SELL Rules:
+        - Price < EMA50 AND EMA20 < EMA50 = 1.5 pts
+        - Price < EMA50 BUT EMA20 > EMA50 = 0.75 pts
         """
         try:
-            # Initialize with safe defaults
+            features = self.s_ema.generate_features(df.tail(250))
+            if features.empty:
+                return 0.0, 0.0, {'buy': "TREND: No data", 'sell': "TREND: No data"}
+            
+            latest = features.iloc[-1]
+            price = latest['close']
+            ema_20 = latest.get('ema_fast', 0)
+            ema_50 = latest.get('ema_slow', 0)
+            
+            buy_score = 0.0
+            sell_score = 0.0
+            
+            # BUY scoring
+            if price > ema_50:
+                if ema_20 > ema_50:
+                    buy_score = self.w_trend
+                    buy_exp = f"TREND BUY: ✅ Full ({self.w_trend:.1f}) - Price > EMA50, EMA20 > EMA50"
+                else:
+                    buy_score = self.w_trend * 0.5
+                    buy_exp = f"TREND BUY: ⚠️ Partial ({buy_score:.1f}) - Price > EMA50 but EMA20 < EMA50"
+            else:
+                buy_exp = "TREND BUY: ❌ No credit - Price < EMA50"
+            
+            # SELL scoring
+            if price < ema_50:
+                if ema_20 < ema_50:
+                    sell_score = self.w_trend
+                    sell_exp = f"TREND SELL: ✅ Full ({self.w_trend:.1f}) - Price < EMA50, EMA20 < EMA50"
+                else:
+                    sell_score = self.w_trend * 0.5
+                    sell_exp = f"TREND SELL: ⚠️ Partial ({sell_score:.1f}) - Price < EMA50 but EMA20 > EMA50"
+            else:
+                sell_exp = "TREND SELL: ❌ No credit - Price > EMA50"
+            
+            return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
+            
+        except Exception as e:
+            logger.error(f"[TREND] Error: {e}")
+            return 0.0, 0.0, {'buy': f"TREND: Error", 'sell': f"TREND: Error"}
+    
+    def _judge_structure_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 2: STRUCTURE (Bidirectional)
+        
+        BUY: At support level
+        SELL: At resistance level
+        """
+        try:
+            current_price = float(df['close'].iloc[-1])
+            threshold_pct = self.config['sr_proximity_pct']
+            
+            buy_score = 0.0
+            sell_score = 0.0
+            
+            if self.ai_validator:
+                # Check support (BUY)
+                sr_buy = self.ai_validator._check_support_resistance_fixed(
+                    df=df,
+                    current_price=current_price,
+                    signal=1,
+                    threshold=threshold_pct,
+                )
+                
+                if sr_buy.get('near_level'):
+                    level = sr_buy.get('nearest_level')
+                    dist_pct = sr_buy.get('distance_pct', 0)
+                    
+                    if dist_pct < (threshold_pct * 50):
+                        buy_score = self.w_structure
+                        buy_exp = f"STRUCT BUY: ✅ Full ({self.w_structure:.1f}) - At Support ${level:.2f}"
+                    else:
+                        buy_score = self.w_structure * 0.5
+                        buy_exp = f"STRUCT BUY: ⚠️ Partial ({buy_score:.1f}) - Near Support ${level:.2f}"
+                else:
+                    buy_exp = "STRUCT BUY: ❌ No support nearby"
+                
+                # Check resistance (SELL)
+                sr_sell = self.ai_validator._check_support_resistance_fixed(
+                    df=df,
+                    current_price=current_price,
+                    signal=-1,
+                    threshold=threshold_pct,
+                )
+                
+                if sr_sell.get('near_level'):
+                    level = sr_sell.get('nearest_level')
+                    dist_pct = sr_sell.get('distance_pct', 0)
+                    
+                    if dist_pct < (threshold_pct * 50):
+                        sell_score = self.w_structure
+                        sell_exp = f"STRUCT SELL: ✅ Full ({self.w_structure:.1f}) - At Resistance ${level:.2f}"
+                    else:
+                        sell_score = self.w_structure * 0.5
+                        sell_exp = f"STRUCT SELL: ⚠️ Partial ({sell_score:.1f}) - Near Resistance ${level:.2f}"
+                else:
+                    sell_exp = "STRUCT SELL: ❌ No resistance nearby"
+            else:
+                buy_exp = "STRUCT BUY: AI disabled"
+                sell_exp = "STRUCT SELL: AI disabled"
+            
+            return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
+            
+        except Exception as e:
+            logger.error(f"[STRUCTURE] Error: {e}")
+            return 0.0, 0.0, {'buy': "STRUCT: Error", 'sell': "STRUCT: Error"}
+    
+    def _judge_momentum_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 3: MOMENTUM (Bidirectional)
+        
+        BUY: RSI oversold or in bullish zone
+        SELL: RSI overbought or in bearish zone
+        """
+        try:
+            features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+            if features_mr.empty:
+                return 0.0, 0.0, {'buy': "MOM: No data", 'sell': "MOM: No data"}
+            
+            rsi = features_mr.iloc[-1].get('rsi', 50)
+            
+            # Config values
+            bullish_min, bullish_max = self.config['rsi_bullish_zone']
+            bearish_min, bearish_max = self.config['rsi_bearish_zone']
+            oversold = self.config['rsi_oversold_bonus']
+            overbought = self.config['rsi_overbought_bonus']
+            
+            buy_score = 0.0
+            sell_score = 0.0
+            
+            # BUY scoring
+            if bullish_min <= rsi <= bullish_max:
+                buy_score = self.w_momentum
+                buy_exp = f"MOM BUY: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} bullish"
+            elif rsi < oversold:
+                buy_score = self.w_momentum
+                buy_exp = f"MOM BUY: ✅ Oversold ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+            else:
+                buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
+            
+            # SELL scoring
+            if bearish_min <= rsi <= bearish_max:
+                sell_score = self.w_momentum
+                sell_exp = f"MOM SELL: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} bearish"
+            elif rsi > overbought:
+                sell_score = self.w_momentum
+                sell_exp = f"MOM SELL: ✅ Overbought ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+            else:
+                sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
+            
+            # MACD confirmation
+            if self.config['macd_confirmation']:
+                macd = features_mr.iloc[-1].get('macd', 0)
+                macd_signal = features_mr.iloc[-1].get('macd_signal', 0)
+                
+                if buy_score > 0 and macd > macd_signal:
+                    bonus = 0.2
+                    buy_score = min(buy_score + bonus, self.w_momentum)
+                    buy_exp += f" + MACD"
+                
+                if sell_score > 0 and macd < macd_signal:
+                    bonus = 0.2
+                    sell_score = min(sell_score + bonus, self.w_momentum)
+                    sell_exp += f" + MACD"
+            
+            return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
+            
+        except Exception as e:
+            logger.error(f"[MOMENTUM] Error: {e}")
+            return 0.0, 0.0, {'buy': "MOM: Error", 'sell': "MOM: Error"}
+    
+    def _judge_pattern_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 4: PATTERN (Bidirectional)
+        
+        BUY: Bullish AI pattern
+        SELL: Bearish AI pattern
+        """
+        try:
+            if not self.ai_validator:
+                return 0.0, 0.0, {'buy': "PATTERN: AI disabled", 'sell': "PATTERN: AI disabled"}
+            
+            buy_score = 0.0
+            sell_score = 0.0
+            
+            # Check bullish pattern
+            pattern_buy = self.ai_validator._check_pattern(
+                df=df,
+                signal=1,
+                min_confidence=self.config['pattern_confidence_min'],
+            )
+            
+            if pattern_buy.get('pattern_confirmed'):
+                conf = pattern_buy.get('confidence', 0)
+                name = pattern_buy.get('pattern_name', 'Unknown')
+                
+                if conf > 0.75:
+                    buy_score = self.w_pattern
+                    buy_exp = f"PATTERN BUY: ✅ Full ({self.w_pattern:.1f}) - {name} ({conf:.0%})"
+                else:
+                    buy_score = self.w_pattern * 0.8
+                    buy_exp = f"PATTERN BUY: ⚠️ Partial ({buy_score:.1f}) - {name} ({conf:.0%})"
+            else:
+                buy_exp = "PATTERN BUY: ❌ No pattern"
+            
+            # Check bearish pattern
+            pattern_sell = self.ai_validator._check_pattern(
+                df=df,
+                signal=-1,
+                min_confidence=self.config['pattern_confidence_min'],
+            )
+            
+            if pattern_sell.get('pattern_confirmed'):
+                conf = pattern_sell.get('confidence', 0)
+                name = pattern_sell.get('pattern_name', 'Unknown')
+                
+                if conf > 0.75:
+                    sell_score = self.w_pattern
+                    sell_exp = f"PATTERN SELL: ✅ Full ({self.w_pattern:.1f}) - {name} ({conf:.0%})"
+                else:
+                    sell_score = self.w_pattern * 0.8
+                    sell_exp = f"PATTERN SELL: ⚠️ Partial ({sell_score:.1f}) - {name} ({conf:.0%})"
+            else:
+                sell_exp = "PATTERN SELL: ❌ No pattern"
+            
+            return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
+            
+        except Exception as e:
+            logger.error(f"[PATTERN] Error: {e}")
+            return 0.0, 0.0, {'buy': "PATTERN: Error", 'sell': "PATTERN: Error"}
+    
+    def _judge_volume_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 5: VOLUME (Same for both directions)
+        
+        Both BUY and SELL benefit from high volume
+        """
+        try:
+            if 'volume' not in df.columns:
+                return 0.0, 0.0, {'buy': "VOL: No data", 'sell': "VOL: No data"}
+            
+            volume_ma_period = self.config['volume_ma_period']
+            current_volume = df['volume'].iloc[-1]
+            volume_ma = df['volume'].rolling(volume_ma_period).mean().iloc[-1]
+            
+            vol_ratio = current_volume / volume_ma if volume_ma > 0 else 1.0
+            
+            # Same scoring for both directions
+            if vol_ratio > 1.5:
+                score = self.w_volume
+                exp = f"VOLUME: ✅ Strong ({self.w_volume:.1f}) - {vol_ratio:.1f}x avg"
+            elif vol_ratio > 1.0:
+                score = self.w_volume * 0.7
+                exp = f"VOLUME: ⚠️ Partial ({score:.1f}) - {vol_ratio:.1f}x avg"
+            else:
+                score = 0.0
+                exp = f"VOLUME: ❌ Below avg ({vol_ratio:.1f}x)"
+            
+            return score, score, {'buy': exp, 'sell': exp}
+            
+        except Exception as e:
+            logger.error(f"[VOLUME] Error: {e}")
+            return 0.0, 0.0, {'buy': "VOL: Error", 'sell': "VOL: Error"}
+    
+    # ========================================================================
+    # HELPER METHODS
+    # ========================================================================
+    
+    def _detect_regime(self, df: pd.DataFrame) -> Tuple[bool, float]:
+        """Leverage existing EMA strategy for regime detection"""
+        try:
+            ema_signal, ema_conf = self.s_ema.generate_signal(df)
+            is_bull = ema_signal >= 0
+            return is_bull, ema_conf
+        except Exception as e:
+            logger.error(f"[REGIME] Error: {e}")
+            return False, 0.5
+    
+    def _log_decision_bidirectional(self, details: Dict):
+        """Log council decision with bidirectional breakdown"""
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info(f"🏛️  COUNCIL DECISION - {details['regime']}")
+        logger.info("=" * 80)
+        logger.info(f"Timestamp: {details['timestamp']}")
+        logger.info(f"")
+        
+        # Show both BUY and SELL scores
+        logger.info(f"BUY SCORECARD (Total: {details['buy_total']:.2f}/5.0):")
+        for judge, score in details['buy_scores'].items():
+            max_score = getattr(self, f"w_{judge}")
+            pct = (score / max_score * 100) if max_score > 0 else 0
+            bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+            logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
+        
+        logger.info(f"")
+        logger.info(f"SELL SCORECARD (Total: {details['sell_total']:.2f}/5.0):")
+        for judge, score in details['sell_scores'].items():
+            max_score = getattr(self, f"w_{judge}")
+            pct = (score / max_score * 100) if max_score > 0 else 0
+            bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+            logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
+        
+        logger.info(f"")
+        logger.info(f"DECISION: {details['decision_type']}")
+        logger.info(f"SIGNAL:   {details['signal']:+2d}")
+        logger.info(f"SCORE:    {details['total_score']:.2f} / {details['required_score']:.2f}")
+        logger.info("=" * 80)
+        logger.info("")
+    
+    def _format_ai_validation_for_viz(self, final_signal: int, details: dict, df: pd.DataFrame) -> dict:
+        """Format AI validation results for visualization"""
+        try:
             viz_data = {
                 "pattern_detected": False,
                 "validation_passed": False,
@@ -465,17 +778,13 @@ class InstitutionalCouncilAggregator:
                 "error": None,
             }
 
-            # Check if AI validator exists and was used
             if not self.ai_validator:
                 viz_data["action"] = "ai_disabled"
                 return viz_data
 
-            # Get current price for S/R analysis
             current_price = float(df["close"].iloc[-1])
 
-            # ================================================================
-            # STEP 1: Get S/R Analysis from AI Validator
-            # ================================================================
+            # S/R Analysis
             try:
                 sr_result = self.ai_validator._check_support_resistance_fixed(
                     df=df,
@@ -489,17 +798,13 @@ class InstitutionalCouncilAggregator:
                     "level_type": sr_result.get("level_type", "none"),
                     "nearest_level": sr_result.get("nearest_level"),
                     "distance_pct": sr_result.get("distance_pct"),
-                    "levels": sr_result.get("all_levels", [])[:5],  # Top 5 levels
+                    "levels": sr_result.get("all_levels", [])[:5],
                     "total_levels_found": len(sr_result.get("all_levels", [])),
                 }
-
             except Exception as e:
                 logger.error(f"[VIZ] S/R analysis failed: {e}")
-                viz_data["error"] = f"S/R error: {str(e)}"
 
-            # ================================================================
-            # STEP 2: Get Pattern Detection from AI Validator
-            # ================================================================
+            # Pattern Detection
             try:
                 pattern_result = self.ai_validator._check_pattern(
                     df=df,
@@ -512,80 +817,51 @@ class InstitutionalCouncilAggregator:
                 viz_data["pattern_id"] = pattern_result.get("pattern_id")
                 viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
 
-                # Get top 3 patterns if available
                 if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
                     try:
-                        # Get last 15 candles for pattern detection
                         snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
                         first_open = snippet[0, 0]
 
                         if first_open > 0:
                             snippet_norm = snippet / first_open - 1
                             snippet_input = snippet_norm.reshape(1, 15, 4)
+                            predictions = self.ai_validator.sniper.model.predict(snippet_input, verbose=0)[0]
 
-                            # Get predictions
-                            predictions = self.ai_validator.sniper.model.predict(
-                                snippet_input, verbose=0
-                            )[0]
-
-                            # Get top 3
                             top3_indices = predictions.argsort()[-3:][::-1]
                             top3_confidences = predictions[top3_indices]
 
-                            # Map to pattern names
                             top3_patterns = []
                             for idx in top3_indices:
-                                pattern_name = (
-                                    self.ai_validator.reverse_pattern_map.get(
-                                        idx, f"Pattern_{idx}"
-                                    )
-                                )
+                                pattern_name = self.ai_validator.reverse_pattern_map.get(idx, f"Pattern_{idx}")
                                 top3_patterns.append(pattern_name)
 
                             viz_data["top3_patterns"] = top3_patterns
                             viz_data["top3_confidences"] = top3_confidences.tolist()
-
                     except Exception as e:
                         logger.debug(f"[VIZ] Top3 patterns failed: {e}")
-
             except Exception as e:
                 logger.error(f"[VIZ] Pattern detection failed: {e}")
-                viz_data["error"] = f"Pattern error: {str(e)}"
 
-            # ================================================================
-            # STEP 3: Determine Validation Status
-            # ================================================================
-
-            # Check if signal was modified by AI
+            # Validation Status
             original_signal = details.get("original_signal", final_signal)
 
             if final_signal == 0 and original_signal != 0:
-                # AI rejected the signal
                 viz_data["validation_passed"] = False
                 viz_data["action"] = "rejected"
-
-                # Collect rejection reasons
+                
                 reasons = []
                 if not viz_data["sr_analysis"]["near_sr_level"]:
                     reasons.append("No nearby S/R level")
                 if not viz_data["pattern_detected"]:
                     reasons.append("No pattern detected")
-                if (
-                    viz_data["pattern_confidence"]
-                    < self.ai_validator.current_pattern_threshold
-                ):
-                    reasons.append(
-                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
-                    )
-
+                if viz_data["pattern_confidence"] < self.ai_validator.current_pattern_threshold:
+                    reasons.append(f"Low confidence ({viz_data['pattern_confidence']:.1%})")
+                
                 viz_data["rejection_reasons"] = reasons
-
             elif final_signal != 0:
-                # Signal was approved
                 viz_data["validation_passed"] = True
                 viz_data["action"] = "approved"
             else:
-                # HOLD signal
                 viz_data["action"] = "hold"
 
             return viz_data
@@ -598,234 +874,6 @@ class InstitutionalCouncilAggregator:
                 "error": str(e),
                 "action": "error",
             }
-    
-    
-    def _judge_trend(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, str]:
-        """
-        JUDGE 1: TREND (1.5 pts)
-        
-        Rules:
-        - Price above EMA50 AND EMA20 > EMA50 = 1.5 pts
-        - Price above EMA50 BUT EMA20 < EMA50 = 0.75 pts (partial credit)
-        - Price below EMA50 = 0.0 pts
-        """
-        try:
-            features = self.s_ema.generate_features(df.tail(250))
-            if features.empty:
-                return 0.0, "TREND: No data"
-            
-            latest = features.iloc[-1]
-            price = latest['close']
-            ema_20 = latest.get('ema_fast', 0)
-            ema_50 = latest.get('ema_slow', 0)
-            
-            if price > ema_50:
-                if ema_20 > ema_50:
-                    return self.w_trend, f"TREND: ✅ Full credit ({self.w_trend:.1f}) - Price > EMA50, EMA20 > EMA50"
-                else:
-                    partial = self.w_trend * 0.5
-                    return partial, f"TREND: ⚠️  Partial ({partial:.1f}) - Price > EMA50 but EMA20 < EMA50"
-            else:
-                return 0.0, "TREND: ❌ No credit (0.0) - Price below EMA50"
-                
-        except Exception as e:
-            logger.error(f"[TREND] Error: {e}")
-            return 0.0, f"TREND: Error - {str(e)}"
-    
-    def _judge_structure(self, df: pd.DataFrame) -> Tuple[float, str]:
-        """
-        JUDGE 2: STRUCTURE (1.5 pts)
-        
-        Rules:
-        - At key S/R level (AI + indicators) = 1.5 pts
-        - Near S/R (within threshold) = 0.75 pts
-        - No S/R nearby = 0.0 pts
-        """
-        try:
-            current_price = float(df['close'].iloc[-1])
-            threshold_pct = self.config['sr_proximity_pct']
-            
-            # Check AI validator for S/R (if available)
-            if self.ai_validator:
-                sr_result = self.ai_validator._check_support_resistance_fixed(
-                    df=df,
-                    current_price=current_price,
-                    signal=1,  # Checking for support
-                    threshold=threshold_pct,
-                )
-                
-                if sr_result.get('near_level'):
-                    level = sr_result.get('nearest_level')
-                    dist_pct = sr_result.get('distance_pct', 0)
-                    
-                    if dist_pct < (threshold_pct * 50):  # Within 50% of threshold
-                        return self.w_structure, f"STRUCTURE: ✅ Full credit ({self.w_structure:.1f}) - At S/R ${level:.2f} ({dist_pct:.2f}%)"
-                    else:
-                        partial = self.w_structure * 0.5
-                        return partial, f"STRUCTURE: ⚠️  Partial ({partial:.1f}) - Near S/R ${level:.2f} ({dist_pct:.2f}%)"
-            
-            # Fallback: Use mean reversion's pivot detection
-            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
-            if mr_signal == 1 and mr_conf > 0.6:
-                return self.w_structure * 0.75, f"STRUCTURE: ⚠️  Partial ({self.w_structure * 0.75:.1f}) - MR bounce signal"
-            
-            return 0.0, "STRUCTURE: ❌ No S/R nearby"
-            
-        except Exception as e:
-            logger.error(f"[STRUCTURE] Error: {e}")
-            return 0.0, f"STRUCTURE: Error - {str(e)}"
-    
-    def _judge_momentum(self, df: pd.DataFrame) -> Tuple[float, str]:
-        """
-        JUDGE 3: MOMENTUM (1.0 pt)
-        
-        Rules:
-        - RSI in bullish zone (40-65) = 1.0 pt
-        - RSI oversold (<30) = 1.0 pt (dip-buying bonus)
-        - MACD confirmation adds +0.2 bonus (if enabled)
-        """
-        try:
-            # Get RSI from mean reversion strategy
-            features_mr = self.s_mean_reversion.generate_features(df.tail(100))
-            if features_mr.empty:
-                return 0.0, "MOMENTUM: No data"
-            
-            rsi = features_mr.iloc[-1].get('rsi', 50)
-            bullish_min, bullish_max = self.config['rsi_bullish_zone']
-            oversold = self.config['rsi_oversold_bonus']
-            
-            score = 0.0
-            explanation = ""
-            
-            # RSI scoring
-            if bullish_min <= rsi <= bullish_max:
-                score = self.w_momentum
-                explanation = f"MOMENTUM: ✅ Full credit ({self.w_momentum:.1f}) - RSI {rsi:.1f} in bullish zone"
-            elif rsi < oversold:
-                score = self.w_momentum
-                explanation = f"MOMENTUM: ✅ Oversold bonus ({self.w_momentum:.1f}) - RSI {rsi:.1f} < {oversold}"
-            else:
-                explanation = f"MOMENTUM: ❌ No credit - RSI {rsi:.1f} outside zones"
-            
-            # MACD confirmation bonus (optional)
-            if self.config['macd_confirmation'] and score > 0:
-                macd = features_mr.iloc[-1].get('macd', 0)
-                macd_signal = features_mr.iloc[-1].get('macd_signal', 0)
-                
-                if macd > macd_signal:
-                    bonus = 0.2
-                    score = min(score + bonus, self.w_momentum)  # Cap at max weight
-                    explanation += f" + MACD bonus (+{bonus:.1f})"
-            
-            return score, explanation
-            
-        except Exception as e:
-            logger.error(f"[MOMENTUM] Error: {e}")
-            return 0.0, f"MOMENTUM: Error - {str(e)}"
-    
-    def _judge_pattern(self, df: pd.DataFrame) -> Tuple[float, str]:
-        """
-        JUDGE 4: PATTERN (0.5 pt)
-        
-        Rules:
-        - AI pattern confidence > 60% = 0.5 pt
-        - AI pattern confidence > 75% = 0.5 pt + small bonus
-        """
-        try:
-            if not self.ai_validator:
-                return 0.0, "PATTERN: AI disabled"
-            
-            # Check AI pattern
-            pattern_result = self.ai_validator._check_pattern(
-                df=df,
-                signal=1,
-                min_confidence=self.config['pattern_confidence_min'],
-            )
-            
-            if pattern_result.get('pattern_confirmed'):
-                confidence = pattern_result.get('confidence', 0)
-                pattern_name = pattern_result.get('pattern_name', 'Unknown')
-                
-                if confidence > 0.75:
-                    return self.w_pattern, f"PATTERN: ✅ Full credit ({self.w_pattern:.1f}) - {pattern_name} ({confidence:.0%})"
-                else:
-                    return self.w_pattern * 0.8, f"PATTERN: ⚠️  Partial ({self.w_pattern * 0.8:.1f}) - {pattern_name} ({confidence:.0%})"
-            
-            return 0.0, f"PATTERN: ❌ No pattern (conf < {self.config['pattern_confidence_min']:.0%})"
-            
-        except Exception as e:
-            logger.error(f"[PATTERN] Error: {e}")
-            return 0.0, f"PATTERN: Error - {str(e)}"
-    
-    def _judge_volume(self, df: pd.DataFrame) -> Tuple[float, str]:
-        """
-        JUDGE 5: VOLUME (0.5 pt)
-        
-        Rules:
-        - Volume > MA(20) = 0.5 pt
-        - Volume > 1.5x MA(20) = 0.5 pt + emphasis
-        """
-        try:
-            if 'volume' not in df.columns:
-                return 0.0, "VOLUME: No volume data"
-            
-            volume_ma_period = self.config['volume_ma_period']
-            current_volume = df['volume'].iloc[-1]
-            volume_ma = df['volume'].rolling(volume_ma_period).mean().iloc[-1]
-            
-            if current_volume > volume_ma * 1.5:
-                return self.w_volume, f"VOLUME: ✅ Strong ({self.w_volume:.1f}) - {current_volume/volume_ma:.1f}x avg"
-            elif current_volume > volume_ma:
-                return self.w_volume * 0.7, f"VOLUME: ⚠️  Partial ({self.w_volume * 0.7:.1f}) - {current_volume/volume_ma:.1f}x avg"
-            else:
-                return 0.0, f"VOLUME: ❌ Below average ({current_volume/volume_ma:.1f}x)"
-            
-        except Exception as e:
-            logger.error(f"[VOLUME] Error: {e}")
-            return 0.0, f"VOLUME: Error - {str(e)}"
-    
-    def _detect_regime(self, df: pd.DataFrame) -> Tuple[bool, float]:
-        """Leverage existing EMA strategy for regime detection"""
-        try:
-            ema_signal, ema_conf = self.s_ema.generate_signal(df)
-            
-            # EMA signal: 1 = bullish, -1 = bearish, 0 = neutral
-            is_bull = ema_signal >= 0
-            
-            return is_bull, ema_conf
-            
-        except Exception as e:
-            logger.error(f"[REGIME] Error: {e}")
-            return False, 0.5  # Default to bearish with low confidence
-    
-    def _log_decision(self, details: Dict):
-        """Log council decision breakdown"""
-        logger.info("")
-        logger.info("=" * 80)
-        logger.info(f"🏛️  COUNCIL DECISION - {details['regime']}")
-        logger.info("=" * 80)
-        logger.info(f"Timestamp: {details['timestamp']}")
-        logger.info(f"")
-        logger.info(f"SCORECARD:")
-        
-        for judge, score in details['scores'].items():
-            max_score = getattr(self, f"w_{judge}")
-            pct = (score / max_score * 100) if max_score > 0 else 0
-            bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-            logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
-        
-        logger.info(f"")
-        logger.info(f"TOTAL SCORE: {details['total_score']:.2f} / 5.0")
-        logger.info(f"REQUIRED:    {details['required_score']:.2f}")
-        logger.info(f"")
-        logger.info(f"DECISION: {details['decision_type']}")
-        logger.info(f"SIGNAL:   {details['signal']:+2d}")
-        logger.info(f"")
-        logger.info(f"REASONING:")
-        for exp in details['explanations']:
-            logger.info(f"  • {exp}")
-        logger.info("=" * 80)
-        logger.info("")
     
     def get_statistics(self) -> Dict:
         """Return aggregator statistics"""
