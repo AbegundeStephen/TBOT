@@ -5,67 +5,67 @@
     <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; }
-        body { 
-            font-family: 'Segoe UI', 'Inter', sans-serif; 
-            background: #0f1115; 
-            color: #e0e0e0; 
-            margin: 0; 
-            display: flex; 
-            height: 100vh; 
-            overflow: hidden; 
+        body {
+            font-family: 'Segoe UI', 'Inter', sans-serif;
+            background: #0f1115;
+            color: #e0e0e0;
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
         }
-        
-        .sidebar { 
-            width: 400px; 
-            background: #161a25; 
-            border-right: 1px solid #2a2e39; 
-            display: flex; 
-            flex-direction: column; 
-            flex-shrink: 0; 
+
+        .sidebar {
+            width: 400px;
+            background: #161a25;
+            border-right: 1px solid #2a2e39;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
         }
         .sidebar-header { padding: 20px; border-bottom: 1px solid #2a2e39; }
         .sidebar-content { flex: 1; overflow-y: auto; padding: 20px; }
         .sidebar-footer { padding: 20px; border-top: 1px solid #2a2e39; background: #13161f; }
 
-        .chart-area { 
-            flex: 1; 
-            display: flex; 
-            flex-direction: column; 
+        .chart-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
             min-width: 0;
             position: relative;
         }
-        .chart-header { 
-            height: 50px; 
-            border-bottom: 1px solid #2a2e39; 
-            display: flex; 
-            align-items: center; 
-            padding: 0 20px; 
-            background: #161a25; 
-            flex-shrink: 0; 
+        .chart-header {
+            height: 50px;
+            border-bottom: 1px solid #2a2e39;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            background: #161a25;
+            flex-shrink: 0;
         }
-        
-        #chart-container { 
+
+        #chart-container {
             flex: 1;
             position: relative;
             width: 100%;
             min-height: 400px;
         }
 
-        select, input { 
-            background: #222631; 
-            border: 1px solid #363c4e; 
-            color: white; 
-            padding: 8px; 
-            border-radius: 4px; 
-            margin-right: 10px; 
+        select, input {
+            background: #222631;
+            border: 1px solid #363c4e;
+            color: white;
+            padding: 8px;
+            border-radius: 4px;
+            margin-right: 10px;
         }
-        button { 
-            cursor: pointer; 
-            border: none; 
-            border-radius: 4px; 
-            padding: 8px 16px; 
-            font-weight: 600; 
-            transition: all 0.2s; 
+        button {
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-weight: 600;
+            transition: all 0.2s;
         }
         .btn-primary { background: #2962ff; color: white; }
         .btn-primary:hover { background: #1e4bd6; }
@@ -74,13 +74,13 @@
         .btn-ai { background: #7c4dff; color: white; width: 100%; padding: 12px; }
         .btn-ai:hover { background: #651fff; }
 
-        .card { 
-            background: #1e222d; 
-            border-radius: 6px; 
-            padding: 15px; 
-            margin-bottom: 15px; 
-            border-left: 4px solid #444; 
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2); 
+        .card {
+            background: #1e222d;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #444;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
         .card.win { border-left-color: #00e676; }
         .card.loss { border-left-color: #ff1744; }
@@ -89,72 +89,72 @@
         h1 { font-size: 18px; margin: 0 0 10px 0; color: #fff; }
         h2 { font-size: 14px; text-transform: uppercase; color: #6d7385; margin: 0 0 8px 0; letter-spacing: 0.5px; }
         .value-large { font-size: 24px; font-weight: bold; margin-bottom: 5px; }
-        .badge { 
-            display: inline-block; 
-            padding: 2px 8px; 
-            border-radius: 4px; 
-            font-size: 11px; 
-            font-weight: bold; 
-            background: #333; 
-            margin-right: 5px; 
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            background: #333;
+            margin-right: 5px;
         }
         .badge-green { color: #00e676; background: rgba(0, 230, 118, 0.1); }
         .badge-red { color: #ff1744; background: rgba(255, 23, 68, 0.1); }
-        
+
         .timeline { list-style: none; padding: 0; margin: 0; }
-        .timeline li { 
-            padding-left: 15px; 
-            border-left: 2px solid #333; 
-            margin-bottom: 8px; 
-            position: relative; 
-            font-size: 13px; 
-            color: #b2b5be; 
+        .timeline li {
+            padding-left: 15px;
+            border-left: 2px solid #333;
+            margin-bottom: 8px;
+            position: relative;
+            font-size: 13px;
+            color: #b2b5be;
         }
-        .timeline li::before { 
-            content: ''; 
-            position: absolute; 
-            left: -5px; 
-            top: 6px; 
-            width: 8px; 
-            height: 8px; 
-            border-radius: 50%; 
-            background: #555; 
+        .timeline li::before {
+            content: '';
+            position: absolute;
+            left: -5px;
+            top: 6px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #555;
         }
         .time-label { color: #6d7385; font-size: 11px; margin-right: 5px; }
 
         .empty-state { text-align: center; color: #666; margin-top: 50px; }
 
         .modal-overlay {
-            display: none; 
-            position: fixed; 
-            top: 0; 
-            left: 0; 
-            width: 100%; 
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
             height: 100%;
-            background: rgba(0, 0, 0, 0.7); 
-            z-index: 1000; 
-            align-items: center; 
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
             justify-content: center;
         }
         .modal-content {
-            background: #1e222d; 
-            padding: 20px; 
-            border-radius: 8px; 
-            width: 80%; 
+            background: #1e222d;
+            padding: 20px;
+            border-radius: 8px;
+            width: 80%;
             max-width: 600px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
             border: 1px solid #444;
         }
         .modal-content textarea {
-            width: 100%; 
-            height: 300px; 
-            background: #0f1115; 
+            width: 100%;
+            height: 300px;
+            background: #0f1115;
             color: #e0e0e0;
-            border: 1px solid #333; 
-            padding: 10px; 
-            font-family: monospace; 
+            border: 1px solid #333;
+            padding: 10px;
+            font-family: monospace;
             font-size: 12px;
-            margin: 10px 0; 
+            margin: 10px 0;
             resize: none;
         }
         .close-btn { background: #444; margin-top: 10px; float: right; }
@@ -168,6 +168,19 @@
             color: #666;
             font-size: 14px;
         }
+
+        #regime-card.loading {
+            opacity: 0.7;
+        }
+
+        #regime-card.loading #regime-content {
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -177,6 +190,10 @@
             <h1>🎬 Trade Replay</h1>
             <div style="display: flex; margin-top: 10px;">
                 <input type="date" id="date-picker">
+                <select id="asset-selector" style="margin-right: 10px;">
+                    <option value="BTC">BTC</option>
+                    <option value="GOLD">Gold</option>
+                </select>
                 <select id="mode-selector">
                     <option value="daily">Daily</option>
                     <option value="weekly">Weekly</option>
@@ -186,8 +203,17 @@
             </div>
         </div>
 
-        <div class="sidebar-content" id="narrative-content">
-            <div class="empty-state">Select a date and click Load.</div>
+        <div class="sidebar-content">
+            <!-- MTF Regime Card (always visible if data is available) -->
+            <div class="card" id="regime-card" style="display: none;">
+                <h2>📊 MTF Regime Analysis</h2>
+                <div id="regime-content"></div>
+            </div>
+
+            <!-- Trade Data (overwritten when loading debrief) -->
+            <div id="narrative-content">
+                <div class="empty-state">Select a date and click Load.</div>
+            </div>
         </div>
 
         <div class="sidebar-footer">
@@ -234,7 +260,7 @@
                     resolve(true);
                     return;
                 }
-                
+
                 var attempts = 0;
                 var checkInterval = setInterval(function() {
                     attempts++;
@@ -253,12 +279,17 @@
         function initChart() {
             return new Promise(function(resolve) {
                 var container = document.getElementById('chart-container');
-                
+
                 if (!chartLibraryLoaded) {
                     container.innerHTML = '<div class="chart-loading">Loading chart library...</div>';
                     waitForLibrary().then(function(loaded) {
                         if (!loaded) {
-                            container.innerHTML = '<div class="chart-loading" style="color: #ff1744;">⚠️ Chart library failed to load. Check your internet connection.</div>';
+                            container.innerHTML =
+                                '<div style="color:red; padding:20px; text-align:center;">' +
+                                '⚠️ <strong>Error:</strong> TradingView Library could not be loaded.<br>' +
+                                'Please check your internet connection or firewall.<br><br>' +
+                                '<button class="btn-primary" onclick="location.reload()">Retry</button>' +
+                                '</div>';
                             resolve(false);
                             return;
                         }
@@ -272,12 +303,12 @@
 
         function initChartInternal(container, resolve) {
             container.innerHTML = '';
-            
+
             var width = container.clientWidth;
             var height = container.clientHeight;
-            
+
             console.log('Chart dimensions:', width, height);
-            
+
             if (width === 0 || height === 0) {
                 console.error('Chart container has zero dimensions!');
                 container.innerHTML = '<div class="chart-loading" style="color: #ff1744;">⚠️ Chart container sizing error. Please refresh.</div>';
@@ -293,16 +324,16 @@
                 chart = LightweightCharts.createChart(container, {
                     width: width,
                     height: height,
-                    layout: { 
-                        background: { color: '#0f1115' }, 
-                        textColor: '#d1d4dc' 
+                    layout: {
+                        background: { color: '#0f1115' },
+                        textColor: '#d1d4dc'
                     },
-                    grid: { 
-                        vertLines: { color: '#1f2229' }, 
-                        horzLines: { color: '#1f2229' } 
+                    grid: {
+                        vertLines: { color: '#1f2229' },
+                        horzLines: { color: '#1f2229' }
                     },
-                    timeScale: { 
-                        timeVisible: true, 
+                    timeScale: {
+                        timeVisible: true,
                         secondsVisible: false,
                         borderColor: '#2a2e39'
                     },
@@ -310,11 +341,11 @@
                         borderColor: '#2a2e39'
                     }
                 });
-                
+
                 if (!chart || typeof chart.addCandlestickSeries !== 'function') {
                     throw new Error('Chart object missing addCandlestickSeries method');
                 }
-                
+
                 candleSeries = chart.addCandlestickSeries({
                     upColor: '#00e676',
                     downColor: '#ff1744',
@@ -325,9 +356,9 @@
 
                 window.addEventListener('resize', function() {
                     if (chart && container.clientWidth > 0 && container.clientHeight > 0) {
-                        chart.applyOptions({ 
-                            width: container.clientWidth, 
-                            height: container.clientHeight 
+                        chart.applyOptions({
+                            width: container.clientWidth,
+                            height: container.clientHeight
                         });
                     }
                 });
@@ -344,10 +375,10 @@
         document.addEventListener('DOMContentLoaded', function() {
             var container = document.getElementById('chart-container');
             container.innerHTML = '<div class="chart-loading">Loading chart library...</div>';
-            
+
             waitForLibrary().then(function(loaded) {
                 if (!loaded) {
-                    container.innerHTML = 
+                    container.innerHTML =
                         '<div style="color:red; padding:20px; text-align:center;">' +
                         '⚠️ <strong>Error:</strong> TradingView Library could not be loaded.<br>' +
                         'Please check your internet connection or firewall.<br><br>' +
@@ -362,15 +393,19 @@
             });
 
             document.getElementById('date-picker').value = new Date().toISOString().split('T')[0];
+            var today = new Date().toISOString().split('T')[0];
+            fetchRegimeData('BTC', today);
         });
 
         function loadData() {
             var date = document.getElementById('date-picker').value;
             var mode = document.getElementById('mode-selector').value;
             var content = document.getElementById('narrative-content');
+            var asset = document.getElementById('asset-selector').value;
 
             content.innerHTML = '<div class="empty-state">Loading...</div>';
 
+            // Fetch trade data
             fetch('/api/debrief_data?date=' + date + '&mode=' + mode)
                 .then(function(res) {
                     if (!res.ok) {
@@ -382,7 +417,7 @@
                     if (data.error) {
                         throw new Error(data.error);
                     }
-                    
+
                     reportData = data;
 
                     if (!reportData.trades || reportData.trades.length === 0) {
@@ -391,28 +426,30 @@
                             candleSeries.setData([]);
                         }
                         document.getElementById('chart-title').innerText = "No Trade Selected";
-                        return;
+                    } else {
+                        currentIndex = 0;
+                        renderTrade(0);
                     }
-
-                    currentIndex = 0;
-                    renderTrade(0);
                 })
                 .catch(function(e) {
                     console.error('Load error:', e);
                     content.innerHTML = '<div class="empty-state" style="color:red">Error: ' + e.message + '</div>';
                 });
+
+            // Always fetch MTF regime data, regardless of trades
+            fetchRegimeData(asset, date);
         }
 
         function renderTrade(index) {
             if (!reportData || !reportData.trades || !reportData.trades[index]) {
                 return;
             }
-            
+
             var trade = reportData.trades[index];
             var content = document.getElementById('narrative-content');
 
             document.getElementById('trade-counter').innerText = (index + 1) + ' / ' + reportData.trades.length;
-            
+
             var entryTime = trade.entry_time ? trade.entry_time.replace('T', ' ').slice(0, 16) : 'Unknown';
             document.getElementById('chart-title').innerText = (trade.asset || 'Unknown') + ' ' + ((trade.side || 'unknown').toUpperCase()) + ' @ ' + entryTime;
 
@@ -463,6 +500,7 @@
             }
 
             html += '</ul></div>';
+
             content.innerHTML = html;
 
             loadChartData(trade);
@@ -483,10 +521,10 @@
             var startParam = trade.chart_data_start ? 'start=' + encodeURIComponent(trade.chart_data_start) : '';
             var endParam = trade.chart_data_end ? 'end=' + encodeURIComponent(trade.chart_data_end) : '';
             var params = [startParam, endParam].filter(Boolean).join('&');
-            
+
             var url = '/api/history/' + asset + (params ? '?' + params : '');
             console.log('Fetching chart data:', url);
-            
+
             fetch(url)
                 .then(function(res) {
                     if (!res.ok) {
@@ -496,16 +534,16 @@
                 })
                 .then(function(candles) {
                     console.log('Received candles:', candles.length);
-                    
+
                     // FALLBACK: If no candles, generate mock data for testing
                     if (!candles || candles.length === 0) {
                         console.warn('No candle data returned, using mock data');
                         candles = generateMockCandles(trade);
                     }
-                    
+
                     if (candles && candles.length > 0) {
                         candleSeries.setData(candles);
-                        
+
                         var markers = [];
                         if (trade.entry_time) {
                             var entryTimestamp = Math.floor(new Date(trade.entry_time).getTime() / 1000);
@@ -533,7 +571,7 @@
                         if (markers.length > 0) {
                             candleSeries.setMarkers(markers);
                         }
-                        
+
                         chart.timeScale().fitContent();
                     } else {
                         candleSeries.setData([]);
@@ -542,7 +580,7 @@
                 .catch(function(e) {
                     console.error("Chart load failed:", e);
                     console.warn("Using mock data instead");
-                    
+
                     // Use mock data on error
                     var mockCandles = generateMockCandles(trade);
                     candleSeries.setData(mockCandles);
@@ -555,20 +593,20 @@
             var candles = [];
             var entryTime = new Date(trade.entry_time).getTime() / 1000;
             var basePrice = 100000; // Mock BTC price
-            
+
             // Generate 100 candles (6 hours before entry to 2 hours after)
             var startTime = entryTime - (6 * 3600);
-            
+
             for (var i = 0; i < 100; i++) {
                 var time = startTime + (i * 300); // 5-minute candles
                 var volatility = Math.random() * 500;
                 var direction = Math.random() > 0.5 ? 1 : -1;
-                
+
                 var open = basePrice + (direction * volatility);
                 var close = open + ((Math.random() - 0.5) * 300);
                 var high = Math.max(open, close) + (Math.random() * 200);
                 var low = Math.min(open, close) - (Math.random() * 200);
-                
+
                 candles.push({
                     time: time,
                     open: open,
@@ -576,10 +614,10 @@
                     low: low,
                     close: close
                 });
-                
+
                 basePrice = close;
             }
-            
+
             return candles;
         }
 
@@ -643,6 +681,123 @@
 
         function closeModal() {
             document.getElementById('copy-modal').style.display = 'none';
+        }
+
+        function fetchRegimeData(asset, date) {
+            var card = document.getElementById('regime-card');
+            var content = document.getElementById('regime-content');
+
+            card.style.display = 'block';
+            card.classList.add('loading');
+            content.innerHTML = '<div>Loading regime data...</div>';
+
+            fetch(`/api/regime/${asset}?date=${date}`)
+                .then(function(res) {
+                    if (!res.ok) {
+                        throw new Error('HTTP ' + res.status + ': ' + res.statusText);
+                    }
+                    return res.json();
+                })
+                .then(function(data) {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    renderRegimeData(data);
+                })
+                .catch(function(e) {
+                    console.error('Regime fetch error:', e);
+                    content.innerHTML =
+                        '<div class="empty-state" style="color:red; font-size: 12px;">Error: ' + e.message + '</div>';
+                })
+                .finally(function() {
+                    card.classList.remove('loading');
+                });
+        }
+
+        function renderRegimeData(regime) {
+            var content = document.getElementById('regime-content');
+            var card = document.getElementById('regime-card');
+
+            if (!regime || !regime.asset) {
+                card.style.display = 'none';
+                return;
+            }
+
+            // Format timestamp
+            var timestamp = new Date(regime.timestamp).toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+            });
+
+            // Emoji mapping for regime types
+            var regimeEmoji = {
+                'strong_bull': '🚀',
+                'bull': '📈',
+                'neutral': '➡️',
+                'bear': '📉',
+                'strong_bear': '⚠️'
+            };
+
+            // Format timeframe data
+            var formatTimeframe = function(tf) {
+                if (!tf || !tf.regime) return '<div class="empty-state" style="font-size: 12px;">No data</div>';
+
+                var emoji = regimeEmoji[tf.regime] || '❓';
+                return `
+                    <div style="margin-bottom: 8px;">
+                        <div><strong>${emoji} ${tf.regime.toUpperCase()}</strong> (${(tf.confidence * 100).toFixed(0)}%)</div>
+                        <div style="font-size: 12px; color: #888;">
+                            Trend: ${tf.trend_direction || 'N/A'} |
+                            ADX: ${tf.adx || 'N/A'} |
+                            RSI: ${tf.rsi || 'N/A'}
+                        </div>
+                    </div>
+                `;
+            };
+
+            // Build HTML
+            var html = `
+                <div style="margin-bottom: 10px;">
+                    <div style="font-size: 12px; color: #888;">Updated: ${timestamp}</div>
+                    <div style="font-size: 16px; margin: 5px 0;">
+                        <strong>${regimeEmoji[regime.consensus.regime] || '❓'} ${regime.consensus.regime.toUpperCase()}</strong>
+                        <span style="float: right; font-size: 14px;">${(regime.consensus.confidence * 100).toFixed(0)}%</span>
+                    </div>
+                    <div style="font-size: 12px; color: #888; margin-bottom: 10px;">
+                        Agreement: ${(regime.consensus.timeframe_agreement * 100).toFixed(0)}% |
+                        Risk: ${regime.risk.level} |
+                        Volatility: ${regime.risk.volatility}
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 10px;">
+                    <h3 style="font-size: 13px; margin: 0 0 5px 0; color: #ccc;">📉 1H Timeframe</h3>
+                    ${formatTimeframe(regime.timeframes['1h'])}
+                </div>
+
+                <div style="margin-bottom: 10px;">
+                    <h3 style="font-size: 13px; margin: 0 0 5px 0; color: #ccc;">📊 4H Timeframe</h3>
+                    ${formatTimeframe(regime.timeframes['4h'])}
+                </div>
+
+                <div style="margin-bottom: 10px;">
+                    <h3 style="font-size: 13px; margin: 0 0 5px 0; color: #ccc;">📅 1D Timeframe</h3>
+                    ${formatTimeframe(regime.timeframes['1d'])}
+                </div>
+
+                <div style="border-top: 1px solid #2a2e39; padding-top: 10px; font-size: 12px;">
+                    <h3 style="font-size: 13px; margin: 0 0 8px 0; color: #ccc;">🎯 Recommendations</h3>
+                    <div><strong>Trading Mode:</strong> ${regime.trading_implications.recommended_mode}</div>
+                    <div><strong>Counter-Trend:</strong> ${regime.trading_implications.allow_counter_trend ? '✅ Allowed' : '❌ Blocked'}</div>
+                    <div><strong>Max Positions:</strong> ${regime.trading_implications.suggested_max_positions}</div>
+                </div>
+            `;
+
+            content.innerHTML = html;
+            card.style.display = 'block';
         }
     </script>
 </body>

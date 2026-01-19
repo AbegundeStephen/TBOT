@@ -45,3 +45,6 @@ models/ai/*.weights.h5
 models/ai/*_config.pkl
 models/ai/*_history.png
 models/ai/*_mapping.pkl
+
+data/historical/
+data/raw/

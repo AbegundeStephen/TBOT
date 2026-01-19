@@ -326,6 +326,104 @@ def get_closed_trades():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/regime/<asset>")
+def get_regime(asset):
+    """
+    Fetches the latest multi-timeframe regime analysis for a given asset and date.
+    If no data exists for the selected date, returns the most recent data.
+    """
+    try:
+        date = request.args.get("date")
+
+        # Query regime data for the selected asset
+        query = (
+            supabase.table("mtf_regime_analysis").select("*").eq("asset", asset.upper())
+        )
+
+        if date:
+            # Convert the date to a range for the day (start and end of the day)
+            start_of_day = f"{date}T00:00:00+00:00"
+            end_of_day = f"{date}T23:59:59+00:00"
+
+            # Filter by timestamp range
+            query = query.gte("timestamp", start_of_day).lte("timestamp", end_of_day)
+
+        # Order by timestamp (descending) and fetch the latest record
+        result = query.order("timestamp", desc=True).limit(1).execute()
+
+        if not result.data:
+            # If no data for the selected date, fetch the most recent data
+            result = (
+                supabase.table("mtf_regime_analysis")
+                .select("*")
+                .eq("asset", asset.upper())
+                .order("timestamp", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+            if not result.data:
+                return jsonify({"error": f"No regime data found for {asset}"}), 404
+
+        regime_data = result.data[0]
+
+        # Format the response
+        response = {
+            "asset": regime_data["asset"],
+            "timestamp": regime_data["timestamp"],
+            "consensus": {
+                "regime": regime_data["consensus_regime"],
+                "confidence": regime_data["consensus_confidence"],
+                "timeframe_agreement": regime_data["timeframe_agreement"],
+                "trend_coherence": regime_data["trend_coherence"],
+            },
+            "risk": {
+                "level": regime_data["risk_level"],
+                "volatility": regime_data["volatility_regime"],
+            },
+            "trading_implications": {
+                "recommended_mode": regime_data["recommended_mode"],
+                "allow_counter_trend": regime_data["allow_counter_trend"],
+                "suggested_max_positions": regime_data["suggested_max_positions"],
+            },
+            "timeframes": {
+                "1h": {
+                    "regime": regime_data["h1_regime"],
+                    "confidence": regime_data["h1_confidence"],
+                    "trend_strength": regime_data["h1_trend_strength"],
+                    "trend_direction": regime_data["h1_trend_direction"],
+                    "adx": regime_data["h1_adx"],
+                    "rsi": regime_data["h1_rsi"],
+                    "ema_diff_pct": regime_data["h1_ema_diff_pct"],
+                },
+                "4h": {
+                    "regime": regime_data["h4_regime"],
+                    "confidence": regime_data["h4_confidence"],
+                    "trend_strength": regime_data["h4_trend_strength"],
+                    "trend_direction": regime_data["h4_trend_direction"],
+                    "adx": regime_data["h4_adx"],
+                    "rsi": regime_data["h4_rsi"],
+                    "ema_diff_pct": regime_data["h4_ema_diff_pct"],
+                },
+                "1d": {
+                    "regime": regime_data["d1_regime"],
+                    "confidence": regime_data["d1_confidence"],
+                    "trend_strength": regime_data["d1_trend_strength"],
+                    "trend_direction": regime_data["d1_trend_direction"],
+                    "adx": regime_data["d1_adx"],
+                    "rsi": regime_data["d1_rsi"],
+                    "ema_diff_pct": regime_data["d1_ema_diff_pct"],
+                },
+            },
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        logger.error(f"Error fetching regime data for {asset}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/signals")
 def get_signals():
     """Get recent trading signals"""
