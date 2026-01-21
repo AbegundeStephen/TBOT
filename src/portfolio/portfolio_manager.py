@@ -517,16 +517,13 @@ class PortfolioManager:
 
     def _fetch_total_capital(self, strict: bool = False) -> float:
         """
-        Fetch total available capital from exchanges
+        ✅ FIXED: Fetch total available capital from ALL exchanges
 
         Args:
             strict: If True, raise error when live balances unavailable in live mode
 
         Returns:
-            Total capital in USD
-
-        Raises:
-            RuntimeError: If strict=True and balances unavailable in live mode
+            Total capital in USD (MT5 + Binance combined)
         """
         if self.is_paper_mode:
             logger.info(f"[PAPER] Using simulated capital: ${self.paper_capital:,.2f}")
@@ -534,62 +531,118 @@ class PortfolioManager:
 
         total_capital = 0.0
         errors = []
+        balances_found = []
 
-        # ✅ Fetch MT5 balance (GOLD)
-        if self.config["assets"].get("GOLD", {}).get("enabled", False):
-            mt5_balance = self._fetch_mt5_balance()
-            if mt5_balance is not None:
-                total_capital += mt5_balance
-                logger.info(f"[MT5] Balance: ${mt5_balance:,.2f}")
-            else:
-                errors.append("MT5 balance unavailable")
+        # ================================================================
+        # ✅ FIX 1: Check MT5 balance (GOLD) - Always try if handler exists
+        # ================================================================
+        if self.mt5_handler is not None:
+            try:
+                mt5_balance = self._fetch_mt5_balance()
+                if mt5_balance is not None and mt5_balance > 0:
+                    total_capital += mt5_balance
+                    balances_found.append(f"MT5: ${mt5_balance:,.2f}")
+                    logger.info(f"[MT5] ✓ Balance fetched: ${mt5_balance:,.2f}")
+                else:
+                    logger.warning(f"[MT5] Balance is 0 or None")
+                    errors.append("MT5 balance unavailable or 0")
+            except Exception as e:
+                logger.error(f"[MT5] Error fetching balance: {e}", exc_info=True)
+                errors.append(f"MT5 error: {str(e)}")
+        else:
+            logger.debug("[MT5] Handler not available, skipping MT5 balance")
 
-        # ✅ Fetch Binance balance (BTC)
-        if self.config["assets"].get("BTC", {}).get("enabled", False):
-            binance_balance = self._fetch_binance_balance()
-            if binance_balance is not None:
-                total_capital += binance_balance
-                logger.info(f"[BINANCE] Balance: ${binance_balance:,.2f}")
-            else:
-                errors.append("Binance balance unavailable")
+        # ================================================================
+        # ✅ FIX 2: Check Binance balance (BTC) - Always try if client exists
+        # ================================================================
+        if self.binance_client is not None:
+            try:
+                binance_balance = self._fetch_binance_balance()
+                if binance_balance is not None and binance_balance > 0:
+                    total_capital += binance_balance
+                    balances_found.append(f"Binance: ${binance_balance:,.2f}")
+                    logger.info(f"[BINANCE] ✓ Balance fetched: ${binance_balance:,.2f}")
+                else:
+                    logger.warning(f"[BINANCE] Balance is 0 or None")
+                    errors.append("Binance balance unavailable or 0")
+            except Exception as e:
+                logger.error(f"[BINANCE] Error fetching balance: {e}", exc_info=True)
+                errors.append(f"Binance error: {str(e)}")
+        else:
+            logger.debug("[BINANCE] Client not available, skipping Binance balance")
 
-        # ✅ FIX: Enforce strict mode in live trading
+        # ================================================================
+        # ✅ FIX 3: Log combined results clearly
+        # ================================================================
+        logger.info(
+            f"\n{'='*80}\n"
+            f"[BALANCE SUMMARY]\n"
+            f"{'='*80}\n"
+            f"Balances Found: {len(balances_found)}\n"
+            f"  {chr(10).join(balances_found) if balances_found else 'None'}\n"
+            f"Total Capital:  ${total_capital:,.2f}\n"
+            f"Errors: {len(errors)}\n"
+            f"  {chr(10).join(errors) if errors else 'None'}\n"
+            f"{'='*80}"
+        )
+
+        # ================================================================
+        # ✅ FIX 4: Strict mode enforcement (for live trading)
+        # ================================================================
         if strict and not self.is_paper_mode and total_capital == 0:
             error_msg = (
-                f"CRITICAL: Unable to fetch live account balances! "
-                f"Errors: {', '.join(errors)}. "
+                f"CRITICAL: Unable to fetch live account balances!\n"
+                f"Errors: {', '.join(errors)}\n"
                 f"Cannot proceed with live trading without valid balances."
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        # ✅ FIX: Don't fallback to paper_capital in live mode
+        # ================================================================
+        # ✅ FIX 5: Fallback handling
+        # ================================================================
         if total_capital == 0:
             if self.is_paper_mode:
                 logger.warning("No balances fetched, using paper capital")
                 return self.paper_capital
             else:
-                logger.error("No balances available from exchanges!")
+                logger.error(
+                    "⚠️  NO BALANCES AVAILABLE FROM ANY EXCHANGE!\n"
+                    "Check your MT5 connection and Binance API keys."
+                )
                 return 0.0
 
-        logger.info(f"[TOTAL] Capital: ${total_capital:,.2f}")
         return total_capital
 
     def _fetch_mt5_balance(self) -> Optional[float]:
-        """Fetch MT5 account balance"""
+        """
+        ✅ FIXED: Fetch MT5 balance with better error handling
+        """
         try:
             import MetaTrader5 as mt5
 
             if not mt5.initialize():
-                logger.error("[MT5] Failed to initialize")
+                logger.error("[MT5] Failed to initialize terminal")
                 return None
 
             account_info = mt5.account_info()
+
             if account_info:
                 balance = account_info.balance
                 equity = account_info.equity
-                logger.debug(f"[MT5] Balance: ${balance:,.2f}, Equity: ${equity:,.2f}")
-                return equity  # Use equity (includes unrealized P&L)
+                margin = account_info.margin
+                free_margin = account_info.margin_free
+
+                logger.info(
+                    f"[MT5] Account info:\n"
+                    f"  Balance:      ${balance:,.2f}\n"
+                    f"  Equity:       ${equity:,.2f}\n"
+                    f"  Margin Used:  ${margin:,.2f}\n"
+                    f"  Free Margin:  ${free_margin:,.2f}"
+                )
+
+                # Use equity (includes unrealized P&L)
+                return equity
             else:
                 logger.error("[MT5] No account info available")
                 return None
@@ -599,14 +652,19 @@ class PortfolioManager:
             return None
 
     def _fetch_binance_balance(self) -> Optional[float]:
-        """Fetch Binance account balance (USDT + BTC converted to USD)"""
+        """
+        ✅ FIXED: Fetch Binance balance with better error handling and logging
+        """
         try:
             if not self.binance_client:
                 logger.error("[BINANCE] Client not initialized")
                 return None
 
+            logger.debug("[BINANCE] Fetching account info...")
             account = self.binance_client.get_account()
+
             total_balance = 0.0
+            asset_details = []
 
             for balance in account["balances"]:
                 asset = balance["asset"]
@@ -614,19 +672,32 @@ class PortfolioManager:
                 locked = float(balance["locked"])
                 total = free + locked
 
-                if total > 0:
+                if total > 0.0001:  # Only log significant balances
                     if asset == "USDT":
                         total_balance += total
-                        logger.debug(f"[BINANCE] USDT: ${total:,.2f}")
+                        asset_details.append(
+                            f"  USDT: ${total:,.2f} (free: ${free:,.2f}, locked: ${locked:,.2f})"
+                        )
+
                     elif asset == "BTC":
                         # Convert BTC to USD
                         ticker = self.binance_client.get_symbol_ticker(symbol="BTCUSDT")
                         btc_price = float(ticker["price"])
                         usd_value = total * btc_price
                         total_balance += usd_value
-                        logger.debug(
-                            f"[BINANCE] BTC: {total:.8f} @ ${btc_price:,.2f} = ${usd_value:,.2f}"
+                        asset_details.append(
+                            f"  BTC:  {total:.8f} @ ${btc_price:,.2f} = ${usd_value:,.2f}"
                         )
+
+            # ✅ Log detailed breakdown
+            if asset_details:
+                logger.info(
+                    f"[BINANCE] Balance breakdown:\n"
+                    + "\n".join(asset_details)
+                    + f"\n  Total: ${total_balance:,.2f}"
+                )
+            else:
+                logger.warning("[BINANCE] No significant balances found")
 
             return total_balance if total_balance > 0 else None
 
@@ -639,28 +710,32 @@ class PortfolioManager:
 
     def refresh_capital(self, force: bool = False) -> bool:
         """
-        ✅ FIX: Refresh capital from exchanges with time-based throttling
-
-        Args:
-            force: If True, bypass time check and force refresh
-
-        Returns:
-            True if refresh successful
+        ✅ FIXED: Better logging for balance refresh
         """
         if self.is_paper_mode:
             return True
 
-        # ✅ FIX: Auto-refresh based on time interval
+        # Check if refresh is needed
         now = datetime.now()
         time_since_refresh = now - self.last_balance_refresh
 
         if not force and time_since_refresh < self.balance_refresh_interval:
             logger.debug(
-                f"Skipping balance refresh (last: {time_since_refresh.seconds}s ago)"
+                f"[BALANCE] Skipping refresh (last: {time_since_refresh.seconds}s ago, "
+                f"interval: {self.balance_refresh_interval.seconds}s)"
             )
             return True
 
-        logger.info("Refreshing account balances from exchanges...")
+        logger.info(
+            f"\n{'='*80}\n"
+            f"[BALANCE REFRESH]\n"
+            f"{'='*80}\n"
+            f"Last refresh: {time_since_refresh.seconds}s ago\n"
+            f"Force:        {force}\n"
+            f"{'='*80}"
+        )
+
+        # Fetch new balances
         new_capital = self._fetch_total_capital(strict=False)
 
         if new_capital > 0:
@@ -673,13 +748,20 @@ class PortfolioManager:
                 self.peak_equity = self.equity
 
             change = new_capital - old_capital
+            change_pct = (change / old_capital * 100) if old_capital > 0 else 0
+
             logger.info(
-                f"Balance refreshed: ${new_capital:,.2f} "
-                f"({'+' if change >= 0 else ''}{change:,.2f})"
+                f"[BALANCE] ✓ Refreshed successfully\n"
+                f"  Old: ${old_capital:,.2f}\n"
+                f"  New: ${new_capital:,.2f}\n"
+                f"  Δ:   ${change:+,.2f} ({change_pct:+.2f}%)"
             )
             return True
         else:
-            logger.error("Failed to refresh balances from exchanges!")
+            logger.error(
+                f"[BALANCE] ✗ Failed to refresh balances!\n"
+                f"  Check MT5 connection and Binance API"
+            )
             return False
 
     def update_mt5_positions_profit(self):
