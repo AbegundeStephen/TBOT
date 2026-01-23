@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 class PerformanceWeightedAggregator:
     """
-    Multi-Strategy Aggregator with AI validation and safety features
+Enhanced Signal Aggregator with World-Class Filters
+====================================================
+Adds Governor + Volatility + Sniper checks to existing aggregator
     """
 
     def __init__(
@@ -31,6 +33,8 @@ class PerformanceWeightedAggregator:
         asset_type: str = "BTC",
         config: Dict = None,
         ai_validator=None,
+        mtf_integration=None,  # For Governor access
+        enable_world_class_filters: bool = True,
         enable_ai_circuit_breaker: bool = False,
         enable_detailed_logging: bool = False,
         strong_signal_bypass_threshold: float = 0.70,
@@ -53,7 +57,31 @@ class PerformanceWeightedAggregator:
         # ================================================================
         self.ai_validator = None
         self.ai_enabled = True
+        
+        # ✨ NEW: Store MTF integration for Governor
+        self.mtf_integration = mtf_integration
+        self.enable_filters = enable_world_class_filters
 
+        # ✨ NEW: Initialize filter thresholds
+        self.filter_thresholds = {
+            'volatility_gate': config.get('world_class_filters', {}).get(
+                'volatility_gate_threshold', 0.002
+            ),
+            'sniper_confidence': config.get('world_class_filters', {}).get(
+                'sniper_pattern_confidence', 0.60
+            ),
+            'min_profit': config.get('world_class_filters', {}).get(
+                'min_profit_potential', 0.005
+            ),
+        }
+        
+        if self.enable_filters:
+            logger.info(f"[FILTERS] World-Class Filters ENABLED for {asset_type}")
+            logger.info(f"  Volatility Gate: {self.filter_thresholds['volatility_gate']:.3%}")
+            logger.info(f"  Sniper Min:      {self.filter_thresholds['sniper_confidence']:.0%}")
+            logger.info(f"  Min Profit:      {self.filter_thresholds['min_profit']:.2%}")
+            
+            
         if ai_validator is not None:
             try:
                 # Validate AI is properly initialized
@@ -789,6 +817,163 @@ class PerformanceWeightedAggregator:
 
         total_score = max(0.0, total_score)
         return total_score, explanation, agreement_count
+    
+    def _check_governor_filter(self, signal: int) -> Tuple[bool, Optional[str]]:
+        """
+        Filter 1: Governor (Daily 200 EMA) Check
+        
+        Returns:
+            (passed, trade_type)
+        """
+        if not self.enable_filters or not self.mtf_integration:
+            return True, "TREND"  # Skip if disabled
+        
+        try:
+            # Get Governor analysis from MTF
+            regime_data = self.mtf_integration._current_regime_data.get(self.asset_type)
+            
+            if not regime_data or 'governor' not in regime_data:
+                logger.debug(f"[GOV] No data for {self.asset_type}, allowing trade")
+                return True, "TREND"
+            
+            governor = regime_data['governor']
+            trade_type = governor.trade_type.value  # "TREND", "SCALP", or "V_SHAPE"
+            
+            # All trade types are allowed, we just tag them differently
+            return True, trade_type
+        
+        except Exception as e:
+            logger.error(f"[GOV] Error: {e}")
+            return True, "TREND"  # Fail-open
+    
+    def _check_volatility_filter(self, df: pd.DataFrame) -> Tuple[bool, float]:
+        """
+        Filter 2: Volatility Gate
+        
+        Returns:
+            (passed, atr_pct)
+        """
+        if not self.enable_filters:
+            return True, 0.005
+        
+        try:
+            if len(df) < 20:
+                return True, 0.005
+            
+            # Calculate ATR
+            high_low = df['high'] - df['low']
+            high_close = np.abs(df['high'] - df['close'].shift())
+            low_close = np.abs(df['low'] - df['close'].shift())
+            
+            ranges = pd.concat([high_low, high_close, low_close], axis=1)
+            true_range = ranges.max(axis=1)
+            atr = true_range.rolling(14).mean().iloc[-1]
+            
+            current_price = df['close'].iloc[-1]
+            atr_pct = atr / current_price
+            
+            threshold = self.filter_thresholds['volatility_gate']
+            passed = atr_pct >= threshold
+            
+            if not passed:
+                logger.info(f"[VOL] ❌ BLOCKED - ATR {atr_pct:.3%} < {threshold:.3%}")
+            
+            return passed, atr_pct
+        
+        except Exception as e:
+            logger.error(f"[VOL] Error: {e}")
+            return True, 0.005
+    
+    def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Dict]:
+        """
+        Filter 3: Sniper Lock (Pattern or Momentum Confirmation)
+        
+        Returns:
+            (passed, details)
+        """
+        if not self.enable_filters:
+            return True, {'trigger_type': 'DISABLED'}
+        
+        try:
+            # Strategy 1: AI Pattern Detection
+            if self.ai_validator and hasattr(self.ai_validator, 'sniper'):
+                pattern_result = self.ai_validator._check_pattern(
+                    df=df,
+                    signal=signal,
+                    min_confidence=self.filter_thresholds['sniper_confidence']
+                )
+                
+                if pattern_result.get('pattern_confirmed'):
+                    return True, {
+                        'passed': True,
+                        'trigger_type': 'AI_PATTERN',
+                        'pattern_name': pattern_result.get('pattern_name'),
+                        'confidence': pattern_result.get('confidence'),
+                    }
+            
+            # Strategy 2: Momentum Candle
+            if len(df) < 3:
+                return False, {'trigger_type': None, 'reason': 'Insufficient data'}
+            
+            latest = df.iloc[-1]
+            body = abs(latest['close'] - latest['open'])
+            total_range = latest['high'] - latest['low']
+            
+            if total_range > 0:
+                body_ratio = body / total_range
+                
+                # Strong momentum: body > 60% of range
+                if body_ratio > 0.60:
+                    is_bullish = latest['close'] > latest['open']
+                    
+                    if (signal == 1 and is_bullish) or (signal == -1 and not is_bullish):
+                        return True, {
+                            'passed': True,
+                            'trigger_type': 'MOMENTUM_CANDLE',
+                            'body_ratio': body_ratio,
+                        }
+            
+            # No confirmation
+            logger.info(f"[SNIPER] ❌ BLOCKED - No pattern or momentum candle")
+            return False, {'trigger_type': None, 'reason': 'No confirmation'}
+        
+        except Exception as e:
+            logger.error(f"[SNIPER] Error: {e}")
+            return True, {'trigger_type': 'ERROR_FALLBACK'}
+    
+    def _check_profit_filter(self, df: pd.DataFrame) -> Tuple[bool, float]:
+        """
+        Filter 4: Minimum Profit Potential
+        
+        Returns:
+            (passed, potential_pct)
+        """
+        if not self.enable_filters:
+            return True, 0.01
+        
+        try:
+            if len(df) < 20:
+                return True, 0.01
+            
+            # Use ATR as proxy for potential move
+            high_low = df['high'] - df['low']
+            atr = high_low.rolling(14).mean().iloc[-1]
+            
+            current_price = df['close'].iloc[-1]
+            potential_pct = atr / current_price
+            
+            threshold = self.filter_thresholds['min_profit']
+            passed = potential_pct >= threshold
+            
+            if not passed:
+                logger.info(f"[PROFIT] ❌ BLOCKED - Potential {potential_pct:.2%} < {threshold:.2%}")
+            
+            return passed, potential_pct
+        
+        except Exception as e:
+            logger.error(f"[PROFIT] Error: {e}")
+            return True, 0.01
+    
 
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
         """
@@ -1005,6 +1190,54 @@ class PerformanceWeightedAggregator:
                 self.stats["signals_generated"] += 1
             else:
                 self.stats["hold_signals"] += 1
+                
+                
+            if final_signal != 0 and self.enable_filters:
+                    logger.info(f"\n{'='*70}")
+                    logger.info(f"[FILTERS] Checking {self.asset_type} {final_signal:+d} signal")
+                    logger.info(f"{'='*70}")
+                    
+                    # Filter 1: Governor
+                    gov_passed, trade_type = self._check_governor_filter(final_signal)
+                    if gov_passed:
+                        logger.info(f"[GOV] ✅ PASSED - Trade Type: {trade_type}")
+                    else:
+                        logger.warning(f"[GOV] ❌ BLOCKED")
+                        final_signal = 0
+                        reasoning = "blocked_by_governor"
+                    
+                    # Filter 2: Volatility (only if governor passed)
+                    if final_signal != 0:
+                        vol_passed, atr_pct = self._check_volatility_filter(df)
+                        if vol_passed:
+                            logger.info(f"[VOL] ✅ PASSED - ATR {atr_pct:.3%}")
+                        else:
+                            final_signal = 0
+                            reasoning = "low_volatility"
+                    
+                    # Filter 3: Sniper (only if volatility passed)
+                    if final_signal != 0:
+                        sniper_passed, sniper_details = self._check_sniper_filter(df, final_signal)
+                        if sniper_passed:
+                            logger.info(f"[SNIPER] ✅ PASSED - {sniper_details.get('trigger_type')}")
+                        else:
+                            final_signal = 0
+                            reasoning = "no_sniper_confirmation"
+                    
+                    # Filter 4: Profit Potential (only if sniper passed)
+                    if final_signal != 0:
+                        profit_passed, profit_pct = self._check_profit_filter(df)
+                        if profit_passed:
+                            logger.info(f"[PROFIT] ✅ PASSED - Potential {profit_pct:.2%}")
+                        else:
+                            final_signal = 0
+                            reasoning = "insufficient_profit_potential"
+                    
+                    # All filters passed
+                    if final_signal != 0:
+                        logger.info(f"\n{'='*70}")
+                        logger.info(f"[FILTERS] ✅ ALL PASSED - Trade Type: {trade_type}")
+                        logger.info(f"{'='*70}\n")
 
             # STEP 7: Build response
             details = {
@@ -1033,7 +1266,17 @@ class PerformanceWeightedAggregator:
                 # ✅ NEW: Pass the full preset config (contains risk_overrides)
                 "preset_config": self.config
             }
-
+            
+            if self.enable_filters and final_signal != 0:
+                details['trade_type'] = trade_type
+                details['world_class_filters'] = {
+                    'governor_passed': gov_passed,
+                    'volatility_passed': vol_passed,
+                    'sniper_passed': sniper_passed,
+                    'profit_passed': profit_passed,
+                    'all_passed': final_signal != 0,
+                }
+            
             if self.ai_enabled:
                 details["ai_enabled"] = True
                 details["ai_bypassed"] = ai_bypass
@@ -1078,7 +1321,16 @@ class PerformanceWeightedAggregator:
                         "error": str(e),
                     }
 
+            # Update stats
+            if final_signal == 1:
+                self.stats["buy_signals"] += 1
+            elif final_signal == -1:
+                self.stats["sell_signals"] += 1
+            else:
+                self.stats["hold_signals"] += 1
+            
             return final_signal, details
+        
 
         except Exception as e:
             logger.error(f"Error in aggregation: {e}", exc_info=True)
