@@ -17,6 +17,8 @@ from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +50,12 @@ class TradeType(Enum):
 @dataclass
 class GovernorAnalysis:
     """
-    ✨ NEW: Governor (Daily 200 EMA) analysis results
+    ✨ Governor (Daily 200 EMA) analysis results
     """
     # Raw data
     current_price: float
     ema_200: float
-    ema_slope: float  # 20-day change in EMA
+    ema_slope: float
     
     # Position relative to EMA
     price_above_ema: bool
@@ -61,16 +63,16 @@ class GovernorAnalysis:
     
     # Slope analysis
     slope_positive: bool
-    slope_strength: str  # "strong", "moderate", "weak", "negative"
+    slope_strength: str
     
     # V-Shape detection
     rsi: float
-    volume_ratio: float  # Current volume vs 20-day MA
+    volume_ratio: float
     volume_spike: bool
     v_shape_conditions_met: bool
     
     # Final classification
-    regime: str  # "TREND_MODE", "SCALP_MODE", "V_SHAPE_OVERRIDE"
+    regime: str
     trade_type: TradeType
     confidence: float
     
@@ -136,74 +138,6 @@ class TimeFrameAnalysis:
 @dataclass
 class MultiTimeFrameRegime:
     """Aggregated regime across multiple timeframes"""
-
-    asset: str
-    timestamp: datetime
-
-    # Individual timeframe results
-    tf_1h: Optional[TimeFrameAnalysis]
-    tf_4h: Optional[TimeFrameAnalysis]
-    tf_1d: Optional[TimeFrameAnalysis]
-
-    # Consensus regime
-    consensus_regime: RegimeType
-    consensus_confidence: float
-
-    # Alignment metrics
-    timeframe_agreement: float  # 0-1, how aligned timeframes are
-    trend_coherence: float  # 0-1, how coherent trend is across TFs
-
-    # Risk assessment
-    risk_level: str  # "low", "medium", "high"
-    volatility_regime: str
-
-    # Trading implications
-    recommended_mode: str  # "aggressive", "balanced", "conservative", "scalper"
-    allow_counter_trend: bool
-    suggested_max_positions: int
-
-    # Raw scores for decision making
-    bullish_score: float  # 0-10
-    bearish_score: float  # 0-10
-
-    def to_dict(self) -> Dict:
-        """Convert to dictionary for database storage"""
-        result = {
-            "asset": self.asset,
-            "timestamp": self.timestamp.isoformat(),
-            "consensus_regime": self.consensus_regime.value,
-            "consensus_confidence": self.consensus_confidence,
-            "timeframe_agreement": self.timeframe_agreement,
-            "trend_coherence": self.trend_coherence,
-            "risk_level": self.risk_level,
-            "volatility_regime": self.volatility_regime,
-            "recommended_mode": self.recommended_mode,
-            "allow_counter_trend": self.allow_counter_trend,
-            "suggested_max_positions": self.suggested_max_positions,
-            "bullish_score": self.bullish_score,
-            "bearish_score": self.bearish_score,
-        }
-
-        # Add individual timeframe data
-        for tf_name, tf_data in [
-            ("1h", self.tf_1h),
-            ("4h", self.tf_4h),
-            ("1d", self.tf_1d),
-        ]:
-            if tf_data:
-                result[f"{tf_name}_regime"] = tf_data.regime.value
-                result[f"{tf_name}_confidence"] = tf_data.confidence
-                result[f"{tf_name}_trend_strength"] = tf_data.trend_strength
-                result[f"{tf_name}_trend_direction"] = tf_data.trend_direction
-                result[f"{tf_name}_adx"] = tf_data.adx
-                result[f"{tf_name}_rsi"] = tf_data.rsi
-                result[f"{tf_name}_ema_diff_pct"] = tf_data.ema_diff_pct
-                result[f"{tf_name}_volatility"] = tf_data.volatility_regime
-                result[f"{tf_name}_returns_20"] = tf_data.returns_20
-
-        return result@dataclass
-class MultiTimeFrameRegime:
-    """Aggregated regime across multiple timeframes"""
     asset: str
     timestamp: datetime
     
@@ -212,7 +146,7 @@ class MultiTimeFrameRegime:
     tf_4h: Optional[TimeFrameAnalysis]
     tf_1d: Optional[TimeFrameAnalysis]
     
-    # ✨ NEW: Governor analysis
+    # ✨ Governor analysis
     governor: Optional[GovernorAnalysis]
     
     # Consensus regime
@@ -232,13 +166,13 @@ class MultiTimeFrameRegime:
     allow_counter_trend: bool
     suggested_max_positions: int
     
-    # ✨ NEW: Trade type from Governor
+    # ✨ Trade type from Governor
     trade_type: TradeType
     
     # Raw scores
     bullish_score: float
     bearish_score: float
-    
+
     def to_dict(self) -> Dict:
         """Convert to dictionary for database storage"""
         result = {
@@ -253,7 +187,7 @@ class MultiTimeFrameRegime:
             "recommended_mode": self.recommended_mode,
             "allow_counter_trend": self.allow_counter_trend,
             "suggested_max_positions": self.suggested_max_positions,
-            "trade_type": self.trade_type.value,  # ✨ NEW
+            "trade_type": self.trade_type.value,
             "bullish_score": self.bullish_score,
             "bearish_score": self.bearish_score,
         }
@@ -290,13 +224,7 @@ class MultiTimeFrameRegimeDetector:
     """
     
     def __init__(self, data_manager, asset_type: str = "BTC"):
-        """
-        Initialize detector
-        
-        Args:
-            data_manager: DataManager instance for fetching historical data
-            asset_type: "BTC" or "GOLD"
-        """
+        """Initialize detector"""
         self.data_manager = data_manager
         self.asset_type = asset_type.upper()
         
@@ -307,14 +235,15 @@ class MultiTimeFrameRegimeDetector:
             TimeFrame.ONE_HOUR: 0.20,
         }
         
-        # ✨ NEW: Governor thresholds
+        # Governor thresholds
         self.governor_thresholds = {
-            "ema_slope_strong": 0.005,   # 0.5% per 20 days = strong uptrend
-            "ema_slope_moderate": 0.002,  # 0.2% = moderate
-            "ema_slope_negative": -0.002, # Downtrend
-            "v_shape_rsi_min": 60,        # RSI must be > 60 for recovery
-            "v_shape_volume_min": 1.5,    # 1.5x average volume
-            "distance_danger_pct": 0.10,  # > 10% from 200 EMA = dangerous
+            "ema_slope_strong": 0.005,
+            "ema_slope_moderate": 0.002,
+            "ema_slope_negative": -0.002,
+            "v_shape_rsi_min": 60,
+            "v_shape_volume_min": 1.5,
+            "distance_danger_pct": 0.10,
+            "min_required_bars": 220,  # ✨ NEW: Make configurable
         }
         
         # Asset-specific thresholds
@@ -347,7 +276,7 @@ class MultiTimeFrameRegimeDetector:
         
         logger.info(f"[MTF + GOVERNOR] Initialized for {asset_type}")
         logger.info(f"  Weights: 1D={self.weights[TimeFrame.ONE_DAY]:.0%} (+ Governor), "
-                   f"4H={self.weights[TimeFrame.FOUR_HOUR]:.0%}, "
+                    f"4H={self.weights[TimeFrame.FOUR_HOUR]:.0%}, "
                    f"1H={self.weights[TimeFrame.ONE_HOUR]:.0%}")
         logger.info(f"  Governor EMA: 200-period Daily")
         logger.info(f"  Governor Modes: TREND / SCALP / V_SHAPE")
@@ -359,15 +288,7 @@ class MultiTimeFrameRegimeDetector:
         force_refresh: bool = False
     ) -> MultiTimeFrameRegime:
         """
-        Analyze regime across all timeframes + Governor
-        
-        Args:
-            symbol: Trading symbol
-            exchange: "binance" or "mt5"
-            force_refresh: Skip cache
-        
-        Returns:
-            MultiTimeFrameRegime with Governor analysis
+        ✨ FIXED: Graceful Governor fallback when data insufficient
         """
         # Check cache
         cache_key = f"{symbol}_{exchange}"
@@ -381,7 +302,7 @@ class MultiTimeFrameRegimeDetector:
         logger.info(f"[MTF + GOVERNOR] Analyzing {self.asset_type} ({symbol})")
         logger.info(f"{'='*70}")
         
-        # ✨ STEP 1: Analyze Governor (Daily 200 EMA)
+        # ✨ STEP 1: Analyze Governor (with graceful fallback)
         governor_analysis = None
         try:
             governor_analysis = self._analyze_governor(symbol, exchange)
@@ -390,22 +311,59 @@ class MultiTimeFrameRegimeDetector:
             logger.info(f"  Regime:         {governor_analysis.regime}")
             logger.info(f"  Trade Type:     {governor_analysis.trade_type.value}")
             logger.info(f"  Confidence:     {governor_analysis.confidence:.2%}")
-            logger.info(f"  Price:          ${governor_analysis.current_price:,.2f}")
-            logger.info(f"  200 EMA:        ${governor_analysis.ema_200:,.2f}")
-            logger.info(f"  Distance:       {governor_analysis.distance_from_ema_pct:+.2%}")
-            logger.info(f"  EMA Slope:      {governor_analysis.ema_slope:+.4f} ({governor_analysis.slope_strength})")
             logger.info(f"  Reasoning:      {governor_analysis.reasoning}")
-            
-            if governor_analysis.v_shape_conditions_met:
-                logger.info(f"  ⚡ V-SHAPE DETECTED!")
-                logger.info(f"     RSI: {governor_analysis.rsi:.1f}")
-                logger.info(f"     Volume: {governor_analysis.volume_ratio:.2f}x average")
+        
+        except ValueError as e:
+            # ✨ GRACEFUL FALLBACK: Insufficient data
+            if "Insufficient daily data" in str(e):
+                logger.warning(f"[GOVERNOR] {e}")
+                logger.warning(f"[GOVERNOR] Using fallback: SCALP mode (conservative)")
+                
+                # Create fallback Governor analysis
+                governor_analysis = GovernorAnalysis(
+                    current_price=0.0,
+                    ema_200=0.0,
+                    ema_slope=0.0,
+                    price_above_ema=False,
+                    distance_from_ema_pct=0.0,
+                    slope_positive=False,
+                    slope_strength="unknown",
+                    rsi=50.0,
+                    volume_ratio=1.0,
+                    volume_spike=False,
+                    v_shape_conditions_met=False,
+                    regime="SCALP_MODE",
+                    trade_type=TradeType.SCALP,
+                    confidence=0.50,
+                    reasoning="Insufficient data - using conservative SCALP mode",
+                    timestamp=datetime.now(),
+                )
+            else:
+                raise
         
         except Exception as e:
             logger.error(f"[GOVERNOR] Analysis failed: {e}", exc_info=True)
-            # Continue with fallback
+            # Create error fallback
+            governor_analysis = GovernorAnalysis(
+                current_price=0.0,
+                ema_200=0.0,
+                ema_slope=0.0,
+                price_above_ema=False,
+                distance_from_ema_pct=0.0,
+                slope_positive=False,
+                slope_strength="error",
+                rsi=50.0,
+                volume_ratio=1.0,
+                volume_spike=False,
+                v_shape_conditions_met=False,
+                regime="SCALP_MODE",
+                trade_type=TradeType.SCALP,
+                confidence=0.50,
+                reasoning=f"Error in analysis - using conservative SCALP mode: {str(e)}",
+                timestamp=datetime.now(),
+            )
         
-        # STEP 2: Analyze each timeframe (existing logic)
+        # STEP 2: Analyze each timeframe
         tf_results = {}
         for timeframe in [TimeFrame.ONE_HOUR, TimeFrame.FOUR_HOUR, TimeFrame.ONE_DAY]:
             try:
@@ -415,9 +373,6 @@ class MultiTimeFrameRegimeDetector:
                 logger.info(f"\n[{timeframe.value.upper()}] Analysis:")
                 logger.info(f"  Regime:     {analysis.regime.value.upper()}")
                 logger.info(f"  Confidence: {analysis.confidence:.2%}")
-                logger.info(f"  Trend:      {analysis.trend_strength} {analysis.trend_direction}")
-                logger.info(f"  ADX:        {analysis.adx:.1f}")
-                logger.info(f"  RSI:        {analysis.rsi:.1f}")
             
             except Exception as e:
                 logger.error(f"[MTF] Error analyzing {timeframe.value}: {e}")
@@ -429,18 +384,15 @@ class MultiTimeFrameRegimeDetector:
             tf_1h=tf_results.get(TimeFrame.ONE_HOUR),
             tf_4h=tf_results.get(TimeFrame.FOUR_HOUR),
             tf_1d=tf_results.get(TimeFrame.ONE_DAY),
-            governor=governor_analysis,  # ✨ NEW
+            governor=governor_analysis,
         )
         
         # Log consensus
         logger.info(f"\n{'='*70}")
         logger.info(f"[CONSENSUS] {result.consensus_regime.value.upper()}")
         logger.info(f"{'='*70}")
-        logger.info(f"  Confidence:       {result.consensus_confidence:.2%}")
-        logger.info(f"  TF Agreement:     {result.timeframe_agreement:.2%}")
-        logger.info(f"  Risk Level:       {result.risk_level.upper()}")
-        logger.info(f"  Recommended Mode: {result.recommended_mode.upper()}")
-        logger.info(f"  ✨ Trade Type:    {result.trade_type.value}")
+        logger.info(f"  Trade Type:    {result.trade_type.value}")
+        logger.info(f"  Confidence:    {result.consensus_confidence:.2%}")
         logger.info(f"{'='*70}\n")
         
         # Cache result
@@ -450,32 +402,25 @@ class MultiTimeFrameRegimeDetector:
     
     def _analyze_governor(self, symbol: str, exchange: str) -> GovernorAnalysis:
         """
-        ✨ NEW: Analyze Daily 200 EMA Governor
-        
-        Rules:
-        1. TREND MODE: Price > 200 EMA AND Slope > 0
-        2. V-SHAPE OVERRIDE: Price > 200 EMA, Slope < 0, RSI > 60, Volume spike
-        3. SCALP MODE: Everything else
-        
-        Args:
-            symbol: Trading symbol
-            exchange: "binance" or "mt5"
-        
-        Returns:
-            GovernorAnalysis object
+        ✅ FIXED: Uses CSV files for daily data (full history)
         """
-        # Fetch daily data
-        df_daily = self._fetch_data(symbol, TimeFrame.ONE_DAY, exchange)
+        # ✅ CHANGED: Use CSV instead of API
+        df_daily = self._fetch_data_from_csv(symbol, TimeFrame.ONE_DAY, exchange)
         
-        if len(df_daily) < 220:  # Need 220 bars for 200 EMA + buffer
-            raise ValueError(f"Insufficient daily data: {len(df_daily)} bars (need 220+)")
+        min_bars = self.governor_thresholds["min_required_bars"]
+        
+        if len(df_daily) < min_bars:
+            raise ValueError(
+                f"Insufficient daily data: {len(df_daily)} bars (need {min_bars}+). "
+                f"CSV file exists but needs more data. Run: python download_multi_tf_data.py"
+            )
         
         # Calculate 200 EMA
         ema_200 = df_daily['close'].ewm(span=200, adjust=False).mean()
         current_price = float(df_daily['close'].iloc[-1])
         current_ema = float(ema_200.iloc[-1])
         
-        # Calculate EMA slope (20-day change)
+        # Calculate EMA slope
         ema_20_days_ago = float(ema_200.iloc[-20])
         ema_slope = (current_ema - ema_20_days_ago) / ema_20_days_ago
         
@@ -497,7 +442,7 @@ class MultiTimeFrameRegimeDetector:
             slope_strength = "negative"
             slope_positive = False
         
-        # RSI (for V-shape detection)
+        # RSI
         delta = df_daily['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -511,18 +456,13 @@ class MultiTimeFrameRegimeDetector:
         volume_ratio = current_volume / volume_ma if volume_ma > 0 else 1.0
         volume_spike = volume_ratio > self.governor_thresholds["v_shape_volume_min"]
         
-        # ================================================================
-        # DECISION LOGIC
-        # ================================================================
-        
-        # Rule 1: TREND MODE (safest)
+        # Decision Logic
         if price_above_ema and slope_positive:
             regime = "TREND_MODE"
             trade_type = TradeType.TREND
             confidence = 0.85
-            reasoning = f"Price above 200 EMA with {slope_strength} positive slope - Strong uptrend"
+            reasoning = f"Price above 200 EMA with {slope_strength} positive slope"
         
-        # Rule 2: V-SHAPE OVERRIDE (recovery play)
         elif (price_above_ema and 
               not slope_positive and 
               rsi > self.governor_thresholds["v_shape_rsi_min"] and 
@@ -530,26 +470,24 @@ class MultiTimeFrameRegimeDetector:
             regime = "V_SHAPE_OVERRIDE"
             trade_type = TradeType.V_SHAPE
             confidence = 0.70
-            reasoning = f"V-shape recovery: Price above EMA, RSI={rsi:.0f}, Volume spike {volume_ratio:.1f}x"
+            reasoning = f"V-shape recovery: RSI={rsi:.0f}, Volume {volume_ratio:.1f}x"
         
-        # Rule 3: SCALP MODE (default/conservative)
         else:
             regime = "SCALP_MODE"
             trade_type = TradeType.SCALP
             confidence = 0.60
             
             if not price_above_ema:
-                reasoning = "Price below 200 EMA - Defensive mode (scalp only)"
+                reasoning = "Price below 200 EMA - Defensive mode"
             elif not slope_positive:
-                reasoning = "Price above EMA but slope negative - Choppy (scalp only)"
+                reasoning = "Price above EMA but slope negative - Choppy"
             else:
-                reasoning = "Unclear trend - Conservative mode (scalp only)"
+                reasoning = "Unclear trend - Conservative mode"
         
-        # Adjust confidence based on distance from EMA
+        # Adjust confidence based on distance
         if abs(distance_pct) > self.governor_thresholds["distance_danger_pct"]:
-            confidence *= 0.85  # Reduce confidence if too far from EMA
+            confidence *= 0.85
         
-        # V-shape conditions check
         v_shape_met = (
             price_above_ema and 
             not slope_positive and 
@@ -982,6 +920,75 @@ class MultiTimeFrameRegimeDetector:
         
         return mode, allow_counter, max_pos
 
+    def _fetch_data_from_csv(
+        self, symbol: str, timeframe: TimeFrame, exchange: str
+    ) -> pd.DataFrame:
+        """
+        ✅ NEW: Fetch data from local CSV files (much faster + full history)
+        
+        Falls back to API if CSV doesn't exist or is stale.
+        
+        Args:
+            symbol: Trading symbol
+            timeframe: TimeFrame enum
+            exchange: "binance" or "mt5"
+        
+        Returns:
+            DataFrame with OHLCV data
+        """
+        # Determine CSV file path
+        if exchange == "binance":
+            asset = "btc"
+            if timeframe == TimeFrame.ONE_HOUR:
+                csv_file = Path("data/train_data_btc_1h.csv")
+            elif timeframe == TimeFrame.FOUR_HOUR:
+                csv_file = Path("data/train_data_btc_4h.csv")
+            else:  # ONE_DAY
+                csv_file = Path("data/train_data_btc_1d.csv")
+        else:  # mt5
+            asset = "gold"
+            if timeframe == TimeFrame.ONE_HOUR:
+                csv_file = Path("data/train_data_gold_1h.csv")
+            elif timeframe == TimeFrame.FOUR_HOUR:
+                csv_file = Path("data/train_data_gold_4h.csv")
+            else:  # ONE_DAY
+                csv_file = Path("data/train_data_gold_1d.csv")
+        
+        # Try to read from CSV
+        if csv_file.exists():
+            try:
+                logger.info(f"[CSV] Reading {asset.upper()} {timeframe.value} from {csv_file}")
+                
+                df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
+                
+                # Ensure timezone-aware
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize('UTC')
+                
+                # Check data freshness (should be within last 24 hours)
+                latest_date = df.index[-1]
+                hours_old = (pd.Timestamp.now(tz='UTC') - latest_date).total_seconds() / 3600
+                
+                if hours_old > 24:
+                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old - consider updating")
+                
+                logger.info(f"[CSV] ✓ Loaded {len(df)} bars from CSV")
+                logger.info(f"[CSV]   Range: {df.index[0]} to {df.index[-1]}")
+                logger.info(f"[CSV]   Age: {hours_old:.1f} hours old")
+                
+                return df
+                
+            except Exception as e:
+                logger.warning(f"[CSV] Failed to read {csv_file}: {e}")
+                logger.info(f"[CSV] Falling back to API fetch")
+        
+        else:
+            logger.info(f"[CSV] File not found: {csv_file}")
+            logger.info(f"[CSV] Falling back to API fetch")
+        
+        # Fallback: Use original API fetch method
+        return self._fetch_data(symbol, timeframe, exchange)
+    
     def _fetch_data(
         self, symbol: str, timeframe: TimeFrame, exchange: str
     ) -> pd.DataFrame:

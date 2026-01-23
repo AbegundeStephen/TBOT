@@ -332,6 +332,13 @@ class TradingBot:
                 db_manager=self.db_manager,  # ✅ Pass db_manager during init
             )
 
+             # ✨ NEW: Enable hedging support
+            hedging_enabled = self.config.get("trading", {}).get("allow_hedging", True)
+            if hedging_enabled:
+                max_hedge_ratio = self.config.get("portfolio", {}).get("max_hedge_ratio", 1.0)
+                enable_hedging_for_portfolio(self.portfolio_manager, max_hedge_ratio)
+                logger.info(f"[HEDGING] ✅ Enabled with max ratio {max_hedge_ratio:.0%}")
+            
             logger.info(
                 f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
             )
