@@ -64,6 +64,7 @@ from src.ai.visualization import (
 )
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 from src.update.historical_updater import HistoricalDataUpdater
+from src.portfolio.hedging_support import enable_hedging_for_portfolio, log_hedging_status
 
 
 import pickle
@@ -944,10 +945,6 @@ class TradingBot:
                 # PERFORMANCE MODE
                 # --------------------------------------------------------
                 try:
-                    from src.execution.signal_aggregator import (
-                        PerformanceWeightedAggregator,
-                    )
-
                     self.aggregators[asset_name] = PerformanceWeightedAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
                         trend_following_strategy=strategies.get("trend_following"),
@@ -957,6 +954,8 @@ class TradingBot:
                         ai_validator=(
                             ai_validator if self.params.use_ai_validation else None
                         ),
+                        mtf_integration=self.mtf_integration,  # Pass MTF for Governor
+                        enable_world_class_filters=True,       # Enable filters
                         enable_ai_circuit_breaker=True,
                         enable_detailed_logging=getattr(
                             self, "detailed_logging", False
@@ -1023,13 +1022,6 @@ class TradingBot:
                 # HYBRID MODE (Both aggregators for comparison)
                 # --------------------------------------------------------
                 try:
-                    from src.execution.signal_aggregator import (
-                        PerformanceWeightedAggregator,
-                    )
-                    from src.execution.council_aggregator import (
-                        InstitutionalCouncilAggregator,
-                    )
-
                     # Create Performance Aggregator
                     perf_agg = PerformanceWeightedAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
@@ -1040,6 +1032,8 @@ class TradingBot:
                         ai_validator=(
                             ai_validator if self.params.use_ai_validation else None
                         ),
+                        mtf_integration=self.mtf_integration,  # Pass MTF for Governor
+                        enable_world_class_filters=True,       # Enable filters
                         enable_ai_circuit_breaker=True,
                         enable_detailed_logging=False,  # Reduce noise in hybrid mode
                         strong_signal_bypass_threshold=getattr(
@@ -2115,10 +2109,6 @@ class TradingBot:
             CONFIG_PATH = Path("config/aggregator_presets.json")
             with open(CONFIG_PATH, "r") as f:
                 AGGREGATOR_PRESETS = json.load(f)["AGGREGATOR_PRESETS"]
-
-            from src.execution.signal_aggregator import PerformanceWeightedAggregator
-            from src.execution.council_aggregator import InstitutionalCouncilAggregator
-
             # Get strategies for this asset
             strategies = self.strategies.get(asset_name, {})
             if not strategies:
@@ -2179,6 +2169,8 @@ class TradingBot:
                     asset_type=asset_type,
                     config=preset_config,
                     ai_validator=ai_validator,
+                    mtf_integration=self.mtf_integration,  # Pass MTF for Governor
+                    enable_world_class_filters=True,       # Enable filters
                     enable_ai_circuit_breaker=True,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
                     strong_signal_bypass_threshold=getattr(
@@ -2234,6 +2226,8 @@ class TradingBot:
                     asset_type=asset_type,
                     config=preset_config,
                     ai_validator=ai_validator,
+                    mtf_integration=self.mtf_integration,  # Pass MTF for Governor
+                    enable_world_class_filters=True,       # Enable filters
                     enable_ai_circuit_breaker=True,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
                     strong_signal_bypass_threshold=getattr(

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Multi-Timeframe Historical Data Downloader
-Downloads 4h and 15m data for BTC (Binance) and GOLD (MT5)
-Saves to data folder for Analyst and Sniper strategies
+Multi-Timeframe Historical Data Downloader - ENHANCED
+Downloads 1H, 4H, and 1D data for BTC (Binance) and GOLD (MT5)
+Saves to data folder for Analyst, Sniper, and Governor strategies
 """
 
 import json
@@ -42,7 +42,7 @@ def download_btc_data(data_manager: DataManager, interval: str, lookback_days: i
     
     Args:
         data_manager: Initialized DataManager instance
-        interval: Binance interval (e.g., '4h', '15m')
+        interval: Binance interval (e.g., '1h', '4h', '1d')
         lookback_days: Number of days to look back
         output_file: Path to save the CSV file
     
@@ -82,8 +82,9 @@ def download_btc_data(data_manager: DataManager, interval: str, lookback_days: i
         logger.info(f"✓ After cleaning: {len(df)} bars")
         
         # Validate data quality
-        if len(df) < 100:
-            logger.error(f"❌ Insufficient data: {len(df)} bars (need at least 100)")
+        min_bars = 500 if interval == "1d" else 100
+        if len(df) < min_bars:
+            logger.error(f"❌ Insufficient data: {len(df)} bars (need at least {min_bars})")
             return False
         
         # Save to CSV
@@ -150,7 +151,7 @@ def download_gold_data(data_manager: DataManager, timeframe: str, lookback_days:
     
     Args:
         data_manager: Initialized DataManager instance
-        timeframe: MT5 timeframe (e.g., 'H4', 'M15')
+        timeframe: MT5 timeframe (e.g., 'H1', 'H4', 'D1')
         lookback_days: Number of days to look back
         output_file: Path to save the CSV file
     
@@ -196,8 +197,9 @@ def download_gold_data(data_manager: DataManager, timeframe: str, lookback_days:
         logger.info(f"✓ After cleaning: {len(df)} bars")
         
         # Validate data quality
-        if len(df) < 100:
-            logger.error(f"❌ Insufficient data: {len(df)} bars (need at least 100)")
+        min_bars = 500 if timeframe == "D1" else 100
+        if len(df) < min_bars:
+            logger.error(f"❌ Insufficient data: {len(df)} bars (need at least {min_bars})")
             return False
         
         # Save to CSV
@@ -217,8 +219,8 @@ def download_gold_data(data_manager: DataManager, timeframe: str, lookback_days:
 def main():
     """Main download pipeline"""
     logger.info("=" * 70)
-    logger.info("MULTI-TIMEFRAME HISTORICAL DATA DOWNLOADER")
-    logger.info("Timeframes: 4h (Analyst) + 15m (Sniper)")
+    logger.info("MULTI-TIMEFRAME HISTORICAL DATA DOWNLOADER - ENHANCED")
+    logger.info("Timeframes: 1H (Sniper) + 4H (Analyst) + 1D (Governor)")
     logger.info("Assets: BTC (Binance) + GOLD (MT5)")
     logger.info("=" * 70)
     
@@ -257,51 +259,79 @@ def main():
     else:
         logger.info("✓ MT5 ready")
     
-    # Download configuration
-    # Optimized for TensorFlow/ML training
-    # Recommendations based on timeframe and ML requirements:
-    # - 4h: 365-730 days (2,190-4,380 candles) - captures multiple market cycles
-    # - 15m: 180-365 days (17,280-35,040 candles) - rich intraday patterns
-    # More data = better generalization, especially for deep learning
-    
+    # ================================================================
+    # DOWNLOAD CONFIGURATION - ENHANCED WITH 1D
+    # ================================================================
     downloads = [
-        # BTC 4h (Analyst) - 730 days (~2 years) for robust ML training
+        # ============================================================
+        # BTC DATA (Binance)
+        # ============================================================
+        # 1H - Sniper (short-term patterns)
+        {
+            "asset": "BTC",
+            "source": "Binance",
+            "interval": "1h",
+            "lookback_days": 90,  # 3 months of hourly data
+            "output_file": "data/train_data_btc_1h.csv",
+            "download_func": download_btc_data,
+            "description": "Sniper - Short-term patterns"
+        },
+        # 4H - Analyst (intermediate S/R)
         {
             "asset": "BTC",
             "source": "Binance",
             "interval": "4h",
-            "lookback_days": 730,  # ~4,380 candles
+            "lookback_days": 730,  # 2 years (~4,380 candles)
             "output_file": "data/train_data_btc_4h.csv",
             "download_func": download_btc_data,
+            "description": "Analyst - Support/Resistance"
         },
-        # BTC 15m (Sniper) - 365 days (1 year) for deep pattern learning
+        # ✅ NEW: 1D - Governor (macro trend)
         {
             "asset": "BTC",
             "source": "Binance",
-            "interval": "15m",
-            "lookback_days": 365,  # ~35,040 candles
-            "output_file": "data/train_data_btc_15m.csv",
+            "interval": "1d",
+            "lookback_days": 730,  # 2 years of daily data
+            "output_file": "data/train_data_btc_1d.csv",
             "download_func": download_btc_data,
+            "description": "🆕 Governor - Macro Trend (200 EMA)"
         },
-        # Gold 4h (Analyst) - 730 days
+        
+        # ============================================================
+        # GOLD DATA (MT5)
+        # ============================================================
+        # 1H - Sniper
+        {
+            "asset": "GOLD",
+            "source": "MT5",
+            "timeframe": "H1",
+            "lookback_days": 90,
+            "output_file": "data/train_data_gold_1h.csv",
+            "download_func": download_gold_data,
+            "requires_mt5": True,
+            "description": "Sniper - Short-term patterns"
+        },
+        # 4H - Analyst
         {
             "asset": "GOLD",
             "source": "MT5",
             "timeframe": "H4",
-            "lookback_days": 730,  # ~4,380 candles
+            "lookback_days": 730,
             "output_file": "data/train_data_gold_4h.csv",
             "download_func": download_gold_data,
             "requires_mt5": True,
+            "description": "Analyst - Support/Resistance"
         },
-        # Gold 15m (Sniper) - 365 days
+        # ✅ NEW: 1D - Governor
         {
             "asset": "GOLD",
             "source": "MT5",
-            "timeframe": "M15",
-            "lookback_days": 365,  # ~35,040 candles
-            "output_file": "data/train_data_gold_15m.csv",
+            "timeframe": "D1",
+            "lookback_days": 730,  # 2 years of daily data
+            "output_file": "data/train_data_gold_1d.csv",
             "download_func": download_gold_data,
             "requires_mt5": True,
+            "description": "🆕 Governor - Macro Trend (200 EMA)"
         },
     ]
     
@@ -315,8 +345,9 @@ def main():
     for i, download_config in enumerate(downloads, 1):
         asset = download_config["asset"]
         source = download_config["source"]
+        description = download_config.get("description", "")
         
-        logger.info(f"\n[{i}/{len(downloads)}] {asset} from {source}")
+        logger.info(f"\n[{i}/{len(downloads)}] {asset} - {description}")
         
         # Skip MT5 downloads if not available
         if download_config.get("requires_mt5") and not mt5_available:
@@ -353,7 +384,13 @@ def main():
     success_count = 0
     for file_path, success in results.items():
         status = "✅" if success else "❌"
-        logger.info(f"{status} {file_path}")
+        
+        # Highlight new 1D files
+        if "1d" in file_path.lower():
+            logger.info(f"{status} {file_path} 🆕 NEW: Governor Data")
+        else:
+            logger.info(f"{status} {file_path}")
+        
         if success:
             success_count += 1
             # Show file size
@@ -365,12 +402,15 @@ def main():
     logger.info("=" * 70)
     
     if success_count > 0:
-        logger.info("\n✅ Downloaded files are ready for training!")
-        logger.info("\nNext steps:")
+        logger.info("\n✅ Downloaded files are ready!")
+        logger.info("\n📋 Data Purpose:")
+        logger.info("  • 1H:  Sniper strategy (15min patterns)")
+        logger.info("  • 4H:  Analyst strategy (S/R levels)")
+        logger.info("  • 1D:  🆕 Governor strategy (Macro trend filter)")
+        logger.info("\n🎯 Next Steps:")
         logger.info("  1. Review the CSV files in the data/ folder")
-        logger.info("  2. Train your Analyst models with 4h data")
-        logger.info("  3. Train your Sniper models with 15m data")
-        logger.info("  4. Update your training script to use these files")
+        logger.info("  2. Verify 1D data has 200+ bars for EMA calculation")
+        logger.info("  3. Run Phase 2: Governor implementation")
     else:
         logger.error("\n❌ No files were downloaded successfully!")
         logger.info("\nTroubleshooting:")
