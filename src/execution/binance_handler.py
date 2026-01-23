@@ -769,12 +769,20 @@ class BinanceExecutionHandler:
         signal_details: Dict = None,
     ) -> bool:
         """
-        ✅ BINANCE TWO-WAY TRADING: Execute trading signal
-
+        ✅ ENHANCED: Execute trading signal with Asymmetric Risk Support
+        
         Signal Logic:
         - BUY (+1):  Close ALL shorts → Open long
         - SELL (-1): Close ALL longs  → Open short
         - HOLD (0):  Check SL/TP only
+        
+        ✨ NEW: Trade Type Support
+        - TREND trades: 2% risk, standard management
+        - SCALP trades: 1% risk, aggressive break-even
+        - V_SHAPE trades: 1.5% risk, moderate management
+        
+        ✨ NEW: Hedging Support
+        - Can maintain long + short simultaneously if enabled
         """
 
         if asset_name != "BTC":
@@ -787,7 +795,9 @@ class BinanceExecutionHandler:
             return False
 
         try:
-            # Get current price
+            # ================================================================
+            # STEP 1: Get Current Price
+            # ================================================================
             if current_price is None:
                 current_price = self.get_current_price()
 
@@ -795,14 +805,23 @@ class BinanceExecutionHandler:
                 logger.error(f"{asset_name}: Invalid price: {current_price}")
                 return False
 
-            # Get existing positions
+            # ================================================================
+            # STEP 2: Extract Trade Type from Signal Details
+            # ================================================================
+            trade_type = "TREND"  # Default
+            if signal_details:
+                trade_type = signal_details.get('trade_type', 'TREND')
+            
+            # ================================================================
+            # STEP 3: Get Existing Positions
+            # ================================================================
             existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
             long_positions = [p for p in existing_positions if p.side == "long"]
             short_positions = [p for p in existing_positions if p.side == "short"]
 
             logger.info(
                 f"\n{'='*80}\n"
-                f"[SIGNAL] {asset_name} Signal: {signal:+2d}\n"
+                f"[SIGNAL] {asset_name} Signal: {signal:+2d} | Trade Type: {trade_type}\n"
                 f"[STATE] Current Positions: {len(long_positions)} LONG, {len(short_positions)} SHORT\n"
                 f"{'='*80}"
             )
@@ -813,11 +832,30 @@ class BinanceExecutionHandler:
                     f"\n[HYBRID] Mode: {signal_details['aggregator_mode'].upper()} "
                     f"({signal_details.get('mode_confidence', 0):.0%} confidence)"
                 )
+            
+            # Log filter results if present
+            if signal_details and signal_details.get("world_class_filters"):
+                filters = signal_details["world_class_filters"]
+                logger.info(f"\n[FILTERS] Status:")
+                logger.info(f"  Governor:   {'✅' if filters.get('governor_passed') else '❌'}")
+                logger.info(f"  Volatility: {'✅' if filters.get('volatility_passed') else '❌'}")
+                logger.info(f"  Sniper:     {'✅' if filters.get('sniper_passed') else '❌'}")
+                logger.info(f"  Profit:     {'✅' if filters.get('profit_passed') else '❌'}")
 
+            # ================================================================
+            # STEP 4: Check Hedging Configuration
+            # ================================================================
+            hedging_enabled = self.config.get("trading", {}).get("allow_hedging", False)
+            
+            if hedging_enabled:
+                logger.info(f"[HEDGING] Enabled - Can maintain long + short simultaneously")
+
+            # ================================================================
             # SCENARIO 1: SELL SIGNAL (-1)
+            # ================================================================
             if signal == -1:
-                # Close all longs
-                if long_positions:
+                # Close all longs (UNLESS hedging is enabled)
+                if long_positions and not hedging_enabled:
                     logger.info(
                         f"\n{'='*80}\n"
                         f"📉 SELL SIGNAL - Closing {len(long_positions)} LONG position(s)\n"
@@ -841,16 +879,23 @@ class BinanceExecutionHandler:
                     logger.info(
                         f"\n[SUMMARY] Closed {closed_count}/{len(long_positions)} positions\n"
                     )
+                
+                elif long_positions and hedging_enabled:
+                    logger.info(
+                        f"\n[HEDGING] Keeping {len(long_positions)} LONG position(s) open "
+                        f"(hedging enabled)"
+                    )
 
                 # Open SHORT
                 can_open, reason = self.can_open_position_side(asset_name, "short")
                 if not can_open:
                     logger.warning(f"[SKIP] Cannot open SHORT: {reason}")
-                    return len(long_positions) > 0
+                    return len(long_positions) > 0 and not hedging_enabled
 
                 logger.info(
                     f"\n{'='*80}\n"
                     f"📉 SELL SIGNAL - Opening new SHORT position\n"
+                    f"Trade Type: {trade_type}\n"
                     f"Check: {reason}\n"
                     f"{'='*80}\n"
                 )
@@ -864,13 +909,15 @@ class BinanceExecutionHandler:
                     sizing_mode=sizing_mode,
                     manual_size_usd=manual_size_usd,
                     override_reason=override_reason,
-                    signal_details=signal_details,
+                    signal_details=signal_details,  # Contains trade_type
                 )
 
+            # ================================================================
             # SCENARIO 2: BUY SIGNAL (+1)
+            # ================================================================
             elif signal == 1:
-                # Close all shorts
-                if short_positions:
+                # Close all shorts (UNLESS hedging is enabled)
+                if short_positions and not hedging_enabled:
                     logger.info(
                         f"\n{'='*80}\n"
                         f"📈 BUY SIGNAL - Closing {len(short_positions)} SHORT position(s)\n"
@@ -894,16 +941,23 @@ class BinanceExecutionHandler:
                     logger.info(
                         f"\n[SUMMARY] Closed {closed_count}/{len(short_positions)} positions\n"
                     )
+                
+                elif short_positions and hedging_enabled:
+                    logger.info(
+                        f"\n[HEDGING] Keeping {len(short_positions)} SHORT position(s) open "
+                        f"(hedging enabled)"
+                    )
 
                 # Open LONG
                 can_open, reason = self.can_open_position_side(asset_name, "long")
                 if not can_open:
                     logger.warning(f"[SKIP] Cannot open LONG: {reason}")
-                    return len(short_positions) > 0
+                    return len(short_positions) > 0 and not hedging_enabled
 
                 logger.info(
                     f"\n{'='*80}\n"
                     f"📈 BUY SIGNAL - Opening new LONG position\n"
+                    f"Trade Type: {trade_type}\n"
                     f"Check: {reason}\n"
                     f"{'='*80}\n"
                 )
@@ -917,10 +971,12 @@ class BinanceExecutionHandler:
                     sizing_mode=sizing_mode,
                     manual_size_usd=manual_size_usd,
                     override_reason=override_reason,
-                    signal_details=signal_details,
+                    signal_details=signal_details,  # Contains trade_type
                 )
 
+            # ================================================================
             # SCENARIO 3: HOLD SIGNAL (0)
+            # ================================================================
             elif signal == 0:
                 if not existing_positions:
                     return False
@@ -946,6 +1002,56 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
             return False
+        
+        
+    def _calculate_asymmetric_risk(
+        self, 
+        trade_type: str, 
+        base_risk: float = 0.015
+    ) -> Tuple[float, Dict]:
+        """
+        ✨ NEW: Calculate risk based on trade type
+        
+        Args:
+            trade_type: "TREND", "SCALP", or "V_SHAPE"
+            base_risk: Base risk percentage (default 1.5%)
+        
+        Returns:
+            (adjusted_risk, risk_profile)
+        """
+        risk_profiles = {
+            "TREND": {
+                "multiplier": 1.33,  # 2% risk (1.5% * 1.33)
+                "description": "Full trend trade",
+                "break_even_trigger": 0.015,  # Move to BE at +1.5%
+                "trailing_stop": 0.025,  # 2.5% trailing
+            },
+            "SCALP": {
+                "multiplier": 0.67,  # 1% risk (1.5% * 0.67)
+                "description": "Conservative scalp",
+                "break_even_trigger": 0.005,  # Move to BE at +0.5%
+                "trailing_stop": 0.015,  # 1.5% trailing
+            },
+            "V_SHAPE": {
+                "multiplier": 1.0,  # 1.5% risk (1.5% * 1.0)
+                "description": "Recovery play",
+                "break_even_trigger": 0.010,  # Move to BE at +1.0%
+                "trailing_stop": 0.020,  # 2.0% trailing
+            },
+        }
+        
+        profile = risk_profiles.get(trade_type, risk_profiles["TREND"])
+        adjusted_risk = base_risk * profile["multiplier"]
+        
+        logger.info(f"\n[RISK CALC] Trade Type: {trade_type}")
+        logger.info(f"  Base Risk:     {base_risk:.2%}")
+        logger.info(f"  Multiplier:    {profile['multiplier']:.2f}x")
+        logger.info(f"  Adjusted Risk: {adjusted_risk:.2%}")
+        logger.info(f"  Description:   {profile['description']}")
+        
+        return adjusted_risk, profile
+        
+    
 
     def _check_stop_loss_take_profit(
         self, position, current_price: float
@@ -1145,7 +1251,9 @@ class BinanceExecutionHandler:
         """
         try:
             side = "long" if signal == 1 else "short"
-
+            trade_type = signal_details.get('trade_type', 'TREND') if signal_details else 'TREND'
+            base_risk = self.config["portfolio"]["target_risk_per_trade"]
+            adjusted_risk, risk_profile = self._calculate_asymmetric_risk(trade_type, base_risk)
             # Determine if using Futures
             is_futures = (
                 hasattr(self, "futures_handler")
