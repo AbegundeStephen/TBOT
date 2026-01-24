@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Multi-Timeframe Historical Data Downloader - ENHANCED
+Multi-Timeframe Historical Data Downloader - HARMONIZED PATHS
 Downloads 1H, 4H, and 1D data for BTC (Binance) and GOLD (MT5)
-Saves to data folder for Analyst, Sniper, and Governor strategies
+Saves to data/raw/ folder for Analyst, Sniper, and Governor strategies
 """
 
 import json
@@ -229,9 +229,10 @@ def download_gold_data(
 def main():
     """Main download pipeline"""
     logger.info("=" * 70)
-    logger.info("MULTI-TIMEFRAME HISTORICAL DATA DOWNLOADER - ENHANCED")
+    logger.info("MULTI-TIMEFRAME HISTORICAL DATA DOWNLOADER")
     logger.info("Timeframes: 1H (Sniper) + 4H (Analyst) + 1D (Governor)")
     logger.info("Assets: BTC (Binance) + GOLD (MT5)")
+    logger.info("Output: data/raw/ directory")
     logger.info("=" * 70)
 
     # Load config
@@ -243,9 +244,9 @@ def main():
     with open(config_path) as f:
         config = json.load(f)
 
-    # Create data directory
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
+    # ✅ HARMONIZED: Create data/raw directory
+    data_dir = Path("data/raw")
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize data manager
     logger.info("\n" + "=" * 70)
@@ -270,74 +271,68 @@ def main():
         logger.info("✓ MT5 ready")
 
     # ================================================================
-    # DOWNLOAD CONFIGURATION - ENHANCED WITH 1D
+    # ✅ HARMONIZED: All files go to data/raw/
     # ================================================================
     downloads = [
         # ============================================================
-        # BTC DATA (Binance)
+        # BTC DATA (Binance) → data/raw/
         # ============================================================
-        # 1H - Sniper (short-term patterns)
         {
             "asset": "BTC",
             "source": "Binance",
             "interval": "1h",
-            "lookback_days": 90,  # 3 months of hourly data
-            "output_file": "data/train_data_btc_1h.csv",
+            "lookback_days": 90,
+            "output_file": "data/raw/BTCUSDT_1h.csv",  # ✅ HARMONIZED
             "download_func": download_btc_data,
             "description": "Sniper - Short-term patterns",
         },
-        # 4H - Analyst (intermediate S/R)
         {
             "asset": "BTC",
             "source": "Binance",
             "interval": "4h",
-            "lookback_days": 730,  # 2 years (~4,380 candles)
-            "output_file": "data/train_data_btc_4h.csv",
+            "lookback_days": 730,
+            "output_file": "data/raw/BTCUSDT_4h.csv",  # ✅ HARMONIZED
             "download_func": download_btc_data,
             "description": "Analyst - Support/Resistance",
         },
-        # ✅ NEW: 1D - Governor (macro trend)
         {
             "asset": "BTC",
             "source": "Binance",
             "interval": "1d",
-            "lookback_days": 1095,  # 2 years of daily data
-            "output_file": "data/train_data_btc_1d.csv",
+            "lookback_days": 1095,
+            "output_file": "data/raw/BTCUSDT_1d.csv",  # ✅ HARMONIZED
             "download_func": download_btc_data,
             "description": "🆕 Governor - Macro Trend (200 EMA)",
         },
         # ============================================================
-        # GOLD DATA (MT5)
+        # GOLD DATA (MT5) → data/raw/
         # ============================================================
-        # 1H - Sniper
         {
             "asset": "GOLD",
             "source": "MT5",
             "timeframe": "H1",
             "lookback_days": 90,
-            "output_file": "data/train_data_gold_1h.csv",
+            "output_file": "data/raw/XAUUSDm_1h.csv",  # ✅ HARMONIZED
             "download_func": download_gold_data,
             "requires_mt5": True,
             "description": "Sniper - Short-term patterns",
         },
-        # 4H - Analyst
         {
             "asset": "GOLD",
             "source": "MT5",
             "timeframe": "H4",
             "lookback_days": 730,
-            "output_file": "data/train_data_gold_4h.csv",
+            "output_file": "data/raw/XAUUSDm_4h.csv",  # ✅ HARMONIZED
             "download_func": download_gold_data,
             "requires_mt5": True,
             "description": "Analyst - Support/Resistance",
         },
-        # ✅ NEW: 1D - Governor
         {
             "asset": "GOLD",
             "source": "MT5",
             "timeframe": "D1",
-            "lookback_days": 1095,  # 2 years of daily data
-            "output_file": "data/train_data_gold_1d.csv",
+            "lookback_days": 1095,
+            "output_file": "data/raw/XAUUSDm_1d.csv",  # ✅ HARMONIZED
             "download_func": download_gold_data,
             "requires_mt5": True,
             "description": "🆕 Governor - Macro Trend (200 EMA)",
@@ -396,7 +391,7 @@ def main():
 
         # Highlight new 1D files
         if "1d" in file_path.lower():
-            logger.info(f"{status} {file_path} 🆕 NEW: Governor Data")
+            logger.info(f"{status} {file_path} 🆕 Governor Data")
         else:
             logger.info(f"{status} {file_path}")
 
@@ -411,15 +406,23 @@ def main():
     logger.info("=" * 70)
 
     if success_count > 0:
-        logger.info("\n✅ Downloaded files are ready!")
+        logger.info("\n✅ Downloaded files are ready in data/raw/!")
         logger.info("\n📋 Data Purpose:")
         logger.info("  • 1H:  Sniper strategy (15min patterns)")
         logger.info("  • 4H:  Analyst strategy (S/R levels)")
         logger.info("  • 1D:  🆕 Governor strategy (Macro trend filter)")
+        logger.info("\n📁 File Structure:")
+        logger.info("  data/raw/")
+        logger.info("  ├── BTCUSDT_1h.csv")
+        logger.info("  ├── BTCUSDT_4h.csv")
+        logger.info("  ├── BTCUSDT_1d.csv  ← Governor")
+        logger.info("  ├── XAUUSDm_1h.csv")
+        logger.info("  ├── XAUUSDm_4h.csv")
+        logger.info("  └── XAUUSDm_1d.csv  ← Governor")
         logger.info("\n🎯 Next Steps:")
-        logger.info("  1. Review the CSV files in the data/ folder")
+        logger.info("  1. Review the CSV files in data/raw/")
         logger.info("  2. Verify 1D data has 200+ bars for EMA calculation")
-        logger.info("  3. Run Phase 2: Governor implementation")
+        logger.info("  3. Run: python main.py (auto-updates enabled)")
     else:
         logger.error("\n❌ No files were downloaded successfully!")
         logger.info("\nTroubleshooting:")
@@ -436,7 +439,7 @@ def main():
 
 if __name__ == "__main__":
     # Create required directories
-    Path("data").mkdir(exist_ok=True)
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
 
     # Check dependencies

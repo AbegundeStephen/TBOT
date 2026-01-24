@@ -653,53 +653,77 @@ class PortfolioManager:
 
     def _fetch_binance_balance(self) -> Optional[float]:
         """
-        ✅ FIXED: Fetch Binance balance with better error handling and logging
+        ✅ FIXED: Dynamically fetches Futures balance if enabled, otherwise Spot.
         """
         try:
             if not self.binance_client:
                 logger.error("[BINANCE] Client not initialized")
                 return None
 
-            logger.debug("[BINANCE] Fetching account info...")
-            account = self.binance_client.get_account()
+            # Check if we are trading Futures or Spot
+            is_futures = (
+                self.config.get("assets", {})
+                .get("BTC", {})
+                .get("enable_futures", False)
+            )
 
-            total_balance = 0.0
-            asset_details = []
+            if is_futures:
+                logger.debug("[BINANCE] Fetching FUTURES account info...")
+                account = self.binance_client.futures_account()
 
-            for balance in account["balances"]:
-                asset = balance["asset"]
-                free = float(balance["free"])
-                locked = float(balance["locked"])
-                total = free + locked
+                total_balance = float(account.get("totalWalletBalance", 0))
+                available = float(account.get("availableBalance", 0))
+                unrealized_pnl = float(account.get("totalUnrealizedProfit", 0))
 
-                if total > 0.0001:  # Only log significant balances
-                    if asset == "USDT":
-                        total_balance += total
-                        asset_details.append(
-                            f"  USDT: ${total:,.2f} (free: ${free:,.2f}, locked: ${locked:,.2f})"
-                        )
-
-                    elif asset == "BTC":
-                        # Convert BTC to USD
-                        ticker = self.binance_client.get_symbol_ticker(symbol="BTCUSDT")
-                        btc_price = float(ticker["price"])
-                        usd_value = total * btc_price
-                        total_balance += usd_value
-                        asset_details.append(
-                            f"  BTC:  {total:.8f} @ ${btc_price:,.2f} = ${usd_value:,.2f}"
-                        )
-
-            # ✅ Log detailed breakdown
-            if asset_details:
                 logger.info(
-                    f"[BINANCE] Balance breakdown:\n"
-                    + "\n".join(asset_details)
-                    + f"\n  Total: ${total_balance:,.2f}"
+                    f"[BINANCE FUTURES] Balance breakdown:\n"
+                    f"  USDT Total: ${total_balance:,.2f}\n"
+                    f"  USDT Free:  ${available:,.2f}\n"
+                    f"  Unrealized: ${unrealized_pnl:,.2f}\n"
+                    f"  Total: ${total_balance:,.2f}"
                 )
-            else:
-                logger.warning("[BINANCE] No significant balances found")
+                return total_balance if total_balance > 0 else None
 
-            return total_balance if total_balance > 0 else None
+            else:
+                # SPOT WALLET LOGIC (Original)
+                logger.debug("[BINANCE] Fetching SPOT account info...")
+                account = self.binance_client.get_account()
+
+                total_balance = 0.0
+                asset_details = []
+
+                for balance in account["balances"]:
+                    asset = balance["asset"]
+                    free = float(balance["free"])
+                    locked = float(balance["locked"])
+                    total = free + locked
+
+                    if total > 0.0001:
+                        if asset == "USDT":
+                            total_balance += total
+                            asset_details.append(
+                                f"  USDT: ${total:,.2f} (free: ${free:,.2f}, locked: ${locked:,.2f})"
+                            )
+
+                        elif asset == "BTC":
+                            ticker = self.binance_client.get_symbol_ticker(
+                                symbol="BTCUSDT"
+                            )
+                            btc_price = float(ticker["price"])
+                            usd_value = total * btc_price
+                            total_balance += usd_value
+                            asset_details.append(
+                                f"  BTC:  {total:.8f} @ ${btc_price:,.2f} = ${usd_value:,.2f}"
+                            )
+
+                if asset_details:
+                    logger.info(
+                        f"[BINANCE SPOT] Balance breakdown:\n"
+                        + "\n".join(asset_details)
+                        + f"\n  Total: ${total_balance:,.2f}"
+                    )
+
+                return total_balance if total_balance > 0 else None
 
         except BinanceAPIException as e:
             logger.error(f"[BINANCE] API error: {e.status_code} - {e.message}")

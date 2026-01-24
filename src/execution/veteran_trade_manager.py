@@ -3,6 +3,7 @@ Production-Ready Veteran Trade Manager
 Optimized for live trading with BTC and GOLD
 Features Gemini's structure-based stop logic + asset-specific tuning
 ENHANCED: Structure-based take profits + critical bug fixes
+✨ NEW: Asymmetric Risk Management (TREND vs SCALP profiles) + Scalp Economics
 """
 
 import logging
@@ -293,7 +294,8 @@ def calculate_hybrid_targets(
 
 class VeteranTradeManager:
     """
-    Production-ready trade manager with structure-based logic
+    Production-ready trade manager with structure-based logic.
+    ✨ ENHANCED: Features Asymmetric Risk Management for TREND vs SCALP trades.
     """
 
     def __init__(
@@ -312,6 +314,7 @@ class VeteranTradeManager:
         custom_profile: Optional[Dict] = None,
         enable_early_profit_lock: bool = False,
         early_lock_threshold_pct: float = 0.01,
+        trade_type: str = "TREND"  # ✨ NEW: 'TREND' or 'SCALP'
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -321,24 +324,50 @@ class VeteranTradeManager:
         self.close = close
         self.account_balance = account_balance
         self.quantity_override = quantity_override
-        self.account_risk = account_risk
         self.atr_period = atr_period
         self.signal_details = signal_details
+        self.trade_type = trade_type
+
+        # ====================================================================
+        # ✨ NEW: ASYMMETRIC RISK PROFILING
+        # ====================================================================
+        if self.trade_type == "SCALP":
+            # SCALP: Sniping a quick reversal against the main trend or in chop.
+            self.account_risk = 0.010  # 1.0% Risk for Scalps (Half standard size)
+            self.enable_early_profit_lock = True
+            self.early_lock_threshold_pct = 0.005 # 0.5% - Aggressive BE
+        elif self.trade_type == "TREND":
+            # TREND: Riding the dominant macro regime.
+            self.account_risk = 0.020  # 2.0% Risk for Trends (Double the scalp size)
+            self.enable_early_profit_lock = enable_early_profit_lock
+            self.early_lock_threshold_pct = early_lock_threshold_pct
+        else:
+            self.account_risk = account_risk # Fallback
+            self.enable_early_profit_lock = enable_early_profit_lock
+            self.early_lock_threshold_pct = early_lock_threshold_pct
 
         self.profile = custom_profile or AssetProfile.get_profile(asset)
-        self.min_stop_pct = self.profile["min_stop_pct"]
-        self.max_stop_pct = self.profile["max_stop_pct"]
-        self.atr_multiplier = self.profile["atr_multiplier"]
+        
+        # Override profile settings for SCALPS to ensure tighter stops and targets
+        if self.trade_type == "SCALP":
+            self.min_stop_pct = self.profile["min_stop_pct"] * 0.5 # Tighter min stop
+            self.max_stop_pct = self.profile["max_stop_pct"] * 0.7 # Tighter max stop
+            self.atr_multiplier = 1.0 # 1 ATR tight stop
+            self.partial_targets = [1.5, 2.5] # Faster targets
+            self.partial_sizes = [0.60, 0.40] # Dump majority at TP1
+        else:
+            self.min_stop_pct = self.profile["min_stop_pct"]
+            self.max_stop_pct = self.profile["max_stop_pct"]
+            self.atr_multiplier = self.profile["atr_multiplier"]
+            self.partial_targets = self.profile["partial_targets"]
+            self.partial_sizes = self.profile["partial_sizes"]
+
         self.pivot_lookback = self.profile["pivot_lookback"]
-        self.partial_targets = self.profile["partial_targets"]
-        self.partial_sizes = self.profile["partial_sizes"]
         self.runner_trail_pct = self.profile["runner_trail_pct"]
         self.time_stop_bars = self.profile["time_stop_bars"]
         self.use_ema_structure = self.profile["use_ema_structure"]
         self.use_structure_targets = self.profile.get("use_structure_targets", True)
 
-        self.enable_early_profit_lock = enable_early_profit_lock
-        self.early_lock_threshold_pct = early_lock_threshold_pct
         self.early_profit_locked = False
 
         self.initial_stop_loss = None
@@ -353,10 +382,29 @@ class VeteranTradeManager:
         self.runner_activated = False
         self.entry_time = datetime.now()
 
+        # Execute calculations
         self._calculate_initial_levels()
 
+        # ====================================================================
+        # ✨ NEW: THE "WORTH IT" CHECK (Scalp Economics)
+        # ====================================================================
+        if self.trade_type == "SCALP" and len(self.take_profit_levels) > 0:
+            target = self.take_profit_levels[0]
+            if self.side == "long":
+                potential_profit_pct = (target - self.entry_price) / self.entry_price
+            else:
+                potential_profit_pct = (self.entry_price - target) / self.entry_price
+
+            MIN_PROFIT_VIABILITY = 0.005 # 0.5% net move required
+            if potential_profit_pct < MIN_PROFIT_VIABILITY:
+                logger.warning(
+                    f"[VTM] ⚠️ SCALP REJECTED: Profit potential {potential_profit_pct:.2%} "
+                    f"< Minimum {MIN_PROFIT_VIABILITY:.2%} (Fees will eat it)"
+                )
+                self.position_size = 0.0 # Force cancellation at execution layer
+
         logger.info("=" * 80)
-        logger.info(f"🎯 VETERAN TRADE MANAGER - {self.asset} {side.upper()}")
+        logger.info(f"🎯 VETERAN TRADE MANAGER - {self.asset} {side.upper()} [{self.trade_type}]")
         logger.info("=" * 80)
         logger.info(
             f"Asset Profile: {self.profile['name']} ({self.profile['volatility']} volatility)"
@@ -367,7 +415,7 @@ class VeteranTradeManager:
         )
         logger.info(f"Position Size: {self.position_size:.6f} units")
         logger.info(
-            f"Risk Amount:   ${account_balance * account_risk:,.2f} ({account_risk:.1%})"
+            f"Risk Amount:   ${account_balance * self.account_risk:,.2f} ({self.account_risk:.1%})"
         )
         logger.info(f"\n📊 PROFIT TARGETS:")
         for i, (target, size) in enumerate(
@@ -456,13 +504,14 @@ class VeteranTradeManager:
                 preliminary_stop = max(atr_stop, structure_stop)  # Choose wider stop
                 self.initial_stop_loss = max(min_stop, min(max_stop, preliminary_stop))
 
-                # Enhanced safety: Require minimum 1.5 ATR distance for BTC
-                min_distance = atr * 1.5
-                if abs(self.entry_price - self.initial_stop_loss) < min_distance:
-                    logger.warning(
-                        f"[VTM] Stop too tight ({abs(self.entry_price - self.initial_stop_loss):.2f}), widening to 1.5 ATR"
-                    )
-                    self.initial_stop_loss = self.entry_price - min_distance
+                # Enhanced safety: Require minimum 1.5 ATR distance for BTC (if TREND)
+                if self.trade_type == "TREND":
+                    min_distance = atr * 1.5
+                    if abs(self.entry_price - self.initial_stop_loss) < min_distance:
+                        logger.warning(
+                            f"[VTM] Stop too tight ({abs(self.entry_price - self.initial_stop_loss):.2f}), widening to 1.5 ATR"
+                        )
+                        self.initial_stop_loss = self.entry_price - min_distance
 
                 logger.info(f"[VTM] Stop Calc (LONG):")
                 logger.info(
@@ -496,7 +545,7 @@ class VeteranTradeManager:
                             structure_levels,
                             self.partial_targets,
                             self.partial_sizes,
-                            min_rr=1.2,
+                            min_rr=1.2 if self.trade_type == "TREND" else 1.0, # Scalps allow 1:1
                         )
                     )
                 else:
@@ -526,7 +575,7 @@ class VeteranTradeManager:
                     min_stop, max(max_stop, max(atr_stop, structure_stop))
                 )
 
-                if abs(self.initial_stop_loss - self.entry_price) < atr:
+                if self.trade_type == "TREND" and abs(self.initial_stop_loss - self.entry_price) < atr:
                     logger.warning(f"[VTM] Stop too tight, widening to 1 ATR")
                     self.initial_stop_loss = self.entry_price + atr
 
@@ -559,7 +608,7 @@ class VeteranTradeManager:
                             structure_levels,
                             self.partial_targets,
                             self.partial_sizes,
-                            min_rr=1.2,
+                            min_rr=1.2 if self.trade_type == "TREND" else 1.0, # Scalps allow 1:1
                         )
                     )
                 else:
@@ -595,18 +644,6 @@ class VeteranTradeManager:
                     f"  Risk: {self.account_risk:.2%} = ${risk_amount:,.2f}\n"
                     f"  Position: {self.position_size:.6f}"
                 )
-
-            # Position size validation (keep existing check)
-            if self.position_size * self.entry_price > self.account_balance * 2:
-                logger.error(f"[VTM] Position size too large!")
-                raise ValueError("Position exceeds 2x account balance")
-
-            dollar_risk = (
-                abs(self.entry_price - self.initial_stop_loss) * self.position_size
-            )
-            logger.info(
-                f"[VTM] $ Risk: ${dollar_risk:,.2f} ({dollar_risk/self.account_balance:.2%})"
-            )
 
             # FIXED: Position size validation
             if self.position_size * self.entry_price > self.account_balance * 2:
@@ -656,7 +693,8 @@ class VeteranTradeManager:
                 self.highest_price_reached = max(
                     self.highest_price_reached, current_price
                 )
-                if self.runner_activated and self.highest_price_reached > old_high:
+                # Trend Runner Trailing Stop Logic
+                if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
                     new_trail = self.highest_price_reached * (1 - self.runner_trail_pct)
                     if new_trail > self.current_stop_loss:
                         self.current_stop_loss = new_trail
@@ -668,7 +706,8 @@ class VeteranTradeManager:
                 self.lowest_price_reached = min(
                     self.lowest_price_reached, current_price
                 )
-                if self.runner_activated and self.lowest_price_reached < old_low:
+                # Trend Runner Trailing Stop Logic
+                if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
                     new_trail = self.lowest_price_reached * (1 + self.runner_trail_pct)
                     if new_trail < self.current_stop_loss:
                         self.current_stop_loss = new_trail
@@ -691,7 +730,9 @@ class VeteranTradeManager:
             else:
                 pnl_pct = (self.entry_price - current_price) / self.entry_price
 
-            # Early profit lock
+            # ====================================================================
+            # ✨ NEW: AGGRESSIVE BREAK-EVEN FOR SCALPS (And Standard BE for Trends)
+            # ====================================================================
             if (
                 self.enable_early_profit_lock
                 and not self.early_profit_locked
@@ -699,15 +740,15 @@ class VeteranTradeManager:
             ):
                 self.early_profit_locked = True
                 if self.side == "long":
-                    new_stop = self.entry_price * 1.002
+                    new_stop = self.entry_price * 1.001 # Move to Entry + 0.1% buffer
                     if new_stop > self.current_stop_loss:
                         self.current_stop_loss = new_stop
-                        logger.info(f"🔒 Profit locked @ break-even")
+                        logger.info(f"[VTM] 🛡️ SHIELD: Stop moved to Break-Even (+{pnl_pct:.2%} hit)")
                 else:
-                    new_stop = self.entry_price * 0.998
+                    new_stop = self.entry_price * 0.999 # Move to Entry - 0.1% buffer
                     if new_stop < self.current_stop_loss:
                         self.current_stop_loss = new_stop
-                        logger.info(f"🔒 Profit locked @ break-even")
+                        logger.info(f"[VTM] 🛡️ SHIELD: Stop moved to Break-Even (+{pnl_pct:.2%} hit)")
 
             # Check stop loss
             if self.side == "long":
@@ -760,7 +801,8 @@ class VeteranTradeManager:
                         f"💰 PARTIAL #{i+1} HIT! Exit {size:.0%}, P&L: +{pnl:.2f}%"
                     )
 
-                    if len(self.partials_hit) >= 2 and not self.runner_activated:
+                    # Scalps don't let runners trail endlessly, but Trends do.
+                    if len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND":
                         self.runner_activated = True
                         logger.info(f"🏃 RUNNER ACTIVATED")
 
@@ -786,7 +828,7 @@ class VeteranTradeManager:
                     }
 
             # Check runner trailing
-            if self.runner_activated:
+            if self.runner_activated and self.trade_type == "TREND":
                 if self.side == "long" and current_price <= self.current_stop_loss:
                     logger.info(f"🏃 RUNNER TRAILING STOP HIT")
                     return {

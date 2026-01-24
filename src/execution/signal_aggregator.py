@@ -838,8 +838,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             
             governor = regime_data['governor']
             trade_type = governor.trade_type.value  # "TREND", "SCALP", or "V_SHAPE"
-            
-            # All trade types are allowed, we just tag them differently
+
+            # IF the Governor says NEUTRAL, BLOCK THE TRADE.
+            if trade_type == "NEUTRAL":
+                logger.info("[GOV] ❌ BLOCKED - Market is Neutral/Cash")
+                return False, trade_type
+
             return True, trade_type
         
         except Exception as e:

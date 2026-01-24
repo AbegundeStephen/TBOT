@@ -1,10 +1,12 @@
 """
 Institutional Council Aggregator - Bidirectional Version
 Supports both BUY and SELL signals with symmetric logic
+✨ ENHANCED: Integrated with World-Class Asymmetric Hedging Filters (1D Governor, Volatility Gate, Sniper Lock).
 """
 
 import pandas as pd
 import numpy as np
+import talib as ta  # ✨ Added for Volatility/ATR checks
 import logging
 from typing import Dict, Tuple, Optional
 from collections import deque
@@ -32,6 +34,7 @@ class InstitutionalCouncilAggregator:
     - Counter-trend: Need 4.0+ (unanimous overrule)
     
     NEW: Symmetric scoring for both BUY and SELL signals
+    ✨ NEW: Asymmetric Output (TREND vs SCALP) based on MTF Governor
     """
     
     def __init__(
@@ -56,6 +59,7 @@ class InstitutionalCouncilAggregator:
         
         # Asset-specific tuning
         config: Optional[Dict] = None,
+        mtf_integration=None # ✨ INJECTED: The Governor
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -63,11 +67,19 @@ class InstitutionalCouncilAggregator:
         self.asset_type = asset_type.upper()
         self.ai_validator = ai_validator
         self.detailed_logging = enable_detailed_logging
+        self.mtf_integration = mtf_integration 
         
         # Configuration merge
         self.config = self._get_default_config()
         if config:
             self.config.update(config)
+
+        # ✨ NEW: World-Class Filter Thresholds
+        self.filter_thresholds = {
+            "min_volatility_pct": self.config.get("risk_management", {}).get("min_volatility_pct", 0.002), # 0.2%
+            "min_sniper_conf": self.config.get("ai", {}).get("min_sniper_confidence", 0.60),
+            "min_profit_potential": self.config.get("risk_management", {}).get("min_profit_potential", 0.005) # 0.5%
+        }
 
         # Dynamic threshold loading
         self.trend_aligned_threshold = self.config.get(
@@ -158,8 +170,115 @@ class InstitutionalCouncilAggregator:
         logger.info(f"   • Counter-trend:  ≥ {self.counter_trend_threshold:.1f} / 5.0")
         logger.info("")
         logger.info(f"   AI Validation: {'ENABLED' if self.ai_validator else 'DISABLED'}")
+        logger.info(f"   Governor MTF:  {'ENABLED' if self.mtf_integration else 'DISABLED'}")
         logger.info("=" * 80)
         logger.info("")
+
+    # ========================================================================
+    # ✨ WORLD-CLASS FILTERS (Asymmetric Logic)
+    # ========================================================================
+
+    def _check_governor_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, str]:
+        """Check the 1D Macro Trend via the MTF Governor."""
+        if not self.mtf_integration:
+            return True, "SCALP" # Fail-open to scalp if no governor
+
+        try:
+            symbol = self.config.get("symbol", "BTCUSDT")
+            exchange = "binance" if "BTC" in self.asset_type else "mt5"
+            regime_data = self.mtf_integration.get_regime_for_trading(self.asset_type, symbol, exchange)
+            
+            if 'governor' not in regime_data:
+                return True, "SCALP"
+
+            governor = regime_data['governor']
+            trade_type = governor.trade_type.value # "TREND", "SCALP", or "V_SHAPE"
+
+            # Block strictly neutral markets
+            if trade_type == "NEUTRAL":
+                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Cash")
+                return False, trade_type
+
+            # The Council is institutional. It ONLY approves trades that ALIGN with the macro view.
+            # If Governor says LONG (BULL) and signal is SHORT, we block it entirely here.
+            if trade_type == "TREND" and governor.regime.value == "BULL" and signal == -1:
+                logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bull Market")
+                return False, "SCALP"
+            if trade_type == "TREND" and governor.regime.value == "BEAR" and signal == 1:
+                logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bear Market")
+                return False, "SCALP"
+
+            return True, trade_type
+
+        except Exception as e:
+            logger.error(f"[GOV] Error: {e}")
+            return True, "SCALP"
+
+    def _check_volatility_gate(self, df: pd.DataFrame) -> bool:
+        """Blocks trades in dead markets (Norm ATR < 0.2%)."""
+        try:
+            high, low, close = df['high'].values, df['low'].values, df['close'].values
+            atr = ta.ATR(high, low, close, timeperiod=14)
+            norm_atr = atr[-1] / close[-1]
+            min_volatility = self.filter_thresholds["min_volatility_pct"]
+            
+            if norm_atr < min_volatility:
+                logger.info(f"[VOLATILITY] ❌ BLOCKED - Dead Market (ATR: {norm_atr:.2%} < {min_volatility:.2%})")
+                return False
+            return True
+        except: return True
+
+    def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> bool:
+        """Hybrid Confirmation: AI Pattern OR Momentum Impulse."""
+        # 1. Smart Check (AI)
+        if self.ai_validator:
+            try:
+                res = self.ai_validator._check_pattern(df, signal, self.filter_thresholds["min_sniper_conf"])
+                if res.get('pattern_confirmed', False):
+                    logger.info(f"[SNIPER] ✅ PASSED - AI Pattern Found: {res.get('pattern_name')}")
+                    return True
+            except: pass
+
+        # 2. Brute Force Check (Momentum)
+        try:
+            closes, highs, lows = df['close'].values, df['high'].values, df['low'].values
+            
+            # Require the breakout candle to have a strong body (Impulse)
+            body = abs(closes[-1] - df['open'].values[-1])
+            candle_range = highs[-1] - lows[-1]
+            if candle_range == 0 or (body / candle_range) < 0.60:
+                logger.info("[SNIPER] ❌ BLOCKED - Weak momentum candle")
+                return False
+
+            if signal == 1: # BUY
+                passed = closes[-1] > max(highs[-4:-1])
+            else: # SELL
+                passed = closes[-1] < min(lows[-4:-1])
+
+            if passed:
+                logger.info("[SNIPER] ✅ PASSED - Momentum Impulse Detected")
+                return True
+        except: pass
+
+        logger.info("[SNIPER] ❌ BLOCKED - No Pattern AND No Momentum")
+        return False
+
+    def _check_profit_economics(self, df: pd.DataFrame, signal: int) -> bool:
+        """The 'Worth It' Check. Validates if potential RR covers fees."""
+        try:
+            close = df['close'].values[-1]
+            atr = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            
+            # Using 1.5 ATR as a proxy for the first target
+            potential_move_pct = (atr * 1.5) / close
+            min_profit = self.filter_thresholds["min_profit_potential"]
+
+            if potential_move_pct < min_profit:
+                logger.info(f"[PROFIT] ❌ BLOCKED - Low Reward (Potential: {potential_move_pct:.2%} < {min_profit:.2%})")
+                return False
+            return True
+        except: return True
+
     
     def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
         """
@@ -258,12 +377,12 @@ class InstitutionalCouncilAggregator:
             chosen_explanations = []
             total_score = 0.0
             required_score = 0.0
+            trade_type = "TREND" # Default
             
             # BUY decision
             if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
                 decision_type = "BUY (Trend-Aligned)"
-                self.stats['trend_aligned_buys'] += 1
                 chosen_scores = buy_scores
                 chosen_explanations = buy_explanations
                 total_score = buy_total
@@ -272,7 +391,6 @@ class InstitutionalCouncilAggregator:
             elif not is_bull and buy_total >= self.counter_trend_threshold:
                 signal = 1
                 decision_type = "BUY (Counter-Trend Reversal)"
-                self.stats['counter_trend_buys'] += 1
                 chosen_scores = buy_scores
                 chosen_explanations = buy_explanations
                 total_score = buy_total
@@ -282,7 +400,6 @@ class InstitutionalCouncilAggregator:
             elif not is_bull and sell_total >= self.trend_aligned_threshold:
                 signal = -1
                 decision_type = "SELL (Trend-Aligned)"
-                self.stats['trend_aligned_sells'] += 1
                 chosen_scores = sell_scores
                 chosen_explanations = sell_explanations
                 total_score = sell_total
@@ -291,7 +408,6 @@ class InstitutionalCouncilAggregator:
             elif is_bull and sell_total >= self.counter_trend_threshold:
                 signal = -1
                 decision_type = "SELL (Counter-Trend Reversal)"
-                self.stats['counter_trend_sells'] += 1
                 chosen_scores = sell_scores
                 chosen_explanations = sell_explanations
                 total_score = sell_total
@@ -304,13 +420,42 @@ class InstitutionalCouncilAggregator:
                 chosen_explanations = buy_explanations + sell_explanations
                 total_score = max(buy_total, sell_total)
                 required_score = self.trend_aligned_threshold
+
+            # ====================================================================
+            # ✨ THE INTERCEPTOR: Apply World-Class Filters before finalizing
+            # ====================================================================
+            if signal != 0:
+                # A. GOVERNOR FILTER
+                gov_passed, trade_type = self._check_governor_filter(df, signal)
+                if not gov_passed:
+                    decision_type = f"BLOCKED (1D Governor vetoed {decision_type})"
+                    signal = 0
+
+                # B. VOLATILITY GATE
+                elif not self._check_volatility_gate(df):
+                    decision_type = f"BLOCKED (Dead Market - Low Volatility)"
+                    signal = 0
+
+                # C. SNIPER LOCK (Momentum / Pattern)
+                elif not self._check_sniper_filter(df, signal):
+                    decision_type = f"BLOCKED (No 15m Momentum/Pattern Confirmation)"
+                    signal = 0
+
+                # D. PROFIT ECONOMICS GATE
+                elif not self._check_profit_economics(df, signal):
+                    decision_type = f"BLOCKED (Potential Reward too low for fees)"
+                    signal = 0
             
-            # Update statistics
+            # Update statistics based on FINAL signal
             if signal == 1:
                 self.stats['buy_signals'] += 1
+                if is_bull: self.stats['trend_aligned_buys'] += 1
+                else: self.stats['counter_trend_buys'] += 1
                 self.stats['avg_score_on_trade'].append(total_score)
             elif signal == -1:
                 self.stats['sell_signals'] += 1
+                if not is_bull: self.stats['trend_aligned_sells'] += 1
+                else: self.stats['counter_trend_sells'] += 1
                 self.stats['avg_score_on_trade'].append(total_score)
             else:
                 self.stats['hold_signals'] += 1
@@ -329,6 +474,7 @@ class InstitutionalCouncilAggregator:
             details = {
                 'timestamp': timestamp,
                 'signal': signal,
+                'trade_type': trade_type, # ✨ NEW: Pass to Risk Manager
                 'decision_type': decision_type,
                 'total_score': total_score,
                 'required_score': required_score,
