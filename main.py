@@ -75,7 +75,7 @@ from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
 from src.training.autotrainer import ContinuousLearningPipeline
-
+from src.execution.council_aggregator import InstitutionalCouncilAggregator
 
 def setup_logging(config):
     """Setup logging with proper encoding and rotation"""
@@ -327,9 +327,9 @@ class TradingBot:
         try:
             self.portfolio_manager = PortfolioManager(
                 config=self.config,
-                mt5_handler=mt5_handler,
-                binance_client=self.data_manager.binance_client,
-                db_manager=self.db_manager,  # ✅ Pass db_manager during init
+                mt5_handler=mt5_initialized, 
+                binance_client=self.data_manager.futures_client, # ✅ FIXED: Use Futures Client
+                db_manager=self.db_manager
             )
 
             # ✨ NEW: Enable hedging support
@@ -1473,6 +1473,7 @@ class TradingBot:
     ) -> Tuple[int, Dict]:
         """
         ✅ FIXED: Ensures AI validation details are ALWAYS populated
+        ✅ FIXED: Injects MTF Governor data into Council Aggregator
         """
 
         # ================================================================
@@ -1498,7 +1499,19 @@ class TradingBot:
         # ================================================================
         if selected_mode == "council":
             aggregator = aggregators["council"]
-            signal, details = aggregator.get_aggregated_signal(df)
+
+            # ✅ NEW: Fetch the latest MTF regime data for the Council
+            mtf_regime = {}
+            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+                mtf_regime = self._current_regime_data[asset_name]
+
+            # ✅ FIXED: Pass full market context to the Institutional Council
+            signal, details = aggregator.get_aggregated_signal(
+                df,
+                current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                is_bull_market=mtf_regime.get("is_bull", False),
+                governor_data=mtf_regime  # This contains the trade_type needed for Asymmetry
+            )
 
             logger.info(
                 f"[COUNCIL] Total Score: {details.get('total_score', 0):.2f}/5.0"
@@ -1568,7 +1581,7 @@ class TradingBot:
         required_fields = [
             "pattern_detected",
             "pattern_name",
-            "pattern_confidence",  # ← FIXED: single 'f'
+            "pattern_confidence",
             "top3_patterns",
             "top3_confidences",
             "sr_analysis",
@@ -1731,98 +1744,7 @@ class TradingBot:
         """Convert signal to readable string"""
         return {1: "BUY", -1: "SELL", 0: "HOLD"}.get(signal, "UNKNOWN")
 
-    def _update_asset_signal(self, asset_name: str):
-        """
-        Update signal for an asset (Monitor Only - No DB Writes)
-        """
-        try:
-            asset_cfg = self.config["assets"][asset_name]
-            exchange = asset_cfg.get("exchange", "binance")
-            symbol = asset_cfg.get("symbol")
-
-            # Fetch latest data
-            end_time = datetime.now(timezone.utc)
-
-            if exchange == "binance":
-                interval = asset_cfg.get("interval", "1h")
-                lookback = 15 if interval == "1h" else 60
-                start_time = end_time - timedelta(days=lookback)
-
-                df = self.data_manager.fetch_binance_data(
-                    symbol=symbol,
-                    interval=interval,
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-            else:
-                timeframe = asset_cfg.get("timeframe", "H1")
-                lookback = 25 if timeframe == "H1" else 75
-                start_time = end_time - timedelta(days=lookback)
-
-                df = self.data_manager.fetch_mt5_data(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    start_date=start_time.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-
-            df = self.data_manager.clean_data(df)
-
-            if len(df) < 250:
-                logger.debug(
-                    f"[SIGNAL] {asset_name}: Insufficient data ({len(df)}/250)"
-                )
-                return
-
-            # Get handler for current price
-            handler = (
-                self.binance_handler if exchange == "binance" else self.mt5_handler
-            )
-            if not handler:
-                logger.debug(f"[SIGNAL] {asset_name}: No handler available")
-                return
-
-            try:
-                current_price = handler.get_current_price(symbol)
-            except:
-                current_price = df["close"].iloc[-1]
-
-            # Get aggregator
-            aggregator = self.aggregators.get(asset_name)
-            if not aggregator:
-                logger.debug(f"[SIGNAL] {asset_name}: No aggregator")
-                return
-
-            # ============================================================
-            # HANDLE DIFFERENT AGGREGATOR MODES
-            # ============================================================
-            if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
-                # Hybrid mode: Get consensus signal
-                # ✅ FIX: Added missing arguments to match definition
-                signal, details = self.get_aggregated_signal_hybrid_dynamic(
-                    asset_name,
-                    df,
-                    aggregators=aggregator,
-                    hybrid_selector=self.hybrid_selector,
-                )
-                logger.debug(f"[SIGNAL] {asset_name} HYBRID signal details calculated")
-            else:
-                # Normal mode: Single aggregator
-                signal, details = aggregator.get_aggregated_signal(df)
-
-            # Update Telegram monitor (if available) - KEEPS MONITORING LIVE
-            if self.telegram_bot:
-                self.telegram_bot.signal_monitor.record_signal(
-                    asset=asset_name,
-                    signal=signal,
-                    details=details,
-                    price=current_price,
-                    timestamp=datetime.now(),
-                )
-
-        except Exception as e:
-            logger.error(f"[SIGNAL] {asset_name} update error: {e}", exc_info=True)
-
+    
     def load_models(self):
         """
         ✨  Load models with safe AI initialization
@@ -2184,7 +2106,7 @@ class TradingBot:
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
                 )
-
+                from src.execution.council_aggregator import InstitutionalCouncilAggregator
                 council_agg = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2897,6 +2819,10 @@ class TradingBot:
             # ============================================================
             # 2. Generate Signal (Hybrid or Single)
             # ============================================================
+            mtf_regime = {}
+            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+                mtf_regime = self._current_regime_data[asset_name]
+                
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
@@ -2905,7 +2831,17 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                 )
             else:
-                signal, details = aggregator.get_aggregated_signal(df)
+                from src.execution.council_aggregator import InstitutionalCouncilAggregator
+                if isinstance(aggregator, InstitutionalCouncilAggregator):
+                    signal, details = aggregator.get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime
+                    )
+                else:
+                    # Performance Aggregator handles its own context internally
+                    signal, details = aggregator.get_aggregated_signal(df)
 
             # Get current price
             try:
@@ -3427,6 +3363,14 @@ class TradingBot:
             # ================================================================
             # ✅ FIX: Handle hybrid vs single aggregator mode
             # ================================================================
+            # ================================================================
+            # ✅ FIX: Handle hybrid vs single aggregator mode with context
+            # ================================================================
+            # Get latest MTF data
+            mtf_regime = {}
+            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+                mtf_regime = self._current_regime_data[asset_name]
+
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 # HYBRID MODE: Use dynamic selector
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
@@ -3436,9 +3380,19 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                 )
             else:
-                # SINGLE AGGREGATOR MODE: Normal call
-                signal, details = aggregator.get_aggregated_signal(df)
-
+                # SINGLE AGGREGATOR MODE:
+                from src.execution.council_aggregator import InstitutionalCouncilAggregator
+                if isinstance(aggregator, InstitutionalCouncilAggregator):
+                    # ✅ FIXED: Pass context to pure Council mode for monitoring
+                    signal, details = aggregator.get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime
+                    )
+                else:
+                    # Performance mode
+                    signal, details = aggregator.get_aggregated_signal(df)
             # Log signal to database (if enabled)
             if self.db_manager:
                 signal_id, is_new = self.db_manager.insert_signal_smart(

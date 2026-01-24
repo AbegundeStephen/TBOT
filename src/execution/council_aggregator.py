@@ -178,40 +178,42 @@ class InstitutionalCouncilAggregator:
     # ✨ WORLD-CLASS FILTERS (Asymmetric Logic)
     # ========================================================================
 
-    def _check_governor_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, str]:
-        """Check the 1D Macro Trend via the MTF Governor."""
-        if not self.mtf_integration:
-            return True, "SCALP" # Fail-open to scalp if no governor
+    def _check_governor_filter(self, df: pd.DataFrame, signal: int, governor_data: Optional[Dict] = None) -> Tuple[bool, str]:
+        """
+        Check the 1D Macro Trend via pre-injected Governor data.
+        ✅ FIXED: Fail-safe defaults to "SCALP" if Governor is unavailable.
+        """
+        # 1. FAIL-SAFE: If no Governor data, allow safe SCALP trading
+        if not governor_data or 'governor' not in governor_data:
+            logger.debug("[GOV] No MTF Governor data available. Defaulting to SCALP mode.")
+            return True, "SCALP"
 
         try:
-            symbol = self.config.get("symbol", "BTCUSDT")
-            exchange = "binance" if "BTC" in self.asset_type else "mt5"
-            regime_data = self.mtf_integration.get_regime_for_trading(self.asset_type, symbol, exchange)
+            governor = governor_data['governor']
             
-            if 'governor' not in regime_data:
-                return True, "SCALP"
+            # Handle object vs dict access depending on how MTF serializes it
+            trade_type = getattr(governor.trade_type, 'value', str(governor.trade_type))
+            regime_value = getattr(governor.regime, 'value', str(governor.regime))
 
-            governor = regime_data['governor']
-            trade_type = governor.trade_type.value # "TREND", "SCALP", or "V_SHAPE"
-
-            # Block strictly neutral markets
+            # 2. Block strictly neutral markets (The only time we block everything)
             if trade_type == "NEUTRAL":
-                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Cash")
-                return False, trade_type
+                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Cash (No clear direction)")
+                return False, "NEUTRAL"
 
-            # The Council is institutional. It ONLY approves trades that ALIGN with the macro view.
-            # If Governor says LONG (BULL) and signal is SHORT, we block it entirely here.
-            if trade_type == "TREND" and governor.regime.value == "BULL" and signal == -1:
-                logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bull Market")
-                return False, "SCALP"
-            if trade_type == "TREND" and governor.regime.value == "BEAR" and signal == 1:
-                logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bear Market")
-                return False, "SCALP"
+            # 3. Macro Trend Alignment (Only active in TREND mode)
+            if trade_type == "TREND":
+                if regime_value == "BULL" and signal == -1:
+                    logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bull Market")
+                    return False, "SCALP"
+                if regime_value == "BEAR" and signal == 1:
+                    logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bear Market")
+                    return False, "SCALP"
 
             return True, trade_type
 
         except Exception as e:
-            logger.error(f"[GOV] Error: {e}")
+            logger.error(f"[GOV] Error processing Governor data: {e}", exc_info=True)
+            # ULTIMATE FAIL-SAFE: If data is corrupted, allow safe SCALP trading
             return True, "SCALP"
 
     def _check_volatility_gate(self, df: pd.DataFrame) -> bool:
@@ -280,26 +282,35 @@ class InstitutionalCouncilAggregator:
         except: return True
 
     
-    def get_aggregated_signal(self, df: pd.DataFrame) -> Tuple[int, Dict]:
+    def get_aggregated_signal(
+        self, 
+        df: pd.DataFrame,
+        current_regime: str = "NEUTRAL",  # ✨ NEW: Accepted from main.py
+        is_bull_market: bool = True,      # ✨ NEW: Accepted from main.py
+        governor_data: Optional[Dict] = None # ✨ NEW: Accepted from main.py
+    ) -> Tuple[int, Dict]:
         """
         Main council decision logic with bidirectional support
-        
-        Returns:
-            signal: 1 (BUY), -1 (SELL), 0 (HOLD)
-            details: Comprehensive breakdown
+        ✅ FIXED: Injects MTF Governor data to optimize CPU and enable Asymmetry.
         """
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
         
         try:
+            # ✅ FIXED: Use the highly-accurate MTF data if provided, otherwise fallback
+            if governor_data:
+                is_bull = is_bull_market
+                regime_name = current_regime
+                regime_conf = governor_data.get('confidence', 0.5)
+            else:
             # Get regime context
-            is_bull, regime_conf = self._detect_regime(df)
-            regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
-            
-            # Extract strategy signals
-            mr_signal, mr_conf = 0, 0.0
-            tf_signal, tf_conf = 0, 0.0
-            ema_signal, ema_conf = 0, 0.0
+                is_bull, regime_conf = self._detect_regime(df)
+                regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
+                
+                # Extract strategy signals
+                mr_signal, mr_conf = 0, 0.0
+                tf_signal, tf_conf = 0, 0.0
+                ema_signal, ema_conf = 0, 0.0
             
             if self.s_mean_reversion:
                 try:
@@ -425,8 +436,8 @@ class InstitutionalCouncilAggregator:
             # ✨ THE INTERCEPTOR: Apply World-Class Filters before finalizing
             # ====================================================================
             if signal != 0:
-                # A. GOVERNOR FILTER
-                gov_passed, trade_type = self._check_governor_filter(df, signal)
+                # A. GOVERNOR FILTER (✅ FIXED: Now passing governor_data)
+                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
                 if not gov_passed:
                     decision_type = f"BLOCKED (1D Governor vetoed {decision_type})"
                     signal = 0

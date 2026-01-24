@@ -868,50 +868,36 @@ class PortfolioManager:
         self, asset: str, current_price: float, volatility: float = None
     ) -> float:
         """
-        ✅ FIX: Ensure fresh capital before calculating position size
+        HARDENED: Calculate position size based STRICTLY on the single exchange's RAW equity.
+        Ignores leverage buying power.
         """
-        # ✅ Auto-refresh if stale
-        self.refresh_capital(force=False)
+        # Get RAW capital for THIS asset's specific exchange
+        exchange = self.config["assets"][asset]["exchange"].lower()
+        if exchange == "binance":
+            # Force Binance to return actual cash, not leveraged buying power
+            asset_capital = self.get_binance_balance() 
+        else:
+            asset_capital = self._fetch_mt5_balance()
 
-        if self.current_capital <= 0:
-            logger.error("Cannot calculate position size: capital is 0!")
+        if asset_capital <= 0:
+            logger.error(f"Cannot calculate position size for {asset}: exchange capital is 0!")
             return 0.0
 
-        asset_config = self.config["assets"][asset]
-
-        # Base position size as percentage of capital
+        # Base position size as percentage of the RAW CASH
         base_size_pct = self.portfolio_config["base_position_size"]
-        base_size_usd = self.current_capital * base_size_pct
-
-        # Apply volatility scaling if enabled
-        if self.portfolio_config["volatility_scaling"] and volatility:
-            baseline_volatility = 0.02
-            vol_scalar = min(baseline_volatility / volatility, 2.0)
-            base_size_usd *= vol_scalar
-            logger.debug(f"{asset} volatility scaling: {vol_scalar:.2f}x")
+        base_size_usd = asset_capital * base_size_pct
 
         # Apply asset weight
-        asset_weight = asset_config.get("weight", 1.0)
+        asset_weight = self.config["assets"][asset].get("weight", 1.0)
         position_size = base_size_usd * asset_weight
 
-        # Enforce minimum and maximum position sizes
-        min_position = asset_config.get("min_position_usd", 100)
-        max_position = asset_config.get("max_position_usd", 6000)
-        position_size = max(min_position, min(position_size, max_position))
-
-        # Check against max single asset exposure
-        max_asset_exposure_pct = self.portfolio_config["max_single_asset_exposure"]
-        max_asset_usd = self.current_capital * max_asset_exposure_pct
-        position_size = min(position_size, max_asset_usd)
-
-        # Check against max position size
-        max_position_pct = self.portfolio_config["max_position_size"]
-        max_position_usd = self.current_capital * max_position_pct
-        position_size = min(position_size, max_position_usd)
+        # Hard Cap Check: Never allow a single trade to exceed 50% of the account cash
+        absolute_max = asset_capital * 0.50
+        position_size = min(position_size, absolute_max)
 
         logger.info(
-            f"{asset} position size: ${position_size:,.2f} "
-            f"({position_size/self.current_capital*100:.2f}% of capital)"
+            f"{asset} isolated position size: ${position_size:,.2f} "
+            f"(Based strictly on {exchange.upper()} balance: ${asset_capital:,.2f})"
         )
         return position_size
 
