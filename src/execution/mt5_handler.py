@@ -1,6 +1,7 @@
 """
 MT5 Execution Handler with Hybrid Position Sizing
 INTEGRATED: Automated risk management + manual override support
+✨ ENHANCED: Hedging enabled - Allows simultaneous Long/Short positions (Asymmetric System)
 """
 
 import logging
@@ -48,34 +49,6 @@ class SizingMode:
     MANUAL_OVERRIDE = "override"
     REDUCED_RISK = "reduced_risk"
     ELEVATED_RISK = "elevated"
-
-
-class PositionSizingRequest:
-    """Request object for position sizing with manual override support"""
-
-    def __init__(
-        self,
-        asset: str,
-        current_price: float,
-        signal: int,
-        mode: str = SizingMode.AUTOMATED,
-        manual_size_usd: float = None,
-        confidence_score: float = None,
-        market_condition: str = None,
-        override_reason: str = None,
-        max_override_pct: float = 2.0,
-    ):
-        self.asset = asset
-        self.current_price = current_price
-        self.signal = signal
-        self.mode = mode
-        self.manual_size_usd = manual_size_usd
-        self.confidence_score = confidence_score or 0.5
-        self.market_condition = market_condition or "neutral"
-        self.override_reason = override_reason
-        self.max_override_pct = max_override_pct
-        self.error_handler = None
-        self.trading_bot = None
 
 
 class PositionSizingRequest:
@@ -914,11 +887,11 @@ class MT5ExecutionHandler:
         signal_details: Dict = None,
     ) -> bool:
         """
-        ✅ MT5 TWO-WAY TRADING: Execute trading signal
+        ✅ MT5 TWO-WAY TRADING: Execute trading signal with Asymmetric Hedging Support
 
         Signal Logic:
-        - BUY (+1):  Close ALL shorts → Open long
-        - SELL (-1): Close ALL longs  → Open short
+        - BUY (+1):  Open long (Closes short ONLY IF hedging disabled)
+        - SELL (-1): Open short (Closes long ONLY IF hedging disabled)
         - HOLD (0):  Check SL/TP only
 
         Args:
@@ -957,17 +930,21 @@ class MT5ExecutionHandler:
                 return False
 
             # ============================================================
-            # STEP 2: Get existing positions
+            # STEP 2: Get existing positions & HEDGING CONFIG
             # ============================================================
             existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
 
             long_positions = [p for p in existing_positions if p.side == "long"]
             short_positions = [p for p in existing_positions if p.side == "short"]
+            
+            # ✨ NEW: Check if Asymmetric Hedging is enabled
+            allow_hedging = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
 
             logger.info(
                 f"\n{'='*80}\n"
                 f"[SIGNAL] {asset_name} Signal: {signal:+2d}\n"
                 f"[STATE] Current Positions: {len(long_positions)} LONG, {len(short_positions)} SHORT\n"
+                f"[CONFIG] Hedging Allowed: {allow_hedging}\n"
                 f"{'='*80}"
             )
 
@@ -978,56 +955,59 @@ class MT5ExecutionHandler:
                 )
 
             # ============================================================
-            # SCENARIO 1: SELL SIGNAL (-1) → Close longs, Open short
+            # SCENARIO 1: SELL SIGNAL (-1) → Handle longs, Open short
             # ============================================================
             if signal == -1:
-                # Step 1: Close ALL long positions
+                # Step 1: Handle LONG positions (The "Kill Switch" Logic)
                 if long_positions:
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"📉 SELL SIGNAL - Closing ALL {len(long_positions)} LONG position(s)\n"
-                        f"{'='*80}"
-                    )
-
-                    closed_count = 0
-                    failed_count = 0
-
-                    for i, position in enumerate(long_positions, 1):
+                    # ✨ NEW: Respect Hedging Configuration
+                    if not allow_hedging:
                         logger.info(
-                            f"\n[{i}/{len(long_positions)}] Closing LONG position:\n"
-                            f"  Position ID: {position.position_id}\n"
-                            f"  MT5 Ticket:  {position.mt5_ticket}\n"
-                            f"  Entry:       ${position.entry_price:,.2f}\n"
-                            f"  Current:     ${current_price:,.2f}"
+                            f"\n{'='*80}\n"
+                            f"📉 SELL SIGNAL - Hedging Disabled: Closing ALL {len(long_positions)} LONG position(s)\n"
+                            f"{'='*80}"
                         )
 
-                        success = self._close_position(
-                            position=position,
-                            current_price=current_price,
-                            asset_name=asset_name,
-                            reason="sell_signal",
+                        closed_count = 0
+                        failed_count = 0
+
+                        for i, position in enumerate(long_positions, 1):
+                            logger.info(
+                                f"\n[{i}/{len(long_positions)}] Closing LONG position:\n"
+                                f"  Position ID: {position.position_id}\n"
+                                f"  MT5 Ticket:  {position.mt5_ticket}\n"
+                                f"  Entry:       ${position.entry_price:,.2f}\n"
+                                f"  Current:     ${current_price:,.2f}"
+                            )
+
+                            success = self._close_position(
+                                position=position,
+                                current_price=current_price,
+                                asset_name=asset_name,
+                                reason="sell_signal",
+                            )
+
+                            if success:
+                                closed_count += 1
+                                logger.info(f"  ✓ Position {position.position_id} closed")
+                            else:
+                                failed_count += 1
+                                logger.error(f"  ✗ Failed to close {position.position_id}")
+
+                        logger.info(
+                            f"\n{'='*80}\n"
+                            f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
+                            f"{'='*80}\n"
                         )
 
-                        if success:
-                            closed_count += 1
-                            logger.info(f"  ✓ Position {position.position_id} closed")
-                        else:
-                            failed_count += 1
-                            logger.error(f"  ✗ Failed to close {position.position_id}")
-
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
-                        f"{'='*80}\n"
-                    )
-
-                    # Verify sync with MT5 after closing
-                    self._verify_position_sync(asset_name, symbol)
-
-                else:
-                    logger.debug(
-                        f"{asset_name}: SELL signal but no LONG positions to close"
-                    )
+                        # Verify sync with MT5 after closing
+                        self._verify_position_sync(asset_name, symbol)
+                    else:
+                        logger.info(
+                            f"\n{'='*80}\n"
+                            f"📉 SELL SIGNAL - Hedging Enabled: Keeping {len(long_positions)} LONG position(s) OPEN.\n"
+                            f"{'='*80}"
+                        )
 
                 # Step 2: Check if we can open SHORT
                 can_open, reason = self.can_open_position_side(asset_name, "short")
@@ -1042,7 +1022,8 @@ class MT5ExecutionHandler:
 
                     # Verify sync even if we can't open
                     self._verify_position_sync(asset_name, symbol)
-                    return len(long_positions) > 0
+                    # If hedging was enabled, we still have longs open, so return True (bot maintains state)
+                    return True if (long_positions and allow_hedging) else False
 
                 # Step 3: Open SHORT position
                 logger.info(
@@ -1072,54 +1053,57 @@ class MT5ExecutionHandler:
                 return success
 
             # ============================================================
-            # SCENARIO 2: BUY SIGNAL (+1) → Close shorts, Open long
+            # SCENARIO 2: BUY SIGNAL (+1) → Handle shorts, Open long
             # ============================================================
             elif signal == 1:
-                # Step 1: Close ALL short positions
+                # Step 1: Handle SHORT positions (The "Kill Switch" Logic)
                 if short_positions:
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"📈 BUY SIGNAL - Closing ALL {len(short_positions)} SHORT position(s)\n"
-                        f"{'='*80}"
-                    )
-
-                    closed_count = 0
-                    failed_count = 0
-
-                    for i, position in enumerate(short_positions, 1):
+                    # ✨ NEW: Respect Hedging Configuration
+                    if not allow_hedging:
                         logger.info(
-                            f"\n[{i}/{len(short_positions)}] Closing SHORT position:\n"
-                            f"  Position ID: {position.position_id}\n"
-                            f"  MT5 Ticket:  {position.mt5_ticket}"
+                            f"\n{'='*80}\n"
+                            f"📈 BUY SIGNAL - Hedging Disabled: Closing ALL {len(short_positions)} SHORT position(s)\n"
+                            f"{'='*80}"
                         )
 
-                        success = self._close_position(
-                            position=position,
-                            current_price=current_price,
-                            asset_name=asset_name,
-                            reason="buy_signal",
+                        closed_count = 0
+                        failed_count = 0
+
+                        for i, position in enumerate(short_positions, 1):
+                            logger.info(
+                                f"\n[{i}/{len(short_positions)}] Closing SHORT position:\n"
+                                f"  Position ID: {position.position_id}\n"
+                                f"  MT5 Ticket:  {position.mt5_ticket}"
+                            )
+
+                            success = self._close_position(
+                                position=position,
+                                current_price=current_price,
+                                asset_name=asset_name,
+                                reason="buy_signal",
+                            )
+
+                            if success:
+                                closed_count += 1
+                                logger.info(f"  ✓ Position {position.position_id} closed")
+                            else:
+                                failed_count += 1
+                                logger.error(f"  ✗ Failed to close {position.position_id}")
+
+                        logger.info(
+                            f"\n{'='*80}\n"
+                            f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
+                            f"{'='*80}\n"
                         )
 
-                        if success:
-                            closed_count += 1
-                            logger.info(f"  ✓ Position {position.position_id} closed")
-                        else:
-                            failed_count += 1
-                            logger.error(f"  ✗ Failed to close {position.position_id}")
-
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"CLOSE SUMMARY: {closed_count} closed, {failed_count} failed\n"
-                        f"{'='*80}\n"
-                    )
-
-                    # Verify sync with MT5 after closing
-                    self._verify_position_sync(asset_name, symbol)
-
-                else:
-                    logger.debug(
-                        f"{asset_name}: BUY signal but no SHORT positions to close"
-                    )
+                        # Verify sync with MT5 after closing
+                        self._verify_position_sync(asset_name, symbol)
+                    else:
+                        logger.info(
+                            f"\n{'='*80}\n"
+                            f"📈 BUY SIGNAL - Hedging Enabled: Keeping {len(short_positions)} SHORT position(s) OPEN.\n"
+                            f"{'='*80}"
+                        )
 
                 # Step 2: Check if we can open LONG
                 can_open, reason = self.can_open_position_side(asset_name, "long")
@@ -1134,7 +1118,8 @@ class MT5ExecutionHandler:
 
                     # Verify sync even if we can't open
                     self._verify_position_sync(asset_name, symbol)
-                    return len(short_positions) > 0
+                    # If hedging was enabled, we still have shorts open, so return True
+                    return True if (short_positions and allow_hedging) else False
 
                 # Step 3: Open LONG position
                 logger.info(

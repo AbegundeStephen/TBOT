@@ -924,7 +924,7 @@ class MultiTimeFrameRegimeDetector:
         self, symbol: str, timeframe: TimeFrame, exchange: str
     ) -> pd.DataFrame:
         """
-        ✅ NEW: Fetch data from local CSV files (much faster + full history)
+        ✅ FIXED: Fetches data from the new 'data/raw/' local directory
         
         Falls back to API if CSV doesn't exist or is stale.
         
@@ -936,23 +936,23 @@ class MultiTimeFrameRegimeDetector:
         Returns:
             DataFrame with OHLCV data
         """
-        # Determine CSV file path
+        # Determine CSV file path based on the new data/raw/ structure
         if exchange == "binance":
             asset = "btc"
             if timeframe == TimeFrame.ONE_HOUR:
-                csv_file = Path("data/train_data_btc_1h.csv")
+                csv_file = Path("data/raw/BTCUSDT_1h.csv")
             elif timeframe == TimeFrame.FOUR_HOUR:
-                csv_file = Path("data/train_data_btc_4h.csv")
+                csv_file = Path("data/raw/BTCUSDT_4h.csv")
             else:  # ONE_DAY
-                csv_file = Path("data/train_data_btc_1d.csv")
+                csv_file = Path("data/raw/BTCUSDT_1d.csv")
         else:  # mt5
             asset = "gold"
             if timeframe == TimeFrame.ONE_HOUR:
-                csv_file = Path("data/train_data_gold_1h.csv")
+                csv_file = Path("data/raw/XAUUSDm_1h.csv")
             elif timeframe == TimeFrame.FOUR_HOUR:
-                csv_file = Path("data/train_data_gold_4h.csv")
+                csv_file = Path("data/raw/XAUUSDm_4h.csv")
             else:  # ONE_DAY
-                csv_file = Path("data/train_data_gold_1d.csv")
+                csv_file = Path("data/raw/XAUUSDm_1d.csv")
         
         # Try to read from CSV
         if csv_file.exists():
@@ -988,6 +988,7 @@ class MultiTimeFrameRegimeDetector:
         
         # Fallback: Use original API fetch method
         return self._fetch_data(symbol, timeframe, exchange)
+    
     
     def _fetch_data(
         self, symbol: str, timeframe: TimeFrame, exchange: str

@@ -74,7 +74,7 @@ from src.telegram import TradingTelegramBot
 from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
-
+from src.training.autotrainer import ContinuousLearningPipeline
 
 
 def setup_logging(config):
@@ -332,8 +332,8 @@ class TradingBot:
                 db_manager=self.db_manager,  # ✅ Pass db_manager during init
             )
 
-             # ✨ NEW: Enable hedging support
-            hedging_enabled = self.config.get("trading", {}).get("allow_hedging", True)
+            # ✨ NEW: Enable hedging support
+            hedging_enabled = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
             if hedging_enabled:
                 max_hedge_ratio = self.config.get("portfolio", {}).get("max_hedge_ratio", 1.0)
                 enable_hedging_for_portfolio(self.portfolio_manager, max_hedge_ratio)
@@ -4131,7 +4131,8 @@ def start_dashboard_server_threaded():
         return None
 
 
-# Modify the main() function
+
+
 def main():
     """Main entry point"""
     Path("models").mkdir(exist_ok=True)
@@ -4191,7 +4192,7 @@ def main():
     # ✨ NEW: Start dashboard server
     server_process = None
     server_thread = None
-
+    
     if config.get("dashboard", {}).get("enabled", True):
         # Try subprocess first
         server_process = start_dashboard_server()
@@ -4201,7 +4202,11 @@ def main():
             logger.warning("[DASHBOARD] Subprocess failed, trying thread mode...")
             server_thread = start_dashboard_server_threaded()
 
+    # Track auto_trainer so we can stop it later
+    auto_trainer = None
+
     try:
+        # 1. Initialize the MAIN BOT first
         bot = TradingBot()
 
         if bot.db_manager:
@@ -4211,6 +4216,15 @@ def main():
             for position in bot.portfolio_manager.positions.values():
                 position.db_manager = bot.db_manager
 
+        # 2. ✅ FIXED: Initialize Auto-Trainer AFTER the bot exists
+        auto_trainer = ContinuousLearningPipeline(
+            config=config,
+            trading_bot=bot, # Now 'bot' is defined!
+            telegram_bot=bot.telegram_bot # Access telegram directly from the bot
+        )
+        auto_trainer.start()
+
+        # 3. Start the main bot loop
         bot.start()
 
     except KeyboardInterrupt:
@@ -4219,6 +4233,10 @@ def main():
         logger.error(f"[FATAL] {e}", exc_info=True)
         sys.exit(1)
     finally:
+        # ✨ NEW: Stop Auto-Trainer on exit
+        if auto_trainer:
+            auto_trainer.stop()
+
         # ✨ NEW: Stop dashboard server on exit
         if server_process:
             logger.info("[DASHBOARD] Stopping web server...")

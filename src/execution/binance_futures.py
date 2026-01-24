@@ -1,6 +1,7 @@
 """
 Binance Futures API Integration - COMPLETE VERSION
 ✅ FIXED: Take Profit Precision + All Integration Functions
+✨ ENHANCED: Hedge Mode Integration for Asymmetric System (Simultaneous Long/Short)
 """
 
 import logging
@@ -23,12 +24,14 @@ class BinanceFuturesHandler:
     """
     Unified Binance Futures API Handler for BOTH Long & Short positions
     ✅ FIXED: Take Profit precision handling
+    ✨ ENHANCED: Forced Hedge Mode for Asymmetric Trading
     """
 
-    def __init__(self, client: Client, symbol: str = "BTCUSDT"):
+    def __init__(self, client: Client, symbol: str = "BTCUSDT", config: dict = None):
         self.client = client
         self.symbol = symbol
         self.filters = {}
+        self.config = config or {}
 
         self.quantity_precision = 3  # Default for BTCUSDT
         self.price_precision = 2  # Default for BTCUSDT
@@ -37,10 +40,28 @@ class BinanceFuturesHandler:
         self.min_qty = 0.001  # Default min quantity
         self.min_notional = 5.0  # Default min notional
 
+        # ✨ NEW: Hedging Configuration
+        self.allow_hedging = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
+
         # Verify Futures API access and load filters
         try:
             self.client.futures_account()
             self._load_symbol_filters()
+            
+            # ====================================================================
+            # ✨ NEW: FORCE BINANCE INTO HEDGE MODE
+            # Required for the bot to hold a Trend Long and a Scalp Short simultaneously.
+            # ====================================================================
+            try:
+                self.client.futures_change_position_mode(dualSidePosition=self.allow_hedging)
+                mode_str = "HEDGE" if self.allow_hedging else "ONE-WAY"
+                logger.info(f"[FUTURES] ✓ Account Position Mode set to: {mode_str}")
+            except Exception as e:
+                if "-4059" in str(e) or "No need to change" in str(e):
+                    logger.debug("[FUTURES] Hedge Mode already correctly set.")
+                else:
+                    logger.error(f"[FUTURES] Failed to set Hedge Mode: {e}")
+
             logger.info(f"[FUTURES] ✓ Binance Futures API connected for {symbol}")
         except Exception as e:
             logger.error(f"[FUTURES] ✗ Futures API unavailable: {e}")
@@ -211,11 +232,15 @@ class BinanceFuturesHandler:
     ) -> Optional[Dict]:
         """
         ✅ FIXED: Cancel existing stops before placing new ones
+        ✨ ENHANCED: Injects `positionSide` for Hedge Mode compatibility
         """
         try:
             # Determine Binance side
             binance_side = SIDE_BUY if side == "long" else SIDE_SELL
             side_label = side.upper()
+            
+            # ✨ NEW: Define strictly required Position Side for Hedge Mode
+            position_side = "LONG" if side == "long" else "SHORT"
 
             # ✅ Round values BEFORE validation
             quantity = self._round_quantity(quantity)
@@ -225,7 +250,7 @@ class BinanceFuturesHandler:
                 take_profit = self._round_price(take_profit)
 
             logger.info(
-                f"[FUTURES] Opening {side_label}: {quantity:.{self.quantity_precision}f} {self.symbol}"
+                f"[FUTURES] Opening {side_label} (Hedge Mode): {quantity:.{self.quantity_precision}f} {self.symbol}"
             )
 
             # Get current price for validation
@@ -238,11 +263,12 @@ class BinanceFuturesHandler:
                 logger.error(f"[FUTURES] Entry validation failed: {error_msg}")
                 return None
 
-            # 1. Place MARKET ENTRY Order
+            # 1. Place MARKET ENTRY Order (✨ ENHANCED WITH positionSide)
             try:
                 order = self.client.futures_create_order(
                     symbol=self.symbol,
                     side=binance_side,
+                    positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
                     type=FUTURE_ORDER_TYPE_MARKET,
                     quantity=quantity,
                 )
@@ -313,17 +339,17 @@ class BinanceFuturesHandler:
                             )
 
                             # Try cancelling again
-                            for order in stop_orders:
+                            for order_to_cancel in stop_orders:
                                 try:
                                     self.client.futures_cancel_order(
-                                        symbol=self.symbol, orderId=order["orderId"]
+                                        symbol=self.symbol, orderId=order_to_cancel["orderId"]
                                     )
                                     logger.info(
-                                        f"[SL] Cancelled lingering order {order['orderId']}"
+                                        f"[SL] Cancelled lingering order {order_to_cancel['orderId']}"
                                     )
                                 except Exception as cancel_err:
                                     logger.error(
-                                        f"[SL] Failed to cancel {order['orderId']}: {cancel_err}"
+                                        f"[SL] Failed to cancel {order_to_cancel['orderId']}: {cancel_err}"
                                     )
 
                             time.sleep(0.5)
@@ -349,7 +375,7 @@ class BinanceFuturesHandler:
                     stop_loss = current_price * 1.03
                     stop_loss = self._round_price(stop_loss)
 
-                # Step 5: Place stop loss with enhanced retry logic
+                # Step 5: Place stop loss with enhanced retry logic (✨ ENHANCED WITH positionSide)
                 sl_success = False
                 sl_last_error = None
 
@@ -362,6 +388,7 @@ class BinanceFuturesHandler:
                         self.client.futures_create_order(
                             symbol=self.symbol,
                             side=sl_side,
+                            positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
                             type=FUTURE_ORDER_TYPE_STOP_MARKET,
                             stopPrice=stop_loss,
                             closePosition=True,  # This closes the entire position when hit
@@ -399,7 +426,7 @@ class BinanceFuturesHandler:
                         if attempt < 3:
                             time.sleep(0.5 * attempt)  # Exponential backoff
 
-                # Step 6: Emergency failsafe
+                # Step 6: Emergency failsafe (✨ ENHANCED WITH positionSide)
                 if not sl_success:
                     logger.critical(
                         f"\n{'='*80}\n"
@@ -420,6 +447,7 @@ class BinanceFuturesHandler:
                         emergency_order = self.client.futures_create_order(
                             symbol=self.symbol,
                             side=close_side,
+                            positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
                             type=FUTURE_ORDER_TYPE_MARKET,
                             quantity=quantity,
                             reduceOnly=True,
@@ -438,7 +466,7 @@ class BinanceFuturesHandler:
                         )
                     return None
 
-            # 4. Place Take Profit (unchanged)
+            # 4. Place Take Profit (✨ ENHANCED WITH positionSide)
             if take_profit:
                 tp_side = SIDE_SELL if side == "long" else SIDE_BUY
 
@@ -479,6 +507,7 @@ class BinanceFuturesHandler:
                             tp_order = self.client.futures_create_order(
                                 symbol=self.symbol,
                                 side=tp_side,
+                                positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
                                 type=FUTURE_ORDER_TYPE_LIMIT,
                                 price=take_profit,
                                 quantity=quantity,
@@ -512,6 +541,7 @@ class BinanceFuturesHandler:
     ) -> bool:
         """
         ✅ FIXED: Close LONG or SHORT position with detailed error reporting
+        ✨ ENHANCED: Injects `positionSide` for Hedge Mode compatibility
         """
         try:
             # Step 1: Get position info if quantity not provided
@@ -541,16 +571,20 @@ class BinanceFuturesHandler:
 
             close_side = SIDE_SELL if side == "long" else SIDE_BUY
             side_label = side.upper()
+            
+            # ✨ NEW: Define strictly required Position Side for Hedge Mode
+            position_side = "LONG" if side == "long" else "SHORT"
 
             logger.info(
-                f"[FUTURES] Closing {side_label}: {quantity:.{self.quantity_precision}f} {self.symbol}"
+                f"[FUTURES] Closing {side_label} (Hedge Mode): {quantity:.{self.quantity_precision}f} {self.symbol}"
             )
 
-            # Step 3: Execute market close order with reduceOnly=True
+            # Step 3: Execute market close order with reduceOnly=True (✨ ENHANCED WITH positionSide)
             try:
                 order = self.client.futures_create_order(
                     symbol=self.symbol,
                     side=close_side,
+                    positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
                     type=FUTURE_ORDER_TYPE_MARKET,
                     quantity=quantity,
                     reduceOnly=True,  # ← Critical: This ensures we're closing, not opening
@@ -600,7 +634,7 @@ class BinanceFuturesHandler:
                 elif "Invalid quantity" in error_str:
                     logger.error(
                         f"[FUTURES] Invalid quantity: {quantity:.{self.quantity_precision}f}\n"
-                        f"  Min: {selAf.min_qty}, Step: {self.step_size}"
+                        f"  Min: {self.min_qty}, Step: {self.step_size}"
                     )
 
                 return False
@@ -727,6 +761,7 @@ class BinanceFuturesHandler:
 def integrate_futures_into_handler(handler):
     """
     Integrate Futures API into existing BinanceExecutionHandler
+    ✨ ENHANCED: Passes config to the FuturesHandler to load hedging rules.
     """
     # Check if Futures is enabled
     futures_enabled = (
@@ -738,9 +773,11 @@ def integrate_futures_into_handler(handler):
         return False
 
     try:
-        # Initialize Futures handler
+        # Initialize Futures handler with Config
         handler.futures_handler = BinanceFuturesHandler(
-            client=handler.client, symbol=handler.symbol
+            client=handler.client, 
+            symbol=handler.symbol,
+            config=handler.config # ✨ NEW: Pass config for hedging awareness
         )
 
         # Set leverage and margin type
@@ -1055,19 +1092,13 @@ def patch_close_position_method(handler):
     logger.info("[FUTURES] _close_position method patched for LONG+SHORT")
 
 
+# Open: src/execution/binance_futures.py
+# Scroll to the bottom and replace this function:
+
 def enable_futures_for_binance_handler(handler):
     """
     MAIN FUNCTION: Enable Futures trading for BOTH LONG and SHORT positions
-
-    Usage in main.py:
-        from src.execution.binance_futures import enable_futures_for_binance_handler
-
-        # After initializing binance_handler
-        if config["assets"]["BTC"].get("enable_futures"):
-            enable_futures_for_binance_handler(binance_handler)
-
-    Returns:
-        True if enabled successfully
+    ✅ FIXED: Removed legacy "monkey patches". The handler now natively supports futures.
     """
 
     try:
@@ -1079,15 +1110,14 @@ def enable_futures_for_binance_handler(handler):
         if not integrate_futures_into_handler(handler):
             return False
 
-        # Step 2: Patch methods
-        patch_open_position_method(handler)
-        patch_close_position_method(handler)
+        # NOTE: We NO LONGER patch open/close methods here because 
+        # binance_handler.py now natively supports Futures margin isolation.
 
-        # Step 3: Verify connection
+        # Step 2: Verify connection
         balance = handler.futures_handler.get_account_balance()
         logger.info(f"[FUTURES] Account Balance: ${balance:,.2f} USDT")
 
-        # Step 4: Check for existing positions
+        # Step 3: Check for existing positions
         position = handler.futures_handler.get_position_info()
         if position:
             side = position.get("side", "unknown")
@@ -1097,14 +1127,10 @@ def enable_futures_for_binance_handler(handler):
             logger.info(f"[FUTURES] Existing {side.upper()} position detected:")
             logger.info(f"  Quantity: {pos_amt:.8f} BTC")
             logger.info(f"  P&L:      ${unrealized:,.2f}")
-            logger.warning("[FUTURES] ⚠️ Sync positions before trading!")
 
         logger.info("=" * 70)
         logger.info("✅ FUTURES TRADING ENABLED")
-        logger.info("  - LONG positions will use Binance Futures API (with leverage)")
-        logger.info("  - SHORT positions will use Binance Futures API")
-        logger.info("  - Lower fees: 0.02% maker / 0.04% taker (vs 0.1% Spot)")
-        logger.info("  - Leverage can amplify both gains AND losses")
+        logger.info("  - Native dynamic margin isolation active")
         logger.info("=" * 70)
 
         return True
