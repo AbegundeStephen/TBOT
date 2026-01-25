@@ -64,7 +64,10 @@ from src.ai.visualization import (
 )
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 from src.update.historical_updater import HistoricalDataUpdater
-from src.portfolio.hedging_support import enable_hedging_for_portfolio, log_hedging_status
+from src.portfolio.hedging_support import (
+    enable_hedging_for_portfolio,
+    log_hedging_status,
+)
 
 
 import pickle
@@ -76,6 +79,7 @@ from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_e
 from src.execution.mtf_integration import MTFRegimeIntegration
 from src.training.autotrainer import ContinuousLearningPipeline
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
+
 
 def setup_logging(config):
     """Setup logging with proper encoding and rotation"""
@@ -327,18 +331,24 @@ class TradingBot:
         try:
             self.portfolio_manager = PortfolioManager(
                 config=self.config,
-                mt5_handler=mt5_initialized, 
-                binance_client=self.data_manager.futures_client, # ✅ FIXED: Use Futures Client
-                db_manager=self.db_manager
+                mt5_handler=mt5_initialized,
+                binance_client=self.data_manager.futures_client,  # ✅ FIXED: Use Futures Client
+                db_manager=self.db_manager,
             )
 
             # ✨ NEW: Enable hedging support
-            hedging_enabled = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
+            hedging_enabled = self.config.get("trading", {}).get(
+                "allow_simultaneous_long_short", True
+            )
             if hedging_enabled:
-                max_hedge_ratio = self.config.get("portfolio", {}).get("max_hedge_ratio", 1.0)
+                max_hedge_ratio = self.config.get("portfolio", {}).get(
+                    "max_hedge_ratio", 1.0
+                )
                 enable_hedging_for_portfolio(self.portfolio_manager, max_hedge_ratio)
-                logger.info(f"[HEDGING] ✅ Enabled with max ratio {max_hedge_ratio:.0%}")
-            
+                logger.info(
+                    f"[HEDGING] ✅ Enabled with max ratio {max_hedge_ratio:.0%}"
+                )
+
             logger.info(
                 f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
             )
@@ -962,7 +972,7 @@ class TradingBot:
                             ai_validator if self.params.use_ai_validation else None
                         ),
                         mtf_integration=self.mtf_integration,  # Pass MTF for Governor
-                        enable_world_class_filters=True,       # Enable filters
+                        enable_world_class_filters=True,  # Enable filters
                         enable_ai_circuit_breaker=True,
                         enable_detailed_logging=getattr(
                             self, "detailed_logging", False
@@ -988,10 +998,6 @@ class TradingBot:
                 # COUNCIL MODE (New institutional aggregator)
                 # --------------------------------------------------------
                 try:
-                    from src.execution.council_aggregator import (
-                        InstitutionalCouncilAggregator,
-                    )
-
                     self.aggregators[asset_name] = InstitutionalCouncilAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
                         trend_following_strategy=strategies.get("trend_following"),
@@ -1040,7 +1046,7 @@ class TradingBot:
                             ai_validator if self.params.use_ai_validation else None
                         ),
                         mtf_integration=self.mtf_integration,  # Pass MTF for Governor
-                        enable_world_class_filters=True,       # Enable filters
+                        enable_world_class_filters=True,  # Enable filters
                         enable_ai_circuit_breaker=True,
                         enable_detailed_logging=False,  # Reduce noise in hybrid mode
                         strong_signal_bypass_threshold=getattr(
@@ -1502,7 +1508,10 @@ class TradingBot:
 
             # ✅ NEW: Fetch the latest MTF regime data for the Council
             mtf_regime = {}
-            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+            if (
+                hasattr(self, "_current_regime_data")
+                and asset_name in self._current_regime_data
+            ):
                 mtf_regime = self._current_regime_data[asset_name]
 
             # ✅ FIXED: Pass full market context to the Institutional Council
@@ -1510,7 +1519,7 @@ class TradingBot:
                 df,
                 current_regime=mtf_regime.get("regime", "NEUTRAL"),
                 is_bull_market=mtf_regime.get("is_bull", False),
-                governor_data=mtf_regime  # This contains the trade_type needed for Asymmetry
+                governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
             )
 
             logger.info(
@@ -1744,7 +1753,6 @@ class TradingBot:
         """Convert signal to readable string"""
         return {1: "BUY", -1: "SELL", 0: "HOLD"}.get(signal, "UNKNOWN")
 
-    
     def load_models(self):
         """
         ✨  Load models with safe AI initialization
@@ -1786,8 +1794,6 @@ class TradingBot:
 
         # ✅ NEW: Set initial presets using DynamicPresetSelector
         if self.config.get("aggregator_settings", {}).get("preset") == "auto":
-            from src.execution.auto_preset_selector import DynamicPresetSelector
-
             selector = DynamicPresetSelector(self.data_manager, self.config)
 
             # Get preset for EACH enabled asset
@@ -2099,14 +2105,13 @@ class TradingBot:
                     config=preset_config,
                     ai_validator=ai_validator,
                     mtf_integration=self.mtf_integration,  # Pass MTF for Governor
-                    enable_world_class_filters=True,       # Enable filters
+                    enable_world_class_filters=True,  # Enable filters
                     enable_ai_circuit_breaker=True,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
                     strong_signal_bypass_threshold=getattr(
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
                 )
-                from src.execution.council_aggregator import InstitutionalCouncilAggregator
                 council_agg = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2156,7 +2161,7 @@ class TradingBot:
                     config=preset_config,
                     ai_validator=ai_validator,
                     mtf_integration=self.mtf_integration,  # Pass MTF for Governor
-                    enable_world_class_filters=True,       # Enable filters
+                    enable_world_class_filters=True,  # Enable filters
                     enable_ai_circuit_breaker=True,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
                     strong_signal_bypass_threshold=getattr(
@@ -2440,14 +2445,27 @@ class TradingBot:
                 self._maybe_take_portfolio_snapshot()
 
             # ✅ NEW: Log hybrid statistics periodically
+            # ✅ NEW: Log hybrid statistics periodically
             if hasattr(self, "hybrid_selector"):
                 stats = self.hybrid_selector.get_statistics()
+
+                # ✅ FIXED: Actively query the current modes for the dashboard/logs
+                active_modes = {}
+                for asset in self.config["assets"]:
+                    if self.config["assets"][asset].get("enabled", False):
+                        # Get mode without logging the switch to avoid log spam
+                        mode_info = self.hybrid_selector.get_optimal_mode(
+                            asset, pd.DataFrame()
+                        )
+                        active_modes[asset] = mode_info["mode"]
 
                 logger.info(f"\n[HYBRID STATS]")
                 logger.info(f"  Total Switches:      {stats['total_switches']}")
                 logger.info(f"  Council Signals:     {stats['council_signals']}")
                 logger.info(f"  Performance Signals: {stats['performance_signals']}")
-                logger.info(f"  Current Modes:       {stats['current_modes']}")
+                logger.info(
+                    f"  Current Modes:       {active_modes}"
+                )  # <-- Now uses active_modes
 
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
@@ -2820,9 +2838,12 @@ class TradingBot:
             # 2. Generate Signal (Hybrid or Single)
             # ============================================================
             mtf_regime = {}
-            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+            if (
+                hasattr(self, "_current_regime_data")
+                and asset_name in self._current_regime_data
+            ):
                 mtf_regime = self._current_regime_data[asset_name]
-                
+
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
@@ -2831,13 +2852,12 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                 )
             else:
-                from src.execution.council_aggregator import InstitutionalCouncilAggregator
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
                     signal, details = aggregator.get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
                         is_bull_market=mtf_regime.get("is_bull", False),
-                        governor_data=mtf_regime
+                        governor_data=mtf_regime,
                     )
                 else:
                     # Performance Aggregator handles its own context internally
@@ -3368,7 +3388,10 @@ class TradingBot:
             # ================================================================
             # Get latest MTF data
             mtf_regime = {}
-            if hasattr(self, "_current_regime_data") and asset_name in self._current_regime_data:
+            if (
+                hasattr(self, "_current_regime_data")
+                and asset_name in self._current_regime_data
+            ):
                 mtf_regime = self._current_regime_data[asset_name]
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
@@ -3381,14 +3404,13 @@ class TradingBot:
                 )
             else:
                 # SINGLE AGGREGATOR MODE:
-                from src.execution.council_aggregator import InstitutionalCouncilAggregator
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
                     # ✅ FIXED: Pass context to pure Council mode for monitoring
                     signal, details = aggregator.get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
                         is_bull_market=mtf_regime.get("is_bull", False),
-                        governor_data=mtf_regime
+                        governor_data=mtf_regime,
                     )
                 else:
                     # Performance mode
@@ -4085,8 +4107,6 @@ def start_dashboard_server_threaded():
         return None
 
 
-
-
 def main():
     """Main entry point"""
     Path("models").mkdir(exist_ok=True)
@@ -4146,7 +4166,7 @@ def main():
     # ✨ NEW: Start dashboard server
     server_process = None
     server_thread = None
-    
+
     if config.get("dashboard", {}).get("enabled", True):
         # Try subprocess first
         server_process = start_dashboard_server()
@@ -4173,8 +4193,8 @@ def main():
         # 2. ✅ FIXED: Initialize Auto-Trainer AFTER the bot exists
         auto_trainer = ContinuousLearningPipeline(
             config=config,
-            trading_bot=bot, # Now 'bot' is defined!
-            telegram_bot=bot.telegram_bot # Access telegram directly from the bot
+            trading_bot=bot,  # Now 'bot' is defined!
+            telegram_bot=bot.telegram_bot,  # Access telegram directly from the bot
         )
         auto_trainer.start()
 
