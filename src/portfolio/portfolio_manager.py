@@ -30,9 +30,9 @@ class Position:
         entry_time: datetime,
         signal_details: dict = None,
         position_id: str = None,
-        stop_loss: float = None,  # ❌ IGNORED by VTM
-        take_profit: float = None,  # ❌ IGNORED by VTM
-        trailing_stop_pct: float = None,  # ❌ IGNORED by VTM
+        stop_loss: float = None,
+        take_profit: float = None,
+        trailing_stop_pct: float = None,
         mt5_ticket: int = None,
         binance_order_id: int = None,
         ohlc_data: dict = None,
@@ -76,7 +76,7 @@ class Position:
         self.db_trade_id = None
         self.db_manager = None
 
-        # ✅ CRITICAL FIX: Initialize VTM
+        # ✅ CRITICAL FIX: Initialize VTM with intelligent context
         self.trade_manager = None
         if use_dynamic_management and ohlc_data:
             try:
@@ -134,6 +134,7 @@ class Position:
                 account_risk = max(0.008, min(account_risk, 0.025))
 
                 # ✅ Initialize VTM with optimized parameters
+                # Use Keyword arguments to ensure correct mapping even if VTM signature changes
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
                     side=side,
@@ -141,51 +142,43 @@ class Position:
                     high=ohlc_data["high"],
                     low=ohlc_data["low"],
                     close=ohlc_data["close"],
-                    account_balance=account_balance or 10000,  # Fallback
+                    account_balance=account_balance or 10000.0,  # Fallback
                     quantity_override=quantity,
-                    account_risk=account_risk,  # ✅ Adjusted
+                    account_risk=account_risk,
                     atr_period=14,
                     enable_early_profit_lock=True,
-                    early_lock_threshold_pct=early_lock_threshold_pct,  # ✅ Adjusted
+                    early_lock_threshold_pct=early_lock_threshold_pct,
                     signal_details=signal_details,
                 )
 
-                # ✅ Use VTM's calculated levels (overrides any passed values)
-                self.stop_loss = self.trade_manager.initial_stop_loss
-                self.take_profit = (
-                    self.trade_manager.take_profit_levels[0]
-                    if self.trade_manager.take_profit_levels
-                    else None
-                )
+                # ✅ Sync VTM's calculated levels back to the Position object
+                if self.trade_manager:
+                    self.stop_loss = self.trade_manager.initial_stop_loss
+                    if self.trade_manager.take_profit_levels:
+                        self.take_profit = self.trade_manager.take_profit_levels[0]
 
-                logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
-                logger.info(f"  Account Risk: {account_risk:.3f}")
-                logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
-                logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
-                logger.info(f"  Take Profit:  ${self.take_profit:,.2f}")
+                    logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
+                    logger.info(f"  Account Risk: {account_risk:.3f}")
+                    logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
+                    logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
+                    logger.info(f"  Take Profit:  ${self.take_profit:,.2f}")
 
             except Exception as e:
-                logger.error(f"[VTM] Initialization failed: {e}", exc_info=True)
+                # Catch failures (including "Position size too large") so the object still initializes
+                logger.error(f"[PORTFOLIO] VTM initialization failed for {asset}: {e}")
                 self.trade_manager = None
 
-                # ✅ Fallback to basic levels if VTM fails
-                if stop_loss:
-                    self.stop_loss = stop_loss
-                if take_profit:
-                    self.take_profit = take_profit
-                if trailing_stop_pct:
-                    self.trailing_stop_pct = trailing_stop_pct
+                # ✅ Fallback to provided basic levels if VTM fails to init
+                self.stop_loss = stop_loss if stop_loss else None
+                self.take_profit = take_profit if take_profit else None
+                self.trailing_stop_pct = trailing_stop_pct if trailing_stop_pct else None
 
         else:
-            # ✅ No VTM - use passed levels
-            logger.debug(f"[VTM] Not initialized (missing OHLC or signal_details)")
-
-            if stop_loss:
-                self.stop_loss = stop_loss
-            if take_profit:
-                self.take_profit = take_profit
-            if trailing_stop_pct:
-                self.trailing_stop_pct = trailing_stop_pct
+            # ✅ No VTM requested or missing data - use passed levels
+            logger.debug(f"[PORTFOLIO] VTM not initialized (missing data or disabled)")
+            self.stop_loss = stop_loss
+            self.take_profit = take_profit
+            self.trailing_stop_pct = trailing_stop_pct
 
     def update_with_new_bar(self, high: float, low: float, close: float):
         """

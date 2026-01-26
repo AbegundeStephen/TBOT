@@ -383,7 +383,11 @@ class VeteranTradeManager:
         self.entry_time = datetime.now()
 
         # Execute calculations
-        self._calculate_initial_levels()
+        try:
+            self._calculate_initial_levels()
+        except Exception as e:
+            logger.error(f"[VTM] Critical initialization error: {e}")
+            raise
 
         # ====================================================================
         # ✨ NEW: THE "WORTH IT" CHECK (Scalp Economics)
@@ -480,6 +484,10 @@ class VeteranTradeManager:
             return None
 
     def _calculate_initial_levels(self):
+        """
+        FIXED: Caps position size to 2x account balance instead of raising ValueError.
+        Ensures risk is recalculated based on the actual quantity used.
+        """
         try:
             atr = self._calculate_atr()
             pivot_level = self._find_pivot_structure()
@@ -493,18 +501,18 @@ class VeteranTradeManager:
                 atr_stop = self.entry_price * (1 - atr_distance_pct)
 
                 if pivot_level:
-                    structure_stop = pivot_level - (atr * 1.0)  # FIXED: Full ATR buffer
+                    structure_stop = pivot_level - (atr * 1.0)
                 else:
                     structure_stop = self.entry_price * (1 - self.min_stop_pct)
 
                 min_stop = self.entry_price * (1 - self.max_stop_pct)
                 max_stop = self.entry_price * (1 - self.min_stop_pct)
 
-                # FIXED: Take LOWER stop (wider)
-                preliminary_stop = max(atr_stop, structure_stop)  # Choose wider stop
+                # Choose wider stop (lower for long) within safety bounds
+                preliminary_stop = max(atr_stop, structure_stop)
                 self.initial_stop_loss = max(min_stop, min(max_stop, preliminary_stop))
 
-                # Enhanced safety: Require minimum 1.5 ATR distance for BTC (if TREND)
+                # Enhanced safety for TREND profiles
                 if self.trade_type == "TREND":
                     min_distance = atr * 1.5
                     if abs(self.entry_price - self.initial_stop_loss) < min_distance:
@@ -513,46 +521,18 @@ class VeteranTradeManager:
                         )
                         self.initial_stop_loss = self.entry_price - min_distance
 
-                logger.info(f"[VTM] Stop Calc (LONG):")
-                logger.info(
-                    f"  Pivot: ${pivot_level:,.2f}" if pivot_level else "  Pivot: None"
-                )
-                logger.info(f"  ATR: ${atr:,.2f} (x{self.atr_multiplier})")
-                logger.info(f"  ATR Stop: ${atr_stop:,.2f}")
-                logger.info(f"  Structure Stop: ${structure_stop:,.2f}")
-                logger.info(f"  → FINAL: ${self.initial_stop_loss:,.2f}")
-
-                # Calculate TPs with structure
                 if self.use_structure_targets:
-                    logger.info(f"\n[VTM] Detecting resistance levels...")
                     structure_levels = find_resistance_levels(
-                        self.high,
-                        self.low,
-                        self.close,
-                        self.entry_price,
-                        self.side,
-                        self.pivot_lookback,
+                        self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback
                     )
-                    if structure_levels:
-                        logger.info(
-                            f"[VTM] Found {len(structure_levels)} resistance levels"
-                        )
-                    self.take_profit_levels, self.partial_sizes = (
-                        calculate_hybrid_targets(
-                            self.entry_price,
-                            self.initial_stop_loss,
-                            self.side,
-                            structure_levels,
-                            self.partial_targets,
-                            self.partial_sizes,
-                            min_rr=1.2 if self.trade_type == "TREND" else 1.0, # Scalps allow 1:1
-                        )
+                    self.take_profit_levels, self.partial_sizes = calculate_hybrid_targets(
+                        self.entry_price, self.initial_stop_loss, self.side, structure_levels,
+                        self.partial_targets, self.partial_sizes,
+                        min_rr=1.2 if self.trade_type == "TREND" else 1.0
                     )
                 else:
                     risk = self.entry_price - self.initial_stop_loss
-                    self.take_profit_levels = [
-                        self.entry_price + (risk * r) for r in self.partial_targets
-                    ]
+                    self.take_profit_levels = [self.entry_price + (risk * r) for r in self.partial_targets]
 
             else:  # short
                 atr_distance = atr * self.atr_multiplier
@@ -563,14 +543,14 @@ class VeteranTradeManager:
                 atr_stop = self.entry_price * (1 + atr_distance_pct)
 
                 if pivot_level:
-                    structure_stop = pivot_level + (atr * 1.0)  # FIXED
+                    structure_stop = pivot_level + (atr * 1.0)
                 else:
                     structure_stop = self.entry_price * (1 + self.min_stop_pct)
 
                 min_stop = self.entry_price * (1 + self.max_stop_pct)
                 max_stop = self.entry_price * (1 + self.min_stop_pct)
 
-                # FIXED: Take HIGHER stop (wider for shorts)
+                # Choose wider stop (higher for short) within safety bounds
                 self.initial_stop_loss = min(
                     min_stop, max(max_stop, max(atr_stop, structure_stop))
                 )
@@ -579,86 +559,70 @@ class VeteranTradeManager:
                     logger.warning(f"[VTM] Stop too tight, widening to 1 ATR")
                     self.initial_stop_loss = self.entry_price + atr
 
-                logger.info(f"[VTM] Stop Calc (SHORT):")
-                logger.info(
-                    f"  Pivot: ${pivot_level:,.2f}" if pivot_level else "  Pivot: None"
-                )
-                logger.info(f"  ATR: ${atr:,.2f}")
-                logger.info(f"  → FINAL: ${self.initial_stop_loss:,.2f}")
-
                 if self.use_structure_targets:
-                    logger.info(f"\n[VTM] Detecting support levels...")
                     structure_levels = find_resistance_levels(
-                        self.high,
-                        self.low,
-                        self.close,
-                        self.entry_price,
-                        self.side,
-                        self.pivot_lookback,
+                        self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback
                     )
-                    if structure_levels:
-                        logger.info(
-                            f"[VTM] Found {len(structure_levels)} support levels"
-                        )
-                    self.take_profit_levels, self.partial_sizes = (
-                        calculate_hybrid_targets(
-                            self.entry_price,
-                            self.initial_stop_loss,
-                            self.side,
-                            structure_levels,
-                            self.partial_targets,
-                            self.partial_sizes,
-                            min_rr=1.2 if self.trade_type == "TREND" else 1.0, # Scalps allow 1:1
-                        )
+                    self.take_profit_levels, self.partial_sizes = calculate_hybrid_targets(
+                        self.entry_price, self.initial_stop_loss, self.side, structure_levels,
+                        self.partial_targets, self.partial_sizes,
+                        min_rr=1.2 if self.trade_type == "TREND" else 1.0
                     )
                 else:
                     risk = self.initial_stop_loss - self.entry_price
-                    self.take_profit_levels = [
-                        self.entry_price - (risk * r) for r in self.partial_targets
-                    ]
+                    self.take_profit_levels = [self.entry_price - (risk * r) for r in self.partial_targets]
 
             self.current_stop_loss = self.initial_stop_loss
 
+            # ====================================================================
+            # POSITION SIZING & LEVERAGE PROTECTION
+            # ====================================================================
             if self.quantity_override is not None:
-                # Use the quantity calculated by the handler (already includes split risk)
-                self.position_size = self.quantity_override
+                requested_quantity = self.quantity_override
+                # Cap quantity at 2x leverage to prevent exchange rejection
+                max_allowed_quantity = (self.account_balance * 2.0) / self.entry_price
+                
+                if requested_quantity > max_allowed_quantity:
+                    logger.warning(
+                        f"[VTM] ⚠️ Requested quantity {requested_quantity:.6f} exceeds 2.0x leverage. "
+                        f"Capping to {max_allowed_quantity:.6f} for safety."
+                    )
+                    self.position_size = max_allowed_quantity
+                else:
+                    self.position_size = requested_quantity
 
-                # Calculate what the actual risk is with this quantity
-                trade_risk = abs(self.entry_price - self.initial_stop_loss)
-                actual_dollar_risk = self.position_size * trade_risk
+                # Recalculate what the actual risk is with this final quantity
+                trade_risk_per_unit = abs(self.entry_price - self.initial_stop_loss)
+                actual_dollar_risk = self.position_size * trade_risk_per_unit
                 actual_risk_pct = actual_dollar_risk / self.account_balance
 
                 logger.info(
-                    f"[VTM] Using handler's quantity: {self.position_size:.6f}\n"
-                    f"  Position value: ${self.position_size * self.entry_price:,.2f}\n"
-                    f"  Actual risk:    ${actual_dollar_risk:,.2f} ({actual_risk_pct:.2%})"
+                    f"[VTM] Final Risk Profile:\n"
+                    f"  Quantity: {self.position_size:.6f}\n"
+                    f"  Total Value: ${self.position_size * self.entry_price:,.2f}\n"
+                    f"  Net Risk:    ${actual_dollar_risk:,.2f} ({actual_risk_pct:.2%})"
                 )
             else:
-                # Fallback: Calculate quantity from account_risk (old behavior)
+                # Fallback: Calculate quantity from account_risk
                 risk_amount = self.account_balance * self.account_risk
-                trade_risk = abs(self.entry_price - self.initial_stop_loss)
-                self.position_size = risk_amount / trade_risk
+                trade_risk_per_unit = abs(self.entry_price - self.initial_stop_loss)
+                self.position_size = risk_amount / trade_risk_per_unit if trade_risk_per_unit > 0 else 0
 
                 logger.warning(
-                    f"[VTM] No quantity override - calculated from risk\n"
-                    f"  Risk: {self.account_risk:.2%} = ${risk_amount:,.2f}\n"
-                    f"  Position: {self.position_size:.6f}"
+                    f"[VTM] No quantity override - calculated from internal risk settings\n"
+                    f"  Target Risk: {self.account_risk:.2%} = ${risk_amount:,.2f}\n"
+                    f"  Calculated Quantity: {self.position_size:.6f}"
                 )
 
-            # FIXED: Position size validation
-            if self.position_size * self.entry_price > self.account_balance * 2:
-                logger.error(f"[VTM] Position size too large!")
-                raise ValueError("Position exceeds 2x account balance")
-
-            dollar_risk = (
-                abs(self.entry_price - self.initial_stop_loss) * self.position_size
-            )
-            logger.info(
-                f"[VTM] $ Risk: ${dollar_risk:,.2f} ({dollar_risk/self.account_balance:.2%})"
-            )
+            # Final safety log instead of raising Exception
+            if self.position_size * self.entry_price > self.account_balance * 2.1:
+                logger.error(
+                    f"[VTM] ❌ CRITICAL: Position size still exceeds 2x buying power. "
+                    f"Value: ${self.position_size * self.entry_price:,.2f} | Balance: ${self.account_balance:,.2f}"
+                )
 
         except Exception as e:
-            logger.error(f"[VTM] Init error: {e}", exc_info=True)
+            logger.error(f"[VTM] Level calculation error: {e}", exc_info=True)
             raise
 
     def update_with_new_bar(
