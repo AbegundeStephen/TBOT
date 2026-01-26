@@ -449,11 +449,11 @@ class TradingTelegramBot:
 
                     logger.info("[TELEGRAM] ✅ Bot fully operational")
 
-                    await self.send_notification(
+                    """ await self.send_notification(
                         "🤖 *Trading Bot Started*\n\n"
                         f"Initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         "Commands available: /help"
-                    )
+                    ) """
 
                     await self._process_message_queue()
 
