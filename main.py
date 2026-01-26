@@ -179,6 +179,7 @@ class TradingBot:
         self._telegram_error_count = 0
         self._max_telegram_restarts = 3
         self._telegram_last_restart = None
+        self._telegram_is_healthy = True
 
         # Main bot state
         self._shutdown_requested = False
@@ -504,7 +505,7 @@ class TradingBot:
         logger.info("-" * 70)
 
     def _initialize_telegram(self):
-        """Initialize Telegram bot with error handling"""
+        """Initialize Telegram bot"""
         try:
             if not TELEGRAM_CONFIG.get("enabled", False):
                 logger.info("[TELEGRAM] Disabled in config")
@@ -514,14 +515,18 @@ class TradingBot:
             admin_ids = TELEGRAM_CONFIG.get("admin_ids", [])
 
             if not token or not admin_ids:
-                logger.warning(
-                    f"[TELEGRAM] Missing config: token={bool(token)}, admins={bool(admin_ids)}"
-                )
+                logger.warning("[TELEGRAM] Missing config")
                 return
 
             self.telegram_bot = TradingTelegramBot(
-                token=token, admin_ids=admin_ids, trading_bot=self
+                token=token, 
+                admin_ids=admin_ids, 
+                trading_bot=self
             )
+            
+            # ✅ NEW: Start dedicated loop immediately
+            self.telegram_bot._start_dedicated_loop()
+            
             logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s)")
 
         except Exception as e:
@@ -1939,100 +1944,91 @@ class TradingBot:
             raise
 
     def _run_telegram_loop(self):
-        """
-        ✨  Run Telegram with proper cleanup (NO RECURSION)
-        """
-        # Create fresh event loop for this thread
-        self.telegram_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.telegram_loop)
-        self._telegram_ready.clear()
-
+        """Run Telegram in its dedicated loop"""
         try:
-            logger.info("[TELEGRAM] Event loop starting...")
-
-            # Run the async bot
-            self.telegram_loop.run_until_complete(self._start_telegram_bot())
-
-        except KeyboardInterrupt:
-            logger.info("[TELEGRAM] Keyboard interrupt received")
-
-        except asyncio.CancelledError:
-            # ✨ FIX: This is NORMAL during shutdown
-            logger.info("[TELEGRAM] Tasks cancelled (shutdown)")
-
+            logger.info("[TELEGRAM] Starting bot...")
+            
+            # ✅ Use the bot's dedicated loop
+            loop = self.telegram_bot._loop
+            
+            if not loop or loop.is_closed():
+                logger.error("[TELEGRAM] Loop not available")
+                return
+            
+            # Run initialization in the dedicated loop
+            asyncio.run_coroutine_threadsafe(
+                self.telegram_bot.initialize(), 
+                loop
+            ).result(timeout=60)
+            
+            logger.info("[TELEGRAM] Bot initialized successfully")
+            
         except Exception as e:
             logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
-            self._telegram_is_healthy = False
-
-        finally:
-            logger.info("[TELEGRAM] Cleaning up event loop...")
-            self._telegram_ready.clear()
-
-            try:
-                # ✨  Gentle task cleanup
-                pending = [
-                    task
-                    for task in asyncio.all_tasks(self.telegram_loop)
-                    if not task.done()
-                ]
-
-                if pending:
-                    logger.info(f"[TELEGRAM] Cancelling {len(pending)} tasks...")
-
-                    # Cancel each task
-                    for task in pending:
-                        if not task.cancelled():
-                            task.cancel()
-
-                    # Give them a moment to cancel
-                    try:
-                        self.telegram_loop.run_until_complete(
-                            asyncio.wait(pending, timeout=2.0)
-                        )
-                    except Exception as e:
-                        logger.debug(f"[TELEGRAM] Task wait: {e}")
-
-                # Close the loop
-                if not self.telegram_loop.is_closed():
-                    self.telegram_loop.close()
-                    logger.info("[TELEGRAM] Event loop closed")
-
-            except Exception as e:
-                logger.debug(f"[TELEGRAM] Cleanup error: {e}")
 
     def _send_telegram_notification(self, coro):
         """
-        ✨  Send notification with proper error handling
+        ✅ FIXED: Send notification safely from main thread to Telegram's event loop
         """
-        if not self.telegram_bot or not self.telegram_loop:
-            logger.debug("[TELEGRAM] Bot/loop not available")
-            return
-
-        if not self._telegram_ready.is_set():
-            logger.debug("[TELEGRAM] Bot not ready, skipping notification")
-            return
-
-        # ✨ FIX: Check if loop is still running
-        if self.telegram_loop.is_closed():
-            logger.debug("[TELEGRAM] Loop closed, skipping notification")
+        if not self.telegram_bot or not self.telegram_bot._is_ready:
+            logger.debug("[TELEGRAM] Bot not ready, queueing notification")
+            if hasattr(self.telegram_bot, '_message_queue'):
+                self.telegram_bot._message_queue.append(str(coro))
             return
 
         try:
-            future = asyncio.run_coroutine_threadsafe(coro, self.telegram_loop)
-            future.result(timeout=10)
+            # ✅ FIX: Get the correct event loop from the Application
+            if not self.telegram_bot.application:
+                logger.warning("[TELEGRAM] Application not available")
+                return
 
-        except TimeoutError:
-            logger.debug("[TELEGRAM] Notification timeout")
+            # The Application runs in its own loop created by updater.start_polling()
+            # We need to get that loop's reference
+            
+            # Option 1: Use the updater's loop if available
+            loop = None
+            
+            if hasattr(self.telegram_bot.application, 'updater') and self.telegram_bot.application.updater:
+                # Try to get the loop from the updater
+                if hasattr(self.telegram_bot.application.updater, '_loop'):
+                    loop = self.telegram_bot.application.updater._loop
+            
+            # Option 2: Try to detect the running loop
+            if not loop:
+                try:
+                    # Get the loop that's currently running the bot
+                    import asyncio
+                    import threading
+                    
+                    # Store loop reference when bot starts
+                    if hasattr(self.telegram_bot, '_application_loop'):
+                        loop = self.telegram_bot._application_loop
+                    else:
+                        logger.warning("[TELEGRAM] Could not find application loop")
+                        return
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Loop detection error: {e}")
+                    return
 
-        except RuntimeError as e:
-            # ✨ FIX: Handle "Event loop is closed" gracefully
-            if "closed" in str(e).lower():
-                logger.debug("[TELEGRAM] Loop closed during notification")
-            else:
-                logger.debug(f"[TELEGRAM] Runtime error: {e}")
+            if not loop or loop.is_closed():
+                logger.warning("[TELEGRAM] Event loop is closed or unavailable")
+                return
+
+            # ✅ Submit coroutine to the bot's event loop
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            
+            # Wait for completion with timeout
+            try:
+                future.result(timeout=15.0)
+                logger.debug("[TELEGRAM] Notification sent successfully")
+            except TimeoutError:
+                logger.warning("[TELEGRAM] Notification timeout (15s)")
+                future.cancel()
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Notification error: {e}")
 
         except Exception as e:
-            logger.debug(f"[TELEGRAM] Notification error: {e}")
+            logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
 
     def _reinitialize_aggregator(self, asset_name: str, preset: str):
         """
@@ -3760,10 +3756,8 @@ class TradingBot:
                     if (now - last_health_check).total_seconds() >= 300:  # 5 min
                         if self.telegram_thread and not self.telegram_thread.is_alive():
                             logger.warning("[HEALTH] Telegram thread died!")
-                            if (
-                                self._telegram_is_healthy
-                                and not self._telegram_should_stop.is_set()
-                            ):
+
+                            if not self._telegram_should_stop.is_set():
                                 logger.info("[HEALTH] Attempting Telegram restart...")
                                 self._restart_telegram_thread()
 
