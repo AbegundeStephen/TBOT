@@ -8,6 +8,7 @@ Provides notifications and remote control capabilities
 import logging
 import asyncio
 import io
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from functools import wraps
@@ -403,6 +404,8 @@ class TradingTelegramBot:
             try:
                 logger.info("[TELEGRAM] Initializing bot...")
 
+                from telegram.request import HTTPXRequest
+
                 request = HTTPXRequest(
                     http_version="1.1",
                     connection_pool_size=50,
@@ -413,10 +416,7 @@ class TradingTelegramBot:
                 )
 
                 self.application = (
-                    Application.builder()
-                    .token(self.token)
-                    .request(request)
-                    .build()
+                    Application.builder().token(self.token).request(request).build()
                 )
 
                 logger.info("[TELEGRAM] Registering handlers...")
@@ -428,7 +428,9 @@ class TradingTelegramBot:
 
                 # ✅ NEW: Store the event loop reference for cross-thread access
                 self._application_loop = asyncio.get_running_loop()
-                logger.info(f"[TELEGRAM] Stored loop reference: {self._application_loop}")
+                logger.info(
+                    f"[TELEGRAM] Stored loop reference: {self._application_loop}"
+                )
 
                 logger.info("[TELEGRAM] Starting polling...")
                 await self.application.updater.start_polling(
@@ -748,8 +750,9 @@ class TradingTelegramBot:
 
     async def shutdown(self):
         """Graceful shutdown"""
-        logger.info("[TELEGRAM] ==================== SHUTDOWN ====================")
+        logger.info("[TELEGRAM] Shutdown initiated...")
 
+        # Stop flags
         self._shutdown_event.set()
         self.is_running = False
         self._is_ready = False
@@ -764,39 +767,36 @@ class TradingTelegramBot:
                 except:
                     pass
 
+            # ✅ CRITICAL: Stop polling FIRST
+            if self.application and self.application.updater:
+                try:
+                    if self.application.updater.running:
+                        logger.info("[TELEGRAM] Stopping updater...")
+                        await asyncio.wait_for(
+                            self.application.updater.stop(), timeout=10.0
+                        )
+                        logger.info("[TELEGRAM] Updater stopped")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Updater stop error: {e}")
+
             # Stop application
             if self.application:
                 try:
-                    if self.application.updater and self.application.updater.running:
-                        await asyncio.wait_for(
-                            self.application.updater.stop(), timeout=5.0
-                        )
-                except:
-                    pass
-
-                try:
                     if self.application.running:
+                        logger.info("[TELEGRAM] Stopping application...")
                         await asyncio.wait_for(self.application.stop(), timeout=5.0)
-                except:
-                    pass
+                        logger.info("[TELEGRAM] Application stopped")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Application stop error: {e}")
 
                 try:
+                    logger.info("[TELEGRAM] Shutting down application...")
                     await asyncio.wait_for(self.application.shutdown(), timeout=5.0)
-                except:
-                    pass
+                    logger.info("[TELEGRAM] Application shut down")
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Application shutdown error: {e}")
 
-                self.application = None
-
-            # Stop loop
-            if self._loop and not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(self._loop.stop)
-
-                if self._loop_thread and self._loop_thread.is_alive():
-                    self._loop_thread.join(timeout=5)
-
-            logger.info(
-                "[TELEGRAM] ==================== SHUTDOWN COMPLETE ===================="
-            )
+            logger.info("[TELEGRAM] ✅ Shutdown complete")
 
         except Exception as e:
             logger.error(f"[TELEGRAM] Shutdown error: {e}")

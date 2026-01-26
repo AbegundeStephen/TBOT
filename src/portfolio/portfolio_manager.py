@@ -875,12 +875,14 @@ class PortfolioManager:
         exchange = self.config["assets"][asset]["exchange"].lower()
         if exchange == "binance":
             # Force Binance to return actual cash, not leveraged buying power
-            asset_capital = self.get_binance_balance() 
+            asset_capital = self.get_binance_balance()
         else:
             asset_capital = self._fetch_mt5_balance()
 
         if asset_capital <= 0:
-            logger.error(f"Cannot calculate position size for {asset}: exchange capital is 0!")
+            logger.error(
+                f"Cannot calculate position size for {asset}: exchange capital is 0!"
+            )
             return 0.0
 
         # Base position size as percentage of the RAW CASH
