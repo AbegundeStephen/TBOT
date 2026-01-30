@@ -307,7 +307,6 @@ def test_short_position(handler, current_price, config):
                 logger.info(f"  Side:        {pos.side.upper()}")
                 logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
                 logger.info(f"  Quantity:    {pos.quantity:.6f} BTC")
-                logger.info(f"  Size:        ${pos.position_size_usd:,.2f}")
                 logger.info(f"  Futures:     {getattr(pos, 'is_futures', False)}")
                 logger.info(f"  Leverage:    {getattr(pos, 'leverage', 1)}x")
                 

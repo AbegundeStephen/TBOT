@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from src.execution.binance_futures import BinanceFuturesHandler
 from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.position_rebalancer import PositionRebalancer
+from src.execution.veteran_trade_manager import VeteranTradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -251,9 +252,14 @@ class HybridPositionSizer:
         manual_size_usd: float = None,
         override_reason: str = None,
         is_futures: bool = False,
+        risk_pct: float = None,  # ✨ NEW: Accept external risk budget
     ) -> Tuple[float, Dict]:
-        """Calculate position size with dynamic margin awareness"""
+        """
+        ✨ REFACTORED: Accept risk budget from Portfolio Manager
+        No longer calculates its own risk percentages
+        """
         try:
+            # Get balance
             asset_balance, margin_info = self._get_available_balance(
                 asset=asset,
                 is_futures=is_futures,
@@ -265,35 +271,23 @@ class HybridPositionSizer:
                 logger.error(f"[RISK] No available balance for {asset}")
                 return 0.0, {"error": "insufficient_balance"}
 
-            # Get target risk
-            if sizing_mode == SizingMode.ELEVATED_RISK:
-                total_risk_pct = self.max_risk_pct
-            elif sizing_mode == SizingMode.REDUCED_RISK:
-                total_risk_pct = self.target_risk_pct * 0.75
-            elif confidence_score and confidence_score >= self.aggressive_threshold:
-                total_risk_pct = self.max_risk_pct
-            else:
-                total_risk_pct = self.target_risk_pct
-
-            # Split risk across ALL positions
-            side = "long" if signal == 1 else "short"
-            existing_positions = self.portfolio_manager.get_asset_positions(asset)
-            same_side_positions = [p for p in existing_positions if p.side == side]
-            total_positions = len(same_side_positions) + 1
-
-            risk_pct_per_position = total_risk_pct / total_positions
-            risk_amount_per_position = asset_balance * risk_pct_per_position
-
-            # Stop distance
+            # ✨ CRITICAL: Use externally provided risk
+            if risk_pct is None:
+                logger.error("[RISK] No risk percentage provided!")
+                return 0.0, {"error": "missing_risk_budget"}
+            
+            # Calculate position size from risk budget
+            risk_amount = asset_balance * risk_pct
+            
             stop_distance = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
 
-            if stop_distance_pct < 0.005:  # 0.5% min stop
+            if stop_distance_pct < 0.005:
                 stop_distance_pct = 0.005
             
-            target_position_size = risk_amount_per_position / stop_distance_pct
+            target_position_size = risk_amount / stop_distance_pct
 
-            # Apply Futures margin limits
+            # Apply Futures margin limits if applicable
             final_position_size = target_position_size
             was_margin_limited = False
 
@@ -303,8 +297,9 @@ class HybridPositionSizer:
                 if target_position_size > max_safe:
                     final_position_size = max_safe
                     was_margin_limited = True
-                    logger.warning(f"[MARGIN] Position reduced to fit margin: ${final_position_size:,.2f}")
+                    logger.warning(f"[MARGIN] Position reduced: ${final_position_size:,.2f}")
 
+            # Apply asset max
             asset_cfg = self.config["assets"][asset]
             max_size = asset_cfg.get("max_position_usd", 100000)
             final_position_size = min(final_position_size, max_size)
@@ -318,6 +313,7 @@ class HybridPositionSizer:
                 "signal": signal,
                 "entry_price": entry_price,
                 "stop_loss_price": stop_loss_price,
+                "provided_risk_pct": risk_pct * 100,
                 "target_position_size": target_position_size,
                 "final_position_size": final_position_size,
                 "actual_risk_usd": actual_risk,
@@ -329,7 +325,7 @@ class HybridPositionSizer:
             return final_position_size, metadata
 
         except Exception as e:
-            logger.error(f"[RISK] Error calculating position size: {e}", exc_info=True)
+            logger.error(f"[RISK] Error: {e}", exc_info=True)
             return 0.0, {"error": str(e)}
 
 
@@ -733,12 +729,12 @@ class BinanceExecutionHandler:
             return round(quantity, 5)
 
     @handle_errors(
-        component="binance_handler",
-        severity=ErrorSeverity.CRITICAL,
-        notify=True,
-        reraise=False,
-        default_return=False,
-    )
+    component="binance_handler",
+    severity=ErrorSeverity.CRITICAL,
+    notify=True,
+    reraise=False,
+    default_return=False,
+)
     def _open_position(
         self,
         signal: int,
@@ -751,13 +747,19 @@ class BinanceExecutionHandler:
         override_reason: str = None,
         signal_details: Dict = None,
     ) -> bool:
-        """Open LONG or SHORT with dynamic margin + VTM"""
+        """
+        ✅ STRATEGIC/TACTICAL INTEGRATION
+        Portfolio Manager controls HOW MUCH to risk (strategy)
+        VTM validates HOW to execute (tactics)
+        """
         try:
             side = "long" if signal == 1 else "short"
-            trade_type = signal_details.get('trade_type', 'TREND') if signal_details else 'TREND'
-            base_risk = self.config["portfolio"]["target_risk_per_trade"]
-            adjusted_risk, risk_profile = self._calculate_asymmetric_risk(trade_type, base_risk)
-
+            
+            # Extract trade type from signal details
+            trade_type = "TREND"  # Default
+            if signal_details:
+                trade_type = signal_details.get('trade_type', 'TREND')
+            
             is_futures = (
                 hasattr(self, "futures_handler")
                 and self.futures_handler is not None
@@ -766,39 +768,111 @@ class BinanceExecutionHandler:
                 .get("enable_futures", False)
             )
 
-            # Calculate safety stop
+            # ================================================================
+            # STEP 1: STRATEGIC - Get risk budget from Portfolio Manager
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[STRATEGIC] Requesting risk budget from Portfolio Manager")
+            logger.info(f"{'='*80}")
+            
+            risk_pct = self.portfolio_manager.get_risk_budget(
+                asset=asset_name,
+                strategy_type=trade_type
+            )
+            
+            if risk_pct <= 0:
+                logger.error(
+                    f"[STRATEGIC] ❌ Risk budget denied (0%)\n"
+                    f"  → Trade rejected by Portfolio Manager"
+                )
+                return False
+            
+            logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
+            
+            # ================================================================
+            # STEP 2: Calculate initial stop loss for validation
+            # ================================================================
             risk_config = self.asset_config.get("risk", {})
             sl_pct = risk_config.get("stop_loss_pct", 0.02)
 
             if side == "long":
-                safety_sl_price = current_price * (1 - sl_pct)
+                initial_stop = current_price * (1 - sl_pct)
             else:
-                safety_sl_price = current_price * (1 + sl_pct)
+                initial_stop = current_price * (1 + sl_pct)
 
             if is_futures:
-                safety_sl_price = round(safety_sl_price, 2)
+                initial_stop = round(initial_stop, 2)
 
-            position_size_usd, sizing_metadata = self.sizer.calculate_size_risk_based(
-                asset=asset_name,
+            # ================================================================
+            # STEP 3: TACTICAL - VTM Pre-Flight Validation
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[TACTICAL] VTM Pre-Flight Validation")
+            logger.info(f"{'='*80}")
+            
+            is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
                 entry_price=current_price,
-                stop_loss_price=safety_sl_price,
-                signal=signal,
-                confidence_score=confidence_score,
-                market_condition=market_condition or "neutral",
-                sizing_mode=sizing_mode,
-                manual_size_usd=manual_size_usd,
-                override_reason=override_reason,
-                is_futures=is_futures,
+                stop_loss=initial_stop,
+                trade_type=trade_type,
+                asset=asset_name
             )
+            
+            if not is_valid:
+                logger.error(
+                    f"[TACTICAL] ❌ Trade rejected by VTM\n"
+                    f"  Reason: {rejection_reason}\n"
+                    f"  → Aborting before paying fees"
+                )
+                return False
+            
+            logger.info(f"[TACTICAL] ✓ Trade validated by VTM")
 
+            # ================================================================
+            # STEP 4: Calculate position size using strategic risk budget
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[SIZING] Calculating position size")
+            logger.info(f"{'='*80}")
+            
+            # Get account balance
+            account_balance = self.portfolio_manager.get_asset_balance(asset_name)
+            
+            # Calculate risk amount
+            risk_amount_usd = account_balance * risk_pct
+            
+            # Calculate stop distance
+            stop_distance = abs(current_price - initial_stop)
+            stop_distance_pct = stop_distance / current_price
+            
+            # Position size = Risk Amount / Stop Distance %
+            position_size_usd = risk_amount_usd / stop_distance_pct
+            
+            logger.info(
+                f"[SIZING] Calculation:\n"
+                f"  Account Balance: ${account_balance:,.2f}\n"
+                f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
+                f"  Stop Distance:   {stop_distance_pct:.3%}\n"
+                f"  Position Size:   ${position_size_usd:,.2f}"
+            )
+            
             if position_size_usd <= 0:
-                logger.error(f"[OPEN] Invalid size: ${position_size_usd:.2f}")
+                logger.error(f"[SIZING] ❌ Invalid position size: ${position_size_usd:.2f}")
                 return False
 
-            if signal_details is None:
-                signal_details = {}
-            signal_details["sizing"] = sizing_metadata
+            # Apply margin limits if futures
+            if is_futures and hasattr(self.sizer, 'margin_calculator'):
+                margin_info = self.sizer.margin_calculator.get_available_margin_info(asset_name)
+                max_safe = margin_info.get('max_safe_position_usd', position_size_usd)
+                
+                if position_size_usd > max_safe:
+                    logger.warning(
+                        f"[MARGIN] Position reduced to fit margin:\n"
+                        f"  Calculated: ${position_size_usd:,.2f}\n"
+                        f"  Max Safe:   ${max_safe:,.2f}"
+                    )
+                    position_size_usd = max_safe
 
+            # Calculate quantity
             quantity = position_size_usd / current_price
             leverage = 1
             margin_type = "SPOT"
@@ -813,9 +887,12 @@ class BinanceExecutionHandler:
 
             MIN_BTC = 0.00001
             if quantity < MIN_BTC:
-                logger.warning(f"[OPEN] Quantity {quantity:.8f} below minimum")
+                logger.warning(f"[SIZING] ❌ Quantity {quantity:.8f} below minimum {MIN_BTC}")
                 return False
 
+            # ================================================================
+            # STEP 5: Execute order on exchange
+            # ================================================================
             order_id = None
 
             if is_futures:
@@ -823,13 +900,13 @@ class BinanceExecutionHandler:
                     if side == "long":
                         order = self.futures_handler.open_long_position(
                             quantity=quantity,
-                            stop_loss=safety_sl_price,
+                            stop_loss=initial_stop,
                             take_profit=None,
                         )
                     else:
                         order = self.futures_handler.open_short_position(
                             quantity=quantity,
-                            stop_loss=safety_sl_price,
+                            stop_loss=initial_stop,
                             take_profit=None,
                         )
 
@@ -837,11 +914,11 @@ class BinanceExecutionHandler:
                         order_id = order.get("orderId")
                         logger.info(f"[FUTURES] ✓ {side.upper()} opened (Order: {order_id})")
                     else:
-                        logger.error(f"[FUTURES] Failed to open {side.upper()}")
+                        logger.error(f"[FUTURES] ❌ Failed to open {side.upper()}")
                         return False
 
                 except Exception as e:
-                    logger.error(f"[FUTURES] Error: {e}")
+                    logger.error(f"[FUTURES] ❌ Error: {e}")
                     return False
             else:
                 if not self.is_paper_mode:
@@ -852,15 +929,17 @@ class BinanceExecutionHandler:
                             )
                             order_id = order.get("orderId")
                         else:
-                            logger.error("[SPOT] SHORT requires Futures API")
+                            logger.error("[SPOT] ❌ SHORT requires Futures API")
                             return False
                     except Exception as e:
-                        logger.error(f"[SPOT] Error: {e}")
+                        logger.error(f"[SPOT] ❌ Error: {e}")
                         return False
                 else:
                     order_id = f"PAPER_{side.upper()}_{int(time.time())}"
 
-            # Fetch OHLC for VTM
+            # ================================================================
+            # STEP 6: Fetch OHLC for VTM
+            # ================================================================
             ohlc_data = None
             if self.data_manager:
                 try:
@@ -881,7 +960,20 @@ class BinanceExecutionHandler:
                             "close": df["close"].values,
                         }
                 except Exception as e:
-                    logger.warning(f"[VTM] OHLC fetch failed: {e}")
+                    logger.warning(f"[VTM] ⚠️ OHLC fetch failed: {e}")
+
+            # ================================================================
+            # STEP 7: Add to Portfolio with VTM (TACTICAL)
+            # ================================================================
+            # Build complete signal details for VTM
+            if signal_details is None:
+                signal_details = {}
+            
+            signal_details.update({
+                "trade_type": trade_type,
+                "strategic_risk_pct": risk_pct,
+                "tactical_validation": "passed"
+            })
 
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
@@ -889,7 +981,7 @@ class BinanceExecutionHandler:
                 side=side,
                 entry_price=current_price,
                 position_size_usd=position_size_usd,
-                stop_loss=None,
+                stop_loss=None,  # VTM will calculate precise levels
                 take_profit=None,
                 trailing_stop_pct=None,
                 binance_order_id=order_id,
@@ -902,14 +994,23 @@ class BinanceExecutionHandler:
             )
 
             if success:
-                logger.info(f"✅ {asset_name} {side.upper()} POSITION OPENED")
+                logger.info(
+                    f"\n{'='*80}\n"
+                    f"✅ {asset_name} {side.upper()} POSITION OPENED\n"
+                    f"{'='*80}\n"
+                    f"Strategic Risk: {risk_pct:.3%}\n"
+                    f"Trade Type:     {trade_type}\n"
+                    f"Position Size:  ${position_size_usd:,.2f}\n"
+                    f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
+                    f"{'='*80}"
+                )
                 return True
             else:
-                logger.error(f"[FAIL] Portfolio rejected {side.upper()} position")
+                logger.error(f"[PORTFOLIO] ❌ Position rejected")
                 return False
 
         except Exception as e:
-            logger.error(f"[OPEN] Error: {e}", exc_info=True)
+            logger.error(f"[OPEN] ❌ Error: {e}", exc_info=True)
             return False
 
     @handle_errors(

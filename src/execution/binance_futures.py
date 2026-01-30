@@ -1,7 +1,8 @@
 """
-Binance Futures API Integration - COMPLETE VERSION
-✅ FIXED: Take Profit Precision + All Integration Functions
-✨ ENHANCED: Hedge Mode Integration for Asymmetric System (Simultaneous Long/Short)
+Binance Futures API Integration - FIXED VERSION
+✅ FIXED: Stop Loss using Algo Order API (fixes -4120 error)
+✅ FIXED: Emergency close without reduceOnly parameter (fixes -1106 error)
+✨ ENHANCED: Hedge Mode Integration for Asymmetric System
 """
 
 import logging
@@ -13,7 +14,6 @@ from binance.enums import (
     ORDER_TYPE_MARKET,
     FUTURE_ORDER_TYPE_MARKET,
     FUTURE_ORDER_TYPE_LIMIT,
-    FUTURE_ORDER_TYPE_STOP_MARKET,
 )
 from typing import Dict, Optional, Tuple
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class BinanceFuturesHandler:
     """
     Unified Binance Futures API Handler for BOTH Long & Short positions
-    ✅ FIXED: Take Profit precision handling
+    ✅ FIXED: Using Algo Order API for stop loss orders
     ✨ ENHANCED: Forced Hedge Mode for Asymmetric Trading
     """
 
@@ -40,20 +40,21 @@ class BinanceFuturesHandler:
         self.min_qty = 0.001  # Default min quantity
         self.min_notional = 5.0  # Default min notional
 
-        # ✨ NEW: Hedging Configuration
-        self.allow_hedging = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
+        # Hedging Configuration
+        self.allow_hedging = self.config.get("trading", {}).get(
+            "allow_simultaneous_long_short", True
+        )
 
         # Verify Futures API access and load filters
         try:
             self.client.futures_account()
             self._load_symbol_filters()
-            
-            # ====================================================================
-            # ✨ NEW: FORCE BINANCE INTO HEDGE MODE
-            # Required for the bot to hold a Trend Long and a Scalp Short simultaneously.
-            # ====================================================================
+
+            # Force Binance into Hedge Mode
             try:
-                self.client.futures_change_position_mode(dualSidePosition=self.allow_hedging)
+                self.client.futures_change_position_mode(
+                    dualSidePosition=self.allow_hedging
+                )
                 mode_str = "HEDGE" if self.allow_hedging else "ONE-WAY"
                 logger.info(f"[FUTURES] ✓ Account Position Mode set to: {mode_str}")
             except Exception as e:
@@ -73,11 +74,9 @@ class BinanceFuturesHandler:
             info = self.client.futures_exchange_info()
             for s in info["symbols"]:
                 if s["symbol"] == self.symbol:
-                    # ✅ Get base precision from symbol info
                     self.quantity_precision = int(s.get("quantityPrecision", 3))
                     self.price_precision = int(s.get("pricePrecision", 2))
 
-                    # ✅ Parse filters
                     for f in s["filters"]:
                         if f["filterType"] == "LOT_SIZE":
                             self.step_size = float(f["stepSize"])
@@ -93,7 +92,6 @@ class BinanceFuturesHandler:
                             self.min_notional = float(f.get("notional", 5.0))
                             self.filters["min_notional"] = self.min_notional
 
-                    # ✅ Store precision in filters for backward compatibility
                     self.filters["precision"] = self.quantity_precision
 
                     logger.info(
@@ -108,7 +106,6 @@ class BinanceFuturesHandler:
 
         except Exception as e:
             logger.error(f"[FUTURES] Failed to load filters: {e}")
-            # Fallback defaults already set in __init__
             logger.info(f"[FUTURES] Using default precision values for {self.symbol}")
 
     def _adjust_quantity(self, quantity: float) -> float:
@@ -143,7 +140,6 @@ class BinanceFuturesHandler:
             logger.info(f"[FUTURES] Margin type set to {margin_type} for {self.symbol}")
             return True
         except Exception as e:
-            # Error code -4046 means margin type is already set
             if "-4046" in str(e):
                 logger.debug(f"[FUTURES] Margin type already {margin_type}")
                 return True
@@ -151,61 +147,161 @@ class BinanceFuturesHandler:
             return False
 
     def _round_price(self, price: float) -> float:
-        """
-        ✅ FIXED: Round price to exchange tick size
-        """
+        """Round price to exchange tick size"""
         if not hasattr(self, "tick_size"):
             return round(price, self.price_precision)
 
-        # Round to nearest tick
         rounded = round(price / self.tick_size) * self.tick_size
-        # Then round to correct decimal places
         rounded = round(rounded, self.price_precision)
 
         logger.debug(f"[PRICE] {price:.8f} → {rounded:.{self.price_precision}f}")
         return rounded
 
     def _round_quantity(self, quantity: float) -> float:
-        """
-        ✅ FIXED: Round quantity to exchange step size
-        """
+        """Round quantity to exchange step size"""
         if not hasattr(self, "step_size"):
             return round(quantity, self.quantity_precision)
 
-        # Round to nearest step
         rounded = round(quantity / self.step_size) * self.step_size
-        # Then round to correct decimal places
         rounded = round(rounded, self.quantity_precision)
 
         logger.debug(f"[QTY] {quantity:.8f} → {rounded:.{self.quantity_precision}f}")
         return rounded
 
     def _validate_order(self, price: float, quantity: float) -> Tuple[bool, str]:
-        """
-        ✅ NEW: Validate order against Binance filters
-        """
-        # Check minimum quantity
+        """Validate order against Binance filters"""
         if quantity < self.min_qty:
             return False, f"Quantity {quantity} < minimum {self.min_qty}"
 
-        # Check minimum notional (price * quantity)
         notional = price * quantity
         if notional < self.min_notional:
             return False, f"Notional ${notional:.2f} < minimum ${self.min_notional}"
 
-        # Check price precision
         price_str = f"{price:.{self.price_precision}f}"
         if float(price_str) != price:
             return False, f"Price precision error: {price} vs {price_str}"
 
         return True, "OK"
 
+    def _place_stop_loss_algo(
+        self,
+        side: str,
+        position_side: str,
+        stop_price: float,
+        quantity: float,
+    ) -> bool:
+        """
+        Places a STOP LOSS for a futures position.
+
+        LIVE:
+            - Uses Binance Futures Algo Order REST endpoint
+        PAPER / TEST:
+            - Skips Binance call
+            - Returns True (virtual SL handled internally)
+
+        Any failure in LIVE mode returns False
+        and MUST trigger emergency close upstream.
+        """
+
+        # ------------------------------------------------------------------
+        # MODE GUARD — Algo orders are NOT supported outside LIVE
+        # ------------------------------------------------------------------
+        mode = self.config["trading"]["mode"]
+        if mode != "live":
+            logger.warning(
+                "[STOP LOSS] Algo SL skipped — not supported in PAPER/TEST mode "
+                "(virtual SL assumed)"
+            )
+            return True
+
+        import time
+        import hmac
+        import hashlib
+        import requests
+        from urllib.parse import urlencode
+
+        try:
+            # ------------------------------------------------------------------
+            # SIDE RESOLUTION
+            # ------------------------------------------------------------------
+            order_side = "SELL" if side.upper() == "LONG" else "BUY"
+
+            timestamp = int(time.time() * 1000)
+
+            params = {
+                "symbol": self.symbol,
+                "side": order_side,
+                "positionSide": position_side,  # LONG / SHORT (hedge-safe)
+                "algoType": "STOP_LOSS",
+                "stopPrice": f"{stop_price:.2f}",
+                "quantity": f"{quantity:.3f}",
+                "workingType": "MARK_PRICE",
+                "timestamp": timestamp,
+            }
+
+            query_string = urlencode(params)
+            signature = hmac.new(
+                self.client.API_SECRET.encode("utf-8"),
+                query_string.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+
+            headers = {
+                "X-MBX-APIKEY": self.client.API_KEY,
+            }
+
+            url = "https://fapi.binance.com/fapi/v1/algo/order"
+
+            response = requests.post(
+                url,
+                headers=headers,
+                params={**params, "signature": signature},
+                timeout=10,
+            )
+
+            # ------------------------------------------------------------------
+            # HARD RESPONSE VALIDATION (NO BLIND JSON PARSING)
+            # ------------------------------------------------------------------
+            if not response.text:
+                raise RuntimeError(
+                    f"Empty response from Binance " f"(status={response.status_code})"
+                )
+
+            try:
+                data = response.json()
+            except Exception:
+                raise RuntimeError(
+                    f"Non-JSON response from Binance "
+                    f"(status={response.status_code}): "
+                    f"{response.text[:200]}"
+                )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"Binance error {response.status_code}: {data}")
+
+            algo_id = data.get("algoId")
+            if not algo_id:
+                raise RuntimeError(f"Algo SL placed but algoId missing: {data}")
+
+            logger.info(
+                "[STOP LOSS] ✓ Algo SL ACTIVE\n"
+                f"  Side:       {side}\n"
+                f"  Position:   {position_side}\n"
+                f"  Stop:       {stop_price}\n"
+                f"  Quantity:   {quantity}\n"
+                f"  Algo ID:    {algo_id}"
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error("[STOP LOSS] ❌ Algo SL FAILED\n" f"  Reason: {str(e)}")
+            return False
+
     def open_short_position(
         self, quantity: float, stop_loss: float = None, take_profit: float = None
     ) -> Optional[Dict]:
-        """
-        Open a SHORT position on Binance Futures
-        """
+        """Open a SHORT position on Binance Futures"""
         return self._open_position(
             side="short",
             quantity=quantity,
@@ -216,9 +312,7 @@ class BinanceFuturesHandler:
     def open_long_position(
         self, quantity: float, stop_loss: float = None, take_profit: float = None
     ) -> Optional[Dict]:
-        """
-        Open a LONG position on Binance Futures
-        """
+        """Open a LONG position on Binance Futures"""
         return self._open_position(
             side="long", quantity=quantity, stop_loss=stop_loss, take_profit=take_profit
         )
@@ -231,18 +325,13 @@ class BinanceFuturesHandler:
         take_profit: float = None,
     ) -> Optional[Dict]:
         """
-        ✅ FIXED: Cancel existing stops before placing new ones
-        ✨ ENHANCED: Injects `positionSide` for Hedge Mode compatibility
+        ✅ FIXED: Using proper Algo API for stop loss placement
         """
         try:
-            # Determine Binance side
             binance_side = SIDE_BUY if side == "long" else SIDE_SELL
             side_label = side.upper()
-            
-            # ✨ NEW: Define strictly required Position Side for Hedge Mode
             position_side = "LONG" if side == "long" else "SHORT"
 
-            # ✅ Round values BEFORE validation
             quantity = self._round_quantity(quantity)
             if stop_loss:
                 stop_loss = self._round_price(stop_loss)
@@ -250,25 +339,24 @@ class BinanceFuturesHandler:
                 take_profit = self._round_price(take_profit)
 
             logger.info(
-                f"[FUTURES] Opening {side_label} (Hedge Mode): {quantity:.{self.quantity_precision}f} {self.symbol}"
+                f"[FUTURES] Opening {side_label} (Hedge Mode): "
+                f"{quantity:.{self.quantity_precision}f} {self.symbol}"
             )
 
-            # Get current price for validation
             ticker = self.client.futures_symbol_ticker(symbol=self.symbol)
             current_price = float(ticker["price"])
 
-            # Validate entry order
             is_valid, error_msg = self._validate_order(current_price, quantity)
             if not is_valid:
-                logger.error(f"[FUTURES] Entry validation failed: {error_msg}")
+                logger.error(f"[FUTURES] Validation failed: {error_msg}")
                 return None
 
-            # 1. Place MARKET ENTRY Order (✨ ENHANCED WITH positionSide)
+            # 1. Open position
             try:
                 order = self.client.futures_create_order(
                     symbol=self.symbol,
                     side=binance_side,
-                    positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
+                    positionSide=position_side,
                     type=FUTURE_ORDER_TYPE_MARKET,
                     quantity=quantity,
                 )
@@ -286,159 +374,48 @@ class BinanceFuturesHandler:
                 f"  Entry:    ${avg_price:,.2f}"
             )
 
-            # ============================================================
-            # 2. ✅ FIX: Cancel existing stop orders BEFORE placing new one
-            # ============================================================
+            # 2. Cancel existing stop orders
             if stop_loss:
-                logger.info(f"[SL] Preparing to place stop loss for {side_label}...")
+                logger.info(f"[SL] Preparing stop loss for {side_label}...")
 
-                # Step 1: Cancel ALL existing stop orders (not just same side)
                 try:
-                    logger.info(f"[SL] Cancelling ALL existing stop orders...")
-                    cancelled_orders = self.client.futures_cancel_all_open_orders(
+                    cancelled = self.client.futures_cancel_all_open_orders(
                         symbol=self.symbol
                     )
-
-                    if cancelled_orders:
+                    if cancelled:
                         logger.info(
-                            f"[SL] ✓ Cancelled {len(cancelled_orders)} existing order(s)"
+                            f"[SL] ✓ Cancelled {len(cancelled)} existing order(s)"
                         )
-                    else:
-                        logger.debug(f"[SL] No existing orders to cancel")
-
                 except Exception as e:
-                    # Error -2011 means "Unknown order sent" - no orders to cancel, which is fine
-                    if "-2011" in str(e) or "Unknown order" in str(e):
-                        logger.debug(f"[SL] No existing orders (expected)")
-                    else:
-                        logger.warning(f"[SL] Cancel error (continuing anyway): {e}")
+                    if "-2011" not in str(e):
+                        logger.warning(f"[SL] Cancel warning: {e}")
 
-                # Step 2: Wait for cancellation to process on exchange
-                time.sleep(0.5)  # Increased from 0.2 to 0.5 seconds
+                time.sleep(0.5)
 
-                # Step 3: Verify no stop orders exist before placing new one
-                max_verification_attempts = 3
-                for verify_attempt in range(1, max_verification_attempts + 1):
-                    try:
-                        open_orders = self.client.futures_get_open_orders(
-                            symbol=self.symbol
-                        )
-                        stop_orders = [
-                            o for o in open_orders if o.get("type") == "STOP_MARKET"
-                        ]
-
-                        if not stop_orders:
-                            logger.info(
-                                f"[SL] ✓ Verified: No stop orders exist (attempt {verify_attempt})"
-                            )
-                            break
-                        else:
-                            logger.warning(
-                                f"[SL] ⚠️ Found {len(stop_orders)} existing stop order(s) "
-                                f"(attempt {verify_attempt}/{max_verification_attempts})"
-                            )
-
-                            # Try cancelling again
-                            for order_to_cancel in stop_orders:
-                                try:
-                                    self.client.futures_cancel_order(
-                                        symbol=self.symbol, orderId=order_to_cancel["orderId"]
-                                    )
-                                    logger.info(
-                                        f"[SL] Cancelled lingering order {order_to_cancel['orderId']}"
-                                    )
-                                except Exception as cancel_err:
-                                    logger.error(
-                                        f"[SL] Failed to cancel {order_to_cancel['orderId']}: {cancel_err}"
-                                    )
-
-                            time.sleep(0.5)
-
-                    except Exception as verify_err:
-                        logger.warning(f"[SL] Verification error: {verify_err}")
-                        break
-
-                # Step 4: Validate and place stop loss
-                sl_side = SIDE_SELL if side == "long" else SIDE_BUY
-
-                # Validate SL price
+                # Validate SL
                 if side == "long" and stop_loss >= current_price:
-                    logger.error(
-                        f"[FUTURES] Invalid SL: ${stop_loss} >= entry ${current_price}"
-                    )
                     stop_loss = current_price * 0.97
                     stop_loss = self._round_price(stop_loss)
                 elif side == "short" and stop_loss <= current_price:
-                    logger.error(
-                        f"[FUTURES] Invalid SL: ${stop_loss} <= entry ${current_price}"
-                    )
                     stop_loss = current_price * 1.03
                     stop_loss = self._round_price(stop_loss)
 
-                # Step 5: Place stop loss with enhanced retry logic (✨ ENHANCED WITH positionSide)
-                sl_success = False
-                sl_last_error = None
+                # Place stop loss using Algo API
+                sl_success = self._place_stop_loss_algo(
+                    side=side,
+                    position_side=position_side,
+                    stop_price=stop_loss,
+                    quantity=quantity,
+                )
 
-                for attempt in range(1, 4):
-                    try:
-                        logger.info(
-                            f"[SL] Attempt {attempt}/3: Placing stop @ ${stop_loss:,.{self.price_precision}f}"
-                        )
-
-                        self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=sl_side,
-                            positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
-                            type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                            stopPrice=stop_loss,
-                            closePosition=True,  # This closes the entire position when hit
-                        )
-
-                        logger.info(
-                            f"  ✓ SL Placed: ${stop_loss:,.{self.price_precision}f}"
-                        )
-                        sl_success = True
-                        break
-
-                    except Exception as e:
-                        sl_last_error = str(e)
-
-                        # Check if it's the -4130 error (stop already exists)
-                        if "-4130" in sl_last_error:
-                            logger.error(
-                                f"  ❌ SL Attempt {attempt}/3 FAILED with -4130\n"
-                                f"  This means a stop order STILL exists on the exchange!\n"
-                                f"  Trying more aggressive cancellation..."
-                            )
-
-                            # Emergency: try to cancel ALL orders again
-                            try:
-                                self.client.futures_cancel_all_open_orders(
-                                    symbol=self.symbol
-                                )
-                                time.sleep(1.0)  # Longer wait
-                            except:
-                                pass
-
-                        else:
-                            logger.warning(f"  ⚠️ SL Attempt {attempt}/3 failed: {e}")
-
-                        if attempt < 3:
-                            time.sleep(0.5 * attempt)  # Exponential backoff
-
-                # Step 6: Emergency failsafe (✨ ENHANCED WITH positionSide)
+                # Emergency close if SL fails
                 if not sl_success:
                     logger.critical(
                         f"\n{'='*80}\n"
-                        f"🛑 CRITICAL: STOP LOSS PLACEMENT FAILED!\n"
+                        f"🛑 CRITICAL: STOP LOSS FAILED!\n"
                         f"{'='*80}\n"
-                        f"Last Error: {sl_last_error}\n"
                         f"Side: {side_label}\n"
-                        f"Quantity: {quantity:.{self.quantity_precision}f}\n"
-                        f"Entry: ${avg_price:,.2f}\n"
-                        f"\n"
-                        f"⚠️  POSITION IS NOW UNPROTECTED!\n"
-                        f"Executing EMERGENCY CLOSE to prevent unlimited loss...\n"
+                        f"Executing EMERGENCY CLOSE...\n"
                         f"{'='*80}\n"
                     )
 
@@ -447,83 +424,48 @@ class BinanceFuturesHandler:
                         emergency_order = self.client.futures_create_order(
                             symbol=self.symbol,
                             side=close_side,
-                            positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
+                            positionSide=position_side,
                             type=FUTURE_ORDER_TYPE_MARKET,
                             quantity=quantity,
-                            reduceOnly=True,
                         )
                         logger.critical(
-                            f"[FUTURES] ✓ EMERGENCY CLOSE SUCCESSFUL\n"
-                            f"  Order ID: {emergency_order.get('orderId')}\n"
-                            f"  Reason: Stop loss placement failed after 3 attempts"
+                            f"[FUTURES] ✓ EMERGENCY CLOSE: {emergency_order.get('orderId')}"
                         )
                     except Exception as close_error:
                         logger.critical(
-                            f"[FUTURES] ☠️ EMERGENCY CLOSE ALSO FAILED!\n"
-                            f"  Error: {close_error}\n"
-                            f"  ⚠️  MANUAL INTERVENTION REQUIRED!\n"
-                            f"  Check Binance Futures UI immediately!"
+                            f"[FUTURES] ☠️ EMERGENCY CLOSE FAILED: {close_error}"
                         )
                     return None
 
-            # 4. Place Take Profit (✨ ENHANCED WITH positionSide)
+            # 3. Take profit (optional)
             if take_profit:
                 tp_side = SIDE_SELL if side == "long" else SIDE_BUY
 
                 if side == "long" and take_profit <= current_price:
-                    logger.warning(
-                        f"[FUTURES] Invalid TP: ${take_profit} <= entry ${current_price}, skipping"
-                    )
                     take_profit = None
                 elif side == "short" and take_profit >= current_price:
-                    logger.warning(
-                        f"[FUTURES] Invalid TP: ${take_profit} >= entry ${current_price}, skipping"
-                    )
                     take_profit = None
 
                 if take_profit:
-                    tp_notional = take_profit * quantity
-                    if tp_notional < self.min_notional:
-                        logger.warning(
-                            f"[FUTURES] TP notional ${tp_notional:.2f} < ${self.min_notional}, "
-                            f"adjusting quantity"
+                    try:
+                        tp_order = self.client.futures_create_order(
+                            symbol=self.symbol,
+                            side=tp_side,
+                            positionSide=position_side,
+                            type=FUTURE_ORDER_TYPE_LIMIT,
+                            price=take_profit,
+                            quantity=quantity,
+                            timeInForce="GTC",
+                            reduceOnly=True,
                         )
-                        adjusted_qty = (self.min_notional / take_profit) * 1.01
-                        adjusted_qty = self._round_quantity(adjusted_qty)
-
-                        if adjusted_qty <= quantity:
-                            quantity = adjusted_qty
-                            logger.info(
-                                f"[FUTURES] Adjusted TP quantity to {quantity:.{self.quantity_precision}f}"
-                            )
-                        else:
-                            logger.warning(
-                                f"[FUTURES] Cannot adjust TP quantity, skipping TP"
-                            )
-                            take_profit = None
-
-                    if take_profit:
-                        try:
-                            tp_order = self.client.futures_create_order(
-                                symbol=self.symbol,
-                                side=tp_side,
-                                positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
-                                type=FUTURE_ORDER_TYPE_LIMIT,
-                                price=take_profit,
-                                quantity=quantity,
-                                timeInForce="GTC",
-                                reduceOnly=True,
-                            )
-                            logger.info(
-                                f"  ✓ TP Placed: ${take_profit:,.{self.price_precision}f}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"  ⚠️ TP Failed: {e}")
+                        logger.info(f"  ✓ TP: ${take_profit:,.{self.price_precision}f}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ TP Failed: {e}")
 
             return order
 
         except Exception as e:
-            logger.error(f"[FUTURES] Failed to execute position: {e}", exc_info=True)
+            logger.error(f"[FUTURES] Failed: {e}", exc_info=True)
             return None
 
     def close_short_position(
@@ -540,11 +482,10 @@ class BinanceFuturesHandler:
         self, side: str, quantity: float = None, order_id: int = None
     ) -> bool:
         """
-        ✅ FIXED: Close LONG or SHORT position with detailed error reporting
-        ✨ ENHANCED: Injects `positionSide` for Hedge Mode compatibility
+        ✅ FIXED: Close position without reduceOnly for market orders
         """
         try:
-            # Step 1: Get position info if quantity not provided
+            # Get position info if quantity not provided
             if quantity is None:
                 position = self.get_position_info(side=side)
                 if position:
@@ -566,28 +507,25 @@ class BinanceFuturesHandler:
                     logger.warning("[FUTURES] No open position found")
                     return False
 
-            # Step 2: Round quantity to valid precision
             quantity = self._round_quantity(quantity)
-
             close_side = SIDE_SELL if side == "long" else SIDE_BUY
             side_label = side.upper()
-            
-            # ✨ NEW: Define strictly required Position Side for Hedge Mode
             position_side = "LONG" if side == "long" else "SHORT"
 
             logger.info(
-                f"[FUTURES] Closing {side_label} (Hedge Mode): {quantity:.{self.quantity_precision}f} {self.symbol}"
+                f"[FUTURES] Closing {side_label} (Hedge Mode): "
+                f"{quantity:.{self.quantity_precision}f} {self.symbol}"
             )
 
-            # Step 3: Execute market close order with reduceOnly=True (✨ ENHANCED WITH positionSide)
             try:
+                # ✅ FIX: Remove reduceOnly for closing market orders
                 order = self.client.futures_create_order(
                     symbol=self.symbol,
                     side=close_side,
-                    positionSide=position_side, # ✨ REQUIRED FOR HEDGE MODE
+                    positionSide=position_side,
                     type=FUTURE_ORDER_TYPE_MARKET,
                     quantity=quantity,
-                    reduceOnly=True,  # ← Critical: This ensures we're closing, not opening
+                    # ✅ REMOVED: reduceOnly=True (not needed for hedge mode)
                 )
 
                 logger.info(
@@ -598,7 +536,7 @@ class BinanceFuturesHandler:
                     f"  Status:    {order.get('status')}"
                 )
 
-                # Step 4: Cancel any remaining SL/TP orders
+                # Cancel remaining orders
                 try:
                     cancelled = self.client.futures_cancel_all_open_orders(
                         symbol=self.symbol
@@ -608,7 +546,6 @@ class BinanceFuturesHandler:
                             f"[FUTURES] Cancelled {len(cancelled)} remaining order(s)"
                         )
                 except Exception as e:
-                    # -2011 means no orders to cancel, which is fine
                     if "-2011" not in str(e):
                         logger.debug(f"[FUTURES] Cancel orders: {e}")
 
@@ -621,22 +558,6 @@ class BinanceFuturesHandler:
                     f"  Quantity: {quantity:.{self.quantity_precision}f}\n"
                     f"  Error:    {str(order_error)}"
                 )
-
-                # Check if it's a known error
-                error_str = str(order_error)
-                if "ReduceOnly Order is rejected" in error_str:
-                    logger.error(
-                        f"[FUTURES] No position exists to close!\n"
-                        f"  This usually means position was already closed manually"
-                    )
-                elif "Insufficient balance" in error_str:
-                    logger.error(f"[FUTURES] Insufficient balance to close position")
-                elif "Invalid quantity" in error_str:
-                    logger.error(
-                        f"[FUTURES] Invalid quantity: {quantity:.{self.quantity_precision}f}\n"
-                        f"  Min: {self.min_qty}, Step: {self.step_size}"
-                    )
-
                 return False
 
         except Exception as e:
@@ -698,9 +619,7 @@ class BinanceFuturesHandler:
             return False
 
     def get_position_info(self, side: str = None) -> Optional[Dict]:
-        """
-        Get current position information
-        """
+        """Get current position information"""
         try:
             positions = self.client.futures_position_information(symbol=self.symbol)
 
@@ -726,9 +645,7 @@ class BinanceFuturesHandler:
             return None
 
     def get_unrealized_pnl(self) -> float:
-        """
-        Get unrealized P&L for current position
-        """
+        """Get unrealized P&L for current position"""
         try:
             position = self.get_position_info()
             if position:
@@ -739,9 +656,7 @@ class BinanceFuturesHandler:
             return 0.0
 
     def get_account_balance(self) -> float:
-        """
-        Get Futures account balance
-        """
+        """Get Futures account balance"""
         try:
             account = self.client.futures_account()
             for asset in account.get("assets", []):
@@ -753,17 +668,9 @@ class BinanceFuturesHandler:
             return 0.0
 
 
-# ============================================================================
-# INTEGRATION WITH EXISTING BinanceExecutionHandler
-# ============================================================================
-
-
+# Integration functions remain the same
 def integrate_futures_into_handler(handler):
-    """
-    Integrate Futures API into existing BinanceExecutionHandler
-    ✨ ENHANCED: Passes config to the FuturesHandler to load hedging rules.
-    """
-    # Check if Futures is enabled
+    """Integrate Futures API into existing BinanceExecutionHandler"""
     futures_enabled = (
         handler.config.get("assets", {}).get("BTC", {}).get("enable_futures", False)
     )
@@ -773,14 +680,10 @@ def integrate_futures_into_handler(handler):
         return False
 
     try:
-        # Initialize Futures handler with Config
         handler.futures_handler = BinanceFuturesHandler(
-            client=handler.client, 
-            symbol=handler.symbol,
-            config=handler.config # ✨ NEW: Pass config for hedging awareness
+            client=handler.client, symbol=handler.symbol, config=handler.config
         )
 
-        # Set leverage and margin type
         leverage = handler.config.get("assets", {}).get("BTC", {}).get("leverage", 10)
         margin_type = (
             handler.config.get("assets", {})
@@ -1092,32 +995,22 @@ def patch_close_position_method(handler):
     logger.info("[FUTURES] _close_position method patched for LONG+SHORT")
 
 
-# Open: src/execution/binance_futures.py
-# Scroll to the bottom and replace this function:
-
 def enable_futures_for_binance_handler(handler):
     """
     MAIN FUNCTION: Enable Futures trading for BOTH LONG and SHORT positions
-    ✅ FIXED: Removed legacy "monkey patches". The handler now natively supports futures.
+    ✅ FIXED: Uses new Algo API for stop losses
     """
-
     try:
         logger.info("\n" + "=" * 70)
         logger.info("ENABLING BINANCE FUTURES FOR LONG + SHORT TRADING")
         logger.info("=" * 70)
 
-        # Step 1: Integrate Futures handler
         if not integrate_futures_into_handler(handler):
             return False
 
-        # NOTE: We NO LONGER patch open/close methods here because 
-        # binance_handler.py now natively supports Futures margin isolation.
-
-        # Step 2: Verify connection
         balance = handler.futures_handler.get_account_balance()
         logger.info(f"[FUTURES] Account Balance: ${balance:,.2f} USDT")
 
-        # Step 3: Check for existing positions
         position = handler.futures_handler.get_position_info()
         if position:
             side = position.get("side", "unknown")
@@ -1130,7 +1023,8 @@ def enable_futures_for_binance_handler(handler):
 
         logger.info("=" * 70)
         logger.info("✅ FUTURES TRADING ENABLED")
-        logger.info("  - Native dynamic margin isolation active")
+        logger.info("  - Using Algo Order API for stop losses")
+        logger.info("  - Hedge mode active")
         logger.info("=" * 70)
 
         return True

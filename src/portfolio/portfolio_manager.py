@@ -468,6 +468,10 @@ class PortfolioManager:
         self.binance_client = binance_client
         self.db_manager = db_manager
         self.execution_handlers = execution_handlers or {}
+        self.risk_cfg = config.get("risk_management", {})
+        
+        self.correlation_threshold = self.portfolio_config.get("correlation_threshold", 0.70)
+        logger.info(f"[RISK] Correlation threshold: {self.correlation_threshold:.0%}")
 
         self.mode = config["trading"].get("mode", "paper")
         self.is_paper_mode = self.mode.lower() == "paper"
@@ -507,6 +511,200 @@ class PortfolioManager:
             )
         else:
             logger.info("✓ Using PAPER mode with simulated capital")
+            
+    def get_risk_budget(
+        self, 
+        asset: str, 
+        strategy_type: str = "TREND"
+    ) -> float:
+        """
+        ✨ STRATEGIC RISK GOVERNOR
+        
+        Calculates risk budget for a new trade based on:
+        1. Base risk (from config)
+        2. Strategy type (SCALP vs TREND asymmetric adjustment)
+        3. Correlation malus (reduce risk if holding correlated assets)
+        4. Drawdown shield (reduce risk in drawdown)
+        5. Total risk limit (cap aggregate open risk)
+        
+        Args:
+            asset: Asset name (e.g., "BTC", "GOLD")
+            strategy_type: "TREND" or "SCALP"
+            
+        Returns:
+            Risk percentage (e.g., 0.015 for 1.5%)
+        """
+        try:
+            # ================================================================
+            # STEP 1: Get base risk from config
+            # ================================================================
+            base_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
+            
+            logger.info(f"\n[RISK BUDGET] Calculating for {asset} {strategy_type}")
+            logger.info(f"  Base Risk: {base_risk:.3%}")
+            
+            # ================================================================
+            # STEP 2: Strategy Type Adjustment (Asymmetric)
+            # ================================================================
+            if strategy_type == "SCALP":
+                # Scalps: Lower risk (quick in/out)
+                strategy_multiplier = 0.67  # 1.5% → 1.0%
+                logger.info(f"  SCALP Multiplier: {strategy_multiplier:.2f}x")
+            elif strategy_type == "TREND":
+                # Trends: Higher risk (riding momentum)
+                strategy_multiplier = 1.33  # 1.5% → 2.0%
+                logger.info(f"  TREND Multiplier: {strategy_multiplier:.2f}x")
+            else:
+                strategy_multiplier = 1.0
+                logger.info(f"  Default Multiplier: {strategy_multiplier:.2f}x")
+            
+            risk_pct = base_risk * strategy_multiplier
+            
+            # ================================================================
+            # STEP 3: Correlation Malus
+            # ================================================================
+            correlation_threshold = self.portfolio_config.get(
+                "correlation_threshold", 0.70
+            )
+            correlation_malus = 1.0
+            
+            # Check if we hold correlated positions
+            if len(self.positions) > 0:
+                # Simple correlation check (BTC-ETH, Gold-Silver, etc.)
+                # For now, we implement a basic version
+                # TODO: Enhance with actual correlation matrix
+                
+                asset_group = self._get_asset_group(asset)
+                
+                for pos_asset, position in self.positions.items():
+                    other_group = self._get_asset_group(pos_asset)
+                    
+                    # If same group, apply malus
+                    if asset_group == other_group and asset_group != "other":
+                        correlation_malus = 0.5
+                        logger.warning(
+                            f"  ⚠️ Correlation Malus: Holding {pos_asset} "
+                            f"(same group: {asset_group})"
+                        )
+                        logger.info(f"  Risk reduced by {1 - correlation_malus:.0%}")
+                        break
+            
+            risk_pct *= correlation_malus
+            
+            # ================================================================
+            # STEP 4: Drawdown Shield
+            # ================================================================
+            drawdown_threshold = self.portfolio_config.get("max_drawdown", 0.15)
+            current_drawdown = 0.0
+            
+            if self.peak_equity > 0:
+                current_drawdown = (self.peak_equity - self.equity) / self.peak_equity
+            
+            drawdown_malus = 1.0
+            
+            if current_drawdown > 0.05:  # 5% drawdown trigger
+                drawdown_malus = 0.5
+                logger.warning(
+                    f"  ⚠️ Drawdown Shield: {current_drawdown:.2%} drawdown detected"
+                )
+                logger.info(f"  Risk reduced by {1 - drawdown_malus:.0%}")
+            
+            risk_pct *= drawdown_malus
+            
+            # ================================================================
+            # STEP 5: Total Risk Limit (Aggregate Cap)
+            # ================================================================
+            max_total_risk_pct = self.risk_cfg.get("max_total_open_risk", 0.10)
+            
+            # Calculate current total risk
+            current_total_risk = 0.0
+            for position in self.positions.values():
+                if position.stop_loss:
+                    pos_risk = abs(position.entry_price - position.stop_loss) * position.quantity
+                    current_total_risk += pos_risk
+            
+            current_total_risk_pct = (
+                current_total_risk / self.current_capital 
+                if self.current_capital > 0 
+                else 0
+            )
+            
+            # Check if adding new trade would exceed limit
+            remaining_risk_budget = max_total_risk_pct - current_total_risk_pct
+            
+            if risk_pct > remaining_risk_budget:
+                logger.warning(
+                    f"  ⚠️ Total Risk Limit: Current {current_total_risk_pct:.2%}, "
+                    f"Max {max_total_risk_pct:.2%}"
+                )
+                logger.info(
+                    f"  Risk capped from {risk_pct:.3%} to {remaining_risk_budget:.3%}"
+                )
+                risk_pct = max(0, remaining_risk_budget)
+            
+            # ================================================================
+            # STEP 6: Final Validation
+            # ================================================================
+            # Ensure we don't go below minimum viable risk
+            min_risk = 0.005  # 0.5% absolute minimum
+            if risk_pct < min_risk:
+                logger.error(
+                    f"  ❌ Risk budget {risk_pct:.3%} below minimum {min_risk:.3%}"
+                )
+                logger.error(f"  → Trade should be rejected")
+                return 0.0
+            
+            # Ensure we don't exceed maximum risk
+            max_risk = self.portfolio_config.get("max_risk_per_trade", 0.025)
+            if risk_pct > max_risk:
+                logger.warning(f"  ⚠️ Risk capped at maximum {max_risk:.3%}")
+                risk_pct = max_risk
+            
+            # ================================================================
+            # STEP 7: Log Final Budget
+            # ================================================================
+            logger.info(f"\n[RISK BUDGET] FINAL: {risk_pct:.3%}")
+            logger.info(f"  Breakdown:")
+            logger.info(f"    Base:         {base_risk:.3%}")
+            logger.info(f"    Strategy:     ×{strategy_multiplier:.2f}")
+            logger.info(f"    Correlation:  ×{correlation_malus:.2f}")
+            logger.info(f"    Drawdown:     ×{drawdown_malus:.2f}")
+            logger.info(f"    Final:        {risk_pct:.3%}")
+            logger.info(f"  → ${self.current_capital * risk_pct:,.2f} at risk\n")
+            
+            return risk_pct
+            
+        except Exception as e:
+            logger.error(f"[RISK BUDGET] Error calculating risk: {e}", exc_info=True)
+            # Return safe default
+            return 0.01  # 1% fallback
+
+    def _get_asset_group(self, asset: str) -> str:
+        """
+        Helper: Categorize assets into correlation groups
+        
+        Returns:
+            Group name: "crypto", "precious_metals", "indices", "forex", "other"
+        """
+        asset = asset.upper()
+        
+        # Crypto group
+        if asset in ["BTC", "BITCOIN", "BTCUSD", "BTCUSDT", "ETH", "ETHEREUM"]:
+            return "crypto"
+        
+        # Precious metals group
+        if asset in ["GOLD", "XAU", "XAUUSDm", "SILVER", "XAG", "XAGUSD"]:
+            return "precious_metals"
+        
+        # Indices group
+        if asset in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW"]:
+            return "indices"
+        
+        # Forex group
+        if asset in ["EUR", "EURUSD", "GBP", "GBPUSD", "JPY", "USDJPY"]:
+            return "forex"
+        
+        return "other"
 
     def _fetch_total_capital(self, strict: bool = False) -> float:
         """
@@ -927,113 +1125,112 @@ class PortfolioManager:
         self, new_position_usd: float, new_side: str = None, asset: str = None
     ) -> bool:
         """
-        ✅ FIXED: Check portfolio limits with proper hedging support
-
-        Args:
-            new_position_usd: Size of new position in USD
-            new_side: "long" or "short" (for hedging calculation)
-            asset: Asset name (to check per-asset hedging)
-
-        Returns:
-            True if within limits, False otherwise
+        ✅ FIXED: Check portfolio limits using margin exposure (not notional)
         """
-
         # Get limits
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
         max_exposure_usd = self.current_capital * max_exposure_pct
-
-        # Calculate current exposures
-        long_exposure = sum(
-            pos.quantity * pos.entry_price
-            for pos in self.positions.values()
-            if pos.side == "long"
-        )
-
-        short_exposure = sum(
-            pos.quantity * pos.entry_price
-            for pos in self.positions.values()
-            if pos.side == "short"
-        )
-
-        current_gross_exposure = long_exposure + short_exposure
-        current_net_exposure = abs(long_exposure - short_exposure)
-
-        # ✅ Check if hedging is allowed
+        
+        # ✅ FIXED: Calculate current MARGIN exposure (not notional)
+        long_margin = 0.0
+        short_margin = 0.0
+        
+        for pos in self.positions.values():
+            notional = pos.quantity * pos.entry_price
+            leverage = getattr(pos, 'leverage', 1)
+            margin = notional / leverage  # ← Use margin
+            
+            if pos.side == "long":
+                long_margin += margin
+            else:
+                short_margin += margin
+        
+        current_gross_margin = long_margin + short_margin
+        current_net_margin = abs(long_margin - short_margin)
+        
+        # ✅ Check hedging configuration
         allow_hedging = self.config.get("trading", {}).get(
             "allow_simultaneous_long_short", False
         )
-
-        # ✅ If we have asset info, check if it's a hedge
+        
+        # Calculate new position margin
+        # NOTE: new_position_usd should already be the NOTIONAL value
+        # We need to get leverage for this asset to calculate margin
+        
+        # Get leverage from config (or default to 1)
+        if asset:
+            asset_cfg = self.config.get("assets", {}).get(asset, {})
+            leverage = asset_cfg.get("leverage", 1)
+        else:
+            leverage = 1
+        
+        new_position_margin = new_position_usd / leverage
+        
+        # Check if it's a hedge
         is_hedge = False
         if asset and new_side:
             opposite_side = "short" if new_side == "long" else "long"
             opposite_positions = [
-                p
-                for p in self.positions.values()
+                p for p in self.positions.values()
                 if p.asset == asset and p.side == opposite_side
             ]
             is_hedge = len(opposite_positions) > 0
-
-        # ✅ Calculate new exposure based on whether we allow hedging
+        
+        # Use NET margin for hedged strategies, GROSS for directional
         if allow_hedging and (is_hedge or new_side):
-            # Use NET exposure for hedged strategies
             if new_side == "long":
-                new_net_exposure = abs(
-                    (long_exposure + new_position_usd) - short_exposure
-                )
+                new_net_margin = abs((long_margin + new_position_margin) - short_margin)
             elif new_side == "short":
-                new_net_exposure = abs(
-                    long_exposure - (short_exposure + new_position_usd)
-                )
+                new_net_margin = abs(long_margin - (short_margin + new_position_margin))
             else:
-                new_net_exposure = current_net_exposure + new_position_usd
-
-            if new_net_exposure > max_exposure_usd:
+                new_net_margin = current_net_margin + new_position_margin
+            
+            if new_net_margin > max_exposure_usd:
                 logger.warning(
-                    f"Portfolio NET exposure limit exceeded:\n"
-                    f"  Current Long:  ${long_exposure:,.2f}\n"
-                    f"  Current Short: ${short_exposure:,.2f}\n"
-                    f"  Current Net:   ${current_net_exposure:,.2f}\n"
-                    f"  New {new_side or 'position'}: ${new_position_usd:,.2f}\n"
-                    f"  New Net:       ${new_net_exposure:,.2f}\n"
-                    f"  Limit:         ${max_exposure_usd:,.2f}"
+                    f"Portfolio NET margin limit exceeded:\n"
+                    f"  Current Long Margin:  ${long_margin:,.2f}\n"
+                    f"  Current Short Margin: ${short_margin:,.2f}\n"
+                    f"  Current Net Margin:   ${current_net_margin:,.2f}\n"
+                    f"  New {new_side or 'position'} (margin): ${new_position_margin:,.2f}\n"
+                    f"  New Net Margin:       ${new_net_margin:,.2f}\n"
+                    f"  Limit:                ${max_exposure_usd:,.2f}"
                 )
                 return False
-
+            
             logger.info(
-                f"[EXPOSURE] NET: ${new_net_exposure:,.2f} / ${max_exposure_usd:,.2f} "
-                f"({new_net_exposure/max_exposure_usd*100:.1f}%)"
+                f"[EXPOSURE] NET MARGIN: ${new_net_margin:,.2f} / ${max_exposure_usd:,.2f} "
+                f"({new_net_margin/max_exposure_usd*100:.1f}%)"
                 f"{' [HEDGE]' if is_hedge else ''}"
             )
-
+        
         else:
-            # Use GROSS exposure for directional strategies
-            new_gross_exposure = current_gross_exposure + new_position_usd
-
-            if new_gross_exposure > max_exposure_usd:
+            # Use GROSS margin for directional strategies
+            new_gross_margin = current_gross_margin + new_position_margin
+            
+            if new_gross_margin > max_exposure_usd:
                 logger.warning(
-                    f"Portfolio GROSS exposure limit: "
-                    f"${new_gross_exposure:,.2f} > ${max_exposure_usd:,.2f}"
+                    f"Portfolio GROSS margin limit: "
+                    f"${new_gross_margin:,.2f} > ${max_exposure_usd:,.2f}"
                 )
                 return False
-
+            
             logger.info(
-                f"[EXPOSURE] GROSS: ${new_gross_exposure:,.2f} / ${max_exposure_usd:,.2f} "
-                f"({new_gross_exposure/max_exposure_usd*100:.1f}%)"
+                f"[EXPOSURE] GROSS MARGIN: ${new_gross_margin:,.2f} / ${max_exposure_usd:,.2f} "
+                f"({new_gross_margin/max_exposure_usd*100:.1f}%)"
             )
-
-        # Check drawdown limit
+        
+        # Check drawdown limit (unchanged)
         drawdown = (
             (self.peak_equity - self.equity) / self.peak_equity
             if self.peak_equity > 0
             else 0
         )
         max_drawdown = self.portfolio_config["max_drawdown"]
-
+        
         if drawdown >= max_drawdown:
             logger.warning(f"Max drawdown: {drawdown:.2%} >= {max_drawdown:.2%}")
             return False
-
+        
         return True
 
     def get_asset_positions(self, asset: str, side: str = None) -> List[Position]:
@@ -1804,6 +2001,9 @@ class PortfolioManager:
 
         total_exposure = 0.0
         total_unrealized_pnl = 0.0
+        
+        total_notional_value = 0.0
+        total_margin_used = 0.0
 
         # ✅  Count positions per asset correctly
         asset_position_counts = {}
@@ -1841,16 +2041,28 @@ class PortfolioManager:
         # Calculate exposures and P&L
         for pos in self.positions.values():
             current_price = current_prices.get(pos.asset, pos.entry_price)
-            total_exposure += pos.quantity * current_price
-
-            # Use exchange-reported profit if available
+            notional_value = pos.quantity * current_price
+            
+            # Get leverage (defaults to 1 for spot trading)
+            leverage = getattr(pos, 'leverage', 1)
+            
+            # ✅ CORRECT: Actual margin used = notional / leverage
+            # This represents your REAL capital at risk
+            margin_used = notional_value / leverage
+            
+            # Accumulate
+            total_notional_value += notional_value
+            total_margin_used += margin_used
+            total_exposure += margin_used  # ← Use margin, not notional
+            
+            # Calculate P&L (unchanged)
             if pos.mt5_ticket and pos.mt5_profit != 0.0:
                 total_unrealized_pnl += pos.mt5_profit
             elif pos.binance_order_id and pos.binance_profit != 0.0:
                 total_unrealized_pnl += pos.binance_profit
             else:
                 total_unrealized_pnl += pos.get_pnl(current_price)
-
+        
         total_value = self.current_capital + total_unrealized_pnl
 
         # Calculate daily P&L
@@ -1861,46 +2073,54 @@ class PortfolioManager:
             daily_pnl = self.realized_pnl_today + total_unrealized_pnl
 
         return {
-            "mode": self.mode,
-            "total_value": total_value,
-            "capital": self.current_capital,
-            "equity": self.equity,
-            "cash": self.current_capital,
-            "total_exposure": total_exposure,
-            "open_positions": len(self.positions),
-            "daily_pnl": daily_pnl,
-            "realized_pnl_today": self.realized_pnl_today,
-            "total_unrealized_pnl": total_unrealized_pnl,
-            "asset_position_counts": asset_position_counts,
-            "asset_positions_detail": asset_positions_detail,
-            "max_positions_per_asset": self.max_positions_per_asset,
-            "positions": {
-                pos.position_id: {
-                    "asset": pos.asset,
-                    "side": pos.side,
-                    "entry_price": pos.entry_price,
-                    "quantity": pos.quantity,
-                    "current_price": current_prices.get(pos.asset, pos.entry_price),
-                    "current_value": pos.quantity
-                    * current_prices.get(pos.asset, pos.entry_price),
-                    "pnl": pos.get_pnl(current_prices.get(pos.asset, pos.entry_price)),
-                    "pnl_pct": pos.get_pnl_pct(
-                        current_prices.get(pos.asset, pos.entry_price)
-                    ),
-                    "stop_loss": pos.stop_loss,
-                    "take_profit": pos.take_profit,
-                    "mt5_ticket": pos.mt5_ticket,
-                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
-                    "binance_order_id": pos.binance_order_id,
-                    "binance_profit": (
-                        pos.binance_profit if pos.binance_order_id else None
-                    ),
-                    "leverage": getattr(pos, "leverage", 1),
-                    "margin_type": getattr(pos, "margin_type", "SPOT"),
-                    "is_futures": getattr(pos, "is_futures", False),
-                }
-                for pos in self.positions.values()
-            },
+        "mode": self.mode,
+        "total_value": total_value,
+        "capital": self.current_capital,
+        "equity": self.equity,
+        "cash": self.current_capital,
+        
+        # ✅ NEW: Separate notional vs actual exposure
+        "total_notional_value": total_notional_value,      # For information
+        "total_margin_used": total_margin_used,            # For risk limits
+        "total_exposure": total_exposure,                  # ← This is margin_used
+        
+        "open_positions": len(self.positions),
+        "daily_pnl": daily_pnl,
+        "realized_pnl_today": self.realized_pnl_today,
+        "total_unrealized_pnl": total_unrealized_pnl,
+        "asset_position_counts": asset_position_counts,
+        "asset_positions_detail": asset_positions_detail,
+        "max_positions_per_asset": self.max_positions_per_asset,
+        
+        # Individual positions...
+        "positions": {
+            pos.position_id: {
+                "asset": pos.asset,
+                "side": pos.side,
+                "entry_price": pos.entry_price,
+                "quantity": pos.quantity,
+                "current_price": current_prices.get(pos.asset, pos.entry_price),
+                "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
+                
+                # ✅ NEW: Add leverage info to position details
+                "leverage": getattr(pos, 'leverage', 1),
+                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
+                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price)) / getattr(pos, 'leverage', 1),
+                
+                "pnl": pos.get_pnl(current_prices.get(pos.asset, pos.entry_price)),
+                "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "mt5_ticket": pos.mt5_ticket,
+                "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
+                "binance_order_id": pos.binance_order_id,
+                "binance_profit": pos.binance_profit if pos.binance_order_id else None,
+                "leverage": getattr(pos, "leverage", 1),
+                "margin_type": getattr(pos, "margin_type", "SPOT"),
+                "is_futures": getattr(pos, "is_futures", False),
+            }
+            for pos in self.positions.values()
+        },
         }
 
     def close_all_positions(self, prices: Dict[str, float] = None):

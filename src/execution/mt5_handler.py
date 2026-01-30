@@ -11,6 +11,7 @@ from datetime import datetime
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.global_error_handler import handle_errors, ErrorSeverity
+from src.execution.veteran_trade_manager import VeteranTradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -120,274 +121,66 @@ class HybridPositionSizer:
         sizing_mode: str = SizingMode.AUTOMATED,
         manual_size_usd: float = None,
         override_reason: str = None,
+        risk_pct: float = None,  # ✨ NEW: Accept external risk budget
     ) -> Tuple[float, Dict]:
         """
-        ✅ FIXED: Calculate position size with proper account size scaling
+        ✨ REFACTORED: Accept risk budget from Portfolio Manager
         """
         try:
-            # ============================================================
-            # STEP 1: Determine risk percentage
-            # ============================================================
-            if sizing_mode == SizingMode.ELEVATED_RISK:
-                risk_pct = self.max_risk_pct
-            elif sizing_mode == SizingMode.REDUCED_RISK:
-                risk_pct = self.target_risk_pct * 0.75
-            elif confidence_score and confidence_score >= self.aggressive_threshold:
-                risk_pct = self.max_risk_pct
-            else:
-                risk_pct = self.target_risk_pct
+            # Get account balance
+            account_balance = self.portfolio_manager.get_asset_balance(asset)
 
-            # Calculate risk amount in dollars
-            risk_amount = self.portfolio_manager.current_capital * risk_pct
+            if account_balance <= 0:
+                logger.error(f"[RISK] No available balance for {asset}")
+                return 0.0, {"error": "insufficient_balance"}
 
-            # ============================================================
-            # STEP 2: Validate stop loss distance
-            # ============================================================
-            asset_cfg = self.config["assets"][asset]
-            risk_cfg = asset_cfg.get("risk", {})
+            # ✨ CRITICAL: Use externally provided risk
+            if risk_pct is None:
+                logger.error("[RISK] No risk percentage provided!")
+                return 0.0, {"error": "missing_risk_budget"}
 
-            min_stop_pct = risk_cfg.get("min_stop_distance_pct", 0.001)
-            max_stop_pct = risk_cfg.get("max_stop_distance_pct", 0.10)
+            # Calculate position size from risk budget
+            risk_amount = account_balance * risk_pct
 
             stop_distance = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
 
-            if stop_distance_pct < 0.0001:
-                stop_distance_pct = 0.0001
+            if stop_distance_pct < 0.005:
+                stop_distance_pct = 0.005
 
-            if stop_distance_pct < min_stop_pct:
-                logger.warning(
-                    f"[RISK] Stop too tight: {stop_distance_pct:.2%} < {min_stop_pct:.2%}"
-                )
-
-            if stop_distance_pct > max_stop_pct:
-                logger.warning(
-                    f"[RISK] Stop very wide: {stop_distance_pct:.2%} > {max_stop_pct:.2%}"
-                )
-                stop_distance_pct = max_stop_pct
-                if signal == 1:
-                    stop_loss_price = entry_price * (1 - max_stop_pct)
-                else:
-                    stop_loss_price = entry_price * (1 + max_stop_pct)
-                stop_distance = abs(entry_price - stop_loss_price)
-
-            # ============================================================
-            # STEP 3: Calculate position size from risk
-            # ============================================================
             position_size_usd = risk_amount / stop_distance_pct
 
-            logger.info(
-                f"[RISK] Position Calculation:\n"
-                f"  Account Capital: ${self.portfolio_manager.current_capital:,.2f}\n"
-                f"  Risk Amount:     ${risk_amount:.2f} ({risk_pct:.2%})\n"
-                f"  Stop Distance:   ${stop_distance:.2f} ({stop_distance_pct:.2%})\n"
-                f"  Calc Position:   ${position_size_usd:,.2f}"
-            )
-
-            # ============================================================
-            # STEP 4: Apply manual override if requested
-            # ============================================================
-            if sizing_mode == SizingMode.MANUAL_OVERRIDE and manual_size_usd:
-                min_allowed = position_size_usd * 0.5
-                max_allowed = position_size_usd * 2.0
-
-                if manual_size_usd < min_allowed or manual_size_usd > max_allowed:
-                    logger.warning(
-                        f"[OVERRIDE] Manual size ${manual_size_usd:,.2f} outside range "
-                        f"[${min_allowed:,.2f}, ${max_allowed:,.2f}] - Using calculated"
-                    )
-                else:
-                    logger.info(
-                        f"[OVERRIDE] Using manual size: ${manual_size_usd:,.2f}"
-                    )
-                    position_size_usd = manual_size_usd
-
-            # ============================================================
-            # STEP 5: Apply SMART position limits (account-aware)
-            # ============================================================
+            # Apply asset limits
+            asset_cfg = self.config["assets"][asset]
             min_size = asset_cfg.get("min_position_usd", 100)
+            max_size = asset_cfg.get("max_position_usd", 50000)
 
-            # ✅ MARGIN TRADING FIX: Calculate max based on FREE MARGIN, not just account
-            # This prevents "No money" errors by checking actual available margin
-            config_max = asset_cfg.get("max_position_usd", 50000)
-
-            # Get available margin from MT5
-            try:
-                import MetaTrader5 as mt5
-
-                account_info = mt5.account_info()
-                if account_info and account_info.margin_free > 0:
-                    # Use free margin as the real constraint for margin trading
-                    # Apply conservative 80% safety factor to avoid margin calls
-                    available_margin = account_info.margin_free * 0.80
-                    leverage = (
-                        account_info.leverage if account_info.leverage > 0 else 100
-                    )
-
-                    # Max position = available margin × leverage × safety factor
-                    margin_based_max = (
-                        available_margin * leverage * 0.20
-                    )  # 20% of leveraged margin
-
-                    logger.info(
-                        f"[MARGIN INFO]\n"
-                        f"  Account Leverage: {leverage}:1\n"
-                        f"  Free Margin:     ${account_info.margin_free:,.2f}\n"
-                        f"  Margin Level:    {account_info.margin_level:.2f}%\n"
-                        f"  Used Margin:     ${account_info.margin:,.2f}\n"
-                        f"  Available (80%): ${available_margin:,.2f}"
-                    )
-                else:
-                    # Fallback to capital-based if margin info unavailable
-                    margin_based_max = self.portfolio_manager.current_capital * 0.50
-                    logger.warning(
-                        "[MARGIN] Could not get MT5 margin info, using capital-based limit"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"[MARGIN] Error getting margin info: {e}, using capital-based limit"
-                )
-                margin_based_max = self.portfolio_manager.current_capital * 0.50
-
-            # Use LOWEST of: config max, margin-based max
-            max_size = min(config_max, margin_based_max)
-
-            logger.info(
-                f"[LIMITS]\n"
-                f"  Config Max:        ${config_max:,.2f}\n"
-                f"  Margin-Based Max:  ${margin_based_max:,.2f}\n"
-                f"  Applied Max:       ${max_size:,.2f}"
-            )
-
-            # Check minimum
             if position_size_usd < min_size:
                 logger.warning(
-                    f"[RISK] Position ${position_size_usd:.2f} below min ${min_size}"
+                    f"[RISK] Below minimum: ${position_size_usd:.2f} < ${min_size}"
                 )
-                return 0.0, {
-                    "error": "below_minimum",
-                    "calculated_size": position_size_usd,
-                    "minimum": min_size,
-                }
+                return 0.0, {"error": "below_minimum"}
 
-            # Apply maximum
-            original_size = position_size_usd
             position_size_usd = min(position_size_usd, max_size)
 
-            if original_size > max_size:
-                logger.warning(
-                    f"[RISK] Position clamped to account-based max: ${original_size:,.2f} → ${max_size:,.2f}"
-                )
-
-            # ============================================================
-            # STEP 6: Check portfolio-level limits
-            # ============================================================
-            max_exposure_mult = self.portfolio_cfg.get("max_portfolio_exposure", 5.0)
-            max_single_asset_mult = self.portfolio_cfg.get(
-                "max_single_asset_exposure", 3.0
-            )
-
-            current_exposure = sum(
-                pos.quantity * pos.entry_price
-                for pos in self.portfolio_manager.positions.values()
-            )
-
-            max_portfolio_usd = (
-                self.portfolio_manager.current_capital * max_exposure_mult
-            )
-
-            if current_exposure + position_size_usd > max_portfolio_usd:
-                old_size = position_size_usd
-                position_size_usd = max(0, max_portfolio_usd - current_exposure)
-                logger.warning(
-                    f"[RISK] Portfolio leverage limit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
-                )
-
-            max_asset_usd = (
-                self.portfolio_manager.current_capital * max_single_asset_mult
-            )
-            if position_size_usd > max_asset_usd:
-                old_size = position_size_usd
-                position_size_usd = max_asset_usd
-                logger.warning(
-                    f"[RISK] Single asset leverage limit: ${old_size:,.2f} → ${position_size_usd:,.2f}"
-                )
-
-            # ============================================================
-            # STEP 6.5: Check Total Open Risk
-            # ============================================================
-            max_total_risk_pct = self.config.get("risk_management", {}).get(
-                "max_total_open_risk", 0.10
-            )
-
-            current_total_risk = 0.0
-            for pos in self.portfolio_manager.positions.values():
-                dist = abs(pos.entry_price - (pos.stop_loss or pos.entry_price))
-                current_total_risk += dist * pos.quantity
-
-            new_trade_risk = position_size_usd * stop_distance_pct
-
-            if current_total_risk + new_trade_risk > (
-                self.portfolio_manager.current_capital * max_total_risk_pct
-            ):
-                logger.warning(
-                    f"[RISK] Total Portfolio Risk Limit Hit!\n"
-                    f"  Current Risk: ${current_total_risk:.2f}\n"
-                    f"  New Trade:    ${new_trade_risk:.2f}\n"
-                    f"  Limit:        ${self.portfolio_manager.current_capital * max_total_risk_pct:.2f}"
-                )
-                return 0.0, {"error": "total_risk_limit_exceeded"}
-
-            # ============================================================
-            # STEP 7: Calculate ACTUAL risk with final position size
-            # ============================================================
             actual_risk = position_size_usd * stop_distance_pct
-            actual_risk_pct = actual_risk / self.portfolio_manager.current_capital
+            actual_risk_pct = actual_risk / account_balance
 
-            if actual_risk_pct > (self.max_risk_pct * 1.5):
-                logger.error(
-                    f"[RISK] CRITICAL: Actual risk {actual_risk_pct:.2%} exceeds max {self.max_risk_pct:.2%}!"
-                )
-                return 0.0, {"error": "risk_exceeds_maximum"}
-
-            # ============================================================
-            # STEP 8: Build metadata
-            # ============================================================
             metadata = {
                 "asset": asset,
-                "mode": sizing_mode,
                 "signal": signal,
-                "confidence_score": confidence_score,
-                "market_condition": market_condition,
                 "entry_price": entry_price,
                 "stop_loss_price": stop_loss_price,
-                "stop_distance_usd": stop_distance,
-                "stop_distance_pct": stop_distance_pct * 100,
-                "target_risk_pct": risk_pct * 100,
-                "target_risk_usd": risk_amount,
-                "actual_risk_pct": actual_risk_pct * 100,
-                "actual_risk_usd": actual_risk,
+                "provided_risk_pct": risk_pct * 100,
                 "position_size_usd": position_size_usd,
-                "position_size_pct": (
-                    position_size_usd / self.portfolio_manager.current_capital
-                )
-                * 100,
-                "position_size_units": position_size_usd / entry_price,
-                "override_details": (
-                    {"mode": sizing_mode, "reason": override_reason}
-                    if sizing_mode != SizingMode.AUTOMATED
-                    else None
-                ),
-                "timestamp": datetime.now().isoformat(),
+                "actual_risk_usd": actual_risk,
+                "actual_risk_pct": actual_risk_pct * 100,
             }
-
-            if sizing_mode != SizingMode.AUTOMATED:
-                self.override_history.append(metadata)
 
             return position_size_usd, metadata
 
         except Exception as e:
-            logger.error(f"[RISK] Error calculating position size: {e}", exc_info=True)
+            logger.error(f"[RISK] Error: {e}", exc_info=True)
             return 0.0, {"error": str(e)}
 
 
@@ -549,183 +342,238 @@ class MT5ExecutionHandler:
         signal_details: Dict = None,
     ) -> bool:
         """
-        ✅ FIXED: Position opening with proper account size handling
+        ✅ STRATEGIC/TACTICAL INTEGRATION
+        Portfolio Manager controls HOW MUCH to risk (strategy)
+        VTM validates HOW to execute (tactics)
         """
         try:
-            import MetaTrader5 as mt5
-            from src.execution.veteran_trade_manager import VeteranTradeManager
-
             if not mt5.symbol_select(symbol, True):
-                logger.error(f"[MT5] Failed to select symbol {symbol}")
+                logger.error(f"[MT5] ❌ Failed to select symbol {symbol}")
                 return False
 
             side = "long" if signal == 1 else "short"
             order_type = mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL
+
+            # Extract trade type from signal details
+            trade_type = "TREND"  # Default
+            if signal_details:
+                trade_type = signal_details.get("trade_type", "TREND")
+
             logger.info(f"[MT5] Opening {side.upper()} position for {asset}")
+
             asset_cfg = self.config["assets"].get(asset, {})
-            leverage = asset_cfg.get("leverage", 2000)  # Default high leverage for MT5
+            leverage = asset_cfg.get("leverage", 2000)
             margin_type = "DYNAMIC"  # MT5 is always Derivatives/CFD
             is_futures = True
 
-            # Get OHLC data for VTM
+            # ================================================================
+            # STEP 1: STRATEGIC - Get risk budget from Portfolio Manager
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[STRATEGIC] Requesting risk budget from Portfolio Manager")
+            logger.info(f"{'='*80}")
+
+            risk_pct = self.portfolio_manager.get_risk_budget(
+                asset=asset, strategy_type=trade_type
+            )
+
+            if risk_pct <= 0:
+                logger.error(
+                    f"[STRATEGIC] ❌ Risk budget denied (0%)\n"
+                    f"  → Trade rejected by Portfolio Manager"
+                )
+                return False
+
+            logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
+
+            # ================================================================
+            # STEP 2: Calculate initial stop loss for validation
+            # ================================================================
+            risk_config = asset_cfg.get("risk", {})
+            sl_pct = risk_config.get("stop_loss_pct", 0.01)
+
+            if side == "long":
+                initial_stop = current_price * (1 - sl_pct)
+            else:
+                initial_stop = current_price * (1 + sl_pct)
+
+            # ================================================================
+            # STEP 3: TACTICAL - VTM Pre-Flight Validation
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[TACTICAL] VTM Pre-Flight Validation")
+            logger.info(f"{'='*80}")
+
+            is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
+                entry_price=current_price,
+                stop_loss=initial_stop,
+                trade_type=trade_type,
+                asset=asset,
+            )
+
+            if not is_valid:
+                logger.error(
+                    f"[TACTICAL] ❌ Trade rejected by VTM\n"
+                    f"  Reason: {rejection_reason}\n"
+                    f"  → Aborting before paying fees"
+                )
+                return False
+
+            logger.info(f"[TACTICAL] ✓ Trade validated by VTM")
+
+            # ================================================================
+            # STEP 4: Fetch OHLC for VTM initialization
+            # ================================================================
             ohlc_data = None
+            df = None
+
             if self.data_manager:
                 try:
                     end_time = datetime.now(timezone.utc)
                     start_time = end_time - timedelta(days=10)
+
                     df = self.data_manager.fetch_mt5_data(
                         symbol=symbol,
                         timeframe=self.config["assets"][asset].get("timeframe", "H1"),
                         start_date=start_time.strftime("%Y-%m-%d"),
                         end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                     )
+
                     if len(df) > 50:
                         ohlc_data = {
                             "high": df["high"].values,
                             "low": df["low"].values,
                             "close": df["close"].values,
                         }
+                        logger.info(
+                            f"[VTM] ✓ Fetched {len(df)} bars for dynamic management"
+                        )
+                    else:
+                        logger.warning(f"[VTM] ⚠️ Insufficient data ({len(df)} bars)")
+
                 except Exception as e:
-                    logger.error(f"[VTM] OHLC fetch failed: {e}")
+                    logger.error(f"[VTM] ❌ OHLC fetch failed: {e}")
 
-            # Calculate VTM Stop
-            stop_loss_price = None
-            if ohlc_data and signal_details:
-                try:
-                    temp_vtm = VeteranTradeManager(
-                        entry_price=current_price,
-                        side=side,
-                        asset=asset,
-                        high=ohlc_data["high"],
-                        low=ohlc_data["low"],
-                        close=ohlc_data["close"],
-                        account_balance=self.portfolio_manager.current_capital,
-                        signal_details=signal_details,
-                        account_risk=0.015,
-                    )
-                    stop_loss_price = temp_vtm.initial_stop_loss
-                    logger.info(f"[VTM] ✓ Stop: ${stop_loss_price:,.2f}")
-                except Exception as e:
-                    logger.error(f"[VTM] Stop calculation failed: {e}")
+            # ================================================================
+            # STEP 5: Calculate position size using strategic risk budget
+            # ================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[SIZING] Calculating position size")
+            logger.info(f"{'='*80}")
 
-            # Fallback Stop
-            if stop_loss_price is None:
-                risk = self.asset_config.get("risk", {})
-                if side == "long":
-                    stop_loss_price = current_price * (
-                        1 - risk.get("stop_loss_pct", 0.01)
-                    )
-                else:
-                    stop_loss_price = current_price * (
-                        1 + risk.get("stop_loss_pct", 0.01)
-                    )
+            # Get account balance
+            account_balance = self.portfolio_manager.current_capital
 
-            # Calculate Sizing
-            position_size_usd, sizing_metadata = self.sizer.calculate_size_risk_based(
-                asset=asset,
-                entry_price=current_price,
-                stop_loss_price=stop_loss_price,
-                signal=signal,
-                confidence_score=confidence_score,
-                market_condition=market_condition,
-                sizing_mode=sizing_mode,
-                manual_size_usd=manual_size_usd,
-                override_reason=override_reason,
+            # Calculate risk amount
+            risk_amount_usd = account_balance * risk_pct
+
+            # Calculate stop distance
+            stop_distance = abs(current_price - initial_stop)
+            stop_distance_pct = stop_distance / current_price
+
+            # Position size = Risk Amount / Stop Distance %
+            position_size_usd = risk_amount_usd / stop_distance_pct
+
+            logger.info(
+                f"[SIZING] Calculation:\n"
+                f"  Account Balance: ${account_balance:,.2f}\n"
+                f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
+                f"  Stop Distance:   {stop_distance_pct:.3%}\n"
+                f"  Position Size:   ${position_size_usd:,.2f}"
             )
 
             if position_size_usd <= 0:
-                logger.error(f"[FAIL] Sizing failed: {sizing_metadata.get('error')}")
+                logger.error(
+                    f"[SIZING] ❌ Invalid position size: ${position_size_usd:.2f}"
+                )
                 return False
 
-            # ✅ FIXED: Calculate volume with ABORT on min lot violation
+            # ================================================================
+            # STEP 6: Convert USD to MT5 lots
+            # ================================================================
             contract_size = self.symbol_info.trade_contract_size
             volume_lots = position_size_usd / (current_price * contract_size)
 
             volume_step = self.symbol_info.volume_step
             volume_lots = round(volume_lots / volume_step) * volume_step
 
-            # Abort if below minimum
+            # Check minimum lot size
             if volume_lots < self.symbol_info.volume_min:
                 min_usd_value = (
                     self.symbol_info.volume_min * current_price * contract_size
                 )
                 logger.warning(
-                    f"[RISK] Trade Aborted: Volume {volume_lots:.4f} < Min {self.symbol_info.volume_min}\n"
+                    f"[SIZING] ❌ Trade Aborted: Volume {volume_lots:.4f} < Min {self.symbol_info.volume_min}\n"
                     f"  Requested Size: ${position_size_usd:.2f}\n"
                     f"  Min Broker Size: ${min_usd_value:.2f}\n"
-                    f"  → Account too small for this trade (need ~${min_usd_value:.0f} minimum)"
+                    f"  → Account too small for this trade"
                 )
                 return False
 
             volume_lots = min(self.symbol_info.volume_max, volume_lots)
-
             actual_usd = volume_lots * current_price * contract_size
-            logger.info(f"[SIZE] {volume_lots:.2f} lots = ${actual_usd:,.2f}")
 
-            # ✅ MARGIN TRADING: Check actual margin requirements BEFORE placing order
-            # This prevents "No money" rejections by validating margin availability
+            logger.info(
+                f"[SIZING] Final:\n"
+                f"  Lots:     {volume_lots:.2f}\n"
+                f"  USD:      ${actual_usd:,.2f}\n"
+                f"  Contract: {contract_size}"
+            )
+
+            # ================================================================
+            # STEP 7: Margin validation (pre-flight check)
+            # ================================================================
             if self.mode.lower() != "paper":
-                # Pre-flight margin check
                 try:
                     account_info = mt5.account_info()
                     if account_info:
-                        # Calculate required margin for this trade
-                        # Formula: (Volume × Contract Size × Price) / Leverage
-                        leverage = (
+                        leverage_actual = (
                             account_info.leverage if account_info.leverage > 0 else 100
                         )
-                        estimated_margin_required = (
+                        estimated_margin = (
                             volume_lots * contract_size * current_price
-                        ) / leverage
-
-                        # Add 10% buffer for price slippage and margin calculation differences
-                        estimated_margin_required *= 1.10
+                        ) / leverage_actual
+                        estimated_margin *= 1.10  # 10% buffer
 
                         logger.info(
                             f"[MARGIN CHECK]\n"
                             f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
-                            f"  Required Margin:  ${estimated_margin_required:,.2f}\n"
+                            f"  Required Margin:  ${estimated_margin:,.2f}\n"
                             f"  Margin Level:     {account_info.margin_level:.2f}%"
                         )
 
-                        if estimated_margin_required > account_info.margin_free:
-                            logger.error(
-                                f"[MARGIN] ❌ INSUFFICIENT MARGIN!\n"
-                                f"  Need: ${estimated_margin_required:,.2f}\n"
-                                f"  Have: ${account_info.margin_free:,.2f}\n"
-                                f"  → Reducing position size to fit available margin"
-                            )
-
-                            # Recalculate volume to fit available margin
-                            max_volume_by_margin = (
-                                account_info.margin_free * 0.90 * leverage
+                        if estimated_margin > account_info.margin_free:
+                            # Reduce volume to fit
+                            max_volume = (
+                                account_info.margin_free * 0.90 * leverage_actual
                             ) / (contract_size * current_price)
-                            max_volume_by_margin = (
-                                round(max_volume_by_margin / volume_step) * volume_step
-                            )
+                            max_volume = round(max_volume / volume_step) * volume_step
 
-                            if max_volume_by_margin < self.symbol_info.volume_min:
+                            if max_volume < self.symbol_info.volume_min:
                                 logger.error(
-                                    f"[MARGIN] ❌ Even minimum lot ({self.symbol_info.volume_min}) requires "
-                                    f"${(self.symbol_info.volume_min * contract_size * current_price) / leverage:.2f} margin\n"
+                                    f"[MARGIN] ❌ Insufficient margin\n"
                                     f"  Available: ${account_info.margin_free:.2f}\n"
                                     f"  → CANNOT OPEN POSITION"
                                 )
                                 return False
 
-                            # Use reduced volume
                             logger.warning(
-                                f"[MARGIN] Adjusted volume: {volume_lots:.2f} → {max_volume_by_margin:.2f} lots"
+                                f"[MARGIN] Adjusted volume: {volume_lots:.2f} → {max_volume:.2f}"
                             )
-                            volume_lots = max_volume_by_margin
+                            volume_lots = max_volume
                             actual_usd = volume_lots * current_price * contract_size
 
                 except Exception as e:
-                    logger.warning(f"[MARGIN] Pre-flight check warning: {e}")
+                    logger.warning(f"[MARGIN] Pre-flight warning: {e}")
 
-                # Now place the order with validated margin
+            # ================================================================
+            # STEP 8: Execute order on MT5
+            # ================================================================
+            mt5_ticket = None
+
+            if self.mode.lower() != "paper":
                 if not self._is_trading_allowed(symbol):
-                    logger.error(f"[MT5] Trading not allowed for {symbol}")
+                    logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
                     return False
 
                 tick = mt5.symbol_info_tick(symbol)
@@ -734,14 +582,10 @@ class MT5ExecutionHandler:
                 )
 
                 filling_mode = mt5.ORDER_FILLING_FOK
-                symbol_filling = self.symbol_info.filling_mode
-
-                if symbol_filling == 1:
+                if self.symbol_info.filling_mode == 1:
                     filling_mode = mt5.ORDER_FILLING_FOK
-                elif symbol_filling == 2:
+                elif self.symbol_info.filling_mode == 2:
                     filling_mode = mt5.ORDER_FILLING_IOC
-                elif symbol_filling == 3:
-                    filling_mode = mt5.ORDER_FILLING_FOK
 
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
@@ -749,11 +593,11 @@ class MT5ExecutionHandler:
                     "volume": volume_lots,
                     "type": order_type,
                     "price": execution_price,
-                    "sl": 0.0,
+                    "sl": 0.0,  # VTM will manage
                     "tp": 0.0,
                     "deviation": 20,
                     "magic": 234000,
-                    "comment": f"Sig_{signal}_{asset}",
+                    "comment": f"Sig_{signal}_{asset}_{trade_type}",
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": filling_mode,
                 }
@@ -762,12 +606,12 @@ class MT5ExecutionHandler:
 
                 if result is None:
                     last_error = mt5.last_error()
-                    logger.error(f"[MT5] Order Failed: No result. Error: {last_error}")
+                    logger.error(f"[MT5] ❌ Order Failed: {last_error}")
                     return False
 
                 if result.retcode != mt5.TRADE_RETCODE_DONE:
                     logger.error(
-                        f"[MT5] Rejected: {result.comment} (Code: {result.retcode})"
+                        f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
                     )
                     return False
 
@@ -779,14 +623,27 @@ class MT5ExecutionHandler:
                 execution_price = current_price
                 logger.info(f"[PAPER] Simulated: {mt5_ticket}")
 
-            # Add to Portfolio
+            # ================================================================
+            # STEP 9: Add to Portfolio with VTM (TACTICAL)
+            # ================================================================
+            if signal_details is None:
+                signal_details = {}
+
+            signal_details.update(
+                {
+                    "trade_type": trade_type,
+                    "strategic_risk_pct": risk_pct,
+                    "tactical_validation": "passed",
+                }
+            )
+
             success = self.portfolio_manager.add_position(
                 asset=asset,
                 symbol=symbol,
                 side=side,
                 entry_price=execution_price,
                 position_size_usd=actual_usd,
-                stop_loss=None,
+                stop_loss=None,  # VTM will calculate
                 take_profit=None,
                 trailing_stop_pct=None,
                 mt5_ticket=mt5_ticket,
@@ -798,19 +655,28 @@ class MT5ExecutionHandler:
                 is_futures=is_futures,
             )
 
-            if not success and self.mode.lower() != "paper" and mt5_ticket:
-                logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
-                self._emergency_close_mt5_position(symbol, volume_lots, order_type)
+            if not success:
+                if self.mode.lower() != "paper" and mt5_ticket:
+                    logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
+                    self._emergency_close_mt5_position(symbol, volume_lots, order_type)
                 return False
+
+            logger.info(
+                f"\n{'='*80}\n"
+                f"✅ {asset} {side.upper()} POSITION OPENED\n"
+                f"{'='*80}\n"
+                f"Strategic Risk: {risk_pct:.3%}\n"
+                f"Trade Type:     {trade_type}\n"
+                f"Position Size:  ${actual_usd:,.2f}\n"
+                f"Lots:           {volume_lots:.2f}\n"
+                f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
+                f"{'='*80}"
+            )
 
             return True
 
         except Exception as e:
-            logger.error(f"[MT5] Critical Error: {e}", exc_info=True)
-            return False
-
-        except Exception as e:
-            logger.error(f"[MT5] Critical Error: {e}", exc_info=True)
+            logger.error(f"[MT5] ❌ Critical Error: {e}", exc_info=True)
             return False
 
     def _is_market_open_for_closing(self, symbol: str) -> Tuple[bool, str]:
@@ -936,9 +802,11 @@ class MT5ExecutionHandler:
 
             long_positions = [p for p in existing_positions if p.side == "long"]
             short_positions = [p for p in existing_positions if p.side == "short"]
-            
+
             # ✨ NEW: Check if Asymmetric Hedging is enabled
-            allow_hedging = self.config.get("trading", {}).get("allow_simultaneous_long_short", True)
+            allow_hedging = self.config.get("trading", {}).get(
+                "allow_simultaneous_long_short", True
+            )
 
             logger.info(
                 f"\n{'='*80}\n"
@@ -989,10 +857,14 @@ class MT5ExecutionHandler:
 
                             if success:
                                 closed_count += 1
-                                logger.info(f"  ✓ Position {position.position_id} closed")
+                                logger.info(
+                                    f"  ✓ Position {position.position_id} closed"
+                                )
                             else:
                                 failed_count += 1
-                                logger.error(f"  ✗ Failed to close {position.position_id}")
+                                logger.error(
+                                    f"  ✗ Failed to close {position.position_id}"
+                                )
 
                         logger.info(
                             f"\n{'='*80}\n"
@@ -1085,10 +957,14 @@ class MT5ExecutionHandler:
 
                             if success:
                                 closed_count += 1
-                                logger.info(f"  ✓ Position {position.position_id} closed")
+                                logger.info(
+                                    f"  ✓ Position {position.position_id} closed"
+                                )
                             else:
                                 failed_count += 1
-                                logger.error(f"  ✗ Failed to close {position.position_id}")
+                                logger.error(
+                                    f"  ✗ Failed to close {position.position_id}"
+                                )
 
                         logger.info(
                             f"\n{'='*80}\n"
