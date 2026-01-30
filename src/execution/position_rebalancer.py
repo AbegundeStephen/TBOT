@@ -93,7 +93,7 @@ class PositionRebalancer:
                 side=close_side,
                 type=FUTURE_ORDER_TYPE_MARKET,
                 quantity=reduction,
-                reduceOnly=True  # Critical: Only reduce, don't reverse
+                #reduceOnly=True  # Critical: Only reduce, don't reverse
             )
             
             logger.info(
