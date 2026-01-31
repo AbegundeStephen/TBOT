@@ -237,11 +237,11 @@ class MultiTimeFrameRegimeDetector:
         
         # Governor thresholds
         self.governor_thresholds = {
-            "ema_slope_strong": 0.005,
+            "ema_slope_strong": 0.002,
             "ema_slope_moderate": 0.002,
             "ema_slope_negative": -0.002,
-            "v_shape_rsi_min": 60,
-            "v_shape_volume_min": 1.5,
+            "v_shape_rsi_min": 45,
+            "v_shape_volume_min": 1.25,
             "distance_danger_pct": 0.10,
             "min_required_bars": 220,  # ✨ NEW: Make configurable
         }
@@ -251,7 +251,7 @@ class MultiTimeFrameRegimeDetector:
             self.thresholds = {
                 "ema_bull": 0.15,
                 "ema_bear": -0.15,
-                "adx_strong": 25,
+                "adx_strong": 20,
                 "adx_weak": 20,
                 "rsi_overbought": 70,
                 "rsi_oversold": 30,
@@ -262,7 +262,7 @@ class MultiTimeFrameRegimeDetector:
             self.thresholds = {
                 "ema_bull": 0.10,
                 "ema_bear": -0.10,
-                "adx_strong": 25,
+                "adx_strong": 20,
                 "adx_weak": 20,
                 "rsi_overbought": 70,
                 "rsi_oversold": 30,

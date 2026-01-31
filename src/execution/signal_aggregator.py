@@ -65,7 +65,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ✨ NEW: Initialize filter thresholds
         self.filter_thresholds = {
             'volatility_gate': config.get('world_class_filters', {}).get(
-                'volatility_gate_threshold', 0.002
+                'volatility_gate_threshold', 0.0035
             ),
             'sniper_confidence': config.get('world_class_filters', {}).get(
                 'sniper_pattern_confidence', 0.60
@@ -155,7 +155,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "min_confidence_to_use": 0.08,
                 "min_signal_quality": 0.28,
                 "hold_contribution_pct": 0.20,
-                "opposition_penalty": 0.75,
+                "opposition_penalty": 0.40,
             }
         else:  # GOLD (Default)
             self.config = {
@@ -170,7 +170,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "min_confidence_to_use": 0.06,
                 "min_signal_quality": 0.25,
                 "hold_contribution_pct": 0.18,
-                "opposition_penalty": 0.75,
+                "opposition_penalty": 0.40,
             }
         
         # 2. Update with passed config (Merge instead of Overwrite)

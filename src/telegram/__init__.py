@@ -198,7 +198,7 @@ class TradingTelegramBot:
     Handles notifications and user commands properly
     """
 
-    def __init__(self, token: str, admin_ids: List[int], trading_bot):
+    def __init__(self, token: str, admin_ids: List[int], trading_bot, signal_monitor: SignalMonitoringIntegration):
         self.token = token
         self.admin_ids = admin_ids
         self.trading_bot = trading_bot
@@ -206,9 +206,7 @@ class TradingTelegramBot:
         self.is_running = False
 
         # Signal monitoring (keep existing)
-        from src.telegram import SignalMonitoringIntegration
-
-        self.signal_monitor = SignalMonitoringIntegration(max_history=100)
+        self.signal_monitor = signal_monitor
 
         # ✅ CRITICAL: Single persistent loop
         self._loop = None
@@ -933,35 +931,34 @@ class TradingTelegramBot:
                 ] or not self.trading_bot.config["assets"][asset].get("enabled", False):
                     continue
 
-                regime_data = self.trading_bot._current_regime_data.get(asset, {})
+                regime_data = self.trading_bot._current_regime_data.get(asset)
                 if not regime_data:
                     continue
 
                 emoji = "₿" if asset == "BTC" else "🥇"
                 msg += f"{emoji} *{asset} STATE*\n"
 
-                # ✅ FIXED: Replace underscores so Telegram Markdown doesn't crash (e.g., STRONG_BULL -> STRONG BULL)
-                current_regime = str(regime_data.get("regime", "NEUTRAL")).replace(
-                    "_", " "
-                )
-                is_bull = regime_data.get("is_bull", False)
+                # Short-term trend from consensus
+                current_regime = str(regime_data.consensus_regime.value).replace("_", " ")
+                is_bull = regime_data.bullish_score > regime_data.bearish_score
                 current_trend_icon = "📈 Bullish" if is_bull else "📉 Bearish"
                 if "NEUTRAL" in current_regime:
                     current_trend_icon = "⚖️ Neutral"
 
                 # 1. Governor State (The Daily 200 EMA)
-                if "governor" in regime_data and hasattr(
-                    regime_data["governor"], "regime"
-                ):
-                    gov = regime_data["governor"]
-                    gov_regime = "🚀 BULL" if gov.regime.value == "BULL" else "🐻 BEAR"
+                if hasattr(regime_data, "governor") and regime_data.governor:
+                    gov = regime_data.governor
+                    
+                    if "TREND" in gov.regime:
+                        gov_regime = "🚀 BULL"
+                    else:
+                        gov_regime = "🐻 BEAR"
 
-                    slope_icon = "📈 Positive" if gov.ema_slope > 0 else "📉 Negative"
-                    if -0.05 < gov.ema_slope < 0.05:
+                    slope_icon = "📈 Positive" if gov.slope_positive else "📉 Negative"
+                    if -0.002 < gov.ema_slope < 0.002: # Based on detector logic
                         slope_icon = "⚖️ Flat"
 
-                    # Get trade type and handle potential underscores safely
-                    trade_type = str(gov.trade_type.value).replace("_", "-")
+                    trade_type = gov.trade_type.value
 
                     if trade_type == "TREND":
                         type_icon = "📈 TREND (Trend-Aligned)"
@@ -969,7 +966,7 @@ class TradingTelegramBot:
                     elif trade_type == "SCALP":
                         type_icon = "⚡ SCALP (Counter-Trend Allowed)"
                         risk_mult = "1.0% Risk (0.67x Multiplier)"
-                    elif "V-SHAPE" in trade_type:
+                    elif "V_SHAPE" in trade_type:
                         type_icon = "🚀 V-SHAPE (Reversal Mode)"
                         risk_mult = "1.5% Risk (1.0x Multiplier)"
                     else:
@@ -977,19 +974,21 @@ class TradingTelegramBot:
                         risk_mult = "0% Risk"
 
                     # Safe rendering without underscores
-                    msg += (
-                        f"  Short-Term Trend: {current_trend_icon} ({current_regime})\n"
-                    )
+                    msg += f"  Short-Term Trend: {current_trend_icon} ({current_regime})\n"
                     msg += f"  Macro Regime:     {gov_regime} (1D 200 EMA)\n"
                     msg += f"  1D EMA Slope:     {slope_icon}\n"
+                    msg += f"  Current Price:    ${gov.current_price:,.2f}\n"
+                    msg += f"  200 EMA:          ${gov.ema_200:,.2f}\n"
+                    price_pos_str = "Above EMA" if gov.price_above_ema else "Below EMA"
+                    msg += f"  Price Position:   {price_pos_str} ({gov.distance_from_ema_pct:+.2%} away)\n"
                     msg += f"  Action Mode:      {type_icon}\n"
                     msg += f"  Risk Profile:     {risk_mult}\n\n"
-
                 else:
                     # Fallback if specific governor object is missing
                     msg += f"  Short-Term Trend: {current_trend_icon}\n"
-                    msg += f"  Regime:           {current_regime} ({regime_data.get('confidence', 0):.1%})\n"
-                    msg += f"  Risk Level:       {str(regime_data.get('risk_level', 'normal')).upper()}\n\n"
+                    msg += f"  Regime:           {current_regime} ({regime_data.consensus_confidence:.1%})\n"
+                    msg += f"  Risk Level:       {str(regime_data.risk_level).upper()}\n\n"
+                    msg += f"  (Governor data not available)\n\n"
 
             msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
 

@@ -27,6 +27,7 @@ sys.path.append(str(Path(__file__).parent))
 from src.execution.binance_handler import BinanceExecutionHandler
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.database.database_manager import TradingDatabaseManager
+from src.data.data_manager import DataManager # Import DataManager
 
 # Setup Logging
 logging.basicConfig(
@@ -191,7 +192,7 @@ def test_long_position(handler, current_price, config):
                 logger.info(f"  Side:        {pos.side.upper()}")
                 logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
                 logger.info(f"  Quantity:    {pos.quantity:.6f} BTC")
-                logger.info(f"  Size:        ${pos.position_size_usd:,.2f}")
+                logger.info(f"  Size:        ${(pos.quantity * pos.entry_price):,.2f}")
                 logger.info(f"  Futures:     {getattr(pos, 'is_futures', False)}")
                 logger.info(f"  Leverage:    {getattr(pos, 'leverage', 1)}x")
                 
@@ -307,6 +308,7 @@ def test_short_position(handler, current_price, config):
                 logger.info(f"  Side:        {pos.side.upper()}")
                 logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
                 logger.info(f"  Quantity:    {pos.quantity:.6f} BTC")
+                logger.info(f"  Size:        ${(pos.quantity * pos.entry_price):,.2f}")
                 logger.info(f"  Futures:     {getattr(pos, 'is_futures', False)}")
                 logger.info(f"  Leverage:    {getattr(pos, 'leverage', 1)}x")
                 
@@ -429,6 +431,15 @@ def run_full_test_suite(mode="paper", test_type="full"):
     except Exception as e:
         logger.warning(f"⚠️  Database init failed: {e}")
         db_manager = None
+        
+    # Initialize DataManager
+    try:
+        data_manager = DataManager(config=config)
+        data_manager.initialize_binance() # Initialize its clients
+        logger.info("✅ Data Manager initialized")
+    except Exception as e:
+        logger.critical(f"❌ Data Manager failed: {e}")
+        return False
 
     # Initialize Binance Client
     if config["assets"]["BTC"].get("enable_futures", False):
@@ -487,7 +498,7 @@ def run_full_test_suite(mode="paper", test_type="full"):
             client=client,
             config=config,
             portfolio_manager=portfolio_manager,
-            data_manager=db_manager,
+            data_manager=data_manager, # Pass the correct DataManager
         )
         logger.info("✅ Binance Execution Handler initialized")
         

@@ -794,14 +794,15 @@ class BinanceExecutionHandler:
             # ================================================================
             risk_config = self.asset_config.get("risk", {})
             sl_pct = risk_config.get("stop_loss_pct", 0.02)
+            
+            # VTM PRE-FLIGHT FIX: Use tighter SL for TREND trades to meet R:R requirements
+            if trade_type == "TREND":
+                sl_pct = 0.015  # Use 1.5% SL to achieve ~2.0 R:R, satisfying VTM
 
             if side == "long":
                 initial_stop = current_price * (1 - sl_pct)
             else:
                 initial_stop = current_price * (1 + sl_pct)
-
-            if is_futures:
-                initial_stop = round(initial_stop, 2)
 
             # ================================================================
             # STEP 3: TACTICAL - VTM Pre-Flight Validation
@@ -958,6 +959,7 @@ class BinanceExecutionHandler:
                             "high": df["high"].values,
                             "low": df["low"].values,
                             "close": df["close"].values,
+                            "volume": df["volume"].values,
                         }
                 except Exception as e:
                     logger.warning(f"[VTM] ⚠️ OHLC fetch failed: {e}")
@@ -1023,67 +1025,56 @@ class BinanceExecutionHandler:
     def _close_position(
         self, position, current_price: float, asset_name: str, reason: str
     ) -> bool:
-        """Close LONG or SHORT position"""
+        """Close LONG or SHORT position using the correct API (Futures or Spot)."""
         try:
             side = position.side
             quantity = position.quantity
             order_id = position.binance_order_id
+            is_futures = getattr(position, 'is_futures', False)
 
-            logger.info(f"[CLOSE] Closing {side.upper()} ({reason})")
+            logger.info(f"[CLOSE] Closing {asset_name} {side.upper()} position ({reason}) | Futures: {is_futures}")
 
-            # Try Futures first
-            if hasattr(self, "futures_handler") and self.futures_handler:
+            # --- Case 1: Futures Position ---
+            if is_futures:
+                if not self.futures_handler:
+                    logger.error("[FUTURES] Cannot close: Futures handler not available.")
+                    return False
                 try:
                     if side == "long":
-                        success = self.futures_handler.close_long_position(
-                            quantity=quantity, order_id=order_id
-                        )
-                    else:
-                        success = self.futures_handler.close_short_position(
-                            quantity=quantity, order_id=order_id
-                        )
-
+                        success = self.futures_handler.close_long_position(quantity=quantity, order_id=order_id)
+                    else: # short
+                        success = self.futures_handler.close_short_position(quantity=quantity, order_id=order_id)
+                    
                     if success:
-                        logger.info(f"[FUTURES] ✓ {side.upper()} closed")
+                        logger.info(f"[FUTURES] ✓ Close order for {side.upper()} position succeeded.")
                     else:
-                        success = False
-
+                        logger.error(f"[FUTURES] ❌ Close order for {side.upper()} position failed.")
+                    return success
                 except Exception as e:
-                    logger.warning(f"[FUTURES] Error: {e}")
-                    success = False
+                    logger.error(f"[FUTURES] ❌ Exception during close: {e}", exc_info=True)
+                    return False
 
-            # Fallback to spot
-            if not hasattr(self, "futures_handler") or not success:
-                if not self.is_paper_mode:
-                    try:
-                        if side == "long":
-                            self.client.order_market_sell(
-                                symbol=self.symbol, quantity=quantity
-                            )
-                            success = True
-                        else:
-                            logger.error("[SPOT] SHORT requires Futures")
-                            success = False
-                    except Exception as e:
-                        logger.error(f"[SPOT] Error: {e}")
-                        success = False
-                else:
-                    logger.info(f"[PAPER] Simulated close: {order_id}")
-                    success = True
-
-            # Close in portfolio
-            if success:
-                trade_result = self.portfolio_manager.close_position(
-                    position_id=position.position_id,
-                    exit_price=current_price,
-                    reason=reason,
-                )
-                return trade_result is not None
-
-            return False
+            # --- Case 2: Spot Position ---
+            else:
+                if self.is_paper_mode:
+                    logger.info(f"[PAPER] Simulated close for spot position: {order_id}")
+                    return True
+                
+                try:
+                    if side == "long":
+                        # To close a long spot position, you sell the asset
+                        self.client.order_market_sell(symbol=self.symbol, quantity=quantity)
+                        logger.info(f"[SPOT] ✓ Market sell order to close long position was successful.")
+                        return True
+                    else: # short
+                        logger.error("[SPOT] ❌ Cannot close short position on Spot market. Requires Futures.")
+                        return False
+                except Exception as e:
+                    logger.error(f"[SPOT] ❌ Exception during close: {e}", exc_info=True)
+                    return False
 
         except Exception as e:
-            logger.error(f"[CLOSE] Error: {e}", exc_info=True)
+            logger.error(f"[CLOSE] Unhandled error in _close_position: {e}", exc_info=True)
             return False
 
     def check_and_update_positions_VTM(self, asset_name: str = "BTC"):
@@ -1146,136 +1137,54 @@ class BinanceExecutionHandler:
         self, asset_name: str = "BTC", symbol: str = None
     ) -> bool:
         """
-        ✅ FIXED: Sync portfolio with Binance (Futures-First + Short Support)
-
-        Priority Logic:
-        1. Check Futures API (supports LONG + SHORT)
-        2. Fall back to Spot ONLY if Futures is unavailable
-        3. Never mix Futures and Spot positions
+        ✅ REFACTORED: Syncs portfolio with Binance using full reconciliation.
+        Handles multiple simultaneous positions (e.g., hedge mode).
         """
         if symbol is None:
             symbol = self.symbol
+        
+        if self.mode == 'paper':
+            logger.info("[SYNC] Sync disabled in paper mode.")
+            return True
+
+        if not self.futures_handler:
+            logger.error("[SYNC] Futures handler not available, cannot sync.")
+            return False
+
+        logger.info(f"[SYNC] Starting full position reconciliation for {asset_name}...")
 
         try:
-            logger.info(f"[SYNC] Starting position sync for {asset_name}...")
-
-            # ============================================================
-            # STEP 1: Get Portfolio Positions
-            # ============================================================
+            # 1. Get current state from Portfolio and Binance
             portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
-            portfolio_total_qty = sum(pos.quantity for pos in portfolio_positions)
+            portfolio_map = {p.side: p for p in portfolio_positions}
 
-            # Determine portfolio side(s)
-            portfolio_side = None
-            if portfolio_positions:
-                longs = sum(1 for p in portfolio_positions if p.side == "long")
-                shorts = sum(1 for p in portfolio_positions if p.side == "short")
-                if longs > 0 and shorts == 0:
-                    portfolio_side = "long"
-                elif shorts > 0 and longs == 0:
-                    portfolio_side = "short"
-                elif longs > 0 and shorts > 0:
-                    portfolio_side = "mixed"
+            binance_positions = self.futures_handler.get_all_positions_info()
+            binance_map = {p['side']: p for p in binance_positions}
+            
+            logger.info(f"[SYNC] State Found: Portfolio({list(portfolio_map.keys())}) vs Binance({list(binance_map.keys())})")
 
-            # ============================================================
-            # STEP 2: Get Binance Position (Futures-First)
-            # ============================================================
-            binance_qty = 0.0
-            binance_side = None  # "long", "short", or None
-
-            # ✅ PRIORITY 1: Check Futures API
-            if hasattr(self, "futures_handler") and self.futures_handler:
-                try:
-                    pos_info = self.futures_handler.get_position_info()
-
-                    if pos_info:
-                        pos_amt = float(pos_info.get("positionAmt", 0))
-                        binance_qty = abs(pos_amt)
-
-                        if pos_amt > 0:
-                            binance_side = "long"
-                        elif pos_amt < 0:
-                            binance_side = "short"
-
-                        if binance_qty > 0:
-                            logger.info(
-                                f"[SYNC] ✅ Futures Position Detected:\n"
-                                f"  Amount: {pos_amt:+.8f} BTC\n"
-                                f"  Side:   {binance_side.upper()}\n"
-                                f"  Entry:  ${float(pos_info.get('entryPrice', 0)):,.2f}\n"
-                                f"  P&L:    ${float(pos_info.get('unRealizedProfit', 0)):,.2f}"
-                            )
-
-                            # ✅ CRITICAL: Mark that we're using Futures data
-                            using_futures = True
-                        else:
-                            logger.info(f"[SYNC] No Futures position for {asset_name}")
-                            using_futures = True  # Still checked Futures, just empty
-                    else:
-                        logger.info(f"[SYNC] No Futures position info available")
-                        using_futures = True
-
-                except Exception as e:
-                    logger.warning(f"[SYNC] Futures API error: {e}")
-                    logger.info(f"[SYNC] Falling back to Spot balance check...")
-                    using_futures = False
-            else:
-                logger.info(f"[SYNC] Futures handler not available, using Spot")
-                using_futures = False
-
-            # ✅ FALLBACK: Check Spot Balance (ONLY if Futures unavailable)
-            if not using_futures:
-                logger.warning(
-                    f"[SYNC] ⚠️  USING SPOT FALLBACK\n"
-                    f"  This mode does NOT support SHORT positions!\n"
-                    f"  Enable Futures handler for full LONG+SHORT support."
-                )
-
-                account = self.client.get_account()
-                for balance in account["balances"]:
-                    if balance["asset"] == asset_name:  # e.g., "BTC"
-                        qty = float(balance["free"]) + float(balance["locked"])
-                        if qty > 0:
-                            binance_qty = qty
-                            binance_side = "long"  # Spot is always long
-                            logger.info(
-                                f"[SYNC] Detected Spot Balance: {binance_qty:.8f} {asset_name}"
-                            )
-                        break
-
-            # ============================================================
-            # Get Current Price
-            # ============================================================
             current_price = self.get_current_price(symbol)
-            MIN_QTY_THRESHOLD = 0.0001
+            if not current_price:
+                logger.error("[SYNC] Could not fetch current price. Aborting sync.")
+                return False
 
-            # ================================================================
-            # SCENARIO 1: Binance has Position, Portfolio Empty → IMPORT
-            # ================================================================
-            if binance_qty > MIN_QTY_THRESHOLD and not portfolio_positions:
-                import_enabled = bool(
-                    self.config.get("portfolio", {}).get(
-                        "import_existing_positions", False
-                    )
-                )
-
-                if import_enabled and binance_side:
-                    logger.info(
-                        f"[SYNC] Found {binance_side.upper()} position of {binance_qty:.8f} {asset_name}\n"
-                        f"  Source: {'Futures' if using_futures else 'Spot'}\n"
-                        f"  → Importing into Portfolio with VTM support..."
-                    )
-
-                    # Fetch OHLC for VTM
+            # 2. Reconcile: Binance -> Portfolio (Import new positions)
+            for side, binance_pos in binance_map.items():
+                if side not in portfolio_map:
+                    logger.warning(f"[SYNC] ⚠️ Found position on Binance not in portfolio: {side.upper()}. Importing...")
+                    
+                    pos_amt = abs(float(binance_pos.get("positionAmt", 0)))
+                    entry_price = float(binance_pos.get("entryPrice", current_price))
+                    position_size_usd = pos_amt * entry_price
+                    
+                    # Fetch OHLC data for VTM
                     ohlc_data = None
                     try:
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10)
                         df = self.data_manager.fetch_binance_data(
                             symbol=symbol,
-                            interval=self.config["assets"][asset_name].get(
-                                "interval", "1h"
-                            ),
+                            interval=self.config["assets"][asset_name].get("interval", "1h"),
                             start_date=start_time.strftime("%Y-%m-%d"),
                             end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                         )
@@ -1284,135 +1193,48 @@ class BinanceExecutionHandler:
                                 "high": df["high"].values,
                                 "low": df["low"].values,
                                 "close": df["close"].values,
+                                "volume": df["volume"].values,
                             }
                     except Exception as e:
-                        logger.error(f"[VTM] Failed to fetch OHLC: {e}")
-
-                    # Generate signal details
-                    signal_details = {
-                        "imported": True,
-                        "import_time": datetime.now().isoformat(),
-                        "source": "futures" if using_futures else "spot",
-                        "aggregator_mode": "unknown",
-                        "reasoning": f"{asset_name} {binance_side} position imported from Binance",
-                    }
+                        logger.error(f"[VTM] Failed to fetch OHLC for import: {e}")
 
                     # Add to portfolio
-                    position_size_usd = binance_qty * current_price
                     success = self.portfolio_manager.add_position(
                         asset=asset_name,
                         symbol=symbol,
-                        side=binance_side,
-                        entry_price=current_price,
+                        side=side,
+                        entry_price=entry_price,
                         position_size_usd=position_size_usd,
-                        stop_loss=None,
-                        take_profit=None,
-                        trailing_stop_pct=self.config["assets"][asset_name]
-                        .get("risk", {})
-                        .get("trailing_stop_pct"),
-                        binance_order_id=None,
+                        stop_loss=None, take_profit=None, trailing_stop_pct=None,
+                        binance_order_id=None, # No order ID for imported position
                         ohlc_data=ohlc_data,
                         use_dynamic_management=True,
-                        signal_details=signal_details,
-                        is_futures=using_futures,  # ✅ Track data source
+                        signal_details={"source": "sync_import"},
+                        is_futures=True,
                     )
-
                     if success:
-                        logger.info(
-                            f"[SYNC] ✅ Imported {binance_qty:.8f} {asset_name} as {binance_side.upper()}\n"
-                            f"  Source: {'Futures' if using_futures else 'Spot'}\n"
-                            f"  Value:  ${position_size_usd:,.2f}"
-                        )
-                        return True
+                        logger.info(f"[SYNC] ✅ Successfully imported {side.upper()} position.")
                     else:
-                        logger.error(f"[SYNC] ❌ Failed to import position")
-                        return False
-                else:
-                    logger.info(f"[SYNC] Import disabled or invalid side. Ignoring.")
-                    return True
+                        logger.error(f"[SYNC] ❌ Failed to import {side.upper()} position.")
 
-            # ================================================================
-            # SCENARIO 2: Portfolio has Positions, Binance Empty → CLOSE ALL
-            # ================================================================
-            if portfolio_positions and binance_qty <= MIN_QTY_THRESHOLD:
-                logger.warning(
-                    f"[SYNC] ⚠️  DESYNC DETECTED!\n"
-                    f"  Portfolio: {len(portfolio_positions)} position(s)\n"
-                    f"  Binance:   Empty\n"
-                    f"  → Closing portfolio positions (likely closed manually)"
-                )
-
-                for position in portfolio_positions:
-                    self.portfolio_manager.close_position(
-                        position_id=position.position_id,
-                        exit_price=current_price,
-                        reason="sync_missing_binance",
-                    )
-                return True
-
-            # ================================================================
-            # SCENARIO 3: Both Have Positions → VALIDATE
-            # ================================================================
-            if portfolio_positions and binance_qty > MIN_QTY_THRESHOLD:
-                # Check 1: Side Mismatch (Critical for Futures)
-                if binance_side != portfolio_side and portfolio_side != "mixed":
-                    logger.error(
-                        f"[SYNC] 🚨 CRITICAL SIDE MISMATCH!\n"
-                        f"  Binance:   {binance_side.upper()}\n"
-                        f"  Portfolio: {portfolio_side.upper()}\n"
-                        f"  → This should NEVER happen with Futures!\n"
-                        f"  → Closing portfolio to resync..."
-                    )
-
-                    for position in portfolio_positions:
-                        self.portfolio_manager.close_position(
-                            position_id=position.position_id,
-                            exit_price=current_price,
-                            reason="sync_critical_side_mismatch",
-                        )
-                    return True
-
-                # Check 2: Quantity Mismatch
-                qty_diff = abs(binance_qty - portfolio_total_qty)
-                qty_diff_pct = (qty_diff / binance_qty * 100) if binance_qty > 0 else 0
-
-                if qty_diff_pct > 10.0:  # Allow 10% variance
+            # 3. Reconcile: Portfolio -> Binance (Close desynced positions)
+            for side, portfolio_pos in portfolio_map.items():
+                if side not in binance_map:
                     logger.warning(
-                        f"[SYNC] ⚠️  QUANTITY MISMATCH (>10%):\n"
-                        f"  Binance:   {binance_qty:.8f}\n"
-                        f"  Portfolio: {portfolio_total_qty:.8f}\n"
-                        f"  Diff:      {qty_diff_pct:.2f}%\n"
-                        f"  → Closing portfolio to resync..."
+                        f"[SYNC] ⚠️ Found position in portfolio not on Binance: {side.upper()} "
+                        f"(ID: {portfolio_pos.position_id}). Closing locally."
                     )
-
-                    for position in portfolio_positions:
-                        self.portfolio_manager.close_position(
-                            position_id=position.position_id,
-                            exit_price=current_price,
-                            reason="sync_quantity_mismatch",
-                        )
-                    return True
-
-                else:
-                    logger.info(
-                        f"[SYNC] ✅ Positions in sync\n"
-                        f"  Side: {binance_side.upper()}\n"
-                        f"  Qty:  {binance_qty:.6f} BTC\n"
-                        f"  Diff: {qty_diff_pct:.2f}%"
+                    self.portfolio_manager.close_position(
+                        position_id=portfolio_pos.position_id,
+                        exit_price=current_price,
+                        reason="sync_desync_from_exchange",
                     )
-
-                    # Verify VTM is active
-                    self._verify_vtm_status_after_sync(asset_name)
-                    return True
-
-            # ================================================================
-            # SCENARIO 4: Both Empty → OK
-            # ================================================================
-            logger.info(f"[SYNC] ✅ No {asset_name} positions detected (Clean state)")
+            
+            logger.info("[SYNC] Reconciliation complete.")
             return True
 
         except Exception as e:
-            logger.error(f"[SYNC] Error: {e}", exc_info=True)
+            logger.error(f"[SYNC] Critical error during reconciliation: {e}", exc_info=True)
             return False
 
     def _sync_futures_positions(self, asset_name: str, symbol: str) -> bool:

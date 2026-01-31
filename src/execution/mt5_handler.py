@@ -444,6 +444,7 @@ class MT5ExecutionHandler:
                             "high": df["high"].values,
                             "low": df["low"].values,
                             "close": df["close"].values,
+                            "volume": df["volume"].values,
                         }
                         logger.info(
                             f"[VTM] ✓ Fetched {len(df)} bars for dynamic management"
@@ -571,57 +572,51 @@ class MT5ExecutionHandler:
             # ================================================================
             mt5_ticket = None
 
-            if self.mode.lower() != "paper":
-                if not self._is_trading_allowed(symbol):
-                    logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
-                    return False
+            if not self._is_trading_allowed(symbol):
+                logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
+                return False
 
-                tick = mt5.symbol_info_tick(symbol)
-                execution_price = (
-                    tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-                )
+            tick = mt5.symbol_info_tick(symbol)
+            execution_price = (
+                tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+            )
 
+            filling_mode = mt5.ORDER_FILLING_FOK
+            if self.symbol_info.filling_mode == 1:
                 filling_mode = mt5.ORDER_FILLING_FOK
-                if self.symbol_info.filling_mode == 1:
-                    filling_mode = mt5.ORDER_FILLING_FOK
-                elif self.symbol_info.filling_mode == 2:
-                    filling_mode = mt5.ORDER_FILLING_IOC
+            elif self.symbol_info.filling_mode == 2:
+                filling_mode = mt5.ORDER_FILLING_IOC
 
-                request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": volume_lots,
-                    "type": order_type,
-                    "price": execution_price,
-                    "sl": 0.0,  # VTM will manage
-                    "tp": 0.0,
-                    "deviation": 20,
-                    "magic": 234000,
-                    "comment": f"Sig_{signal}_{asset}_{trade_type}",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": filling_mode,
-                }
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume_lots,
+                "type": order_type,
+                "price": execution_price,
+                "sl": 0.0,  # VTM will manage
+                "tp": 0.0,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": f"Sig_{signal}_{asset}_{trade_type}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
 
-                result = mt5.order_send(request)
+            result = mt5.order_send(request)
 
-                if result is None:
-                    last_error = mt5.last_error()
-                    logger.error(f"[MT5] ❌ Order Failed: {last_error}")
-                    return False
+            if result is None:
+                last_error = mt5.last_error()
+                logger.error(f"[MT5] ❌ Order Failed: {last_error}")
+                return False
 
-                if result.retcode != mt5.TRADE_RETCODE_DONE:
-                    logger.error(
-                        f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
-                    )
-                    return False
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                logger.error(
+                    f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
+                )
+                return False
 
-                mt5_ticket = result.order
-                logger.info(f"[MT5] ✓ {side.upper()} order placed: #{mt5_ticket}")
-
-            else:
-                mt5_ticket = f"PAPER_{int(datetime.now().timestamp())}"
-                execution_price = current_price
-                logger.info(f"[PAPER] Simulated: {mt5_ticket}")
+            mt5_ticket = result.order
+            logger.info(f"[MT5] ✓ {side.upper()} order placed: #{mt5_ticket}")
 
             # ================================================================
             # STEP 9: Add to Portfolio with VTM (TACTICAL)
@@ -1163,22 +1158,13 @@ class MT5ExecutionHandler:
 
             # Close on MT5 first (if live mode)
             mt5_closed = False
-            if self.mode.lower() != "paper" and mt5_ticket:
-                mt5_closed = self._close_mt5_order(mt5_ticket, asset_name, side)
+            if position.mt5_ticket:
+                mt5_closed = self._close_mt5_order(position.mt5_ticket, asset_name, position.side)
             else:
-                mt5_closed = True  # Paper mode or no ticket
+                mt5_closed = True  # No MT5 ticket, so no need to close on exchange
 
-            # Close in portfolio manager
-            trade_result = self.portfolio_manager.close_position(
-                position_id=position_id, exit_price=current_price, reason=reason
-            )
-
-            if trade_result and mt5_closed:
-                logger.info(f"  ✓ Position {position_id} closed successfully")
-                return True
-            else:
-                logger.error(f"  ✗ Failed to close position {position_id}")
-                return False
+            # Return status of MT5 closure
+            return mt5_closed
 
         except Exception as e:
             logger.error(f"Error closing position: {e}", exc_info=True)
@@ -1702,6 +1688,7 @@ class MT5ExecutionHandler:
                                 "high": df["high"].values,
                                 "low": df["low"].values,
                                 "close": df["close"].values,
+                                "volume": df["volume"].values,
                             }
                             logger.info(
                                 f"[VTM] ✅ Fetched {len(df)} bars for dynamic management"

@@ -27,8 +27,8 @@ class EMAStrategy(BaseStrategy):
         self.slow_period = config.get("ema_slow", 100)  # Default to 100 for GOLD
 
         # Signal thresholds (relaxed for GOLD)
-        self.min_distance_pct = config.get("min_distance_pct", 0.0002)  # 0.0002% for GOLD
-        self.min_return_threshold = config.get("min_return_threshold", 0.0005)  # 0.05% for GOLD
+        self.min_distance_pct = config.get("min_distance_pct", 0.001)  # 0.001%
+        self.min_return_threshold = config.get("min_return_threshold", 0.0025)  # 0.25%
         self.min_score_threshold = config.get("min_conditions", 3)  # Lowered for GOLD
 
         # Filters
@@ -40,7 +40,7 @@ class EMAStrategy(BaseStrategy):
         self.use_4h_context = config.get("use_4h_context", True)
         self.require_4h_alignment = config.get("require_4h_alignment", False)
         self.h4_trend_weight = config.get("h4_trend_weight", 1.5)
-        self.h4_counter_penalty = config.get("h4_counter_penalty", 0.75)  # Reduced from 1.5
+        self.h4_counter_penalty = config.get("h4_counter_penalty", 1.5)  # Strict enforcement
 
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  EMA Fast: {self.fast_period}, Slow: {self.slow_period}")

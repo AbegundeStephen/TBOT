@@ -35,8 +35,8 @@ class MeanReversionStrategy(BaseStrategy):
 
         # Thresholds - VERY conservative
         self.rsi_overbought = config.get("rsi_overbought", 64)
-        self.rsi_oversold = config.get("rsi_oversold", 25)
-        self.bb_lower_threshold = config.get("bb_lower_threshold", 0.25)
+        self.rsi_oversold = config.get("rsi_oversold", 35)
+        self.bb_lower_threshold = config.get("bb_lower_threshold", 0.35)
         self.bb_upper_threshold = config.get("bb_upper_threshold", 0.70)
 
         # Strict thresholds

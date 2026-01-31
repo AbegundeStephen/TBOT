@@ -73,7 +73,7 @@ from src.portfolio.hedging_support import (
 import pickle
 
 # Import Telegram bot
-from src.telegram import TradingTelegramBot
+from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
 from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
@@ -150,6 +150,7 @@ class TradingBot:
         self.portfolio_manager = None
         self.data_manager_telegram = ThreadSafeBotDataManager(max_cache_age=10)
         self.db_manager = None  # ✨ Initialize BEFORE portfolio
+        self.signal_monitor = SignalMonitoringIntegration(max_history=100) # MOVED HERE
 
         # Handler instances
         self.binance_handler = None
@@ -521,7 +522,8 @@ class TradingBot:
             self.telegram_bot = TradingTelegramBot(
                 token=token, 
                 admin_ids=admin_ids, 
-                trading_bot=self
+                trading_bot=self,
+                signal_monitor=self.signal_monitor
             )
             
             # ✅ NEW: Start dedicated loop immediately
@@ -3729,12 +3731,11 @@ class TradingBot:
             from telegram_config import TELEGRAM_CONFIG
             
             self.telegram_bot = TradingTelegramBot(
-                token=TELEGRAM_CONFIG["bot_token"],
-                admin_ids=TELEGRAM_CONFIG["admin_ids"],
-                trading_bot=self
-            )
-            
-            # ✅ CRITICAL: Don't call start_loop_thread here!
+                            token=TELEGRAM_CONFIG["bot_token"],
+                            admin_ids=TELEGRAM_CONFIG["admin_ids"],
+                            trading_bot=self,
+                            signal_monitor=self.signal_monitor
+                        )            # ✅ CRITICAL: Don't call start_loop_thread here!
             # Let _run_telegram_loop do it
             
             # ================================================================
