@@ -190,113 +190,23 @@ class BinanceFuturesHandler:
         stop_price: float,
         quantity: float,
     ) -> bool:
-        """
-        Places a STOP LOSS for a futures position.
-
-        LIVE:
-            - Uses Binance Futures Algo Order REST endpoint
-        PAPER / TEST:
-            - Skips Binance call
-            - Returns True (virtual SL handled internally)
-
-        Any failure in LIVE mode returns False
-        and MUST trigger emergency close upstream.
-        """
-
-        # ------------------------------------------------------------------
-        # MODE GUARD — Algo orders are NOT supported outside LIVE
-        # ------------------------------------------------------------------
-        mode = self.config["trading"]["mode"]
-        if mode != "live":
-            logger.warning(
-                "[STOP LOSS] Algo SL skipped — not supported in PAPER/TEST mode "
-                "(virtual SL assumed)"
-            )
-            return True
-
-        import time
-        import hmac
-        import hashlib
-        import requests
-        from urllib.parse import urlencode
-
-        try:
-            # ------------------------------------------------------------------
-            # SIDE RESOLUTION
-            # ------------------------------------------------------------------
-            order_side = "SELL" if side.upper() == "LONG" else "BUY"
-
-            timestamp = int(time.time() * 1000)
-
-            params = {
-                "symbol": self.symbol,
-                "side": order_side,
-                "positionSide": position_side,  # LONG / SHORT (hedge-safe)
-                "algoType": "STOP_LOSS",
-                "stopPrice": f"{stop_price:.2f}",
-                "quantity": f"{quantity:.3f}",
-                "workingType": "MARK_PRICE",
-                "timestamp": timestamp,
-            }
-
-            query_string = urlencode(params)
-            signature = hmac.new(
-                self.client.API_SECRET.encode("utf-8"),
-                query_string.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
-
-            headers = {
-                "X-MBX-APIKEY": self.client.API_KEY,
-            }
-
-            url = "https://fapi.binance.com/fapi/v1/algo/order"
-
-            response = requests.post(
-                url,
-                headers=headers,
-                params={**params, "signature": signature},
-                timeout=10,
-            )
-
-            # ------------------------------------------------------------------
-            # HARD RESPONSE VALIDATION (NO BLIND JSON PARSING)
-            # ------------------------------------------------------------------
-            if not response.text:
-                raise RuntimeError(
-                    f"Empty response from Binance " f"(status={response.status_code})"
+                """
+                [DISABLED]
+                This function is disabled because repeated tests have shown the Binance
+                Testnet API does not reliably support the required STOP_MARKET orders
+                with the necessary 'reduceOnly' parameter to ensure safety.
+        
+                The bot will now rely exclusively on the VeteranTradeManager (VTM) to
+                monitor prices and execute a market close if a stop loss is hit.
+                
+                This function will always return True to prevent the emergency close
+                logic from being triggered.
+                """
+                logger.warning(
+                    "[STOP LOSS]  DISABLED - Exchange-side stop-loss is disabled. "
+                    "VTM is responsible for all trade exits."
                 )
-
-            try:
-                data = response.json()
-            except Exception:
-                raise RuntimeError(
-                    f"Non-JSON response from Binance "
-                    f"(status={response.status_code}): "
-                    f"{response.text[:200]}"
-                )
-
-            if response.status_code != 200:
-                raise RuntimeError(f"Binance error {response.status_code}: {data}")
-
-            algo_id = data.get("algoId")
-            if not algo_id:
-                raise RuntimeError(f"Algo SL placed but algoId missing: {data}")
-
-            logger.info(
-                "[STOP LOSS] ✓ Algo SL ACTIVE\n"
-                f"  Side:       {side}\n"
-                f"  Position:   {position_side}\n"
-                f"  Stop:       {stop_price}\n"
-                f"  Quantity:   {quantity}\n"
-                f"  Algo ID:    {algo_id}"
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error("[STOP LOSS] ❌ Algo SL FAILED\n" f"  Reason: {str(e)}")
-            return False
+                return True
 
     def open_short_position(
         self, quantity: float, stop_loss: float = None, take_profit: float = None

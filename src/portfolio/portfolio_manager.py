@@ -28,6 +28,7 @@ class Position:
         entry_price: float,
         quantity: float,
         entry_time: datetime,
+        risk_config: dict,
         signal_details: dict = None,
         position_id: str = None,
         stop_loss: float = None,
@@ -139,6 +140,7 @@ class Position:
                     entry_price=entry_price,
                     side=side,
                     asset=asset,
+                    risk_config=risk_config,
                     high=ohlc_data["high"],
                     low=ohlc_data["low"],
                     close=ohlc_data["close"],
@@ -1389,6 +1391,8 @@ class PortfolioManager:
         # 3. CREATE POSITION OBJECT
         # ✅ VTM is initialized INSIDE Position.__init__() - don't do it here!
         # ============================================================================
+        risk_config = self.config.get("assets", {}).get(asset, {}).get("risk", {})
+        
         position = Position(
             asset=asset,
             symbol=symbol,
@@ -1396,6 +1400,7 @@ class PortfolioManager:
             entry_price=entry_price,
             quantity=quantity,
             entry_time=entry_time or datetime.now(),
+            risk_config=risk_config,
             signal_details=signal_details,
             stop_loss=stop_loss,  # May be None if VTM will calculate
             take_profit=take_profit,
