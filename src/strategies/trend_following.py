@@ -37,7 +37,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         # ADX parameters
         self.adx_period = config.get("adx_period", 14)
-        self.adx_threshold = config.get("adx_threshold", 15)
+        self.adx_threshold = config.get("adx_threshold", 20)
         self.require_adx = config.get("require_adx", False)
 
         # 4H context parameters
@@ -301,10 +301,10 @@ class TrendFollowingStrategy(BaseStrategy):
             # 1. MA Alignment (0-2 points)
             if sma_fast[i] > sma_slow[i]:
                 ma_separation = (sma_fast[i] - sma_slow[i]) / sma_slow[i]
-                bullish_score += 2.0 if ma_separation > 0.002 else 1.0
+                bullish_score += 2.0 if ma_separation > 0.001 else 1.0
             elif sma_fast[i] < sma_slow[i]:
                 ma_separation = (sma_slow[i] - sma_fast[i]) / sma_slow[i]
-                bearish_score += 2.0 if ma_separation > 0.002 else 1.0
+                bearish_score += 2.0 if ma_separation > 0.001 else 1.0
 
             # 2. MACD (0-1.5 points)
             if macd_hist[i] > 0:

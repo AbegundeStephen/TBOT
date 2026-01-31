@@ -31,11 +31,11 @@ class AssetProfile:
     BTC = {
         "name": "Bitcoin",
         "volatility": "high",
-        "min_stop_pct": 0.025,      # 2.5% minimum
+        "min_stop_pct": 0.008,      # 0.8% minimum (TIGHTENED FOR DYNAMIC ENTRY)
         "max_stop_pct": 0.06,       # 6% maximum
         "atr_multiplier": 1.8,
         "pivot_lookback": 30,
-        "partial_targets": [2.5, 4.5, 7.0],
+        "partial_targets": [1.5, 3.0, 5.0],  # BANK EARLY STRATEGY
         "partial_sizes": [0.45, 0.30, 0.25],
         "runner_trail_pct": 0.025,
         "time_stop_bars": 72,
@@ -45,11 +45,11 @@ class AssetProfile:
     GOLD = {
         "name": "Gold",
         "volatility": "medium",
-        "min_stop_pct": 0.012,      # 1.2% minimum
+        "min_stop_pct": 0.0025,     # 0.25% minimum (ULTRA-TIGHT FOR PRECISION)
         "max_stop_pct": 0.025,      # 2.5% maximum
         "atr_multiplier": 1.5,
         "pivot_lookback": 25,
-        "partial_targets": [2.5, 4.0, 6.0],
+        "partial_targets": [1.5, 2.5, 4.0],  # FASTER BANKING
         "partial_sizes": [0.45, 0.30, 0.25],
         "runner_trail_pct": 0.015,
         "time_stop_bars": 60,
@@ -136,7 +136,7 @@ def calculate_hybrid_targets(
     structure_levels: List[float],
     risk_multiples: List[float],
     partial_sizes: List[float],
-    min_rr: float = 2.0,
+    min_rr: float = 1.2,
 ) -> Tuple[List[float], List[float]]:
     """Calculate targets with structure awareness"""
     risk = abs(entry_price - stop_loss)
@@ -230,7 +230,7 @@ class VeteranTradeManager:
         stop_loss: float,
         trade_type: str = "TREND",
         asset: str = "BTC",
-        min_profit_viability: float = 0.005,  # 0.5% minimum
+        min_profit_viability: float = 0.0025,  # 0.25% minimum (STRICT FEE GATE)
     ) -> Tuple[bool, str]:
         """
         ✨ NEW: Pre-flight validation (BEFORE paying exchange fees)
@@ -252,7 +252,7 @@ class VeteranTradeManager:
                 min_rr = 1.5  # 1.5:1 minimum for scalps
             else:  # TREND
                 max_stop = profile["max_stop_pct"]
-                min_rr = 2.0  # 2:1 minimum for trends
+                min_rr = 1.49  # 1.49:1 minimum for trends
             
             # Calculate stop distance
             stop_distance = abs(entry_price - stop_loss)
@@ -304,8 +304,9 @@ class VeteranTradeManager:
         high: np.ndarray,
         low: np.ndarray,
         close: np.ndarray,
+        quantity: float,
+        volume: Optional[np.ndarray] = None,
         # ✨ NEW: External position size (from Portfolio Manager)
-        quantity: float,  
         # Legacy compatibility arguments
         signal_details: Dict = None,
         account_balance: float = None,
@@ -329,6 +330,7 @@ class VeteranTradeManager:
         self.high = high
         self.low = low
         self.close = close
+        self.volume = volume
         self.atr_period = atr_period
         self.signal_details = signal_details or {}
         self.trade_type = trade_type
@@ -408,6 +410,123 @@ class VeteranTradeManager:
         except Exception as e:
             logger.error(f"[VTM] ATR error: {e}")
             return self.entry_price * 0.02
+        
+    def check_promotion_to_runner(
+        self, 
+        current_price: float
+    ) -> bool:
+        """
+        ✨ ITERATION 3: Dynamic Promotion Logic
+        
+        After TP1 (1.5R) hits, check if trade should be promoted to Runner Mode.
+        
+        Criteria:
+        - Volume > 1.2x Average, OR
+        - Strong directional candle (close near high/low)
+        
+        Returns:
+            True if promotion triggered (delete TP2/TP3, activate runner)
+        """
+        # Only check if TP1 was just hit
+        if len(self.partials_hit) != 1:
+            return False
+        
+        # Already promoted
+        if self.runner_activated:
+            return False
+        
+        try:
+            # CRITERION 1: Volume Confirmation
+            volume_ratio = 1.0
+            if self.volume is not None and len(self.volume) > 20:
+                # Exclude current (incomplete) bar's volume
+                avg_vol = np.mean(self.volume[-21:-1]) 
+                current_vol = self.volume[-1]
+                if avg_vol > 0:
+                    volume_ratio = current_vol / avg_vol
+            
+            volume_strong = volume_ratio > 1.2
+            
+            # CRITERION 2: Strong Directional Candle
+            # Check if current price is in the "conviction zone" (top/bottom 20% of candle)
+            if len(self.high) > 0 and len(self.low) > 0:
+                latest_high = self.high[-1]
+                latest_low = self.low[-1]
+                candle_range = latest_high - latest_low
+                
+                if candle_range > 0:
+                    if self.side == "long":
+                        # For longs, check if closing near high
+                        distance_from_high = (latest_high - current_price) / candle_range
+                        candle_conviction = distance_from_high < 0.20
+                    else:
+                        # For shorts, check if closing near low
+                        distance_from_low = (current_price - latest_low) / candle_range
+                        candle_conviction = distance_from_low < 0.20
+                else:
+                    candle_conviction = False
+            else:
+                candle_conviction = False
+            
+            # PROMOTION DECISION
+            if volume_strong or candle_conviction:
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("🚀 TRADE PROMOTION TRIGGERED")
+                logger.info("=" * 70)
+                logger.info(f"  Volume Strong:  {'✓' if volume_strong else '✗'}")
+                logger.info(f"  Candle Conviction: {'✓' if candle_conviction else '✗'}")
+                logger.info(f"  Action: Deleting TP2/TP3, Activating Runner Mode")
+                logger.info("=" * 70)
+                logger.info("")
+                
+                # PROMOTE TO RUNNER
+                self.runner_activated = True
+                
+                # Delete TP2 and TP3 (keep only remaining position for runner)
+                if len(self.take_profit_levels) > 1:
+                    self.take_profit_levels = []  # Clear all targets
+                    self.partial_sizes = []  # Clear all partial sizes
+                
+                # Move stop to break-even immediately
+                if self.side == "long":
+                    self.current_stop_loss = max(
+                        self.current_stop_loss, 
+                        self.entry_price * 1.001
+                    )
+                else:
+                    self.current_stop_loss = min(
+                        self.current_stop_loss, 
+                        self.entry_price * 0.999
+                    )
+                
+                logger.info(f"[VTM] Stop moved to break-even: ${self.current_stop_loss:,.2f}")
+                
+                return True
+            
+            else:
+                logger.info("[VTM] TP1 hit, but promotion criteria not met")
+                logger.info(f"  Volume: {volume_ratio:.2f}x (need 1.2x)")
+                logger.info(f"  Candle Conviction: {'✓' if candle_conviction else '✗'}")
+                logger.info(f"  Keeping TP2/TP3, moving stop to break-even")
+                
+                # Keep TP2/TP3 but secure profit
+                if self.side == "long":
+                    self.current_stop_loss = max(
+                        self.current_stop_loss, 
+                        self.entry_price * 1.001
+                    )
+                else:
+                    self.current_stop_loss = min(
+                        self.current_stop_loss, 
+                        self.entry_price * 0.999
+                    )
+                
+                return False
+        
+        except Exception as e:
+            logger.error(f"[VTM] Promotion check error: {e}")
+            return False
 
     def _find_pivot_structure(self) -> Optional[float]:
         """Find market structure pivot for stop placement"""
@@ -637,11 +756,31 @@ class VeteranTradeManager:
                     pnl = abs(current_price - self.entry_price) / self.entry_price * 100
                     logger.info(f"💰 PARTIAL #{i+1}: +{pnl:.2f}%")
 
-                    if len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND":
-                        self.runner_activated = True
-                        logger.info(f"🏃 RUNNER ACTIVATED")
+                    # ✨ ITERATION 3: Check for Promotion after TP1
+                    if len(self.partials_hit) == 1 and self.trade_type == "TREND":
+                        # NOTE: Volume ratio should be passed from the calling context
+                        # For now, we'll trigger promotion check without volume
+                        # This will be enhanced when integrated with execution handlers
+                        promotion_triggered = self.check_promotion_to_runner(
+                            current_price=current_price
+                        )
+                        
+                        if not promotion_triggered:
+                            # Promotion failed - secure profit by moving to break-even
+                            if not self.early_profit_locked:
+                                if self.side == "long":
+                                    self.current_stop_loss = max(self.current_stop_loss, self.entry_price * 1.001)
+                                else:
+                                    self.current_stop_loss = min(self.current_stop_loss, self.entry_price * 0.999)
+                                logger.info(f"🔒 Stop → break-even (TP2/TP3 remain)")
 
-                    if len(self.partials_hit) == 1 and not self.early_profit_locked:
+                    # Legacy runner activation (for multi-partial trades)
+                    elif len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND":
+                        self.runner_activated = True
+                        logger.info(f"🏃 RUNNER ACTIVATED (Legacy 2+ Partials)")
+
+                    # Standard break-even for non-TREND or after first partial
+                    elif len(self.partials_hit) == 1 and not self.early_profit_locked and self.trade_type != "TREND":
                         if self.side == "long":
                             self.current_stop_loss = max(self.current_stop_loss, self.entry_price * 1.001)
                         else:

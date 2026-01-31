@@ -77,8 +77,8 @@ class InstitutionalCouncilAggregator:
         # ✨ NEW: World-Class Filter Thresholds
         self.filter_thresholds = {
             "min_volatility_pct": self.config.get("risk_management", {}).get("min_volatility_pct", 0.002), # 0.2%
-            "min_sniper_conf": self.config.get("ai", {}).get("min_sniper_confidence", 0.60),
-            "min_profit_potential": self.config.get("risk_management", {}).get("min_profit_potential", 0.005) # 0.5%
+            "min_sniper_conf": self.config.get("ai", {}).get("min_sniper_confidence", 0.65),
+            "min_profit_potential": self.config.get("risk_management", {}).get("min_profit_potential", 0.0035) # 0.35%
         }
 
         # Dynamic threshold loading
@@ -135,7 +135,7 @@ class InstitutionalCouncilAggregator:
                 'rsi_bearish_zone': (35, 60),
                 'rsi_oversold_bonus': 30,
                 'rsi_overbought_bonus': 70,
-                'sr_proximity_pct': 0.015,  # 1.5%
+                'sr_proximity_pct': 0.0035,  # 0.35%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.60,
                 'macd_confirmation': True,
@@ -146,7 +146,7 @@ class InstitutionalCouncilAggregator:
                 'rsi_bearish_zone': (40, 65),
                 'rsi_oversold_bonus': 25,
                 'rsi_overbought_bonus': 75,
-                'sr_proximity_pct': 0.010,  # 1.0%
+                'sr_proximity_pct': 0.0035,  # 0.35%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
@@ -248,7 +248,7 @@ class InstitutionalCouncilAggregator:
             # Require the breakout candle to have a strong body (Impulse)
             body = abs(closes[-1] - df['open'].values[-1])
             candle_range = highs[-1] - lows[-1]
-            if candle_range == 0 or (body / candle_range) < 0.60:
+            if candle_range == 0 or (body / candle_range) < 0.35:
                 logger.info("[SNIPER] ❌ BLOCKED - Weak momentum candle")
                 return False
 
@@ -363,7 +363,7 @@ class InstitutionalCouncilAggregator:
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
-            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df)
+            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull)
             buy_explanations.append(momentum_exp['buy'])
             sell_explanations.append(momentum_exp['sell'])
             
@@ -708,7 +708,7 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[STRUCTURE] Error: {e}")
             return 0.0, 0.0, {'buy': "STRUCT: Error", 'sell': "STRUCT: Error"}
     
-    def _judge_momentum_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+    def _judge_momentum_bidirectional(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, float, Dict]:
         """
         JUDGE 3: MOMENTUM (Bidirectional)
         
@@ -723,7 +723,11 @@ class InstitutionalCouncilAggregator:
             rsi = features_mr.iloc[-1].get('rsi', 50)
             
             # Config values
-            bullish_min, bullish_max = self.config['rsi_bullish_zone']
+            if is_bull:
+                bullish_min, bullish_max = (50, 75)  # Shift up in trends
+            else:
+                bullish_min, bullish_max = self.config['rsi_bullish_zone']
+
             bearish_min, bearish_max = self.config['rsi_bearish_zone']
             oversold = self.config['rsi_oversold_bonus']
             overbought = self.config['rsi_overbought_bonus']

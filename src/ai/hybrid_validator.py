@@ -62,8 +62,8 @@ class HybridSignalValidator:
         analyst,
         sniper,
         pattern_id_map,
-        sr_threshold_pct=0.020,  #  2.5% instead of 0.5%
-        pattern_confidence_min=0.44,
+        sr_threshold_pct=0.0035,  # 0.35% instead of 2.5%
+        pattern_confidence_min=0.65,
         use_ai_validation=True,
         enable_adaptive_thresholds=True,
         strong_signal_bypass_threshold=0.85,
@@ -203,23 +203,7 @@ class HybridSignalValidator:
             logger.info(f"  Regime:     {signal_details.get('regime', 'N/A')}")
             logger.info("─" * 70)
 
-        # ============================================================
-        # LAYER 0: Strong Signal Bypass
-        # ============================================================
-        signal_quality = signal_details.get("signal_quality", 0)
-        if signal_quality >= self.strong_signal_bypass:
-            result = self._bypass_validation(
-                signal, signal_details, reason="strong_signal", quality=signal_quality
-            )
-            self.stats["bypassed_strong_signal"] += 1
-            self.strategy_stats[strategy]["approved"] += 1
 
-            if self.detailed_logging:
-                logger.info(
-                    f"  ✅ BYPASS: Strong signal quality ({signal_quality:.2%})"
-                )
-
-            return result
 
         # ============================================================
         # LAYER 1: Circuit Breaker Check

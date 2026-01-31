@@ -49,17 +49,17 @@ class DynamicPresetSelector:
         self.thresholds = {
             'BTC': {
                 # Volatility thresholds (ATR ratio)
-                'volatility_very_high': 2.0,      # Conservative trigger
+                'volatility_very_high': 3.0,      # Conservative trigger
                 'volatility_high': 1.5,            # Balanced max
                 'volatility_normal': 1.2,          # Aggressive max
                 
                 # Trend strength (ADX)
-                'adx_very_weak': 15,               # Conservative zone
+                'adx_very_weak': 20,               # Conservative zone
                 'adx_weak': 20,                    # Balanced min
                 'adx_moderate': 25,                # Aggressive min
                 
                 # Momentum thresholds (20-period %)
-                'momentum_strong_bull': 5.0,       # Strong uptrend
+                'momentum_strong_bull': 1.5,       # Strong uptrend
                 'momentum_bull': 2.0,              # Mild uptrend
                 'momentum_bear': -2.0,             # Mild downtrend
                 'momentum_strong_bear': -5.0,      # Strong downtrend
@@ -70,15 +70,15 @@ class DynamicPresetSelector:
             },
             'GOLD': {
                 # GOLD is less volatile than BTC - tighter ranges
-                'volatility_very_high': 1.8,
+                'volatility_very_high': 3.0,
                 'volatility_high': 1.4,
                 'volatility_normal': 1.15,
                 
-                'adx_very_weak': 12,
+                'adx_very_weak': 20,
                 'adx_weak': 18,
                 'adx_moderate': 23,
                 
-                'momentum_strong_bull': 3.0,
+                'momentum_strong_bull': 1.5,
                 'momentum_bull': 1.5,
                 'momentum_bear': -1.5,
                 'momentum_strong_bear': -3.0,

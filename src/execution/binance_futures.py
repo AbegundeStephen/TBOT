@@ -15,7 +15,7 @@ from binance.enums import (
     FUTURE_ORDER_TYPE_MARKET,
     FUTURE_ORDER_TYPE_LIMIT,
 )
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -524,8 +524,7 @@ class BinanceFuturesHandler:
                     side=close_side,
                     positionSide=position_side,
                     type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=quantity,
-                    # ✅ REMOVED: reduceOnly=True (not needed for hedge mode)
+                    quantity=quantity
                 )
 
                 logger.info(
@@ -643,6 +642,22 @@ class BinanceFuturesHandler:
         except Exception as e:
             logger.error(f"[FUTURES] Error getting position: {e}")
             return None
+
+    def get_all_positions_info(self) -> List[Dict]:
+        """Get ALL non-zero position information for the symbol."""
+        active_positions = []
+        try:
+            positions = self.client.futures_position_information(symbol=self.symbol)
+            for pos in positions:
+                if pos["symbol"] == self.symbol:
+                    pos_amt = float(pos.get("positionAmt", 0))
+                    if pos_amt != 0:
+                        pos["side"] = "long" if pos_amt > 0 else "short"
+                        active_positions.append(pos)
+            return active_positions
+        except Exception as e:
+            logger.error(f"[FUTURES] Error getting all positions: {e}")
+            return []
 
     def get_unrealized_pnl(self) -> float:
         """Get unrealized P&L for current position"""
