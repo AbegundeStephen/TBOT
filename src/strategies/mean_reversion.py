@@ -30,7 +30,7 @@ class MeanReversionStrategy(BaseStrategy):
         self.rsi_period = config.get("rsi_period", 14)
         self.stoch_k = config.get("stoch_k", 14)
         self.stoch_d = config.get("stoch_d", 3)
-        self.reversion_window = config.get("reversion_window", 5)
+        self.reversion_window = config.get("reversion_window", 3)
         self.asset = config.get("asset", "BTC")
 
         # Thresholds - VERY conservative

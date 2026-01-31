@@ -245,7 +245,7 @@ class MultiTimeFrameRegimeDetector:
             "ema_slope_negative": -0.002,
             "v_shape_rsi_min": 45,
             "v_shape_volume_min": 1.25,
-            "distance_danger_pct": 0.10,
+            "distance_danger_pct": 0.20,
             "min_required_bars": 220,  # ✨ NEW: Make configurable
         }
         
