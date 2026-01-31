@@ -407,8 +407,8 @@ class MT5ExecutionHandler:
             is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
                 entry_price=current_price,
                 stop_loss=initial_stop,
+                risk_config=risk_config,
                 trade_type=trade_type,
-                asset=asset,
             )
 
             if not is_valid:

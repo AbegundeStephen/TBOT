@@ -275,16 +275,16 @@ class HybridPositionSizer:
             if risk_pct is None:
                 logger.error("[RISK] No risk percentage provided!")
                 return 0.0, {"error": "missing_risk_budget"}
-            
+
             # Calculate position size from risk budget
             risk_amount = asset_balance * risk_pct
-            
+
             stop_distance = abs(entry_price - stop_loss_price)
             stop_distance_pct = stop_distance / entry_price
 
             if stop_distance_pct < 0.005:
                 stop_distance_pct = 0.005
-            
+
             target_position_size = risk_amount / stop_distance_pct
 
             # Apply Futures margin limits if applicable
@@ -297,7 +297,9 @@ class HybridPositionSizer:
                 if target_position_size > max_safe:
                     final_position_size = max_safe
                     was_margin_limited = True
-                    logger.warning(f"[MARGIN] Position reduced: ${final_position_size:,.2f}")
+                    logger.warning(
+                        f"[MARGIN] Position reduced: ${final_position_size:,.2f}"
+                    )
 
             # Apply asset max
             asset_cfg = self.config["assets"][asset]
@@ -354,9 +356,11 @@ class BinanceExecutionHandler:
             "max_positions_per_asset", 3
         )
         self.is_paper_mode = self.mode.lower() == "paper"
-        
+
         # ✨ NEW: Standardized Hedging Config
-        self.allow_hedging = self.trading_config.get("allow_simultaneous_long_short", True)
+        self.allow_hedging = self.trading_config.get(
+            "allow_simultaneous_long_short", True
+        )
 
         # ✅ STEP 1: Initialize Futures handler FIRST
         self.futures_handler = None
@@ -496,8 +500,8 @@ class BinanceExecutionHandler:
 
             trade_type = "TREND"
             if signal_details:
-                trade_type = signal_details.get('trade_type', 'TREND')
-            
+                trade_type = signal_details.get("trade_type", "TREND")
+
             existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
             long_positions = [p for p in existing_positions if p.side == "long"]
             short_positions = [p for p in existing_positions if p.side == "short"]
@@ -525,9 +529,11 @@ class BinanceExecutionHandler:
                     closed_count = 0
                     for i, position in enumerate(long_positions, 1):
                         logger.info(f"  Closing LONG position: {position.position_id}")
-                        if self._close_position(position, current_price, asset_name, "sell_signal"):
+                        if self._close_position(
+                            position, current_price, asset_name, "sell_signal"
+                        ):
                             closed_count += 1
-                
+
                 elif self.allow_hedging and long_positions:
                     logger.info(
                         f"\n[HEDGING] Keeping {len(long_positions)} LONG position(s) open "
@@ -541,7 +547,9 @@ class BinanceExecutionHandler:
                     # If hedging was enabled, we still have longs open, so return True
                     return True if (long_positions and self.allow_hedging) else False
 
-                logger.info(f"\n📉 SELL SIGNAL - Opening new SHORT position ({trade_type})")
+                logger.info(
+                    f"\n📉 SELL SIGNAL - Opening new SHORT position ({trade_type})"
+                )
 
                 return self._open_position(
                     signal=-1,
@@ -570,9 +578,11 @@ class BinanceExecutionHandler:
                     closed_count = 0
                     for i, position in enumerate(short_positions, 1):
                         logger.info(f"  Closing SHORT position: {position.position_id}")
-                        if self._close_position(position, current_price, asset_name, "buy_signal"):
+                        if self._close_position(
+                            position, current_price, asset_name, "buy_signal"
+                        ):
                             closed_count += 1
-                
+
                 elif self.allow_hedging and short_positions:
                     logger.info(
                         f"\n[HEDGING] Keeping {len(short_positions)} SHORT position(s) open "
@@ -585,7 +595,9 @@ class BinanceExecutionHandler:
                     logger.warning(f"[SKIP] Cannot open LONG: {reason}")
                     return True if (short_positions and self.allow_hedging) else False
 
-                logger.info(f"\n📈 BUY SIGNAL - Opening new LONG position ({trade_type})")
+                logger.info(
+                    f"\n📈 BUY SIGNAL - Opening new LONG position ({trade_type})"
+                )
 
                 return self._open_position(
                     signal=1,
@@ -612,8 +624,12 @@ class BinanceExecutionHandler:
                         position, current_price
                     )
                     if should_close:
-                        logger.info(f"[AUTO-CLOSE] {position.position_id}: {close_reason}")
-                        if self._close_position(position, current_price, asset_name, close_reason):
+                        logger.info(
+                            f"[AUTO-CLOSE] {position.position_id}: {close_reason}"
+                        )
+                        if self._close_position(
+                            position, current_price, asset_name, close_reason
+                        ):
                             positions_closed = True
 
                 return positions_closed
@@ -625,9 +641,7 @@ class BinanceExecutionHandler:
             return False
 
     def _calculate_asymmetric_risk(
-        self, 
-        trade_type: str, 
-        base_risk: float = 0.015
+        self, trade_type: str, base_risk: float = 0.015
     ) -> Tuple[float, Dict]:
         """Calculate risk based on trade type"""
         risk_profiles = {
@@ -650,13 +664,13 @@ class BinanceExecutionHandler:
                 "trailing_stop": 0.020,
             },
         }
-        
+
         profile = risk_profiles.get(trade_type, risk_profiles["TREND"])
         adjusted_risk = base_risk * profile["multiplier"]
-        
+
         logger.info(f"\n[RISK CALC] Trade Type: {trade_type}")
         logger.info(f"  Adjusted Risk: {adjusted_risk:.2%}")
-        
+
         return adjusted_risk, profile
 
     def _check_stop_loss_take_profit(
@@ -729,12 +743,12 @@ class BinanceExecutionHandler:
             return round(quantity, 5)
 
     @handle_errors(
-    component="binance_handler",
-    severity=ErrorSeverity.CRITICAL,
-    notify=True,
-    reraise=False,
-    default_return=False,
-)
+        component="binance_handler",
+        severity=ErrorSeverity.CRITICAL,
+        notify=True,
+        reraise=False,
+        default_return=False,
+    )
     def _open_position(
         self,
         signal: int,
@@ -754,12 +768,12 @@ class BinanceExecutionHandler:
         """
         try:
             side = "long" if signal == 1 else "short"
-            
+
             # Extract trade type from signal details
             trade_type = "TREND"  # Default
             if signal_details:
-                trade_type = signal_details.get('trade_type', 'TREND')
-            
+                trade_type = signal_details.get("trade_type", "TREND")
+
             is_futures = (
                 hasattr(self, "futures_handler")
                 and self.futures_handler is not None
@@ -774,27 +788,26 @@ class BinanceExecutionHandler:
             logger.info(f"\n{'='*80}")
             logger.info(f"[STRATEGIC] Requesting risk budget from Portfolio Manager")
             logger.info(f"{'='*80}")
-            
+
             risk_pct = self.portfolio_manager.get_risk_budget(
-                asset=asset_name,
-                strategy_type=trade_type
+                asset=asset_name, strategy_type=trade_type
             )
-            
+
             if risk_pct <= 0:
                 logger.error(
                     f"[STRATEGIC] ❌ Risk budget denied (0%)\n"
                     f"  → Trade rejected by Portfolio Manager"
                 )
                 return False
-            
+
             logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
-            
+
             # ================================================================
             # STEP 2: Calculate initial stop loss for validation
             # ================================================================
             risk_config = self.asset_config.get("risk", {})
             sl_pct = risk_config.get("stop_loss_pct", 0.02)
-            
+
             # VTM PRE-FLIGHT FIX: Use tighter SL for TREND trades to meet R:R requirements
             if trade_type == "TREND":
                 sl_pct = 0.015  # Use 1.5% SL to achieve ~2.0 R:R, satisfying VTM
@@ -810,14 +823,14 @@ class BinanceExecutionHandler:
             logger.info(f"\n{'='*80}")
             logger.info(f"[TACTICAL] VTM Pre-Flight Validation")
             logger.info(f"{'='*80}")
-            
+
             is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
                 entry_price=current_price,
                 stop_loss=initial_stop,
+                risk_config=risk_config,
                 trade_type=trade_type,
-                asset=asset_name
             )
-            
+
             if not is_valid:
                 logger.error(
                     f"[TACTICAL] ❌ Trade rejected by VTM\n"
@@ -825,7 +838,7 @@ class BinanceExecutionHandler:
                     f"  → Aborting before paying fees"
                 )
                 return False
-            
+
             logger.info(f"[TACTICAL] ✓ Trade validated by VTM")
 
             # ================================================================
@@ -834,20 +847,20 @@ class BinanceExecutionHandler:
             logger.info(f"\n{'='*80}")
             logger.info(f"[SIZING] Calculating position size")
             logger.info(f"{'='*80}")
-            
+
             # Get account balance
             account_balance = self.portfolio_manager.get_asset_balance(asset_name)
-            
+
             # Calculate risk amount
             risk_amount_usd = account_balance * risk_pct
-            
+
             # Calculate stop distance
             stop_distance = abs(current_price - initial_stop)
             stop_distance_pct = stop_distance / current_price
-            
+
             # Position size = Risk Amount / Stop Distance %
             position_size_usd = risk_amount_usd / stop_distance_pct
-            
+
             logger.info(
                 f"[SIZING] Calculation:\n"
                 f"  Account Balance: ${account_balance:,.2f}\n"
@@ -855,16 +868,20 @@ class BinanceExecutionHandler:
                 f"  Stop Distance:   {stop_distance_pct:.3%}\n"
                 f"  Position Size:   ${position_size_usd:,.2f}"
             )
-            
+
             if position_size_usd <= 0:
-                logger.error(f"[SIZING] ❌ Invalid position size: ${position_size_usd:.2f}")
+                logger.error(
+                    f"[SIZING] ❌ Invalid position size: ${position_size_usd:.2f}"
+                )
                 return False
 
             # Apply margin limits if futures
-            if is_futures and hasattr(self.sizer, 'margin_calculator'):
-                margin_info = self.sizer.margin_calculator.get_available_margin_info(asset_name)
-                max_safe = margin_info.get('max_safe_position_usd', position_size_usd)
-                
+            if is_futures and hasattr(self.sizer, "margin_calculator"):
+                margin_info = self.sizer.margin_calculator.get_available_margin_info(
+                    asset_name
+                )
+                max_safe = margin_info.get("max_safe_position_usd", position_size_usd)
+
                 if position_size_usd > max_safe:
                     logger.warning(
                         f"[MARGIN] Position reduced to fit margin:\n"
@@ -888,7 +905,9 @@ class BinanceExecutionHandler:
 
             MIN_BTC = 0.00001
             if quantity < MIN_BTC:
-                logger.warning(f"[SIZING] ❌ Quantity {quantity:.8f} below minimum {MIN_BTC}")
+                logger.warning(
+                    f"[SIZING] ❌ Quantity {quantity:.8f} below minimum {MIN_BTC}"
+                )
                 return False
 
             # ================================================================
@@ -913,7 +932,9 @@ class BinanceExecutionHandler:
 
                     if order:
                         order_id = order.get("orderId")
-                        logger.info(f"[FUTURES] ✓ {side.upper()} opened (Order: {order_id})")
+                        logger.info(
+                            f"[FUTURES] ✓ {side.upper()} opened (Order: {order_id})"
+                        )
                     else:
                         logger.error(f"[FUTURES] ❌ Failed to open {side.upper()}")
                         return False
@@ -970,12 +991,14 @@ class BinanceExecutionHandler:
             # Build complete signal details for VTM
             if signal_details is None:
                 signal_details = {}
-            
-            signal_details.update({
-                "trade_type": trade_type,
-                "strategic_risk_pct": risk_pct,
-                "tactical_validation": "passed"
-            })
+
+            signal_details.update(
+                {
+                    "trade_type": trade_type,
+                    "strategic_risk_pct": risk_pct,
+                    "tactical_validation": "passed",
+                }
+            )
 
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
@@ -1004,6 +1027,7 @@ class BinanceExecutionHandler:
                     f"Trade Type:     {trade_type}\n"
                     f"Position Size:  ${position_size_usd:,.2f}\n"
                     f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
+                    f"⚠ SL Management:  VTM Only (No Exchange SL)\n"
                     f"{'='*80}"
                 )
                 return True
@@ -1030,51 +1054,77 @@ class BinanceExecutionHandler:
             side = position.side
             quantity = position.quantity
             order_id = position.binance_order_id
-            is_futures = getattr(position, 'is_futures', False)
+            is_futures = getattr(position, "is_futures", False)
 
-            logger.info(f"[CLOSE] Closing {asset_name} {side.upper()} position ({reason}) | Futures: {is_futures}")
+            logger.info(
+                f"[CLOSE] Closing {asset_name} {side.upper()} position ({reason}) | Futures: {is_futures}"
+            )
 
             # --- Case 1: Futures Position ---
             if is_futures:
                 if not self.futures_handler:
-                    logger.error("[FUTURES] Cannot close: Futures handler not available.")
+                    logger.error(
+                        "[FUTURES] Cannot close: Futures handler not available."
+                    )
                     return False
                 try:
                     if side == "long":
-                        success = self.futures_handler.close_long_position(quantity=quantity, order_id=order_id)
-                    else: # short
-                        success = self.futures_handler.close_short_position(quantity=quantity, order_id=order_id)
-                    
+                        success = self.futures_handler.close_long_position(
+                            quantity=quantity, order_id=order_id
+                        )
+                    else:  # short
+                        success = self.futures_handler.close_short_position(
+                            quantity=quantity, order_id=order_id
+                        )
+
                     if success:
-                        logger.info(f"[FUTURES] ✓ Close order for {side.upper()} position succeeded.")
+                        logger.info(
+                            f"[FUTURES] ✓ Close order for {side.upper()} position succeeded."
+                        )
                     else:
-                        logger.error(f"[FUTURES] ❌ Close order for {side.upper()} position failed.")
+                        logger.error(
+                            f"[FUTURES] ❌ Close order for {side.upper()} position failed."
+                        )
                     return success
                 except Exception as e:
-                    logger.error(f"[FUTURES] ❌ Exception during close: {e}", exc_info=True)
+                    logger.error(
+                        f"[FUTURES] ❌ Exception during close: {e}", exc_info=True
+                    )
                     return False
 
             # --- Case 2: Spot Position ---
             else:
                 if self.is_paper_mode:
-                    logger.info(f"[PAPER] Simulated close for spot position: {order_id}")
+                    logger.info(
+                        f"[PAPER] Simulated close for spot position: {order_id}"
+                    )
                     return True
-                
+
                 try:
                     if side == "long":
                         # To close a long spot position, you sell the asset
-                        self.client.order_market_sell(symbol=self.symbol, quantity=quantity)
-                        logger.info(f"[SPOT] ✓ Market sell order to close long position was successful.")
+                        self.client.order_market_sell(
+                            symbol=self.symbol, quantity=quantity
+                        )
+                        logger.info(
+                            f"[SPOT] ✓ Market sell order to close long position was successful."
+                        )
                         return True
-                    else: # short
-                        logger.error("[SPOT] ❌ Cannot close short position on Spot market. Requires Futures.")
+                    else:  # short
+                        logger.error(
+                            "[SPOT] ❌ Cannot close short position on Spot market. Requires Futures."
+                        )
                         return False
                 except Exception as e:
-                    logger.error(f"[SPOT] ❌ Exception during close: {e}", exc_info=True)
+                    logger.error(
+                        f"[SPOT] ❌ Exception during close: {e}", exc_info=True
+                    )
                     return False
 
         except Exception as e:
-            logger.error(f"[CLOSE] Unhandled error in _close_position: {e}", exc_info=True)
+            logger.error(
+                f"[CLOSE] Unhandled error in _close_position: {e}", exc_info=True
+            )
             return False
 
     def check_and_update_positions_VTM(self, asset_name: str = "BTC"):
@@ -1103,12 +1153,21 @@ class BinanceExecutionHandler:
                         else:
                             exit_reason_str = str(exit_reason)
 
-                        logger.info(f"[VTM] {position.position_id} triggered {exit_reason_str.upper()}")
-                        self._close_position(position, current_price, asset_name, f"VTM_{exit_reason_str}")
+                        logger.info(
+                            f"[VTM] {position.position_id} triggered {exit_reason_str.upper()}"
+                        )
+                        self._close_position(
+                            position,
+                            current_price,
+                            asset_name,
+                            f"VTM_{exit_reason_str}",
+                        )
                         positions_closed = True
                         continue
 
-                should_close, reason = self._check_stop_loss_take_profit(position, current_price)
+                should_close, reason = self._check_stop_loss_take_profit(
+                    position, current_price
+                )
                 if should_close:
                     self._close_position(position, current_price, asset_name, reason)
                     positions_closed = True
@@ -1142,8 +1201,8 @@ class BinanceExecutionHandler:
         """
         if symbol is None:
             symbol = self.symbol
-        
-        if self.mode == 'paper':
+
+        if self.mode == "paper":
             logger.info("[SYNC] Sync disabled in paper mode.")
             return True
 
@@ -1159,9 +1218,11 @@ class BinanceExecutionHandler:
             portfolio_map = {p.side: p for p in portfolio_positions}
 
             binance_positions = self.futures_handler.get_all_positions_info()
-            binance_map = {p['side']: p for p in binance_positions}
-            
-            logger.info(f"[SYNC] State Found: Portfolio({list(portfolio_map.keys())}) vs Binance({list(binance_map.keys())})")
+            binance_map = {p["side"]: p for p in binance_positions}
+
+            logger.info(
+                f"[SYNC] State Found: Portfolio({list(portfolio_map.keys())}) vs Binance({list(binance_map.keys())})"
+            )
 
             current_price = self.get_current_price(symbol)
             if not current_price:
@@ -1171,12 +1232,14 @@ class BinanceExecutionHandler:
             # 2. Reconcile: Binance -> Portfolio (Import new positions)
             for side, binance_pos in binance_map.items():
                 if side not in portfolio_map:
-                    logger.warning(f"[SYNC] ⚠️ Found position on Binance not in portfolio: {side.upper()}. Importing...")
-                    
+                    logger.warning(
+                        f"[SYNC] ⚠️ Found position on Binance not in portfolio: {side.upper()}. Importing..."
+                    )
+
                     pos_amt = abs(float(binance_pos.get("positionAmt", 0)))
                     entry_price = float(binance_pos.get("entryPrice", current_price))
                     position_size_usd = pos_amt * entry_price
-                    
+
                     # Fetch OHLC data for VTM
                     ohlc_data = None
                     try:
@@ -1184,7 +1247,9 @@ class BinanceExecutionHandler:
                         start_time = end_time - timedelta(days=10)
                         df = self.data_manager.fetch_binance_data(
                             symbol=symbol,
-                            interval=self.config["assets"][asset_name].get("interval", "1h"),
+                            interval=self.config["assets"][asset_name].get(
+                                "interval", "1h"
+                            ),
                             start_date=start_time.strftime("%Y-%m-%d"),
                             end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                         )
@@ -1205,17 +1270,23 @@ class BinanceExecutionHandler:
                         side=side,
                         entry_price=entry_price,
                         position_size_usd=position_size_usd,
-                        stop_loss=None, take_profit=None, trailing_stop_pct=None,
-                        binance_order_id=None, # No order ID for imported position
+                        stop_loss=None,
+                        take_profit=None,
+                        trailing_stop_pct=None,
+                        binance_order_id=None,  # No order ID for imported position
                         ohlc_data=ohlc_data,
                         use_dynamic_management=True,
                         signal_details={"source": "sync_import"},
                         is_futures=True,
                     )
                     if success:
-                        logger.info(f"[SYNC] ✅ Successfully imported {side.upper()} position.")
+                        logger.info(
+                            f"[SYNC] ✅ Successfully imported {side.upper()} position."
+                        )
                     else:
-                        logger.error(f"[SYNC] ❌ Failed to import {side.upper()} position.")
+                        logger.error(
+                            f"[SYNC] ❌ Failed to import {side.upper()} position."
+                        )
 
             # 3. Reconcile: Portfolio -> Binance (Close desynced positions)
             for side, portfolio_pos in portfolio_map.items():
@@ -1229,19 +1300,23 @@ class BinanceExecutionHandler:
                         exit_price=current_price,
                         reason="sync_desync_from_exchange",
                     )
-            
+
             logger.info("[SYNC] Reconciliation complete.")
             return True
 
         except Exception as e:
-            logger.error(f"[SYNC] Critical error during reconciliation: {e}", exc_info=True)
+            logger.error(
+                f"[SYNC] Critical error during reconciliation: {e}", exc_info=True
+            )
             return False
 
     def _sync_futures_positions(self, asset_name: str, symbol: str) -> bool:
         """Sync Futures positions (supports LONG + SHORT)"""
         try:
             portfolio_positions = self.portfolio_manager.get_asset_positions(asset_name)
-            futures_positions = self.futures_handler.client.futures_position_information(symbol=symbol)
+            futures_positions = (
+                self.futures_handler.client.futures_position_information(symbol=symbol)
+            )
 
             active_futures = []
             for pos in futures_positions:
@@ -1256,10 +1331,14 @@ class BinanceExecutionHandler:
                         }
                     )
 
-            logger.info(f"[SYNC] Portfolio: {len(portfolio_positions)} | Futures: {len(active_futures)}")
+            logger.info(
+                f"[SYNC] Portfolio: {len(portfolio_positions)} | Futures: {len(active_futures)}"
+            )
 
             if active_futures and not portfolio_positions:
-                import_enabled = self.config.get("portfolio", {}).get("import_existing_positions", False)
+                import_enabled = self.config.get("portfolio", {}).get(
+                    "import_existing_positions", False
+                )
                 if not import_enabled:
                     return True
 
@@ -1270,10 +1349,14 @@ class BinanceExecutionHandler:
                         side=fut_pos["side"],
                         entry_price=fut_pos["entry_price"],
                         position_size_usd=fut_pos["quantity"] * fut_pos["entry_price"],
-                        stop_loss=None, take_profit=None, trailing_stop_pct=None,
-                        binance_order_id=None, ohlc_data=None, use_dynamic_management=True,
+                        stop_loss=None,
+                        take_profit=None,
+                        trailing_stop_pct=None,
+                        binance_order_id=None,
+                        ohlc_data=None,
+                        use_dynamic_management=True,
                         entry_time=datetime.now(),
-                        signal_details={"imported": True}
+                        signal_details={"imported": True},
                     )
                 return True
 

@@ -192,7 +192,10 @@ class MultiTimeFrameRegime:
             "bearish_score": self.bearish_score,
         }
         
-        # Add Governor data
+        # Always include trade type, as it has a fallback
+        result["trade_type"] = self.trade_type.name if self.trade_type else "UNKNOWN"
+
+        # Add governor details if available
         if self.governor:
             result["governor"] = self.governor.to_dict()
         

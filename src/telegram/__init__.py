@@ -76,7 +76,7 @@ class SignalMonitoringIntegration:
             "regime": details.get("regime"),
             "is_bull": details.get("is_bull_market"),
             "quality": details.get("signal_quality", 0),
-            "reasoning": details.get("reasoning"),  # Can be None
+            "reasoning": details.get("reasoning"),
             "mr_signal": details.get("mean_reversion_signal"),
             "mr_conf": details.get("mean_reversion_confidence", 0),
             "tf_signal": details.get("trend_following_signal"),
@@ -84,6 +84,10 @@ class SignalMonitoringIntegration:
             "ema_signal": details.get("ema_signal"),
             "ema_conf": details.get("ema_confidence", 0),
             "regime_changed": details.get("regime_changed", False),
+            # Hybrid mode additions
+            "aggregator_mode": details.get("aggregator_mode"),
+            "council_score": details.get("total_score"),
+            "council_decision": details.get("decision_type"),
         }
 
         self.signal_history[asset].append(entry)
@@ -198,7 +202,13 @@ class TradingTelegramBot:
     Handles notifications and user commands properly
     """
 
-    def __init__(self, token: str, admin_ids: List[int], trading_bot, signal_monitor: SignalMonitoringIntegration):
+    def __init__(
+        self,
+        token: str,
+        admin_ids: List[int],
+        trading_bot,
+        signal_monitor: SignalMonitoringIntegration,
+    ):
         self.token = token
         self.admin_ids = admin_ids
         self.trading_bot = trading_bot
@@ -289,6 +299,12 @@ class TradingTelegramBot:
         def run_loop():
             """Thread target: Create and run event loop forever"""
             try:
+                # ✅ FIX: Use selector loop on Windows (not proactor) to prevent cleanup errors
+                if sys.platform == "win32":
+                    asyncio.set_event_loop_policy(
+                        asyncio.WindowsSelectorEventLoopPolicy()
+                    )
+
                 # Create new loop for this thread
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
@@ -931,64 +947,50 @@ class TradingTelegramBot:
                 ] or not self.trading_bot.config["assets"][asset].get("enabled", False):
                     continue
 
-                regime_data = self.trading_bot._current_regime_data.get(asset)
-                if not regime_data:
+                regime_data_obj = self.trading_bot._current_regime_data.get(asset)
+                if not regime_data_obj:
                     continue
+
+                # Standardize to a dictionary
+                if hasattr(regime_data_obj, "to_dict"):
+                    regime_data = regime_data_obj.to_dict()
+                else:
+                    regime_data = regime_data_obj
 
                 emoji = "₿" if asset == "BTC" else "🥇"
                 msg += f"{emoji} *{asset} STATE*\n"
 
-                # Short-term trend from consensus
-                current_regime = str(regime_data.consensus_regime.value).replace("_", " ")
-                is_bull = regime_data.bullish_score > regime_data.bearish_score
+                current_regime = str(
+                    regime_data.get("consensus_regime", "NEUTRAL")
+                ).replace("_", " ")
+                is_bull = regime_data.get("bullish_score", 0) > regime_data.get(
+                    "bearish_score", 0
+                )
                 current_trend_icon = "📈 Bullish" if is_bull else "📉 Bearish"
                 if "NEUTRAL" in current_regime:
                     current_trend_icon = "⚖️ Neutral"
 
-                # 1. Governor State (The Daily 200 EMA)
-                if hasattr(regime_data, "governor") and regime_data.governor:
-                    gov = regime_data.governor
-                    
-                    if "TREND" in gov.regime:
-                        gov_regime = "🚀 BULL"
-                    else:
-                        gov_regime = "🐻 BEAR"
+                trade_type = regime_data.get('trade_type')
+                
+                msg += f"  Short-Term Trend: {current_trend_icon} ({current_regime})\n"
 
-                    slope_icon = "📈 Positive" if gov.slope_positive else "📉 Negative"
-                    if -0.002 < gov.ema_slope < 0.002: # Based on detector logic
-                        slope_icon = "⚖️ Flat"
-
-                    trade_type = gov.trade_type.value
-
+                if trade_type:
+                    type_icon = "📈" if trade_type == "TREND" else "⚡" if trade_type == "SCALP" else "🚀"
+                    risk_mult = "" 
                     if trade_type == "TREND":
-                        type_icon = "📈 TREND (Trend-Aligned)"
                         risk_mult = "2.0% Risk (1.33x Multiplier)"
                     elif trade_type == "SCALP":
-                        type_icon = "⚡ SCALP (Counter-Trend Allowed)"
                         risk_mult = "1.0% Risk (0.67x Multiplier)"
                     elif "V_SHAPE" in trade_type:
-                        type_icon = "🚀 V-SHAPE (Reversal Mode)"
                         risk_mult = "1.5% Risk (1.0x Multiplier)"
                     else:
-                        type_icon = "🛑 NEUTRAL (No Trading)"
                         risk_mult = "0% Risk"
-
-                    # Safe rendering without underscores
-                    msg += f"  Short-Term Trend: {current_trend_icon} ({current_regime})\n"
-                    msg += f"  Macro Regime:     {gov_regime} (1D 200 EMA)\n"
-                    msg += f"  1D EMA Slope:     {slope_icon}\n"
-                    msg += f"  Current Price:    ${gov.current_price:,.2f}\n"
-                    msg += f"  200 EMA:          ${gov.ema_200:,.2f}\n"
-                    price_pos_str = "Above EMA" if gov.price_above_ema else "Below EMA"
-                    msg += f"  Price Position:   {price_pos_str} ({gov.distance_from_ema_pct:+.2%} away)\n"
-                    msg += f"  Action Mode:      {type_icon}\n"
+                    
+                    msg += f"  Action Mode:      {type_icon} {trade_type}\n"
                     msg += f"  Risk Profile:     {risk_mult}\n\n"
                 else:
-                    # Fallback if specific governor object is missing
-                    msg += f"  Short-Term Trend: {current_trend_icon}\n"
-                    msg += f"  Regime:           {current_regime} ({regime_data.consensus_confidence:.1%})\n"
-                    msg += f"  Risk Level:       {str(regime_data.risk_level).upper()}\n\n"
-                    msg += f"  (Governor data not available)\n\n"
+                    msg += f"  Action Mode:      🛑 UNKNOWN\n"
+                    msg += f"  Risk Profile:     0% Risk (No Trade)\n\n"
 
             msg += f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
 
@@ -2319,46 +2321,60 @@ class TradingTelegramBot:
     async def _send_signals_message(self, query):
         """Send signals message (for callback)"""
         try:
-            if not hasattr(self, "signal_monitor"):
-                await query.edit_message_text("❌ Signal monitoring not initialized")
-                return
-
-            btc_signals = self.signal_monitor.get_last_signals("BTC", n=3)
-            gold_signals = self.signal_monitor.get_last_signals("GOLD", n=3)
-
             msg = "📡 *Latest Trading Signals*\n\n"
+            for asset in ["BTC", "GOLD"]:
+                if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                    continue
 
-            msg += "*₿ BTC*\n"
-            if btc_signals:
-                for sig in reversed(btc_signals):
-                    msg += self._format_signal_entry(sig)
-            else:
-                msg += "No signals yet\n"
+                emoji = "₿" if asset == "BTC" else "🥇"
+                msg += f"{emoji} *{asset} Signals (last 5)*\n"
 
-            msg += "\n*🥇 GOLD*\n"
-            if gold_signals:
-                for sig in reversed(gold_signals):
-                    msg += self._format_signal_entry(sig)
-            else:
-                msg += "No signals yet\n"
+                signals = self.signal_monitor.get_last_signals(asset, n=5)
+                if not signals:
+                    msg += "_No signals recorded yet._\n\n"
+                    continue
 
-            msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+                for sig in reversed(signals):
+                    ts = sig["timestamp"].strftime("%H:%M:%S")
+                    signal_val = sig["signal"]
+                    price = sig["price"]
+                    sig_icon = (
+                        "📈 BUY"
+                        if signal_val == 1
+                        else "📉 SELL" if signal_val == -1 else " HOLD"
+                    )
 
-            keyboard = [
-                [
-                    InlineKeyboardButton("📊 Stats", callback_data="stats"),
-                    InlineKeyboardButton("⚙️ Presets", callback_data="presets"),
-                ],
-                [InlineKeyboardButton("🔄 Refresh", callback_data="signals")],
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+                    msg += f"\n*{ts}* - *{sig_icon}* @ `${price:,.2f}`\n"
 
+                    # Hybrid-aware output
+                    mode = sig.get("aggregator_mode", "performance")
+                    msg += f"  Mode: `{mode.upper()}`\n"
+
+                    if mode == "council":
+                        score = sig.get("council_score") or 0
+                        decision = sig.get("council_decision", "N/A")
+                        msg += f"  Score: *{score:.2f}* | Decision: {decision}\n"
+                    else:  # Default to performance
+                        quality = sig.get("quality", 0) or 0
+                        reasoning = sig.get("reasoning", "N/A")
+                        msg += f"  Quality: *{quality:.1%}*\n"
+                        msg += f"  Reasoning: _{reasoning}_\n"
+                msg += "\n"
+
+            reply_markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Refresh", callback_data="signals")]]
+            )
             await query.edit_message_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
 
         except Exception as e:
-            logger.error(f"Error in _send_signals_message: {e}")
+            logger.error(f"Error in _send_signals_message: {e}", exc_info=True)
+            # Try to send a simple error message if editing fails
+            try:
+                await query.edit_message_text("❌ Error fetching signals.")
+            except:
+                pass
 
     async def send_notification(self, message: str, disable_preview: bool = True):
         """
@@ -2439,6 +2455,7 @@ class TradingTelegramBot:
         leverage: int = 1,
         margin_type: str = "SPOT",
         is_futures: bool = False,
+        vtm_is_active: bool = False,
     ):
         """
         ✅ FIXED: Notify when a trade is opened with correct futures/spot detection
@@ -2453,6 +2470,7 @@ class TradingTelegramBot:
             leverage: Leverage multiplier (default 1)
             margin_type: "SPOT", "CROSSED", "ISOLATED"
             is_futures: True if futures/margin trading
+            vtm_is_active: True if VTM is managing the trade
         """
         try:
             # Determine icons and labels
@@ -2521,6 +2539,10 @@ class TradingTelegramBot:
                     tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
                 )
                 msg += f"📈 Risk/Reward: 1:{rr_ratio:.2f}\n\n"
+            
+            # ✅ NEW: Add VTM warning if applicable
+            if vtm_is_active:
+                msg += "⚠ *SL Management: VTM Only (No Exchange SL)*\n\n"
 
             # Add timestamp
             msg += f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -2927,58 +2949,62 @@ class TradingTelegramBot:
             logger.error(f"Error in cmd_signal_stats: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching statistics")
 
+    @admin_only
     async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /signals command - Show latest signals (Non-Blocking)"""
-        import asyncio
-
+        """Handle /signals command"""
         try:
-            if not hasattr(self, "signal_monitor"):
-                await update.message.reply_text("❌ Signal monitoring not initialized")
-                return
+            msg = "📡 *Latest Trading Signals*\n\n"
+            for asset in ["BTC", "GOLD"]:
+                if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                    continue
 
-            def _prepare_signals():
-                btc_signals = self.signal_monitor.get_last_signals("BTC", n=3)
-                gold_signals = self.signal_monitor.get_last_signals("GOLD", n=3)
+                emoji = "₿" if asset == "BTC" else "🥇"
+                msg += f"{emoji} *{asset} Signals (last 5)*\n"
 
-                msg = "📡 *Latest Trading Signals*\n\n"
+                signals = self.signal_monitor.get_last_signals(asset, n=5)
+                if not signals:
+                    msg += "_No signals recorded yet._\n\n"
+                    continue
 
-                msg += "*₿ BTC*\n"
-                if btc_signals:
-                    for sig in reversed(btc_signals):
-                        msg += self._format_signal_entry(sig)
-                else:
-                    msg += "No signals yet\n"
+                for sig in reversed(signals):
+                    ts = sig["timestamp"].strftime("%H:%M:%S")
+                    signal_val = sig["signal"]
+                    price = sig["price"]
 
-                msg += "\n*🥇 GOLD*\n"
-                if gold_signals:
-                    for sig in reversed(gold_signals):
-                        msg += self._format_signal_entry(sig)
-                else:
-                    msg += "No signals yet\n"
+                    sig_icon = (
+                        "📈 BUY"
+                        if signal_val == 1
+                        else "📉 SELL" if signal_val == -1 else " HOLD"
+                    )
 
-                msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+                    msg += f"\n*{ts}* - *{sig_icon}* @ `${price:,.2f}`\n"
 
-                keyboard = [
-                    [
-                        InlineKeyboardButton("📊 BTC Stats", callback_data="btc_stats"),
-                        InlineKeyboardButton(
-                            "🥇 GOLD Stats", callback_data="gold_stats"
-                        ),
-                    ],
-                    [InlineKeyboardButton("🔄 Refresh", callback_data="signals")],
-                ]
-                return msg, InlineKeyboardMarkup(keyboard)
+                    # Hybrid-aware output
+                    mode = sig.get("aggregator_mode", "performance")
+                    msg += f"  Mode: `{mode.upper()}`\n"
 
-            # ✅ Offload signal retrieval and iteration to thread
-            msg, reply_markup = await asyncio.to_thread(_prepare_signals)
+                    if mode == "council":
+                        score = sig.get("council_score") or 0
+                        decision = sig.get("council_decision", "N/A")
+                        msg += f"  Score: *{score:.2f}* | Decision: {decision}\n"
+                    else:  # Default to performance
+                        quality = sig.get("quality", 0) or 0
+                        reasoning = sig.get("reasoning", "N/A")
+                        msg += f"  Quality: *{quality:.1%}*\n"
+                        msg += f"  Reasoning: _{reasoning}_\n"
 
+                msg += "\n"
+
+            reply_markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Refresh", callback_data="signals")]]
+            )
             await update.message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
 
         except Exception as e:
             logger.error(f"Error in cmd_signals: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error fetching signals")
+            await update.message.reply_text("❌ Error fetching signals.")
 
     async def cmd_regimes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /regimes command - Show regime information (Non-Blocking)"""

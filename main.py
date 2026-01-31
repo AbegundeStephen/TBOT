@@ -1536,7 +1536,20 @@ class TradingBot:
 
         else:  # performance mode
             aggregator = aggregators["performance"]
-            signal, details = aggregator.get_aggregated_signal(df)
+            # Fetch the latest MTF regime data to pass to the aggregator
+            mtf_regime = {}
+            if (
+                hasattr(self, "_current_regime_data")
+                and asset_name in self._current_regime_data
+            ):
+                mtf_regime = self._current_regime_data[asset_name]
+
+            signal, details = aggregator.get_aggregated_signal(
+                df,
+                current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                is_bull_market=mtf_regime.get("is_bull", False),
+                governor_data=mtf_regime,
+            )
 
             logger.info(
                 f"[PERFORMANCE] Signal Quality: {details.get('signal_quality', 0):.2%}"
@@ -3099,6 +3112,8 @@ class TradingBot:
                                     f"  Take Profit: ${tp:,.2f}"
                                 )
 
+                                vtm_is_active = new_pos.trade_manager is not None
+
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
                                         asset=asset_name,
@@ -3110,6 +3125,7 @@ class TradingBot:
                                         leverage=leverage,
                                         margin_type=margin_type,
                                         is_futures=is_futures,
+                                        vtm_is_active=vtm_is_active,
                                     )
                                 )
 
