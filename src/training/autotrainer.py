@@ -139,9 +139,12 @@ class ContinuousLearningPipeline:
                     logger.info("=" * 70)
 
                     self._run_training_pipeline()
-
-                # Sleep for 1 hour before checking the clock again
-                time.sleep(3600)
+                    
+                    # Snooze for a day to prevent re-running on the same day, especially after a failure
+                    time.sleep(24 * 3600)
+                else:
+                    # Sleep for 1 hour before checking the clock again
+                    time.sleep(3600)
 
             except Exception as e:
                 logger.error(f"[AUTO-TRAIN] Fatal error in training loop: {e}", exc_info=True)
