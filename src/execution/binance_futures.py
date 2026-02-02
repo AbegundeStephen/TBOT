@@ -392,60 +392,55 @@ class BinanceFuturesHandler:
         self, side: str, quantity: float = None, order_id: int = None
     ) -> bool:
         """
-        ✅ FIXED: Close position without reduceOnly for market orders
+        ✅ FIXED: Close position without reduceOnly for market orders and handle race conditions.
         """
         try:
-            # Get position info if quantity not provided
-            if quantity is None:
-                position = self.get_position_info(side=side)
-                if position:
-                    pos_amt = float(position.get("positionAmt", 0))
+            # IDEMPOTENT CLOSE: First, check if a position actually exists to be closed.
+            position_info = self.get_position_info(side=side)
 
-                    if side == "short" and pos_amt >= 0:
-                        logger.warning(
-                            f"[FUTURES] No SHORT position to close (posAmt: {pos_amt})"
-                        )
-                        return False
-                    elif side == "long" and pos_amt <= 0:
-                        logger.warning(
-                            f"[FUTURES] No LONG position to close (posAmt: {pos_amt})"
-                        )
-                        return False
+            # If no position exists or its size is zero, the desired state is already met.
+            if not position_info or float(position_info.get("positionAmt", 0)) == 0:
+                logger.info(f"[FUTURES] No active {side.upper()} position found on exchange. Assuming already closed.")
+                return True
 
-                    quantity = abs(pos_amt)
-                else:
-                    logger.warning("[FUTURES] No open position found")
-                    return False
+            # Determine quantity to close. If not provided, close the whole position.
+            close_quantity = quantity
+            if close_quantity is None:
+                close_quantity = abs(float(position_info.get("positionAmt", 0)))
+            
+            if close_quantity == 0:
+                logger.info("[FUTURES] Close requested for zero quantity. Nothing to do.")
+                return True
 
-            quantity = self._round_quantity(quantity)
+            close_quantity = self._round_quantity(close_quantity)
             close_side = SIDE_SELL if side == "long" else SIDE_BUY
             side_label = side.upper()
             position_side = "LONG" if side == "long" else "SHORT"
 
             logger.info(
                 f"[FUTURES] Closing {side_label} (Hedge Mode): "
-                f"{quantity:.{self.quantity_precision}f} {self.symbol}"
+                f"{close_quantity:.{self.quantity_precision}f} {self.symbol}"
             )
 
             try:
-                # ✅ FIX: Remove reduceOnly for closing market orders
+                # Attempt to close the position with a market order
                 order = self.client.futures_create_order(
                     symbol=self.symbol,
                     side=close_side,
                     positionSide=position_side,
                     type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=quantity
+                    quantity=close_quantity
                 )
 
                 logger.info(
                     f"[FUTURES] ✓ {side_label} closed\n"
                     f"  Order ID:  {order.get('orderId')}\n"
-                    f"  Quantity:  {quantity:.{self.quantity_precision}f} BTC\n"
+                    f"  Quantity:  {close_quantity:.{self.quantity_precision}f} BTC\n"
                     f"  Exit:      ${float(order.get('avgPrice', 0)):,.2f}\n"
                     f"  Status:    {order.get('status')}"
                 )
 
-                # Cancel remaining orders
+                # Cancel remaining open orders for the symbol
                 try:
                     cancelled = self.client.futures_cancel_all_open_orders(
                         symbol=self.symbol
@@ -455,16 +450,21 @@ class BinanceFuturesHandler:
                             f"[FUTURES] Cancelled {len(cancelled)} remaining order(s)"
                         )
                 except Exception as e:
-                    if "-2011" not in str(e):
-                        logger.debug(f"[FUTURES] Cancel orders: {e}")
+                    if "-2011" not in str(e): # Ignore "Unknown order sent"
+                        logger.debug(f"[FUTURES] Cancel orders warning: {e}")
 
                 return True
 
             except Exception as order_error:
+                # Handle the specific race condition error where the position was closed just before our order
+                if "ReduceOnly Order is rejected" in str(order_error):
+                     logger.info(f"[FUTURES] Position likely closed by another process (ReduceOnly rejected). Marking as success.")
+                     return True
+                
                 logger.error(
                     f"[FUTURES] ❌ Order execution failed\n"
                     f"  Side:     {side_label}\n"
-                    f"  Quantity: {quantity:.{self.quantity_precision}f}\n"
+                    f"  Quantity: {close_quantity:.{self.quantity_precision}f}\n"
                     f"  Error:    {str(order_error)}"
                 )
                 return False
