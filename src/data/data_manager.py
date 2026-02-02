@@ -647,7 +647,7 @@ class DataManager:
                 interval=interval,
                 start_date=start_date,
                 end_date=end_date,
-                use_live_for_history=False,  # Use primary client for current data
+                use_live_for_history=True,  # Use primary client for current data
             )
 
             df = self.clean_data(df)
