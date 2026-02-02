@@ -201,41 +201,8 @@ class TradingBot:
         self.mtf_integration = None
         self._current_regime_data = {}
 
-        self.dynamic_selector = DynamicPresetSelector(
-            self.data_manager, self.config, telegram_bot=self.telegram_bot
-        )
-
-        preset_mode = self.config.get("aggregator_settings", {}).get(
-            "preset", "balanced"
-        )
-        if preset_mode == "auto":
-            logger.info("\n" + "=" * 70)
-            logger.info("🎯 AUTO PRESET MODE ENABLED")
-            logger.info("=" * 70)
-            logger.info("System will automatically select optimal preset per asset:")
-            logger.info("  • CONSERVATIVE: High risk/volatility conditions")
-            logger.info("  • BALANCED:     Normal market conditions")
-            logger.info("  • AGGRESSIVE:   Strong trending markets")
-            logger.info("  • SCALPER:      Ideal low-volatility conditions")
-            logger.info("=" * 70 + "\n")
-
-            # Set initial presets for all enabled assets
-            logger.info(
-                "[AUTO PRESET] Analyzing market conditions for initial setup..."
-            )
-            for asset_name in self.strategies.keys():
-                if self.config["assets"][asset_name].get("enabled", False):
-                    initial_preset = self.dynamic_selector.get_preset_for_asset(
-                        asset_name
-                    )
-                    self.dynamic_selector.current_presets[asset_name] = initial_preset
-                    logger.info(f"  {asset_name:6} → {initial_preset.upper()}")
-        else:
-            logger.info(f"[PRESET] Using manual preset: {preset_mode.upper()}")
-
-        self.hybrid_selector = HybridAggregatorSelector(
-            self.data_manager, self.config, telegram_bot=self.telegram_bot
-        )
+        self.dynamic_selector = None
+        self.hybrid_selector = None
 
         self.error_handler = GlobalErrorHandler(
             telegram_bot=self.telegram_bot,
@@ -3792,6 +3759,43 @@ class TradingBot:
         try:
             # Initialize exchanges and handlers
             self.initialize_exchanges()
+
+            # ✅ FIXED: Initialize selectors AFTER exchanges are connected
+            self.dynamic_selector = DynamicPresetSelector(
+                self.data_manager, self.config, telegram_bot=self.telegram_bot
+            )
+            self.hybrid_selector = HybridAggregatorSelector(
+                self.data_manager, self.config, telegram_bot=self.telegram_bot
+            )
+
+            preset_mode = self.config.get("aggregator_settings", {}).get(
+                "preset", "balanced"
+            )
+            if preset_mode == "auto":
+                logger.info("\n" + "=" * 70)
+                logger.info("🎯 AUTO PRESET MODE ENABLED")
+                logger.info("=" * 70)
+                logger.info("System will automatically select optimal preset per asset:")
+                logger.info("  • CONSERVATIVE: High risk/volatility conditions")
+                logger.info("  • BALANCED:     Normal market conditions")
+                logger.info("  • AGGRESSIVE:   Strong trending markets")
+                logger.info("  • SCALPER:      Ideal low-volatility conditions")
+                logger.info("=" * 70 + "\n")
+
+                # Set initial presets for all enabled assets
+                logger.info(
+                    "[AUTO PRESET] Analyzing market conditions for initial setup..."
+                )
+                for asset_name in self.strategies.keys():
+                    if self.config["assets"][asset_name].get("enabled", False):
+                        initial_preset = self.dynamic_selector.get_preset_for_asset(
+                            asset_name
+                        )
+                        self.dynamic_selector.current_presets[asset_name] = initial_preset
+                        logger.info(f"  {asset_name:6} → {initial_preset.upper()}")
+            else:
+                logger.info(f"[PRESET] Using manual preset: {preset_mode.upper()}")
+
             self.load_models()
 
             self.initialize_mtf_regime_detection()
