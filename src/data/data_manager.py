@@ -32,6 +32,7 @@ class DataManager:
     def initialize_binance(self) -> bool:
         """
         ✅ ENHANCED: Initialize with smart Live/Testnet separation
+        ✅ FIXED: Added User-Agent to prevent CloudFront 403 errors.
 
         Strategy:
         1. Primary client = testnet (for safe trade execution)
@@ -39,6 +40,11 @@ class DataManager:
         3. Futures client = separate if provided
         """
         try:
+            # Define a browser-like User-Agent to avoid WAF blocks
+            user_agent_header = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+
             api_config = self.config["api"]["binance"]
             api_key = api_config.get("api_key", "")
             api_secret = api_config.get("api_secret", "")
@@ -58,6 +64,7 @@ class DataManager:
 
             # Always create a live client for data (no keys needed = public access)
             self.live_data_client = Client("", "")
+            self.live_data_client.session.headers.update(user_agent_header)
 
             try:
                 self.live_data_client.ping()
@@ -75,6 +82,7 @@ class DataManager:
                 logger.warning("\n⚠️  Binance API keys not configured")
                 logger.info("   Using public API only (no trading capability)")
                 self.binance_client = Client("", "")
+                self.binance_client.session.headers.update(user_agent_header)
                 logger.info("✅ Public Spot API initialized")
                 return True
 
@@ -87,12 +95,14 @@ class DataManager:
 
             if is_testnet:
                 self.binance_client = Client(api_key, api_secret, testnet=True)
+                self.binance_client.session.headers.update(user_agent_header)
                 self.binance_client.API_URL = "https://testnet.binance.vision/api"
                 logger.info("   Endpoint: https://testnet.binance.vision/api (testnet)")
                 logger.warning("   ⚠️  Testnet has LIMITED historical data (~2 days)")
                 logger.info("   💡 Historical analysis will use live API automatically")
             else:
                 self.binance_client = Client(api_key, api_secret)
+                self.binance_client.session.headers.update(user_agent_header)
                 logger.info("   Endpoint: https://api.binance.com (LIVE)")
                 logger.warning("   ⚠️  WARNING: LIVE TRADING MODE - REAL MONEY AT RISK")
 
@@ -116,6 +126,7 @@ class DataManager:
                         self.futures_client = Client(
                             futures_key, futures_secret, testnet=True
                         )
+                        self.futures_client.session.headers.update(user_agent_header)
                         self.futures_client.API_URL = (
                             "https://testnet.binancefuture.com"
                         )
@@ -124,6 +135,7 @@ class DataManager:
                         )
                     else:
                         self.futures_client = Client(futures_key, futures_secret)
+                        self.futures_client.session.headers.update(user_agent_header)
                         self.futures_client.API_URL = "https://fapi.binance.com"
                         logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
                         logger.warning("   ⚠️  LIVE FUTURES TRADING - HIGH RISK")
