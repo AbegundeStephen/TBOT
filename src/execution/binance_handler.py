@@ -21,6 +21,8 @@ from src.execution.binance_futures import BinanceFuturesHandler
 from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.position_rebalancer import PositionRebalancer
 from src.execution.veteran_trade_manager import VeteranTradeManager
+from src.data.data_manager import CLOUDFRONT_HEADERS
+from src.market.price_cache import price_cache
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +343,7 @@ class BinanceExecutionHandler:
     ):
         self.config = config
         self.client = client
+        self.client.session.headers.update(CLOUDFRONT_HEADERS)
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
 
@@ -444,6 +447,24 @@ class BinanceExecutionHandler:
             f"OK - {current_count}/{max_per_asset} {side.upper()} positions open",
         )
 
+    def _fetch_live_futures_price(self, symbol: str) -> Optional[float]:
+        """
+        Fetches the live price directly from the futures ticker endpoint.
+        This method is guarded, has no retries, and returns None on any error.
+        """
+        try:
+            # This is the only place that should call a live ticker endpoint.
+            if self.futures_handler:
+                ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                return float(ticker["price"])
+            else:
+                logger.warning("[PRICE] Live futures price fetch skipped: Futures handler not available.")
+                return None
+        except Exception as e:
+            # Catch all exceptions (APIError, JSONDecodeError, etc.) and return None
+            # The error is already logged by the calling function, so we suppress it here.
+            return None
+
     @handle_errors(
         component="binance_handler",
         severity=ErrorSeverity.ERROR,
@@ -451,17 +472,48 @@ class BinanceExecutionHandler:
         reraise=False,
         default_return=None,
     )
-    def get_current_price(self, symbol: str = None) -> Optional[float]:
-        """Get current market price"""
+    def get_current_price(self, symbol: str = None, force_live: bool = False) -> Optional[float]:
+        """
+        Unified price accessor for the entire system.
+        
+        Uses a cache-first approach. The cache is primarily populated by
+        the last kline close price. A live price is only fetched if the
+        cache is stale/empty AND force_live is True (e.g., for execution).
+
+        Args:
+            symbol (str, optional): The symbol to fetch. Defaults to the handler's default.
+            force_live (bool, optional): If True, fetch from the live endpoint if cache is stale. 
+                                         Defaults to False.
+
+        Returns:
+            Optional[float]: The price, or None if unavailable.
+        """
         if symbol is None:
             symbol = self.symbol
+        
+        # 1. Try to get a fresh price from the cache (populated by kline data)
+        cached_price = price_cache.get(symbol)
+        if cached_price is not None:
+            return cached_price
 
-        try:
-            ticker = self.client.get_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
-        except Exception as e:
-            logger.error(f"Error fetching price for {symbol}: {e}")
-            return None
+        # 2. If cache is stale and a live price is requested, fetch it once.
+        if force_live:
+            live_price = self._fetch_live_futures_price(symbol)
+            if live_price is not None:
+                # Update cache and return the live price
+                price_cache.set(symbol, live_price)
+                logger.info(f"[CACHE] Price cache updated with LIVE price: {live_price}")
+                return live_price
+
+        # 3. As a fallback, return the last known price from cache, even if it's stale.
+        last_known_price = price_cache.get_last_known(symbol)
+        if last_known_price:
+            logger.warning(f"[PRICE] Using stale cached price for {symbol}: {last_known_price}")
+            return last_known_price
+        
+        logger.error(f"Error fetching price for {symbol}: All methods failed.")
+        return None
+
 
     @handle_errors(
         component="binance_handler",
@@ -492,7 +544,7 @@ class BinanceExecutionHandler:
 
         try:
             if current_price is None:
-                current_price = self.get_current_price()
+                current_price = self.get_current_price(force_live=True)
 
             if current_price is None or current_price <= 0:
                 logger.error(f"{asset_name}: Invalid price: {current_price}")
@@ -1134,7 +1186,7 @@ class BinanceExecutionHandler:
             if not positions:
                 return False
 
-            current_price = self.get_current_price()
+            current_price = self.get_current_price(force_live=True)
             if not current_price:
                 return False
 
@@ -1224,7 +1276,7 @@ class BinanceExecutionHandler:
                 f"[SYNC] State Found: Portfolio({list(portfolio_map.keys())}) vs Binance({list(binance_map.keys())})"
             )
 
-            current_price = self.get_current_price(symbol)
+            current_price = self.get_current_price(symbol, force_live=True)
             if not current_price:
                 logger.error("[SYNC] Could not fetch current price. Aborting sync.")
                 return False

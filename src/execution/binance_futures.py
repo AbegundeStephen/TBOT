@@ -16,6 +16,7 @@ from binance.enums import (
     FUTURE_ORDER_TYPE_LIMIT,
 )
 from typing import Dict, List, Optional, Tuple
+from src.data.data_manager import CLOUDFRONT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class BinanceFuturesHandler:
 
     def __init__(self, client: Client, symbol: str = "BTCUSDT", config: dict = None):
         self.client = client
+        self.client.session.headers.update(CLOUDFRONT_HEADERS)
         self.symbol = symbol
         self.filters = {}
         self.config = config or {}
@@ -608,6 +610,7 @@ def integrate_futures_into_handler(handler):
         handler.futures_handler = BinanceFuturesHandler(
             client=handler.client, symbol=handler.symbol, config=handler.config
         )
+        handler.futures_handler.client.session.headers.update(CLOUDFRONT_HEADERS)  # ✅ CloudFront 403 fix
 
         leverage = handler.config.get("assets", {}).get("BTC", {}).get("leverage", 10)
         margin_type = (

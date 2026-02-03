@@ -12,6 +12,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.veteran_trade_manager import VeteranTradeManager
+from src.market.price_cache import price_cache
 
 logger = logging.getLogger(__name__)
 
@@ -224,24 +225,33 @@ class MT5ExecutionHandler:
             logger.info("[INIT] Auto-syncing positions with MT5...")
             self.sync_positions_with_mt5("GOLD")
 
-    @handle_errors(
-        component="mt5_handler",
-        severity=ErrorSeverity.ERROR,
-        notify=True,
-        reraise=False,
-        default_return=0.0,
-    )
-    def get_current_price(self, symbol: str = None) -> float:
-        """Get current market price"""
+    def get_current_price(self, symbol: str = None, force_live: bool = False) -> Optional[float]:
+        """
+        Unified price accessor for MT5, using the central price cache.
+        """
         if symbol is None:
             symbol = self.symbol
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            logger.error(f"Failed to get tick for {symbol}")
-            return 0.0
+        # 1. Try to get a fresh price from the cache
+        cached_price = price_cache.get(symbol)
+        if cached_price is not None and not force_live:
+            return cached_price
 
-        return (tick.ask + tick.bid) / 2
+        # 2. If cache is stale or a live price is forced, fetch from MT5
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                live_price = (tick.ask + tick.bid) / 2
+                price_cache.set(symbol, live_price) # Update cache
+                return live_price
+            else:
+                # Fallback to last known price if tick fails
+                logger.warning(f"Failed to get live tick for {symbol}, using last known price.")
+                return price_cache.get_last_known(symbol)
+        except Exception as e:
+            logger.error(f"Error fetching MT5 price for {symbol}: {e}")
+            # Fallback to last known price on error
+            return price_cache.get_last_known(symbol)
 
     def can_open_position_side(self, asset_name: str, side: str) -> Tuple[bool, str]:
         """Check if we can open a position on a specific SIDE"""
