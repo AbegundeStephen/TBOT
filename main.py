@@ -2858,7 +2858,8 @@ class TradingBot:
 
             # Get current price
             try:
-                current_price = handler.get_current_price(symbol)
+                # ✅ CRITICAL: Force a live price fetch ONLY at the moment of execution
+                current_price = handler.get_current_price(symbol, force_live=True)
             except:
                 current_price = float(df["close"].iloc[-1])
 
@@ -3892,76 +3893,6 @@ class TradingBot:
             logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
             self.stop()
             sys.exit(1)
-
-            # Setup signal handlers
-            def signal_handler(signum, frame):
-                logger.info(f"\n[!] Signal {signum} received, shutting down...")
-                self.stop()
-                sys.exit(0)
-
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
-
-            # Schedule trading cycles
-            check_interval = self.config["trading"].get("check_interval_seconds", 300)
-            schedule.every(check_interval).seconds.do(self.run_trading_cycle)
-            schedule.every(1).hours.do(self.log_detailed_pnl_report)
-
-            self.is_running = True
-            self._main_loop_running = True
-            logger.info(f"\n[OK] Trading bot running")
-            logger.info(
-                f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
-            )
-            logger.info(f"Press Ctrl+C to stop\n")
-
-            # Run initial cycle
-            self.run_trading_cycle()
-
-            # Main loop with health monitoring
-            last_health_check = datetime.now()
-            health_check_interval = 300  # 5 minutes
-
-            # In the start() method's main loop:
-            while self.is_running and not self._shutdown_requested:
-                try:
-                    schedule.run_pending()
-
-                    # Periodic health check
-                    now = datetime.now()
-                    if (now - last_health_check).total_seconds() >= health_check_interval:
-                        
-                        # ✅ FIX: Check if thread is alive AND bot is ready
-                        if self.telegram_thread:
-                            thread_alive = self.telegram_thread.is_alive()
-                            bot_ready = self._telegram_ready.is_set()
-                            
-                            if not thread_alive:
-                                logger.warning("[HEALTH] Telegram thread died!")
-                                
-                                # Only restart if we're not already trying to restart
-                                if not self._telegram_should_stop.is_set():
-                                    logger.info("[HEALTH] Attempting Telegram restart...")
-                                    success = self._restart_telegram_thread()
-                                    
-                                    if not success:
-                                        logger.error("[HEALTH] Restart failed!")
-                            
-                            elif not bot_ready:
-                                logger.warning("[HEALTH] Telegram thread alive but bot not ready")
-                                # Don't restart in this case - it might just be initializing
-                            
-                        last_health_check = now
-
-                    time.sleep(1)
-
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:
-                    logger.error(f"[ERROR] Main loop error: {e}", exc_info=True)
-                    time.sleep(10)  # Wait before continuing
-
-            logger.info("[STOP] Main loop ended")
 
         except KeyboardInterrupt:
             logger.info("\n[!] KeyboardInterrupt received")

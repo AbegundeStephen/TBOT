@@ -897,10 +897,15 @@ class PortfolioManager:
                             )
 
                         elif asset == "BTC":
-                            ticker = self.binance_client.get_symbol_ticker(
-                                symbol="BTCUSDT"
-                            )
-                            btc_price = float(ticker["price"])
+                            handler = self.execution_handlers.get("binance")
+                            if not handler:
+                                logger.error("[BINANCE] Cannot get BTC price, handler not available.")
+                                continue
+                            btc_price = handler.get_current_price("BTCUSDT")
+                            if not btc_price:
+                                logger.error("[BINANCE] Failed to get BTC price from handler.")
+                                continue
+                            
                             usd_value = total * btc_price
                             total_balance += usd_value
                             asset_details.append(
@@ -1028,10 +1033,15 @@ class PortfolioManager:
 
                 # Get current price
                 try:
-                    ticker = self.binance_client.get_symbol_ticker(
-                        symbol=position.symbol
-                    )
-                    current_price = float(ticker["price"])
+                    handler = self.execution_handlers.get("binance")
+                    if not handler:
+                        logger.debug(f"Cannot update Binance profit for {asset}, handler not available.")
+                        continue
+                    
+                    current_price = handler.get_current_price(position.symbol)
+                    if not current_price:
+                        logger.debug(f"Could not fetch price for {position.symbol} via handler.")
+                        continue
 
                     # Calculate real-time P&L
                     if position.side == "long":

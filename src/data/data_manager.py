@@ -15,8 +15,16 @@ from binance.exceptions import BinanceAPIException
 import logging
 from typing import Optional, Dict, Tuple
 from tenacity import retry, stop_after_attempt, wait_exponential
+from src.market.price_cache import price_cache
 
 logger = logging.getLogger(__name__)
+
+CLOUDFRONT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin": "https://www.binance.com",
+    "Referer": "https://www.binance.com/",
+}
 
 
 class DataManager:
@@ -40,11 +48,6 @@ class DataManager:
         3. Futures client = separate if provided
         """
         try:
-            # Define a browser-like User-Agent to avoid WAF blocks
-            user_agent_header = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-
             api_config = self.config["api"]["binance"]
             api_key = api_config.get("api_key", "")
             api_secret = api_config.get("api_secret", "")
@@ -64,7 +67,10 @@ class DataManager:
 
             # Always create a live client for data (no keys needed = public access)
             self.live_data_client = Client("", "")
-            self.live_data_client.session.headers.update(user_agent_header)
+            self.live_data_client.session.headers.update(CLOUDFRONT_HEADERS)
+            logger.info(
+                f"   [User-Agent] Live Data Client: {self.live_data_client.session.headers.get('User-Agent')}"
+            )
 
             try:
                 self.live_data_client.ping()
@@ -82,7 +88,10 @@ class DataManager:
                 logger.warning("\n⚠️  Binance API keys not configured")
                 logger.info("   Using public API only (no trading capability)")
                 self.binance_client = Client("", "")
-                self.binance_client.session.headers.update(user_agent_header)
+                self.binance_client.session.headers.update(CLOUDFRONT_HEADERS)
+                logger.info(
+                    f"   [User-Agent] Primary Client (Public): {self.binance_client.session.headers.get('User-Agent')}"
+                )
                 logger.info("✅ Public Spot API initialized")
                 return True
 
@@ -95,14 +104,20 @@ class DataManager:
 
             if is_testnet:
                 self.binance_client = Client(api_key, api_secret, testnet=True)
-                self.binance_client.session.headers.update(user_agent_header)
+                self.binance_client.session.headers.update(CLOUDFRONT_HEADERS)
+                logger.info(
+                    f"   [User-Agent] Primary Client (Testnet): {self.binance_client.session.headers.get('User-Agent')}"
+                )
                 self.binance_client.API_URL = "https://testnet.binance.vision/api"
                 logger.info("   Endpoint: https://testnet.binance.vision/api (testnet)")
                 logger.warning("   ⚠️  Testnet has LIMITED historical data (~2 days)")
                 logger.info("   💡 Historical analysis will use live API automatically")
             else:
                 self.binance_client = Client(api_key, api_secret)
-                self.binance_client.session.headers.update(user_agent_header)
+                self.binance_client.session.headers.update(CLOUDFRONT_HEADERS)
+                logger.info(
+                    f"   [User-Agent] Primary Client (Live): {self.binance_client.session.headers.get('User-Agent')}"
+                )
                 logger.info("   Endpoint: https://api.binance.com (LIVE)")
                 logger.warning("   ⚠️  WARNING: LIVE TRADING MODE - REAL MONEY AT RISK")
 
@@ -126,7 +141,10 @@ class DataManager:
                         self.futures_client = Client(
                             futures_key, futures_secret, testnet=True
                         )
-                        self.futures_client.session.headers.update(user_agent_header)
+                        self.futures_client.session.headers.update(CLOUDFRONT_HEADERS)
+                        logger.info(
+                            f"   [User-Agent] Futures Client (Testnet): {self.futures_client.session.headers.get('User-Agent')}"
+                        )
                         self.futures_client.API_URL = (
                             "https://testnet.binancefuture.com"
                         )
@@ -135,7 +153,10 @@ class DataManager:
                         )
                     else:
                         self.futures_client = Client(futures_key, futures_secret)
-                        self.futures_client.session.headers.update(user_agent_header)
+                        self.futures_client.session.headers.update(CLOUDFRONT_HEADERS)
+                        logger.info(
+                            f"   [User-Agent] Futures Client (Live): {self.futures_client.session.headers.get('User-Agent')}"
+                        )
                         self.futures_client.API_URL = "https://fapi.binance.com"
                         logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
                         logger.warning("   ⚠️  LIVE FUTURES TRADING - HIGH RISK")
@@ -421,6 +442,12 @@ class DataManager:
                 f"   Coverage: {days_received}/{days_requested} days ({coverage_pct:.1f}%)"
             )
 
+            # Update the price cache with the latest close
+            if not df.empty:
+                last_close = df['close'].iloc[-1]
+                price_cache.set(symbol, last_close)
+                logger.info(f"[CACHE] Price cache updated with last kline close: {last_close}")
+
             return df
 
         except Exception as e:
@@ -559,6 +586,13 @@ class DataManager:
             df = df.set_index("timestamp")
 
             logger.info(f"✅ Fetched {len(df)} bars from MT5")
+            
+            # Update the price cache with the latest close
+            if not df.empty:
+                last_close = df['close'].iloc[-1]
+                price_cache.set(symbol, last_close)
+                logger.info(f"[CACHE] Price cache updated with last kline close from MT5: {last_close}")
+
             return df
 
         except ImportError:

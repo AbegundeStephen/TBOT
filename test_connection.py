@@ -1,46 +1,33 @@
 import requests
-import json
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
-# Define a standard User-Agent
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/91.0.4472.124 Safari/537.36"
-    )
-}
+# Replace with your Binance API key and secret
+API_KEY = "k6HT6iujBRAUHeG0pX2hL8LOkgsZ7JfESeLXPdePnkj2QIHN9UgcJQkTi9Ig2OKS"
+API_SECRET = "FjkPxzUUppcHlPMlcXZrgSqSbOqkNXQnrX6JMANZ9W3MQRoeAW3QfjilJoKq41du"
 
-# --- Test 1: Public Endpoint ---
-print("--- Running Test 1: Public Binance Endpoint ---")
-public_url = "https://api.binance.com/api/v3/time"
-
+# Step 1: Get your current public IP
 try:
-    response_public = requests.get(public_url, headers=headers, timeout=10)
-    print(f"Status Code: {response_public.status_code}")
-    print("Response Body:")
+    public_ip = requests.get("https://api.ipify.org").text
+    print(f"🌐 Your current public IP: {public_ip}")
+except Exception as e:
+    print("❌ Could not fetch public IP:", e)
+    public_ip = None
 
-    # Try to print as JSON, fall back to raw text
-    try:
-        print(json.dumps(response_public.json(), indent=2))
-    except json.JSONDecodeError:
-        print(response_public.text)
+# Step 2: Initialize Binance client
+client = Client(API_KEY, API_SECRET, testnet=False)  # set testnet=True if using testnet
 
-except requests.exceptions.RequestException as e:
-    print(f"An error occurred: {e}")
-
-print("\n" + "=" * 50 + "\n")
-
-# --- Test 2: What is my IP? ---
-print("--- Running Test 2: Checking Public IP Address ---")
-ip_check_url = "https://api.ipify.org?format=json"
-
+# Step 3: Test Futures account access
 try:
-    response_ip = requests.get(ip_check_url, timeout=10)
-    print(f"Status Code: {response_ip.status_code}")
-
-    ip_data = response_ip.json()
-    print(f"Server's Public IP appears to be: {ip_data['ip']}")
-    print("^^^ Make SURE this IP is the one whitelisted on Binance! ^^^")
-
-except requests.exceptions.RequestException as e:
-    print(f"Could not determine public IP. An error occurred: {e}")
+    balances = client.futures_account_balance()
+    print("✅ API key is valid and Futures access works!")
+    print("Futures Balances:")
+    for asset in balances:
+        print(f"{asset['asset']}: {asset['balance']}")
+except BinanceAPIException as e:
+    print("❌ Binance API error:")
+    print(f"Code: {e.code}, Message: {e.message}")
+    if e.code == -2015:
+        print("→ Invalid API key, IP not allowed, or Futures permission missing.")
+        if public_ip:
+            print(f"→ Make sure this IP ({public_ip}) is whitelisted in your Binance API settings.")
