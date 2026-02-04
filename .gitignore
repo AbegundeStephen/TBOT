@@ -1,6 +1,6 @@
 # Environment & Secrets
 .env
-config.json
+#config.json
 *.key
 *.pem
 
