@@ -1088,12 +1088,13 @@ class TradingBot:
             )
             logger.info(f"  Presets Used: {set(asset_presets.values())}")
 
-    def _format_ai_validation_direct(self, signal: int, df: pd.DataFrame) -> dict:
+    def _format_ai_validation_direct(self, asset_name: str, signal: int, df: pd.DataFrame) -> dict:
         """
         Direct AI validation formatting (fallback when aggregator doesn't have the method)
         MATCHES the full implementation from _format_ai_validation_for_viz
 
         Args:
+            asset_name: The name of the asset being processed (e.g., 'BTC', 'GOLD').
             signal: Trading signal
             df: Market dataframe
 
@@ -1125,6 +1126,7 @@ class TradingBot:
 
             # Get S/R analysis
             sr_result = self.ai_validator._check_support_resistance_fixed(
+                asset=asset_name,
                 df=df,
                 current_price=current_price,
                 signal=signal,
@@ -1594,7 +1596,7 @@ class TradingBot:
             logger.warning(f"[HYBRID] Regenerating complete AI validation...")
 
             # Regenerate completely
-            ai_validation = self._format_ai_validation_direct(signal, df)
+            ai_validation = self._format_ai_validation_direct(asset_name, signal, df)
             details["ai_validation"] = ai_validation
 
         # ================================================================
@@ -3162,7 +3164,7 @@ class TradingBot:
                                     f"[VIZ] Regenerating AI validation from scratch..."
                                 )
                                 details["ai_validation"] = (
-                                    self._format_ai_validation_direct(signal, df)
+                                    self._format_ai_validation_direct(asset_name, signal, df)
                                 )
 
                                 is_valid = self._validate_ai_details_structure(

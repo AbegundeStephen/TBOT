@@ -3,7 +3,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
 # Replace with your Binance API key and secret
-API_KEY = "***REMOVED-BINANCE-SECRET***"
+API_KEY = "***REMOVED-BINANCE-KEY***"
 API_SECRET = "***REMOVED-BINANCE-SECRET***"
 
 # Step 1: Get your current public IP
@@ -30,4 +30,6 @@ except BinanceAPIException as e:
     if e.code == -2015:
         print("→ Invalid API key, IP not allowed, or Futures permission missing.")
         if public_ip:
-            print(f"→ Make sure this IP ({public_ip}) is whitelisted in your Binance API settings.")
+            print(
+                f"→ Make sure this IP ({public_ip}) is whitelisted in your Binance API settings."
+            )
