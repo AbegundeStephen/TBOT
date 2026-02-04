@@ -108,8 +108,7 @@ class HybridSignalValidator:
         self.current_pattern_threshold = pattern_confidence_min
 
         # S/R cache
-        self.sr_cache = {}
-        self.last_sr_update = None
+        self.sr_cache: Dict[str, Dict] = {}
         self.sr_update_interval = 3600  # 1 hour
 
         # Circuit breaker
@@ -249,7 +248,7 @@ class HybridSignalValidator:
         # ============================================================
         current_price = float(df["close"].iloc[-1])
         sr_result = self._check_support_resistance_fixed(
-            df, current_price, signal, threshold=self.current_sr_threshold
+            asset, df, current_price, signal, threshold=self.current_sr_threshold
         )
 
         if self.detailed_logging:
@@ -440,22 +439,21 @@ class HybridSignalValidator:
                 )
 
     def _check_support_resistance_fixed(
-        self, df: pd.DataFrame, current_price: float, signal: int, threshold: float
+        self, asset: str, df: pd.DataFrame, current_price: float, signal: int, threshold: float
     ) -> dict:
         """
-         Directional S/R logic
-        BUY needs support BELOW, SELL needs resistance ABOVE
+         Directional S/R logic with per-asset caching.
+        BUY needs support BELOW, SELL needs resistance ABOVE.
         """
-        # Update S/R levels if cache stale
-        now = pd.Timestamp.now()
-        if (
-            self.last_sr_update is None
-            or (now - self.last_sr_update).total_seconds() > self.sr_update_interval
-        ):
-            self._update_sr_levels(df)
-            self.last_sr_update = now
+        now = datetime.now()
+        asset_cache = self.sr_cache.get(asset, {})
+        last_update = asset_cache.get('updated_at')
 
-        all_levels = self.sr_cache.get("levels", [])
+        if not last_update or (now - last_update).total_seconds() > self.sr_update_interval:
+            self._update_sr_levels(asset, df)
+            asset_cache = self.sr_cache.get(asset, {})
+
+        all_levels = asset_cache.get("levels", [])
 
         if not all_levels:
             return {
@@ -768,28 +766,28 @@ class HybridSignalValidator:
 
         logger.info("🔄 AI circuit breaker reset - validation RE-ENABLED")
 
-    def _update_sr_levels(self, df: pd.DataFrame):
-        """More robust S/R level extraction"""
+    def _update_sr_levels(self, asset: str, df: pd.DataFrame):
+        """More robust S/R level extraction, now per-asset."""
         pivots = self._extract_pivots(df, window=7)
 
         #  Lower threshold from 5 to 3 pivots
         if len(pivots) < 3:
             logger.warning(
-                f"[SR UPDATE] Only {len(pivots)} pivots - using price quantiles as fallback"
+                f"[SR UPDATE] Only {len(pivots)} pivots for {asset} - using price quantiles as fallback"
             )
 
             # Fallback: Use price distribution quantiles as S/R levels
             closes = df["close"].values
             levels = np.percentile(closes, [10, 25, 50, 75, 90]).tolist()
 
-            self.sr_cache = {
+            self.sr_cache[asset] = {
                 "levels": sorted(levels),
                 "updated_at": datetime.now(),
                 "pivot_count": 0,
                 "fallback_mode": True,
             }
 
-            logger.info(f"[SR UPDATE] Fallback: {len(levels)} quantile-based levels")
+            logger.info(f"[SR UPDATE] Fallback for {asset}: {len(levels)} quantile-based levels")
             return
 
         try:
@@ -804,27 +802,27 @@ class HybridSignalValidator:
             #  If clustering fails, use pivots directly
             if not levels:
                 logger.warning(
-                    "[SR UPDATE] Clustering returned no levels - using raw pivots"
+                    f"[SR UPDATE] Clustering returned no levels for {asset} - using raw pivots"
                 )
                 levels = sorted(np.unique(pivots).tolist())
 
-            self.sr_cache = {
+            self.sr_cache[asset] = {
                 "levels": levels,
                 "updated_at": datetime.now(),
                 "pivot_count": len(pivots),
                 "fallback_mode": False,
             }
 
-            logger.debug(f"[SR UPDATE] {len(levels)} levels from {len(pivots)} pivots")
+            logger.debug(f"[SR UPDATE] {len(levels)} levels for {asset} from {len(pivots)} pivots")
 
         except Exception as e:
-            logger.error(f"[SR UPDATE] Failed: {e}")
+            logger.error(f"[SR UPDATE] Failed for {asset}: {e}")
 
             # Emergency fallback: use price range
             closes = df["close"].values
             levels = np.percentile(closes, [10, 30, 50, 70, 90]).tolist()
 
-            self.sr_cache = {
+            self.sr_cache[asset] = {
                 "levels": sorted(levels),
                 "updated_at": datetime.now(),
                 "pivot_count": 0,
@@ -832,7 +830,7 @@ class HybridSignalValidator:
             }
 
             logger.warning(
-                f"[SR UPDATE] Emergency fallback: {len(levels)} quantile levels"
+                f"[SR UPDATE] Emergency fallback for {asset}: {len(levels)} quantile levels"
             )
 
     def _extract_pivots(self, df: pd.DataFrame, window=7) -> np.ndarray:

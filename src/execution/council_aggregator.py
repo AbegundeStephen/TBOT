@@ -485,6 +485,7 @@ class InstitutionalCouncilAggregator:
             details = {
                 'timestamp': timestamp,
                 'signal': signal,
+                'asset': self.asset_type,
                 'trade_type': trade_type, # ✨ NEW: Pass to Risk Manager
                 'decision_type': decision_type,
                 'total_score': total_score,
@@ -659,6 +660,7 @@ class InstitutionalCouncilAggregator:
             if self.ai_validator:
                 # Check support (BUY)
                 sr_buy = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type,
                     df=df,
                     current_price=current_price,
                     signal=1,
@@ -680,6 +682,7 @@ class InstitutionalCouncilAggregator:
                 
                 # Check resistance (SELL)
                 sr_sell = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type,
                     df=df,
                     current_price=current_price,
                     signal=-1,
@@ -948,6 +951,7 @@ class InstitutionalCouncilAggregator:
             # S/R Analysis
             try:
                 sr_result = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type,
                     df=df,
                     current_price=current_price,
                     signal=final_signal,
