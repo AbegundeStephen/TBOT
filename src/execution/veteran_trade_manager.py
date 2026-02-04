@@ -193,11 +193,12 @@ class VeteranTradeManager:
         try:
             # Asymmetric constraints
             if trade_type == "SCALP":
-                max_stop = risk_config.get("min_stop_pct", 0.01) * 0.5
-                min_rr = 1.5
+                base_max = risk_config.get("max_stop_pct", 0.03)
+                max_stop = base_max * 0.7
+                min_rr = 1.2
             else:  # TREND
                 max_stop = risk_config.get("max_stop_pct", 0.06)
-                min_rr = 1.49
+                min_rr = 1.5
             
             stop_distance = abs(entry_price - stop_loss)
             stop_distance_pct = stop_distance / entry_price
@@ -276,8 +277,11 @@ class VeteranTradeManager:
             self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.01) * 0.5
             self.max_stop_pct = self.risk_config.get("max_stop_pct", 0.03) * 0.7
             self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.5) * 0.75
-            self.partial_targets = self.risk_config.get("partial_targets", [1.5, 2.5])
-            self.partial_sizes = self.risk_config.get("partial_sizes", [0.6, 0.4])
+
+            # FORCE tighter SCALP targets (do not read config)
+            self.partial_targets = [1.2, 2.0, 3.0]
+            self.partial_sizes = [0.5, 0.3, 0.2]
+
             self.enable_early_profit_lock = True
             self.early_lock_threshold_pct = 0.005
         else:  # TREND
