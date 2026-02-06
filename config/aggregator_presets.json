@@ -58,7 +58,7 @@
         "single_override_threshold": 0.70,
         "opposition_penalty": 0.60,
         "verbose": false,
-        "council_trend_aligned": 3.0,
+        "council_trend_aligned": 2.9,
         "council_counter_trend": 3.5
       },
       "scalper": {
@@ -80,7 +80,7 @@
         "verbose": false,
         "min_quality_margin": 0.05,
         "opposition_penalty": 0.60,
-        "council_trend_aligned": 2.5,
+        "council_trend_aligned": 2.4,
         "council_counter_trend": 3.5
       }
     },

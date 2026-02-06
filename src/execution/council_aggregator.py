@@ -230,40 +230,156 @@ class InstitutionalCouncilAggregator:
             return True
         except: return True
 
-    def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> bool:
-        """Hybrid Confirmation: AI Pattern OR Momentum Impulse."""
-        # 1. Smart Check (AI)
-        if self.ai_validator:
-            try:
-                res = self.ai_validator._check_pattern(df, signal, self.filter_thresholds["min_sniper_conf"])
-                if res.get('pattern_confirmed', False):
-                    logger.info(f"[SNIPER] ✅ PASSED - AI Pattern Found: {res.get('pattern_name')}")
-                    return True
-            except: pass
-
-        # 2. Brute Force Check (Momentum)
+    def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Dict]:
+        """
+        Hybrid Confirmation: AI Pattern OR Momentum Impulse.
+        
+        Updated to align with the institutional edge confirmation approach from SignalAggregator.
+        A trade is confirmed if ANY of the following institutional edge conditions are met.
+        This prevents rejecting high-quality trades due to cosmetic candle issues.
+        
+        Confirmation Logic (OR-based):
+        1. AI Pattern: A high-confidence AI pattern is detected.
+        2. Momentum Candle: The candle body is at least 60% of the total range.
+        3. Turtle Breakout: Price closes above the 20-period Donchian High or below the Low.
+        4. Volume Surge: Volume is >= 150% of its 20-period rolling average.
+        5. Volatility Breach: Price closes outside the 2.0 standard deviation Bollinger Bands.
+        
+        Returns:
+            (passed, details)
+        """
         try:
-            closes, highs, lows = df['close'].values, df['high'].values, df['low'].values
+            latest = df.iloc[-1]
+            reasons = []
+
+            # ================================================================
+            # 1. AI Pattern Confidence
+            # ================================================================
+            # Reason: The AI model has already encoded a multi-factor edge.
+            if self.ai_validator:
+                try:
+                    pattern_result = self.ai_validator._check_pattern(
+                        df=df,
+                        signal=signal,
+                        min_confidence=self.filter_thresholds['min_sniper_conf']
+                    )
+                    if pattern_result.get('pattern_confirmed'):
+                        reasons.append({
+                            'passed': True,
+                            'trigger_type': 'AI_PATTERN',
+                            'pattern_name': pattern_result.get('pattern_name'),
+                            'confidence': pattern_result.get('confidence'),
+                        })
+                except Exception as e:
+                    logger.debug(f"[SNIPER] AI Pattern check failed: {e}")
+
+            # ================================================================
+            # 2. Momentum Candle
+            # ================================================================
+            # Reason: Confirms strong conviction from buyers or sellers in the current period.
+            body = abs(latest['close'] - latest['open'])
+            total_range = latest['high'] - latest['low']
+            if total_range > 0:
+                body_ratio = body / total_range
+                if body_ratio >= 0.60:
+                    is_bullish_candle = latest['close'] > latest['open']
+                    if (signal == 1 and is_bullish_candle) or (signal == -1 and not is_bullish_candle):
+                        reasons.append({
+                            'passed': True,
+                            'trigger_type': 'MOMENTUM_CANDLE',
+                            'body_ratio': body_ratio,
+                        })
+
+            # Check if we have enough data for rolling indicators (Donchian, Volume MA, Bollinger Bands)
+            # Need 20 periods + current, so at least 21 bars
+            if len(df) < 21:
+                if reasons:
+                    if self.detailed_logging: logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {[r['trigger_type'] for r in reasons]} (Partial checks due to insufficient data)")
+                    return True, reasons[0]
+                else:
+                    logger.warning(f"[SNIPER] ❌ BLOCKED - Insufficient data for full institutional checks (need 21 bars, have {len(df)}).")
+                    return False, {'trigger_type': None, 'reason': f'Insufficient data for full checks (have {len(df)})'}
+
+            # ================================================================
+            # 3. Turtle Breakout (20-period Donchian Channel)
+            # ================================================================
+            # Reason: Captures classic institutional breakout entries.
+            # We look at the previous 20 candles to define the channel *before* the current candle.
+            high_20 = df['high'].iloc[-21:-1].max()
+            low_20 = df['low'].iloc[-21:-1].min()
+
+            if signal == 1 and latest['close'] > high_20:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'TURTLE_BREAKOUT',
+                    'breakout_level': high_20,
+                    'price': latest['close'],
+                })
+            elif signal == -1 and latest['close'] < low_20:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'TURTLE_BREAKOUT',
+                    'breakout_level': low_20,
+                    'price': latest['close'],
+                })
+
+            # ================================================================
+            # 4. Volume Surge
+            # ================================================================
+            # Reason: Confirms institutional participation and conviction behind a move.
+            volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
+            if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'VOLUME_SURGE',
+                    'volume': latest['volume'],
+                    'avg_volume': volume_rolling_avg,
+                    'surge_factor': latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0,
+                })
+
+            # ================================================================
+            # 5. Volatility Breach (Bollinger Bands)
+            # ================================================================
+            # Reason: Detects that price has moved into a new volatility regime.
+            close_rolling_mean = df['close'].iloc[-21:-1].mean()
+            close_rolling_std = df['close'].iloc[-21:-1].std()
             
-            # Require the breakout candle to have a strong body (Impulse)
-            body = abs(closes[-1] - df['open'].values[-1])
-            candle_range = highs[-1] - lows[-1]
-            if candle_range == 0 or (body / candle_range) < 0.35:
-                logger.info("[SNIPER] ❌ BLOCKED - Weak momentum candle")
-                return False
+            if close_rolling_std > 0:
+                upper_band = close_rolling_mean + (2.0 * close_rolling_std)
+                lower_band = close_rolling_mean - (2.0 * close_rolling_std)
 
-            if signal == 1: # BUY
-                passed = closes[-1] > max(highs[-4:-1])
-            else: # SELL
-                passed = closes[-1] < min(lows[-4:-1])
+                if signal == 1 and latest['close'] > upper_band:
+                    reasons.append({
+                        'passed': True,
+                        'trigger_type': 'VOLATILITY_BREACH',
+                        'band': 'upper',
+                        'price': latest['close'],
+                    })
+                elif signal == -1 and latest['close'] < lower_band:
+                    reasons.append({
+                        'passed': True,
+                        'trigger_type': 'VOLATILITY_BREACH',
+                        'band': 'lower',
+                        'price': latest['close'],
+                    })
+            
+            # ================================================================
+            # Final Decision
+            # ================================================================
+            if reasons:
+                # Log all triggers that passed
+                trigger_types = [r['trigger_type'] for r in reasons]
+                logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {trigger_types}")
+                # Return the details of the first trigger found
+                return True, reasons[0]
 
-            if passed:
-                logger.info("[SNIPER] ✅ PASSED - Momentum Impulse Detected")
-                return True
-        except: pass
+            logger.info(f"[SNIPER] ❌ BLOCKED - No institutional edge confirmed.")
+            return False, {'trigger_type': None, 'reason': 'No confirmation criteria met'}
 
-        logger.info("[SNIPER] ❌ BLOCKED - No Pattern AND No Momentum")
-        return False
+        except Exception as e:
+            logger.error(f"[SNIPER] Error in institutional edge check: {e}", exc_info=True)
+            # Fail-open: If the filter fails, we allow the trade to avoid blocking valid signals due to code errors.
+            return True, {'trigger_type': 'ERROR_FALLBACK', 'reason': str(e)}
 
     def _check_profit_economics(self, df: pd.DataFrame, signal: int) -> bool:
         """The 'Worth It' Check. Validates if potential RR covers fees."""
@@ -354,16 +470,20 @@ class InstitutionalCouncilAggregator:
             }
             sell_explanations = []
             
+            # ✨ NEW: Detect Breakout State to enable adaptive logic
+            is_breakout_mode = self._detect_breakout_state(df)
+            
             # Run all judges for both directions
             buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull)
             buy_explanations.append(trend_exp['buy'])
             sell_explanations.append(trend_exp['sell'])
             
-            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df)
+            # Pass breakout flag to adaptive judges
+            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df, is_breakout_mode)
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
-            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull)
+            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode)
             buy_explanations.append(momentum_exp['buy'])
             sell_explanations.append(momentum_exp['sell'])
             
@@ -448,8 +568,10 @@ class InstitutionalCouncilAggregator:
                     signal = 0
 
                 # C. SNIPER LOCK (Momentum / Pattern)
-                elif not self._check_sniper_filter(df, signal):
-                    decision_type = f"BLOCKED (No 15m Momentum/Pattern Confirmation)"
+                # The _check_sniper_filter now returns a tuple (passed, details_dict)
+                sniper_passed, sniper_details = self._check_sniper_filter(df, signal)
+                if not sniper_passed:
+                    decision_type = f"BLOCKED (No institutional sniper confirmation: {sniper_details.get('reason', 'N/A')})"
                     signal = 0
 
                 # D. PROFIT ECONOMICS GATE
@@ -643,80 +765,79 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[TREND] Error: {e}")
             return 0.0, 0.0, {'buy': f"TREND: Error", 'sell': f"TREND: Error"}
     
-    def _judge_structure_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+    def _judge_structure_bidirectional(self, df: pd.DataFrame, is_breakout_mode: bool) -> Tuple[float, float, Dict]:
         """
-        JUDGE 2: STRUCTURE (Bidirectional)
+        JUDGE 2: STRUCTURE (Bidirectional & Adaptive)
         
-        BUY: At support level
-        SELL: At resistance level
+        - Normal Mode: Is price at a key decision point (S/R)?
+        - Breakout Mode: Has price decisively broken a structural level?
         """
         try:
             current_price = float(df['close'].iloc[-1])
-            threshold_pct = self.config['sr_proximity_pct']
-            
-            buy_score = 0.0
-            sell_score = 0.0
-            
-            if self.ai_validator:
-                # Check support (BUY)
-                sr_buy = self.ai_validator._check_support_resistance_fixed(
-                    asset=self.asset_type,
-                    df=df,
-                    current_price=current_price,
-                    signal=1,
-                    threshold=threshold_pct,
-                )
+            buy_score, sell_score = 0.0, 0.0
+            buy_exp, sell_exp = "STRUCT BUY: ❌ No signal", "STRUCT SELL: ❌ No signal"
+
+            if is_breakout_mode:
+                # --- BREAKOUT LOGIC: Has structure been broken? ---
+                # "Price breaking a structural floor is a GO for selling."
+                # We use a 20-period Donchian channel as a proxy for recent structure.
+                if len(df) < 21:
+                    return 0.0, 0.0, {'buy': "STRUCT: Need 21 bars for breakout", 'sell': "STRUCT: Need 21 bars for breakout"}
                 
+                high_20 = df['high'].iloc[-21:-1].max()
+                low_20 = df['low'].iloc[-21:-1].min()
+
+                if current_price > high_20:
+                    buy_score = self.w_structure
+                    buy_exp = f"STRUCT BUY: ✅ Breakout ({self.w_structure:.1f}) - Price > 20-bar high ${high_20:.2f}"
+                
+                if current_price < low_20:
+                    sell_score = self.w_structure
+                    sell_exp = f"STRUCT SELL: ✅ Breakdown ({self.w_structure:.1f}) - Price < 20-bar low ${low_20:.2f}"
+
+            else:
+                # --- NORMAL LOGIC: Is price reacting to an S/R level? ---
+                # "Price far from resistance is NO justification to sell."
+                if not self.ai_validator:
+                    return 0.0, 0.0, {'buy': "STRUCT: AI disabled", 'sell': "STRUCT: AI disabled"}
+
+                threshold_pct = self.config['sr_proximity_pct']
+                
+                # Check for reaction at a SUPPORT level (for BUY)
+                sr_buy = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type, df=df, current_price=current_price, signal=1, threshold=threshold_pct
+                )
                 if sr_buy.get('near_level'):
-                    level = sr_buy.get('nearest_level')
-                    dist_pct = sr_buy.get('distance_pct', 0)
-                    
-                    if dist_pct < (threshold_pct * 50):
-                        buy_score = self.w_structure
-                        buy_exp = f"STRUCT BUY: ✅ Full ({self.w_structure:.1f}) - At Support ${level:.2f}"
-                    else:
-                        buy_score = self.w_structure * 0.5
-                        buy_exp = f"STRUCT BUY: ⚠️ Partial ({buy_score:.1f}) - Near Support ${level:.2f}"
+                    level = sr_buy.get('nearest_level', 0)
+                    buy_score = self.w_structure
+                    buy_exp = f"STRUCT BUY: ✅ At Support ({self.w_structure:.1f}) - Near level ${level:.2f}"
                 else:
                     buy_exp = "STRUCT BUY: ❌ No support nearby"
                 
-                # Check resistance (SELL)
+                # Check for reaction at a RESISTANCE level (for SELL)
                 sr_sell = self.ai_validator._check_support_resistance_fixed(
-                    asset=self.asset_type,
-                    df=df,
-                    current_price=current_price,
-                    signal=-1,
-                    threshold=threshold_pct,
+                    asset=self.asset_type, df=df, current_price=current_price, signal=-1, threshold=threshold_pct
                 )
-                
                 if sr_sell.get('near_level'):
-                    level = sr_sell.get('nearest_level')
-                    dist_pct = sr_sell.get('distance_pct', 0)
-                    
-                    if dist_pct < (threshold_pct * 50):
-                        sell_score = self.w_structure
-                        sell_exp = f"STRUCT SELL: ✅ Full ({self.w_structure:.1f}) - At Resistance ${level:.2f}"
-                    else:
-                        sell_score = self.w_structure * 0.5
-                        sell_exp = f"STRUCT SELL: ⚠️ Partial ({sell_score:.1f}) - Near Resistance ${level:.2f}"
+                    level = sr_sell.get('nearest_level', 0)
+                    sell_score = self.w_structure
+                    sell_exp = f"STRUCT SELL: ✅ At Resistance ({self.w_structure:.1f}) - Near level ${level:.2f}"
                 else:
                     sell_exp = "STRUCT SELL: ❌ No resistance nearby"
-            else:
-                buy_exp = "STRUCT BUY: AI disabled"
-                sell_exp = "STRUCT SELL: AI disabled"
-            
+
             return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
-            
+
         except Exception as e:
-            logger.error(f"[STRUCTURE] Error: {e}")
+            logger.error(f"[STRUCTURE] Error: {e}", exc_info=True)
             return 0.0, 0.0, {'buy': "STRUCT: Error", 'sell': "STRUCT: Error"}
     
-    def _judge_momentum_bidirectional(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, float, Dict]:
+    def _judge_momentum_bidirectional(self, df: pd.DataFrame, is_bull: bool, is_breakout_mode: bool) -> Tuple[float, float, Dict]:
         """
-        JUDGE 3: MOMENTUM (Bidirectional)
+        JUDGE 3: MOMENTUM (Bidirectional & Adaptive)
         
-        BUY: RSI oversold or in bullish zone
-        SELL: RSI overbought or in bearish zone
+        Behavior flips based on whether the market is in a breakout state.
+        - Normal Mode: Assumes mean-reversion (buy dips, sell rips).
+        - Breakout Mode: Assumes momentum continuation (buy strength, sell weakness).
         """
         try:
             features_mr = self.s_mean_reversion.generate_features(df.tail(100))
@@ -726,57 +847,64 @@ class InstitutionalCouncilAggregator:
             rsi = features_mr.iloc[-1].get('rsi', 50)
             
             # Config values
-            if is_bull:
-                bullish_min, bullish_max = (50, 75)  # Shift up in trends
-            else:
-                bullish_min, bullish_max = self.config['rsi_bullish_zone']
-
+            bullish_min, bullish_max = self.config['rsi_bullish_zone']
             bearish_min, bearish_max = self.config['rsi_bearish_zone']
             oversold = self.config['rsi_oversold_bonus']
             overbought = self.config['rsi_overbought_bonus']
             
             buy_score = 0.0
             sell_score = 0.0
-            
-            # BUY scoring
-            if bullish_min <= rsi <= bullish_max:
-                buy_score = self.w_momentum
-                buy_exp = f"MOM BUY: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} bullish"
-            elif rsi < oversold:
-                buy_score = self.w_momentum
-                buy_exp = f"MOM BUY: ✅ Oversold ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+            buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
+            sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
+
+            if is_breakout_mode:
+                # --- BREAKOUT LOGIC (Momentum Continuation) ---
+                # "RSI < 25 indicates strong downside momentum. Go Sell."
+                if rsi < oversold:
+                    sell_score = self.w_momentum
+                    sell_exp = f"MOM SELL: ✅ Breakout ({self.w_momentum:.1f}) - RSI {rsi:.1f} shows downside momentum"
+                # "RSI > 75 indicates strong upside momentum. Go Buy."
+                if rsi > overbought:
+                    buy_score = self.w_momentum
+                    buy_exp = f"MOM BUY: ✅ Breakout ({self.w_momentum:.1f}) - RSI {rsi:.1f} shows upside momentum"
+
             else:
-                buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
+                # --- NORMAL LOGIC (Mean Reversion) ---
+                # "RSI in bullish zone (40-65) is a buy signal."
+                if bullish_min <= rsi <= bullish_max:
+                    buy_score = self.w_momentum
+                    buy_exp = f"MOM BUY: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} in bullish zone"
+                # "RSI < 30 is oversold. Stop selling, start buying."
+                elif rsi < oversold:
+                    buy_score = self.w_momentum
+                    buy_exp = f"MOM BUY: ✅ Oversold ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+
+                # "RSI in bearish zone (35-60) is a sell signal."
+                if bearish_min <= rsi <= bearish_max:
+                    sell_score = self.w_momentum
+                    sell_exp = f"MOM SELL: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} in bearish zone"
+                # "RSI > 70 is overbought. Stop buying, start selling."
+                elif rsi > overbought:
+                    sell_score = self.w_momentum
+                    sell_exp = f"MOM SELL: ✅ Overbought ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
             
-            # SELL scoring
-            if bearish_min <= rsi <= bearish_max:
-                sell_score = self.w_momentum
-                sell_exp = f"MOM SELL: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} bearish"
-            elif rsi > overbought:
-                sell_score = self.w_momentum
-                sell_exp = f"MOM SELL: ✅ Overbought ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
-            else:
-                sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
-            
-            # MACD confirmation
+            # MACD confirmation still adds value in both modes
             if self.config['macd_confirmation']:
                 macd = features_mr.iloc[-1].get('macd', 0)
                 macd_signal = features_mr.iloc[-1].get('macd_signal', 0)
                 
                 if buy_score > 0 and macd > macd_signal:
-                    bonus = 0.2
-                    buy_score = min(buy_score + bonus, self.w_momentum)
-                    buy_exp += f" + MACD"
+                    buy_score = min(buy_score + 0.2, self.w_momentum)
+                    buy_exp += " +MACD"
                 
                 if sell_score > 0 and macd < macd_signal:
-                    bonus = 0.2
-                    sell_score = min(sell_score + bonus, self.w_momentum)
-                    sell_exp += f" + MACD"
+                    sell_score = min(sell_score + 0.2, self.w_momentum)
+                    sell_exp += " +MACD"
             
             return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
             
         except Exception as e:
-            logger.error(f"[MOMENTUM] Error: {e}")
+            logger.error(f"[MOMENTUM] Error: {e}", exc_info=True)
             return 0.0, 0.0, {'buy': "MOM: Error", 'sell': "MOM: Error"}
     
     def _judge_pattern_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
@@ -885,6 +1013,69 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.error(f"[REGIME] Error: {e}")
             return False, 0.5
+
+    def _detect_breakout_state(self, df: pd.DataFrame, adx_threshold: int = 25, volume_surge_factor: float = 1.5, donchian_period: int = 20) -> bool:
+        """
+        Detects a market breakout state based on a confluence of indicators.
+        A breakout is confirmed if ALL of the following conditions are true:
+        1. Strength: ADX is above a specified threshold (e.g., 25), indicating strong trend.
+        2. Participation: Volume is significantly higher than its rolling average, showing conviction.
+        3. Structure: Price has broken a recent high or low, confirming a structural shift.
+        
+        This method provides a binary flag (is_breakout_mode) to switch the logic of other judges.
+        
+        Args:
+            df (pd.DataFrame): The market data.
+            adx_threshold (int): The ADX value required to confirm trend strength.
+            volume_surge_factor (float): The multiplier for volume vs. its rolling average.
+            donchian_period (int): The lookback period for the Donchian channel breakout.
+
+        Returns:
+            bool: True if the market is in a breakout state, False otherwise.
+        """
+        try:
+            if len(df) < (donchian_period + 1):
+                return False # Not enough data to determine breakout state
+
+            # 1. Strength Check: ADX > 25
+            highs = df['high'].values
+            lows = df['low'].values
+            closes = df['close'].values
+            adx = ta.ADX(highs, lows, closes, timeperiod=14) # Standard ADX period is 14
+            latest_adx = adx[-1]
+            is_strong_trend = latest_adx > adx_threshold
+            
+            if not is_strong_trend:
+                if self.detailed_logging: logger.info(f"[BREAKOUT] Condition not met: ADX {latest_adx:.1f} <= {adx_threshold}")
+                return False
+
+            # 2. Participation Check: Volume >= 1.5x average
+            volume_ma = df['volume'].rolling(donchian_period).mean().iloc[-1]
+            current_volume = df['volume'].iloc[-1]
+            is_volume_surge = current_volume >= (volume_ma * volume_surge_factor)
+
+            if not is_volume_surge:
+                if self.detailed_logging: logger.info(f"[BREAKOUT] Condition not met: Volume {current_volume:.0f} < {volume_ma * volume_surge_factor:.0f}")
+                return False
+
+            # 3. Structure Check: Price breaks Donchian High/Low
+            # We check the channel from the *previous* 20 bars
+            donchian_high = df['high'].iloc[-donchian_period-1:-1].max()
+            donchian_low = df['low'].iloc[-donchian_period-1:-1].min()
+            latest_close = closes[-1]
+            is_structure_broken = (latest_close > donchian_high) or (latest_close < donchian_low)
+
+            if not is_structure_broken:
+                if self.detailed_logging: logger.info(f"[BREAKOUT] Condition not met: Close {latest_close:.2f} within Donchian({donchian_low:.2f}, {donchian_high:.2f})")
+                return False
+
+            # If all three conditions are met, we are in a breakout state.
+            logger.info(f"🔥 BREAKOUT STATE DETECTED: ADX={latest_adx:.1f}, Vol Ratio={current_volume/volume_ma:.1f}x, Price broke structure.")
+            return True
+
+        except Exception as e:
+            logger.error(f"[BREAKOUT] Error detecting breakout state: {e}", exc_info=True)
+            return False # Fail-safe to False
     
     def _log_decision_bidirectional(self, details: Dict):
         """Log council decision with bidirectional breakdown"""

@@ -76,6 +76,7 @@ class MeanReversionStrategy(BaseStrategy):
             self.rsi_period,
             self.stoch_k + self.stoch_d,
             14,  # ATR
+            26 + 9 # MACD lookback
         ]
         return max(periods)
 
@@ -114,6 +115,17 @@ class MeanReversionStrategy(BaseStrategy):
         )
         df["stoch_k"] = slowk
         df["stoch_d"] = slowd
+
+        # MACD (Standard parameters 12, 26, 9)
+        macd, macdsignal, macdhist = ta.MACD(
+            close,
+            fastperiod=12,
+            slowperiod=26,
+            signalperiod=9
+        )
+        df["macd"] = macd
+        df["macd_signal"] = macdsignal
+        df["macd_hist"] = macdhist
 
         # Volatility (normalized)
         df["atr"] = ta.ATR(high, low, close, timeperiod=14)
