@@ -144,6 +144,7 @@ class TradingBot:
             ai_enable_adaptive=True,
             ai_strong_signal_bypass=0.70,
         )
+        self.detailed_logging = True
 
         # Core components
         self.data_manager = DataManager(self.config)

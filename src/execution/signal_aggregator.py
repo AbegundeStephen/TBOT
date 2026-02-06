@@ -890,59 +890,151 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
     
     def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Dict]:
         """
-        Filter 3: Sniper Lock (Pattern or Momentum Confirmation)
+        Filter 3: Sniper Lock - Institutional Edge Confirmation
+        =======================================================
+        A trade is confirmed if ANY of the following institutional edge conditions are met.
+        This prevents rejecting high-quality trades due to cosmetic candle issues.
+        
+        Confirmation Logic (OR-based):
+        1. AI Pattern: A high-confidence AI pattern is detected.
+        2. Momentum Candle: The candle body is at least 60% of the total range.
+        3. Turtle Breakout: Price closes above the 20-period Donchian High or below the Low.
+        4. Volume Surge: Volume is >= 150% of its 20-period rolling average.
+        5. Volatility Breach: Price closes outside the 2.0 standard deviation Bollinger Bands.
         
         Returns:
             (passed, details)
         """
         if not self.enable_filters:
             return True, {'trigger_type': 'DISABLED'}
-        
+
         try:
-            # Strategy 1: AI Pattern Detection
+            latest = df.iloc[-1]
+            reasons = []
+
+            # ================================================================
+            # 1. AI Pattern Confidence
+            # ================================================================
+            # Reason: The AI model has already encoded a multi-factor edge.
             if self.ai_validator and hasattr(self.ai_validator, 'sniper'):
                 pattern_result = self.ai_validator._check_pattern(
                     df=df,
                     signal=signal,
                     min_confidence=self.filter_thresholds['sniper_confidence']
                 )
-                
                 if pattern_result.get('pattern_confirmed'):
-                    return True, {
+                    reasons.append({
                         'passed': True,
                         'trigger_type': 'AI_PATTERN',
                         'pattern_name': pattern_result.get('pattern_name'),
                         'confidence': pattern_result.get('confidence'),
-                    }
-            
-            # Strategy 2: Momentum Candle
-            if len(df) < 3:
-                return False, {'trigger_type': None, 'reason': 'Insufficient data'}
-            
-            latest = df.iloc[-1]
+                    })
+
+            # ================================================================
+            # 2. Momentum Candle
+            # ================================================================
+            # Reason: Confirms strong conviction from buyers or sellers in the current period.
             body = abs(latest['close'] - latest['open'])
             total_range = latest['high'] - latest['low']
-            
             if total_range > 0:
                 body_ratio = body / total_range
-                
-                # Strong momentum: body > 60% of range
-                if body_ratio > 0.60:
-                    is_bullish = latest['close'] > latest['open']
-                    
-                    if (signal == 1 and is_bullish) or (signal == -1 and not is_bullish):
-                        return True, {
+                if body_ratio >= 0.60:
+                    is_bullish_candle = latest['close'] > latest['open']
+                    if (signal == 1 and is_bullish_candle) or (signal == -1 and not is_bullish_candle):
+                        reasons.append({
                             'passed': True,
                             'trigger_type': 'MOMENTUM_CANDLE',
                             'body_ratio': body_ratio,
-                        }
+                        })
+
+            # Check if we have enough data for rolling indicators
+            if len(df) < 21: # Need 20 periods + current
+                if reasons:
+                    logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {[r['trigger_type'] for r in reasons]}")
+                    return True, reasons[0]
+                else:
+                    logger.warning(f"[SNIPER] ❌ BLOCKED - Insufficient data for full institutional checks (need 21 bars, have {len(df)}).")
+                    return False, {'trigger_type': None, 'reason': f'Insufficient data for breakouts (have {len(df)})'}
+
+            # ================================================================
+            # 3. Turtle Breakout (20-period Donchian Channel)
+            # ================================================================
+            # Reason: Captures classic institutional breakout entries.
+            # We look at the previous 20 candles to define the channel *before* the current candle.
+            high_20 = df['high'].iloc[-21:-1].max()
+            low_20 = df['low'].iloc[-21:-1].min()
+
+            if signal == 1 and latest['close'] > high_20:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'TURTLE_BREAKOUT',
+                    'breakout_level': high_20,
+                    'price': latest['close'],
+                })
+            elif signal == -1 and latest['close'] < low_20:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'TURTLE_BREAKOUT',
+                    'breakout_level': low_20,
+                    'price': latest['close'],
+                })
+
+            # ================================================================
+            # 4. Volume Surge
+            # ================================================================
+            # Reason: Confirms institutional participation and conviction behind a move.
+            volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
+            if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'VOLUME_SURGE',
+                    'volume': latest['volume'],
+                    'avg_volume': volume_rolling_avg,
+                    'surge_factor': latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0,
+                })
+
+            # ================================================================
+            # 5. Volatility Breach (Bollinger Bands)
+            # ================================================================
+            # Reason: Detects that price has moved into a new volatility regime.
+            close_rolling_mean = df['close'].iloc[-21:-1].mean()
+            close_rolling_std = df['close'].iloc[-21:-1].std()
             
-            # No confirmation
-            logger.info(f"[SNIPER] ❌ BLOCKED - No pattern or momentum candle")
-            return False, {'trigger_type': None, 'reason': 'No confirmation'}
-        
+            if close_rolling_std > 0:
+                upper_band = close_rolling_mean + (2.0 * close_rolling_std)
+                lower_band = close_rolling_mean - (2.0 * close_rolling_std)
+
+                if signal == 1 and latest['close'] > upper_band:
+                    reasons.append({
+                        'passed': True,
+                        'trigger_type': 'VOLATILITY_BREACH',
+                        'band': 'upper',
+                        'price': latest['close'],
+                    })
+                elif signal == -1 and latest['close'] < lower_band:
+                    reasons.append({
+                        'passed': True,
+                        'trigger_type': 'VOLATILITY_BREACH',
+                        'band': 'lower',
+                        'price': latest['close'],
+                    })
+            
+            # ================================================================
+            # Final Decision
+            # ================================================================
+            if reasons:
+                # Log all triggers that passed
+                trigger_types = [r['trigger_type'] for r in reasons]
+                logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {trigger_types}")
+                # Return the details of the first trigger found
+                return True, reasons[0]
+
+            logger.info(f"[SNIPER] ❌ BLOCKED - No institutional edge confirmed.")
+            return False, {'trigger_type': None, 'reason': 'No confirmation criteria met'}
+
         except Exception as e:
-            logger.error(f"[SNIPER] Error: {e}")
+            logger.error(f"[SNIPER] Error in institutional edge check: {e}", exc_info=True)
+            # Fail-open: If the filter fails, we allow the trade to avoid blocking valid signals due to code errors.
             return True, {'trigger_type': 'ERROR_FALLBACK'}
     
     def _check_profit_filter(self, df: pd.DataFrame) -> Tuple[bool, float]:

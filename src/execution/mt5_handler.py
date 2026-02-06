@@ -503,10 +503,18 @@ class MT5ExecutionHandler:
             # STEP 6: Convert USD to MT5 lots
             # ================================================================
             contract_size = self.symbol_info.trade_contract_size
-            volume_lots = position_size_usd / (current_price * contract_size)
+            raw_volume_lots = position_size_usd / (current_price * contract_size)
 
             volume_step = self.symbol_info.volume_step
-            volume_lots = round(volume_lots / volume_step) * volume_step
+            volume_lots = round(raw_volume_lots / volume_step) * volume_step
+
+            # ✅ FIX for Small Accounts: If calculated volume rounds to 0, use minimum lot size
+            if volume_lots == 0 and raw_volume_lots > 0:
+                logger.warning(
+                    f"[SIZING] Calculated volume {raw_volume_lots:.6f} is below one volume step. "
+                    f"Forcing to minimum lot size of {self.symbol_info.volume_min} to support small accounts."
+                )
+                volume_lots = self.symbol_info.volume_min
 
             # Check minimum lot size
             if volume_lots < self.symbol_info.volume_min:
