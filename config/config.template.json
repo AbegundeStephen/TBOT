@@ -72,6 +72,10 @@
         "min_bars_training": 5000,
         "lookback_days": 730,
         "weight": 0.5,
+        "fixed_risk_usd": {
+          "TREND": 10,
+          "SCALP": 3
+        },
         "min_position_usd": 100,
         "max_position_usd": 75000,
         "strategies": {
@@ -133,6 +137,8 @@
         "min_bars_training": 5000,
         "lookback_days": 730,
         "weight": 0.5,
+        "force_min_lot": true,
+        "allow_scalps": false,
         "min_position_usd": 4000,
         "max_position_usd": 50000,
         "lot_size": 0.01,
@@ -374,7 +380,8 @@
       "min_time_between_trades_minutes": 60,
       "check_interval_seconds": 300,
       "max_positions_per_asset": 3,
-      "allow_hedging": true
+      "allow_hedging": true,
+      "small_account_protocol": false
     },
     "risk_management": {
       "max_daily_trades": 10,
