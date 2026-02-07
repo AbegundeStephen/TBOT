@@ -39,6 +39,8 @@ class Position:
         ohlc_data: dict = None,
         account_balance: float = None,
         use_dynamic_management: bool = True,
+        disable_partials: bool = False,
+        vtm_overrides: Optional[Dict] = None,
         leverage: int = 1,
         margin_type: str = "SPOT",
         is_futures: bool = False,
@@ -136,6 +138,13 @@ class Position:
 
                 # ✅ Initialize VTM with optimized parameters
                 # Use Keyword arguments to ensure correct mapping even if VTM signature changes
+
+                # Apply VTM overrides if they exist
+                if vtm_overrides:
+                    risk_config = risk_config.copy()
+                    risk_config.update(vtm_overrides)
+                    logger.info(f"[VTM] Overrides applied: {vtm_overrides}")
+
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
                     side=side,
@@ -535,30 +544,51 @@ class PortfolioManager:
             Risk percentage (e.g., 0.015 for 1.5%)
         """
         try:
+            asset_cfg = self.config.get("assets", {}).get(asset, {})
             # ================================================================
-            # STEP 1: Get base risk from config
+            # STEP 1: Get base risk from config (Percentage or Fixed Dollar)
             # ================================================================
+            fixed_risk_config = asset_cfg.get("fixed_risk_usd")
             base_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
             
             logger.info(f"\n[RISK BUDGET] Calculating for {asset} {strategy_type}")
-            logger.info(f"  Base Risk: {base_risk:.3%}")
-            
-            # ================================================================
-            # STEP 2: Strategy Type Adjustment (Asymmetric)
-            # ================================================================
-            if strategy_type == "SCALP":
-                # Scalps: Lower risk (quick in/out)
-                strategy_multiplier = 0.67  # 1.5% → 1.0%
-                logger.info(f"  SCALP Multiplier: {strategy_multiplier:.2f}x")
-            elif strategy_type == "TREND":
-                # Trends: Higher risk (riding momentum)
-                strategy_multiplier = 1.33  # 1.5% → 2.0%
-                logger.info(f"  TREND Multiplier: {strategy_multiplier:.2f}x")
+
+            if fixed_risk_config and isinstance(fixed_risk_config, dict):
+                # FIXED DOLLAR RISK LOGIC
+                risk_usd = fixed_risk_config.get(strategy_type)
+                if risk_usd:
+                    if self.current_capital > 0:
+                        risk_pct = risk_usd / self.current_capital
+                        logger.info(f"  Fixed Dollar Risk: ${risk_usd} ({strategy_type})")
+                        logger.info(f"  Account Capital: ${self.current_capital:,.2f}")
+                        logger.info(f"  Calculated Risk: {risk_pct:.3%}")
+                    else:
+                        logger.error("[RISK] Cannot calculate fixed risk, current capital is zero.")
+                        return 0.0
+                else:
+                    # Fallback to percentage if strategy type not in fixed config
+                    risk_pct = base_risk
+                    logger.info(f"  Base Risk: {risk_pct:.3%}")
             else:
-                strategy_multiplier = 1.0
-                logger.info(f"  Default Multiplier: {strategy_multiplier:.2f}x")
+                # ORIGINAL PERCENTAGE-BASED LOGIC
+                logger.info(f"  Base Risk: {base_risk:.3%}")
             
-            risk_pct = base_risk * strategy_multiplier
+                # ================================================================
+                # STEP 2: Strategy Type Adjustment (Asymmetric)
+                # ================================================================
+                if strategy_type == "SCALP":
+                    # Scalps: Lower risk (quick in/out)
+                    strategy_multiplier = 0.67  # 1.5% → 1.0%
+                    logger.info(f"  SCALP Multiplier: {strategy_multiplier:.2f}x")
+                elif strategy_type == "TREND":
+                    # Trends: Higher risk (riding momentum)
+                    strategy_multiplier = 1.33  # 1.5% → 2.0%
+                    logger.info(f"  TREND Multiplier: {strategy_multiplier:.2f}x")
+                else:
+                    strategy_multiplier = 1.0
+                    logger.info(f"  Default Multiplier: {strategy_multiplier:.2f}x")
+                
+                risk_pct = base_risk * strategy_multiplier
             
             # ================================================================
             # STEP 3: Correlation Malus
@@ -1352,9 +1382,11 @@ class PortfolioManager:
         use_dynamic_management: bool = True,
         entry_time: datetime = None,
         signal_details: dict = None,
+        vtm_overrides: Optional[Dict] = None,
         leverage: int = 1,
         margin_type: str = "CROSSED",
         is_futures: bool = True,
+        disable_partials: bool = False,
     ) -> bool:
         """
         Add a new position with hybrid aware VTM support
@@ -1420,11 +1452,12 @@ class PortfolioManager:
             ohlc_data=ohlc_data,
             account_balance=self.current_capital,
             use_dynamic_management=use_dynamic_management,  # ← This triggers VTM init in Position.__init__()
+            vtm_overrides=vtm_overrides,
             leverage=leverage,
-            margin_type=margin_type,
-            is_futures=is_futures,
-        )
-
+                            margin_type=margin_type,
+                            is_futures=is_futures,
+                            disable_partials=disable_partials,
+                        )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
                 logger.info(

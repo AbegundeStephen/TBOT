@@ -357,6 +357,39 @@ class MT5ExecutionHandler:
         VTM validates HOW to execute (tactics)
         """
         try:
+            # ================================================================
+            # SMALL ACCOUNT PROTOCOL ("SNIPER MODE")
+            # ================================================================
+            is_small_account_mode = self.trading_config.get("small_account_protocol", False)
+            vtm_overrides = None
+            force_lot_size = None
+            
+            asset_cfg = self.config["assets"].get(asset, {})
+            trade_type = "TREND"  # Default
+            if signal_details:
+                trade_type = signal_details.get("trade_type", "TREND")
+
+            if is_small_account_mode:
+                logger.warning("[SNIPER MODE] Small Account Protocol ACTIVE")
+
+                # 1. Reject scalps if not allowed
+                if not asset_cfg.get("allow_scalps", True) and trade_type == "SCALP":
+                    logger.error(f"[SNIPER MODE] ❌ SCALP trade rejected for {asset}.")
+                    return False
+                
+                # 2. Force minimum lot size
+                if asset_cfg.get("force_min_lot", False):
+                    force_lot_size = self.symbol_info.volume_min
+                    logger.info(f"[SNIPER MODE] Forcing lot size to broker minimum: {force_lot_size}")
+
+                # 3. Disable partials
+                vtm_overrides = {
+                    'partial_targets': [],
+                    'partial_sizes': []
+                }
+                logger.info("[SNIPER MODE] Disabling partial take-profits for VTM.")
+
+
             if not mt5.symbol_select(symbol, True):
                 logger.error(f"[MT5] ❌ Failed to select symbol {symbol}")
                 return False
@@ -529,7 +562,10 @@ class MT5ExecutionHandler:
                 )
                 return False
 
-            volume_lots = min(self.symbol_info.volume_max, volume_lots)
+            if force_lot_size is not None:
+                volume_lots = force_lot_size
+            else:
+                volume_lots = min(self.symbol_info.volume_max, volume_lots)
             actual_usd = volume_lots * current_price * contract_size
 
             logger.info(
@@ -666,6 +702,7 @@ class MT5ExecutionHandler:
                 leverage=leverage,
                 margin_type=margin_type,
                 is_futures=is_futures,
+                vtm_overrides=vtm_overrides,
             )
 
             if not success:
