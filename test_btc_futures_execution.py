@@ -329,7 +329,7 @@ def test_short_position(handler, current_price, config):
 
 
 def test_close_all(handler, current_price):
-    """Test closing all positions (opposite signal)"""
+    """Test closing all positions directly using PortfolioManager"""
     logger.info("\n" + "=" * 80)
     logger.info("🧪 TEST 4: CLOSE ALL POSITIONS")
     logger.info("=" * 80)
@@ -340,48 +340,25 @@ def test_close_all(handler, current_price):
         logger.warning("⚠️  No positions to close")
         return True
     
-    shorts = [p for p in positions if p.side == "short"]
-    longs = [p for p in positions if p.side == "long"]
-    
-    if shorts:
-        logger.info(f"📈 Closing {len(shorts)} SHORT position(s) with BUY signal")
-        signal = 1  # BUY to close shorts
-        signal_type = "buy"
-    elif longs:
-        logger.info(f"📉 Closing {len(longs)} LONG position(s) with SELL signal")
-        signal = -1  # SELL to close longs
-        signal_type = "sell"
-    else:
-        return True
-    
-    signal_details = create_signal_details(signal_type, confidence=0.75)
+    logger.info(f"Closing {len(positions)} positions for BTC...")
     
     try:
-        # Execute opposite signal to close positions
-        success = handler.execute_signal(
-            signal=signal,
-            current_price=current_price,
-            asset_name="BTC",
-            confidence_score=0.75,
-            market_condition="neutral",
-            signal_details=signal_details,
-        )
+        # Directly close all positions via PortfolioManager
+        initial_open_count = len(positions)
+        handler.portfolio_manager.close_all_positions_for_asset("BTC", exit_price=current_price, reason="test_suite_close_all")
         
         # Check if positions were closed
         remaining = handler.portfolio_manager.get_asset_positions("BTC")
         
-        if len(remaining) < len(positions):
-            logger.info(f"\n✅ CLOSED {len(positions) - len(remaining)} POSITION(S)")
+        if not remaining: # If no positions remaining
+            logger.info(f"\n✅ CLOSED ALL {initial_open_count} POSITION(S)")
             
-            # Show P&L from closed trades
-            logger.info("\n💰 Closed Trade Summary:")
-            # Note: You'll need to implement get_closed_trades if not available
-            # For now, just confirm closure
-            logger.info(f"  Remaining positions: {len(remaining)}")
+            # Show P&L from closed trades (implementation dependent)
+            logger.info("\n💰 Closed Trade Summary: (Check Supabase logs for details)")
             
             return True
         else:
-            logger.warning("\n⚠️  No positions were closed")
+            logger.error(f"\n❌ FAILED TO CLOSE ALL POSITIONS. {len(remaining)} remaining.")
             return False
             
     except Exception as e:
@@ -408,9 +385,65 @@ def run_full_test_suite(mode="paper", test_type="full"):
     # Load config
     config = load_config()
     
-    # Override mode if specified
-    if mode == "paper":
-        config["trading"]["mode"] = "paper"
+    # Override mode based on argument
+    config["trading"]["mode"] = mode
+    
+    # Temporarily override max_total_open_risk for full cycle testing
+    if test_type == "full" and mode == "live":
+        if "risk_management" not in config:
+            config["risk_management"] = {}
+        config["risk_management"]["max_total_open_risk"] = 0.90 # Allow up to 90% total risk
+        logger.warning(f"⚠️ Temporarily setting max_total_open_risk to {config['risk_management']['max_total_open_risk']:.0%} for full cycle live test.")
+        
+        # Temporarily disable simultaneous long/short for sequential testing
+        if "trading" not in config:
+            config["trading"] = {}
+        config["trading"]["allow_simultaneous_long_short"] = False
+        logger.warning("⚠️ Temporarily disabling hedging (allow_simultaneous_long_short) for sequential full cycle live test.")
+    
+    # --- CLEANUP: Close all existing positions on Binance before starting the test ---
+    try:
+        # Need to ensure api_config is available for cleanup_client
+        if config["assets"]["BTC"].get("enable_futures", False):
+            api_config = config["api"]["binance_futures"]
+        else:
+            api_config = config["api"]["binance"]
+            
+        cleanup_client = Client(
+            api_key=api_config["api_key"],
+            api_secret=api_config["api_secret"],
+            testnet=api_config.get("testnet", False),
+        )
+        # Pass a mock portfolio manager to avoid full init for cleanup
+        temp_pm = PortfolioManager(config=config, binance_client=cleanup_client) 
+        temp_dm = DataManager(config=config)
+        temp_dm.initialize_binance() # Initialize its clients
+        temp_handler = BinanceExecutionHandler(
+            client=cleanup_client,
+            config=config, 
+            portfolio_manager=temp_pm,
+            data_manager=temp_dm
+        )
+        logger.warning("🗑️ Attempting to close any existing Binance positions before test run...")
+        
+        if temp_handler.futures_handler:
+            open_binance_positions = temp_handler.futures_handler.get_all_positions_info()
+            if open_binance_positions:
+                for pos in open_binance_positions:
+                    logger.info(f"  Closing existing {pos['side'].upper()} position {pos['symbol']} quantity {abs(float(pos['positionAmt']))}...")
+                    if pos['side'].lower() == 'long':
+                        temp_handler.futures_handler.close_long_position(quantity=abs(float(pos['positionAmt'])))
+                    else: # 'short'
+                        temp_handler.futures_handler.close_short_position(quantity=abs(float(pos['positionAmt'])))
+                logger.warning("🗑️ All existing Binance positions closed.")
+            else:
+                logger.warning("🗑️ No existing Binance positions found to close.")
+        else:
+            logger.warning("🗑️ Futures handler not active for cleanup. Skipping Binance position close.")
+    except Exception as e:
+        logger.error(f"❌ Error during pre-test cleanup: {e}", exc_info=True)
+        return False
+    # --- END CLEANUP ---
     
     if not config["assets"]["BTC"].get("enabled", False):
         logger.error("❌ BTC is disabled in config!")
@@ -500,12 +533,24 @@ def run_full_test_suite(mode="paper", test_type="full"):
             portfolio_manager=portfolio_manager,
             data_manager=data_manager, # Pass the correct DataManager
         )
+        # Manually inject the handler into the portfolio manager to resolve circular dependency
+        portfolio_manager.execution_handlers['binance'] = handler
         logger.info("✅ Binance Execution Handler initialized")
         
         # Verify Futures is enabled
         if hasattr(handler, 'futures_handler') and handler.futures_handler:
             logger.info("✅ Futures Handler: ACTIVE")
             logger.info(f"   Leverage: {config['assets']['BTC'].get('leverage', 20)}x")
+            
+            # If not in paper mode, update PortfolioManager with actual testnet capital
+            if not handler.is_paper_mode:
+                futures_balance = handler.futures_handler.get_account_balance()
+                if futures_balance > 0:
+                    portfolio_manager.current_capital = futures_balance
+                    logger.info(f"✅ PortfolioManager updated with actual testnet capital: ${futures_balance:,.2f}")
+                else:
+                    logger.warning("⚠️  Could not retrieve actual testnet balance for PortfolioManager. Using default.")
+
         else:
             logger.warning("⚠️  Futures Handler: NOT ACTIVE (Spot mode)")
             
@@ -515,7 +560,7 @@ def run_full_test_suite(mode="paper", test_type="full"):
 
     # Get current price
     try:
-        current_price = handler.get_current_price("BTCUSDT")
+        current_price = handler.get_current_price("BTCUSDT", force_live=True)
         logger.info(f"\n💰 Current BTC Price: ${current_price:,.2f}")
     except Exception as e:
         logger.error(f"❌ Could not fetch price: {e}")

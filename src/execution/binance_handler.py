@@ -498,6 +498,14 @@ class BinanceExecutionHandler:
 
         # 2. If cache is stale and a live price is requested, fetch it once.
         if force_live:
+            # ✨ FIX: Return mock price in paper mode
+            if self.is_paper_mode:
+                # Return a sensible mock price for BTCUSDT in paper mode
+                mock_price = 40000.0 
+                price_cache.set(symbol, mock_price) # Update cache with mock price
+                logger.info(f"[CACHE] Price cache updated with MOCK price (Paper Mode): {mock_price}")
+                return mock_price
+
             live_price = self._fetch_live_futures_price(symbol)
             if live_price is not None:
                 # Update cache and return the live price
@@ -579,11 +587,16 @@ class BinanceExecutionHandler:
                     )
 
                     closed_count = 0
-                    for i, position in enumerate(long_positions, 1):
+                    # Create a copy of the list to iterate over, as the underlying self.positions dict will be modified
+                    for i, position in enumerate(list(long_positions), 1):
                         logger.info(f"  Closing LONG position: {position.position_id}")
-                        if self._close_position(
-                            position, current_price, asset_name, "sell_signal"
-                        ):
+                        # Correctly call the portfolio manager to close the position
+                        result = self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason="sell_signal",
+                        )
+                        if result:
                             closed_count += 1
 
                 elif self.allow_hedging and long_positions:
@@ -628,11 +641,16 @@ class BinanceExecutionHandler:
                     )
 
                     closed_count = 0
-                    for i, position in enumerate(short_positions, 1):
+                    # Create a copy of the list to iterate over, as the underlying self.positions dict will be modified
+                    for i, position in enumerate(list(short_positions), 1):
                         logger.info(f"  Closing SHORT position: {position.position_id}")
-                        if self._close_position(
-                            position, current_price, asset_name, "buy_signal"
-                        ):
+                        # Correctly call the portfolio manager to close the position
+                        result = self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason="buy_signal",
+                        )
+                        if result:
                             closed_count += 1
 
                 elif self.allow_hedging and short_positions:

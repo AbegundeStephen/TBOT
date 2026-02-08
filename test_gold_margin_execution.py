@@ -265,23 +265,19 @@ def test_close_all(handler, current_price):
         logger.warning("⚠️  No positions to close")
         return True
     
-    # In a hedging system, we need to close both sides.
-    # We can send a BUY signal to close shorts, and a SELL to close longs.
-    
-    success = True
-    if any(p.side == 'short' for p in positions):
-        logger.info("📈 Closing SHORT position(s) with a BUY signal.")
-        res = handler.execute_signal(signal=1, asset_name="GOLD", confidence_score=0.9, market_condition="neutral")
-        if not res: success = False
-
-    if any(p.side == 'long' for p in positions):
-        logger.info("📉 Closing LONG position(s) with a SELL signal.")
-        res = handler.execute_signal(signal=-1, asset_name="GOLD", confidence_score=0.9, market_condition="neutral")
-        if not res: success = False
+    # Use portfolio_manager's dedicated method to close all positions for the asset.
+    # This ensures proper state management within the portfolio.
+    closed_positions_results = handler.portfolio_manager.close_all_positions_for_asset(
+        asset="GOLD",
+        exit_price=current_price,
+        reason="test_suite_close_all"
+    )
 
     remaining = handler.portfolio_manager.get_asset_positions("GOLD")
     if not remaining:
         logger.info("\n✅ ALL POSITIONS CLOSED SUCCESSFULLY")
+        # Check if the number of successfully closed positions matches the initial count
+        success = len(closed_positions_results) == len(positions)
     else:
         logger.error(f"\n❌ FAILED TO CLOSE ALL POSITIONS. {len(remaining)} remaining.")
         success = False

@@ -53,19 +53,31 @@ class BinanceFuturesHandler:
             self._load_symbol_filters()
 
             # Force Binance into Hedge Mode
-            try:
-                self.client.futures_change_position_mode(
-                    dualSidePosition=self.allow_hedging
-                )
-                mode_str = "HEDGE" if self.allow_hedging else "ONE-WAY"
-                logger.info(f"[FUTURES] ✓ Account Position Mode set to: {mode_str}")
-            except Exception as e:
-                if "-4059" in str(e) or "No need to change" in str(e):
-                    logger.debug("[FUTURES] Hedge Mode already correctly set.")
-                else:
-                    logger.error(f"[FUTURES] Failed to set Hedge Mode: {e}")
+            # try:
+            #     self.client.futures_change_position_mode(
+            #         dualSidePosition=self.allow_hedging
+            #     )
+            #     mode_str = "HEDGE" if self.allow_hedging else "ONE-WAY"
+            #     logger.info(f"[FUTURES] ✓ Account Position Mode set to: {mode_str}")
+            # except Exception as e:
+            #     if "-4059" in str(e) or "No need to change" in str(e):
+            #         logger.debug("[FUTURES] Hedge Mode already correctly set.")
+            #     else:
+            #         logger.error(f"[FUTURES] Failed to set Hedge Mode: {e}")
 
             logger.info(f"[FUTURES] ✓ Binance Futures API connected for {symbol}")
+
+            # --- NEW: Get actual current position mode from Binance ---
+            try:
+                position_mode_info = self.client.futures_get_position_mode()
+                self._actual_hedge_mode_enabled = position_mode_info.get('dualSidePosition', True) # Default to True (HEDGE) if not found
+                logger.info(f"[FUTURES] Actual Binance Futures Mode: {'HEDGE' if self._actual_hedge_mode_enabled else 'ONE-WAY'} (from API)")
+            except Exception as e:
+                logger.error(f"[FUTURES] Failed to get actual position mode: {e}")
+                self._actual_hedge_mode_enabled = True # Assume HEDGE mode as fallback to be safe
+                logger.warning("[FUTURES] Assuming HEDGE mode due to error fetching actual mode.")
+            # --- END NEW ---
+
         except Exception as e:
             logger.error(f"[FUTURES] ✗ Futures API unavailable: {e}")
             raise
@@ -265,13 +277,21 @@ class BinanceFuturesHandler:
 
             # 1. Open position
             try:
-                order = self.client.futures_create_order(
-                    symbol=self.symbol,
-                    side=binance_side,
-                    positionSide=position_side,
-                    type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=quantity,
-                )
+                order_params = {
+                    "symbol": self.symbol,
+                    "side": binance_side,
+                    "type": FUTURE_ORDER_TYPE_MARKET,
+                    "quantity": quantity,
+                }
+                # Only add positionSide if actual account mode is HEDGE mode
+                if hasattr(self, '_actual_hedge_mode_enabled') and self._actual_hedge_mode_enabled:
+                    order_params["positionSide"] = position_side
+                else:
+                    # If ONE-WAY mode, do NOT send positionSide parameter
+                    # logger.debug("[FUTURES] ONE-WAY mode detected, omitting positionSide parameter.")
+                    pass # positionSide is already not in order_params
+                
+                order = self.client.futures_create_order(**order_params)
             except Exception as e:
                 logger.error(f"[FUTURES] Entry failed: {e}")
                 return None
@@ -426,13 +446,21 @@ class BinanceFuturesHandler:
 
             try:
                 # Attempt to close the position with a market order
-                order = self.client.futures_create_order(
-                    symbol=self.symbol,
-                    side=close_side,
-                    positionSide=position_side,
-                    type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=close_quantity
-                )
+                order_params = {
+                    "symbol": self.symbol,
+                    "side": close_side,
+                    "type": FUTURE_ORDER_TYPE_MARKET,
+                    "quantity": close_quantity
+                }
+                # Only add positionSide if actual account mode is HEDGE mode
+                if hasattr(self, '_actual_hedge_mode_enabled') and self._actual_hedge_mode_enabled:
+                    order_params["positionSide"] = position_side
+                else:
+                    # If ONE-WAY mode, do NOT send positionSide parameter
+                    # logger.debug("[FUTURES] ONE-WAY mode detected for close, omitting positionSide parameter.")
+                    pass # positionSide is already not in order_params
+
+                order = self.client.futures_create_order(**order_params)
 
                 logger.info(
                     f"[FUTURES] ✓ {side_label} closed\n"
