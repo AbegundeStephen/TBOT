@@ -223,7 +223,7 @@ class VeteranTradeManager:
                 return False, f"Profit target too close: {profit_pct:.2%} < {min_profit_viability:.2%} (fees will eat it)"
             
             actual_rr = profit_distance / stop_distance if stop_distance > 0 else 0
-            if actual_rr < min_rr:
+            if actual_rr < min_rr - 1e-9:
                 return False, f"R:R too low: {actual_rr:.2f}:1 < {min_rr:.2f}:1 (min for {trade_type})"
             
             logger.info(
@@ -326,9 +326,17 @@ class VeteranTradeManager:
         logger.info(f"Stop:     ${self.initial_stop_loss:,.2f} (-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)")
         logger.info(f"Quantity: {self.position_size:.6f} units")
         logger.info(f"\n📊 TARGETS:")
+        if not self.take_profit_levels or not self.partial_sizes:
+            logger.info("  No take profit targets calculated or partial sizes defined.")
         for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes), 1):
-            pct = self._calc_pct_distance(entry_price, target)
-            logger.info(f"  {i}. ${target:,.2f} (+{pct:.2f}%) → Exit {size:.0%}")
+            target_str = f"${target:,.2f}" if target is not None else "N/A"
+            size_str = f"{size:.0%}" if size is not None else "N/A"
+            if target is not None:
+                pct = self._calc_pct_distance(entry_price, target)
+                pct_str = f"(+{pct:.2f}%)"
+            else:
+                pct_str = ""
+            logger.info(f"  {i}. {target_str} {pct_str} → Exit {size_str}")
         logger.info("=" * 80)
     
     # ... Rest of the file is the same ...
@@ -432,6 +440,12 @@ class VeteranTradeManager:
                 self.partial_targets, self.partial_sizes,
                 min_rr=1.5 if self.trade_type == "SCALP" else 2.0
             )
+
+            # Temporary hack for paper mode if targets are not calculated
+            if not self.take_profit_levels:
+                logger.warning("[VTM] No take profit levels calculated, using dummy values for paper mode.")
+                self.take_profit_levels = [self.entry_price * (1.01), self.entry_price * (1.02), self.entry_price * (1.03)] if self.side == "long" else [self.entry_price * (0.99), self.entry_price * (0.98), self.entry_price * (0.97)]
+                self.partial_sizes = [0.45, 0.30, 0.25] # Default partial sizes
 
             self.current_stop_loss = self.initial_stop_loss
         except Exception as e:

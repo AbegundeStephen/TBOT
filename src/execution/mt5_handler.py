@@ -6,6 +6,7 @@ INTEGRATED: Automated risk management + manual override support
 
 import logging
 import MetaTrader5 as mt5
+import time # Added for time.time()
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 import pandas as pd
@@ -239,6 +240,12 @@ class MT5ExecutionHandler:
 
         # 2. If cache is stale or a live price is forced, fetch from MT5
         try:
+            if self.mode.lower() == "paper" and (cached_price is None or force_live):
+                mock_price = 2000.00 # A sensible mock price for GOLD
+                price_cache.set(symbol, mock_price)
+                logger.info(f"[CACHE] Price cache updated with MOCK price (Paper Mode): {mock_price}")
+                return mock_price
+
             tick = mt5.symbol_info_tick(symbol)
             if tick:
                 live_price = (tick.ask + tick.bid) / 2
@@ -622,55 +629,64 @@ class MT5ExecutionHandler:
                     logger.warning(f"[MARGIN] Pre-flight warning: {e}")
 
             # ================================================================
-            # STEP 8: Execute order on MT5
+            # STEP 8: Execute order on MT5 (or simulate in paper mode)
             # ================================================================
             mt5_ticket = None
 
-            if not self._is_trading_allowed(symbol):
-                logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
-                return False
-
+            # Determine the price to use for the order
             tick = mt5.symbol_info_tick(symbol)
-            execution_price = (
-                tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-            )
-
-            filling_mode = mt5.ORDER_FILLING_FOK
-            if self.symbol_info.filling_mode == 1:
-                filling_mode = mt5.ORDER_FILLING_FOK
-            elif self.symbol_info.filling_mode == 2:
-                filling_mode = mt5.ORDER_FILLING_IOC
-
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": volume_lots,
-                "type": order_type,
-                "price": execution_price,
-                "sl": 0.0,  # VTM will manage
-                "tp": 0.0,
-                "deviation": 20,
-                "magic": 234000,
-                "comment": f"Sig_{signal}_{asset}_{trade_type}",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling_mode,
-            }
-
-            result = mt5.order_send(request)
-
-            if result is None:
-                last_error = mt5.last_error()
-                logger.error(f"[MT5] ❌ Order Failed: {last_error}")
-                return False
-
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                logger.error(
-                    f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
+            if tick:
+                execution_price = (
+                    tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
                 )
-                return False
+            else:
+                execution_price = current_price # Fallback if tick fails
 
-            mt5_ticket = result.order
-            logger.info(f"[MT5] ✓ {side.upper()} order placed: #{mt5_ticket}")
+            if self.mode.lower() == "paper":
+                mt5_ticket = int(time.time()) # Simulate a ticket
+                logger.info(f"[MT5] [PAPER MODE] ✓ {side.upper()} order simulated: #{mt5_ticket}")
+                # In paper mode, we use the `current_price` for entry and simulate order success
+            else:
+                if not self._is_trading_allowed(symbol):
+                    logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
+                    return False
+
+                filling_mode = mt5.ORDER_FILLING_FOK
+                if self.symbol_info.filling_mode == 1:
+                    filling_mode = mt5.ORDER_FILLING_FOK
+                elif self.symbol_info.filling_mode == 2:
+                    filling_mode = mt5.ORDER_FILLING_IOC
+
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": volume_lots,
+                    "type": order_type,
+                    "price": execution_price,
+                    "sl": 0.0,  # VTM will manage
+                    "tp": 0.0,
+                    "deviation": 20,
+                    "magic": 234000,
+                    "comment": f"Sig_{signal}_{asset}_{trade_type}",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode,
+                }
+
+                result = mt5.order_send(request)
+
+                if result is None:
+                    last_error = mt5.last_error()
+                    logger.error(f"[MT5] ❌ Order Failed: {last_error}")
+                    return False
+
+                if result.retcode != mt5.TRADE_RETCODE_DONE:
+                    logger.error(
+                        f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
+                    )
+                    return False
+
+                mt5_ticket = result.order
+                logger.info(f"[MT5] ✓ {side.upper()} order placed: #{mt5_ticket}")
 
             # ================================================================
             # STEP 9: Add to Portfolio with VTM (TACTICAL)
@@ -1128,6 +1144,10 @@ class MT5ExecutionHandler:
 
         Logs detailed comparison and triggers re-sync if needed
         """
+        if self.mode.lower() == "paper":
+            logger.info("[SYNC CHECK] Paper mode detected. Skipping MT5 position sync verification.")
+            return True # Always in sync in paper mode
+
         try:
             import MetaTrader5 as mt5
 
@@ -1232,6 +1252,11 @@ class MT5ExecutionHandler:
         Returns:
             True if successfully closed, False otherwise
         """
+        # In paper mode, simulate successful closure
+        if self.mode.lower() == "paper":
+            logger.info(f"[MT5] [PAPER MODE] ✓ Simulated close of ticket {ticket}")
+            return True
+
         try:
             # ✅ FIX 1: Check if market is open for closing
             is_open, market_msg = self._is_market_open_for_closing(self.symbol)

@@ -170,7 +170,7 @@ class Position:
                     logger.info(f"  Account Risk: {account_risk:.3f}")
                     logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
                     logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
-                    logger.info(f"  Take Profit:  ${self.take_profit:,.2f}")
+                    logger.info(f"  Take Profit:  {f'${self.take_profit:,.2f}' if self.take_profit is not None else 'N/A'}")
 
             except Exception as e:
                 # Catch failures (including "Position size too large") so the object still initializes
@@ -811,13 +811,18 @@ class PortfolioManager:
         # ✅ FIX 4: Strict mode enforcement (for live trading)
         # ================================================================
         if strict and not self.is_paper_mode and total_capital == 0:
-            error_msg = (
-                f"CRITICAL: Unable to fetch live account balances!\n"
-                f"Errors: {', '.join(errors)}\n"
-                f"Cannot proceed with live trading without valid balances."
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+            if self.mt5_handler is None and self.binance_client is None:
+                # This is okay, handlers aren't ready yet, will refresh later
+                logger.warning("[BALANCE] No handlers initialized yet, initial capital set to 0. Will refresh later.")
+                return 0.0
+            else:
+                error_msg = (
+                    f"CRITICAL: Unable to fetch live account balances!\n"
+                    f"Errors: {', '.join(errors)}\n"
+                    f"Cannot proceed with live trading without valid balances."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
         # ================================================================
         # ✅ FIX 5: Fallback handling
