@@ -1415,16 +1415,28 @@ class PortfolioManager:
 
         # ✅ NEW: Check if this is an import from sync
         is_sync_import = signal_details and signal_details.get("source") == "sync_import"
+        # ✅ NEW: Check if this is a Small Account Protocol trade
+        is_small_account_protocol_trade = signal_details and signal_details.get("small_account_protocol_active", False)
 
-        # 2. Check portfolio exposure limits (SKIP IF IMPORTING)
-        if not is_sync_import and not self.check_portfolio_limits(
+        # 2. Check portfolio exposure limits (SKIP IF IMPORTING OR SMALL ACCOUNT PROTOCOL TRADE)
+        if not is_sync_import and not is_small_account_protocol_trade and not self.check_portfolio_limits(
             new_position_usd=position_size_usd, new_side=side, asset=asset
         ):
             logger.warning(f"Portfolio limits exceeded for {asset} {side.upper()}")
             return False
 
-        # ✅ NEW: Log if the check was bypassed
-        if is_sync_import:
+        # ✅ NEW: Log if the check was bypassed due to Small Account Protocol
+        if is_small_account_protocol_trade:
+            # Re-check the limits just to log the warning, but don't block the trade
+            if not self.check_portfolio_limits(
+                new_position_usd=position_size_usd, new_side=side, asset=asset
+            ):
+                logger.warning(
+                    f"[SMALL ACCOUNT PROTOCOL] Bypassing portfolio exposure limits for {asset} (Sniper Mode active)."
+                )
+
+        # ✅ NEW: Log if the check was bypassed for sync import
+        elif is_sync_import:
             # Re-check the limits just to log the warning, but don't block the trade
             if not self.check_portfolio_limits(
                 new_position_usd=position_size_usd, new_side=side, asset=asset
