@@ -578,7 +578,7 @@ class PortfolioManager:
                 # ================================================================
                 if strategy_type == "SCALP":
                     # Scalps: Lower risk (quick in/out)
-                    strategy_multiplier = 0.67  # 1.5% → 1.0%
+                    strategy_multiplier = 1.25  # 1.5% → 1.875%
                     logger.info(f"  SCALP Multiplier: {strategy_multiplier:.2f}x")
                 elif strategy_type == "TREND":
                     # Trends: Higher risk (riding momentum)
