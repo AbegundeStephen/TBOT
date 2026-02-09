@@ -362,7 +362,7 @@ class BinanceExecutionHandler:
 
         # ✨ NEW: Standardized Hedging Config
         self.allow_hedging = self.trading_config.get(
-            "allow_simultaneous_long_short", True
+            "allow_simultaneous_long_short", False
         )
 
         # ✅ STEP 1: Initialize Futures handler FIRST
