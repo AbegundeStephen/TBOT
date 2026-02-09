@@ -548,32 +548,53 @@ class MT5ExecutionHandler:
             volume_step = self.symbol_info.volume_step
             volume_lots = round(raw_volume_lots / volume_step) * volume_step
 
+            # Check if the calculated risk-based position size is even viable for the broker's minimum lot.
+            # This is a pre-check before any forcing.
+            min_lot_notional_value = self.symbol_info.volume_min * current_price * contract_size
+            if position_size_usd < min_lot_notional_value:
+                logger.warning(
+                    f"[SIZING] ❌ Trade Aborted: Calculated risk-based size (${position_size_usd:,.2f}) "
+                    f"is below broker's minimum lot notional equivalent (${min_lot_notional_value:,.2f}).\n"
+                    f"  Minimum lot size ({self.symbol_info.volume_min}) is too large for the current risk budget.\n"
+                    f"  → Consider increasing risk tolerance or available capital."
+                )
+                return False
+
             # ✅ FIX for Small Accounts: If calculated volume rounds to 0, use minimum lot size
+            # This ensures we always trade at least the minimum if our risk budget allows for it.
             if volume_lots == 0 and raw_volume_lots > 0:
                 logger.warning(
                     f"[SIZING] Calculated volume {raw_volume_lots:.6f} is below one volume step. "
                     f"Forcing to minimum lot size of {self.symbol_info.volume_min} to support small accounts."
                 )
                 volume_lots = self.symbol_info.volume_min
+            else:
+                # Ensure it's not below min even after rounding down
+                if volume_lots < self.symbol_info.volume_min:
+                    volume_lots = self.symbol_info.volume_min
 
-            # Check minimum lot size
-            if volume_lots < self.symbol_info.volume_min:
-                min_usd_value = (
-                    self.symbol_info.volume_min * current_price * contract_size
-                )
-                logger.warning(
-                    f"[SIZING] ❌ Trade Aborted: Volume {volume_lots:.4f} < Min {self.symbol_info.volume_min}\n"
-                    f"  Requested Size: ${position_size_usd:.2f}\n"
-                    f"  Min Broker Size: ${min_usd_value:.2f}\n"
-                    f"  → Account too small for this trade"
-                )
-                return False
 
             if force_lot_size is not None:
                 volume_lots = force_lot_size
             else:
+                # Ensure we don't exceed max volume after any adjustments
                 volume_lots = min(self.symbol_info.volume_max, volume_lots)
             actual_usd = volume_lots * current_price * contract_size
+
+            # NEW: Re-check if the FORCED minimum lot size *still* results in an oversized position relative to the risk budget
+            # This acts as a final safeguard after any volume adjustments.
+            # Allow a small tolerance (e.g., 5%) for slight discrepancies due to lot step rounding
+            forced_min_lot_tolerance_pct = self.risk_config.get("forced_min_lot_tolerance_pct", 0.05)
+            if actual_usd > position_size_usd * (1 + forced_min_lot_tolerance_pct):
+                logger.warning(
+                    f"[SIZING] ❌ Trade Aborted: Forcing to minimum lot size ({volume_lots}) results in an oversized notional.\n"
+                    f"  Intended Risk-based Notional: ${position_size_usd:,.2f}\n"
+                    f"  Forced Min Lot Notional:      ${actual_usd:,.2f}\n"
+                    f"  Tolerance:                    {forced_min_lot_tolerance_pct:.1%}\n"
+                    f"  → Minimum lot size is too large for the current risk budget, even with tolerance."
+                )
+                return False
+
 
             logger.info(
                 f"[SIZING] Final:\n"
@@ -871,7 +892,7 @@ class MT5ExecutionHandler:
 
             # ✨ NEW: Check if Asymmetric Hedging is enabled
             allow_hedging = self.config.get("trading", {}).get(
-                "allow_simultaneous_long_short", True
+                "allow_simultaneous_long_short", False
             )
 
             logger.info(

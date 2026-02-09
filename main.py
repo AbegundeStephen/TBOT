@@ -220,6 +220,7 @@ class TradingBot:
             data_manager=self.data_manager, config=self.config
         )
         self._last_history_update = None
+        self.autotrainer = None
 
     def initialize_exchanges(self):
         """
@@ -1850,6 +1851,25 @@ class TradingBot:
         else:
             logger.info("[VIZ] Skipping visualization (AI or Telegram not available)")
             self.chart_sender = None
+
+    def initialize_autotrainer(self):
+        """Initializes and starts the continuous learning pipeline."""
+        if self.config.get("ml", {}).get("enable_autotrain", False):
+            logger.info("\n" + "=" * 70)
+            logger.info("INITIALIZING AUTO-TRAINER")
+            logger.info("=" * 70)
+            try:
+                self.autotrainer = ContinuousLearningPipeline(
+                    config=self.config,
+                    trading_bot=self,
+                    telegram_bot=self.telegram_bot
+                )
+                self.autotrainer.start()
+            except Exception as e:
+                logger.error(f"[AUTO-TRAIN] Failed to initialize: {e}", exc_info=True)
+                self.autotrainer = None
+        else:
+            logger.info("[AUTO-TRAIN] Disabled in config.")
 
     # ✨ NEW:  Telegram thread management
     def _start_telegram_with_monitoring(self):
@@ -3808,6 +3828,9 @@ class TradingBot:
                 logger.info("[MTF] Running initial regime analysis...")
                 self.run_mtf_regime_analysis()
 
+            # Initialize and start the autotrainer
+            self.initialize_autotrainer()
+
             # Start Telegram (existing code continues)
             if self.telegram_bot:
                 logger.info("\n[TELEGRAM] Starting bot thread...")
@@ -3974,6 +3997,10 @@ class TradingBot:
 
         self.is_running = False
         self._main_loop_running = False
+
+        # Stop the autotrainer
+        if self.autotrainer:
+            self.autotrainer.stop()
 
         # Close positions if configured
         if self.config["trading"].get("close_positions_on_shutdown", False):
