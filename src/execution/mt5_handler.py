@@ -372,401 +372,235 @@ class MT5ExecutionHandler:
             force_lot_size = None
             
             asset_cfg = self.config["assets"].get(asset, {})
-            trade_type = "TREND"  # Default
-            if signal_details:
-                trade_type = signal_details.get("trade_type", "TREND")
-
-            if is_small_account_mode:
-                logger.warning("[SNIPER MODE] Small Account Protocol ACTIVE")
-
-                # 1. Reject scalps if not allowed
-                if not asset_cfg.get("allow_scalps", True) and trade_type == "SCALP":
-                    logger.error(f"[SNIPER MODE] ❌ SCALP trade rejected for {asset}.")
-                    return False
-                
-                # 2. Force minimum lot size
-                if asset_cfg.get("force_min_lot", False):
-                    force_lot_size = self.symbol_info.volume_min
-                    logger.info(f"[SNIPER MODE] Forcing lot size to broker minimum: {force_lot_size}")
-
-                # 3. Disable partials
-                vtm_overrides = {
-                    'partial_targets': [],
-                    'partial_sizes': []
-                }
-                logger.info("[SNIPER MODE] Disabling partial take-profits for VTM.")
-
-
-            if not mt5.symbol_select(symbol, True):
-                logger.error(f"[MT5] ❌ Failed to select symbol {symbol}")
-                return False
-
-            side = "long" if signal == 1 else "short"
-            order_type = mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL
-
-            # Extract trade type from signal details
-            trade_type = "TREND"  # Default
-            if signal_details:
-                trade_type = signal_details.get("trade_type", "TREND")
-
-            logger.info(f"[MT5] Opening {side.upper()} position for {asset}")
-
-            asset_cfg = self.config["assets"].get(asset, {})
-            leverage = asset_cfg.get("leverage", 2000)
-            margin_type = "DYNAMIC"  # MT5 is always Derivatives/CFD
-            is_futures = True
-
-            # ================================================================
-            # STEP 1: STRATEGIC - Get risk budget from Portfolio Manager
-            # ================================================================
-            logger.info(f"\n{'='*80}")
-            logger.info(f"[STRATEGIC] Requesting risk budget from Portfolio Manager")
-            logger.info(f"{'='*80}")
-
-            risk_pct = self.portfolio_manager.get_risk_budget(
-                asset=asset, strategy_type=trade_type
-            )
-
-            if risk_pct <= 0:
-                logger.error(
-                    f"[STRATEGIC] ❌ Risk budget denied (0%)\n"
-                    f"  → Trade rejected by Portfolio Manager"
-                )
-                return False
-
-            logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
-
-            # ================================================================
-            # STEP 2: Calculate initial stop loss for validation
-            # ================================================================
-            risk_config = asset_cfg.get("risk", {})
-            sl_pct = risk_config.get("stop_loss_pct", 0.01)
-
-            if side == "long":
-                initial_stop = current_price * (1 - sl_pct)
-            else:
-                initial_stop = current_price * (1 + sl_pct)
-
-            # ================================================================
-            # STEP 3: TACTICAL - VTM Pre-Flight Validation
-            # ================================================================
-            logger.info(f"\n{'='*80}")
-            logger.info(f"[TACTICAL] VTM Pre-Flight Validation")
-            logger.info(f"{'='*80}")
-
-            is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
-                entry_price=current_price,
-                stop_loss=initial_stop,
-                risk_config=risk_config,
-                trade_type=trade_type,
-            )
-
-            if not is_valid:
-                logger.error(
-                    f"[TACTICAL] ❌ Trade rejected by VTM\n"
-                    f"  Reason: {rejection_reason}\n"
-                    f"  → Aborting before paying fees"
-                )
-                return False
-
-            logger.info(f"[TACTICAL] ✓ Trade validated by VTM")
-
-            # ================================================================
-            # STEP 4: Fetch OHLC for VTM initialization
-            # ================================================================
-            ohlc_data = None
-            df = None
-
-            if self.data_manager:
-                try:
-                    end_time = datetime.now(timezone.utc)
-                    start_time = end_time - timedelta(days=10)
-
-                    df = self.data_manager.fetch_mt5_data(
-                        symbol=symbol,
-                        timeframe=self.config["assets"][asset].get("timeframe", "H1"),
-                        start_date=start_time.strftime("%Y-%m-%d"),
-                        end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-
-                    if len(df) > 50:
-                        ohlc_data = {
-                            "high": df["high"].values,
-                            "low": df["low"].values,
-                            "close": df["close"].values,
-                            "volume": df["volume"].values,
-                        }
-                        logger.info(
-                            f"[VTM] ✓ Fetched {len(df)} bars for dynamic management"
-                        )
-                    else:
-                        logger.warning(f"[VTM] ⚠️ Insufficient data ({len(df)} bars)")
-
-                except Exception as e:
-                    logger.error(f"[VTM] ❌ OHLC fetch failed: {e}")
-
-            # ================================================================
-            # STEP 5: Calculate position size using strategic risk budget
-            # ================================================================
-            logger.info(f"\n{'='*80}")
-            logger.info(f"[SIZING] Calculating position size")
-            logger.info(f"{'='*80}")
-
-            # Get account balance
-            account_balance = self.portfolio_manager.current_capital
-
-            # Calculate risk amount
-            risk_amount_usd = account_balance * risk_pct
-
-            # Calculate stop distance
-            stop_distance = abs(current_price - initial_stop)
-            stop_distance_pct = stop_distance / current_price
-
-            # Position size = Risk Amount / Stop Distance %
-            position_size_usd = risk_amount_usd / stop_distance_pct
-
-            logger.info(
-                f"[SIZING] Calculation:\n"
-                f"  Account Balance: ${account_balance:,.2f}\n"
-                f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
-                f"  Stop Distance:   {stop_distance_pct:.3%}\n"
-                f"  Position Size:   ${position_size_usd:,.2f}"
-            )
-
-            if position_size_usd <= 0:
-                logger.error(
-                    f"[SIZING] ❌ Invalid position size: ${position_size_usd:.2f}"
-                )
-                return False
-
-            # ================================================================
-            # STEP 6: Convert USD to MT5 lots
-            # ================================================================
-            contract_size = self.symbol_info.trade_contract_size
-            raw_volume_lots = position_size_usd / (current_price * contract_size)
-
-            volume_step = self.symbol_info.volume_step
-            volume_lots = round(raw_volume_lots / volume_step) * volume_step
-
-            # Check if the calculated risk-based position size is even viable for the broker's minimum lot.
-            # This is a pre-check before any forcing.
-            min_lot_notional_value = self.symbol_info.volume_min * current_price * contract_size
-            if position_size_usd < min_lot_notional_value:
-                logger.warning(
-                    f"[SIZING] ❌ Trade Aborted: Calculated risk-based size (${position_size_usd:,.2f}) "
-                    f"is below broker's minimum lot notional equivalent (${min_lot_notional_value:,.2f}).\n"
-                    f"  Minimum lot size ({self.symbol_info.volume_min}) is too large for the current risk budget.\n"
-                    f"  → Consider increasing risk tolerance or available capital."
-                )
-                return False
-
-            # ✅ FIX for Small Accounts: If calculated volume rounds to 0, use minimum lot size
-            # This ensures we always trade at least the minimum if our risk budget allows for it.
-            if volume_lots == 0 and raw_volume_lots > 0:
-                logger.warning(
-                    f"[SIZING] Calculated volume {raw_volume_lots:.6f} is below one volume step. "
-                    f"Forcing to minimum lot size of {self.symbol_info.volume_min} to support small accounts."
-                )
-                volume_lots = self.symbol_info.volume_min
-            else:
-                # Ensure it's not below min even after rounding down
-                if volume_lots < self.symbol_info.volume_min:
-                    volume_lots = self.symbol_info.volume_min
-
-
-            if force_lot_size is not None:
-                volume_lots = force_lot_size
-            else:
-                # Ensure we don't exceed max volume after any adjustments
-                volume_lots = min(self.symbol_info.volume_max, volume_lots)
-            actual_usd = volume_lots * current_price * contract_size
-
-            # NEW: Re-check if the FORCED minimum lot size *still* results in an oversized position relative to the risk budget
-            # This acts as a final safeguard after any volume adjustments.
-            # Allow a small tolerance (e.g., 5%) for slight discrepancies due to lot step rounding
-            forced_min_lot_tolerance_pct = self.risk_config.get("forced_min_lot_tolerance_pct", 0.05)
-            if actual_usd > position_size_usd * (1 + forced_min_lot_tolerance_pct):
-                logger.warning(
-                    f"[SIZING] ❌ Trade Aborted: Forcing to minimum lot size ({volume_lots}) results in an oversized notional.\n"
-                    f"  Intended Risk-based Notional: ${position_size_usd:,.2f}\n"
-                    f"  Forced Min Lot Notional:      ${actual_usd:,.2f}\n"
-                    f"  Tolerance:                    {forced_min_lot_tolerance_pct:.1%}\n"
-                    f"  → Minimum lot size is too large for the current risk budget, even with tolerance."
-                )
-                return False
-
-
-            logger.info(
-                f"[SIZING] Final:\n"
-                f"  Lots:     {volume_lots:.2f}\n"
-                f"  USD:      ${actual_usd:,.2f}\n"
-                f"  Contract: {contract_size}"
-            )
-
-            # ================================================================
-            # STEP 7: Margin validation (pre-flight check)
-            # ================================================================
-            if self.mode.lower() != "paper":
-                try:
-                    account_info = mt5.account_info()
-                    if account_info:
-                        leverage_actual = (
-                            account_info.leverage if account_info.leverage > 0 else 100
-                        )
-                        estimated_margin = (
-                            volume_lots * contract_size * current_price
-                        ) / leverage_actual
-                        estimated_margin *= 1.10  # 10% buffer
-
-                        logger.info(
-                            f"[MARGIN CHECK]\n"
-                            f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
-                            f"  Required Margin:  ${estimated_margin:,.2f}\n"
-                            f"  Margin Level:     {account_info.margin_level:.2f}%"
-                        )
-
-                        if estimated_margin > account_info.margin_free:
-                            # Reduce volume to fit
-                            max_volume = (
-                                account_info.margin_free * 0.90 * leverage_actual
-                            ) / (contract_size * current_price)
-                            max_volume = round(max_volume / volume_step) * volume_step
-
-                            if max_volume < self.symbol_info.volume_min:
+                        trade_type = "TREND"  # Default
+                        if signal_details:
+                            trade_type = signal_details.get("trade_type", "TREND")
+            
+                                    if is_small_account_mode and asset_cfg.get("force_min_lot", False):
+                                        # --- SNIPER MODE: HARDCODED 0.01 LOT ---
+                                        logger.info("[SNIPER MODE] Bypassing risk calculation, forcing 0.01 lot size for GOLD.")
+                                        volume_lots = self.symbol_info.volume_min
+                                        position_size_usd = volume_lots * current_price * self.symbol_info.trade_contract_size
+                                        actual_usd = position_size_usd
+                                        risk_pct = -1 # Indicate bypass
+                                        # --- Add flag to signal_details ---
+                                        if signal_details is None: signal_details = {}
+                                        signal_details["small_account_protocol_active"] = True
+                                    else:
+                                        # --- STANDARD RISK-BASED SIZING ---
+                                        logger.info(f"\n{'='*80}")
+                                        logger.info(f"[STRATEGIC] Requesting risk budget from Portfolio Manager")
+                                        logger.info(f"{'='*80}")            
+                            risk_pct = self.portfolio_manager.get_risk_budget(
+                                asset=asset, strategy_type=trade_type
+                            )
+            
+                            if risk_pct <= 0:
                                 logger.error(
-                                    f"[MARGIN] ❌ Insufficient margin\n"
-                                    f"  Available: ${account_info.margin_free:.2f}\n"
-                                    f"  → CANNOT OPEN POSITION"
+                                    f"[STRATEGIC] ❌ Risk budget denied (0%)\n"
+                                    f"  → Trade rejected by Portfolio Manager"
                                 )
                                 return False
-
-                            logger.warning(
-                                f"[MARGIN] Adjusted volume: {volume_lots:.2f} → {max_volume:.2f}"
+            
+                            logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
+            
+                            # Calculate initial stop loss for validation
+                            risk_config = asset_cfg.get("risk", {})
+                            sl_pct = risk_config.get("stop_loss_pct", 0.01)
+            
+                            if side == "long":
+                                initial_stop = current_price * (1 - sl_pct)
+                            else:
+                                initial_stop = current_price * (1 + sl_pct)
+            
+                            # VTM Pre-Flight Validation
+                            logger.info(f"\n{'='*80}")
+                            logger.info(f"[TACTICAL] VTM Pre-Flight Validation")
+                            logger.info(f"{'='*80}")
+            
+                            is_valid, rejection_reason = VeteranTradeManager.validate_trade_setup(
+                                entry_price=current_price,
+                                stop_loss=initial_stop,
+                                risk_config=risk_config,
+                                trade_type=trade_type,
                             )
-                            volume_lots = max_volume
+            
+                            if not is_valid:
+                                logger.error(
+                                    f"[TACTICAL] ❌ Trade rejected by VTM\n"
+                                    f"  Reason: {rejection_reason}\n"
+                                    f"  → Aborting before paying fees"
+                                )
+                                return False
+                            logger.info(f"[TACTICAL] ✓ Trade validated by VTM")
+            
+                            # Sizing Calculation
+                            logger.info(f"\n{'='*80}")
+                            logger.info(f"[SIZING] Calculating position size")
+                            logger.info(f"{'='*80}")
+                            account_balance = self.portfolio_manager.current_capital
+                            risk_amount_usd = account_balance * risk_pct
+                            stop_distance = abs(current_price - initial_stop)
+                            stop_distance_pct = stop_distance / current_price
+                            position_size_usd = risk_amount_usd / stop_distance_pct
+            
+                            logger.info(
+                                f"[SIZING] Calculation:\n"
+                                f"  Account Balance: ${account_balance:,.2f}\n"
+                                f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
+                                f"  Stop Distance:   {stop_distance_pct:.3%}\n"
+                                f"  Position Size:   ${position_size_usd:,.2f}"
+                            )
+                            if position_size_usd <= 0: return False
+            
+                            # Convert USD to MT5 lots
+                            contract_size = self.symbol_info.trade_contract_size
+                            raw_volume_lots = position_size_usd / (current_price * contract_size)
+                            volume_step = self.symbol_info.volume_step
+                            volume_lots = round(raw_volume_lots / volume_step) * volume_step
+                            
+                            min_lot_notional_value = self.symbol_info.volume_min * current_price * contract_size
+                            if position_size_usd < min_lot_notional_value:
+                                logger.warning(
+                                    f"[SIZING] ❌ Trade Aborted: Calculated risk-based size (${position_size_usd:,.2f}) "
+                                    f"is below broker's minimum lot notional equivalent (${min_lot_notional_value:,.2f})."
+                                )
+                                return False
+            
+                            if volume_lots < self.symbol_info.volume_min:
+                                volume_lots = self.symbol_info.volume_min
+                            
+                            if force_lot_size is not None:
+                                volume_lots = force_lot_size
+                            else:
+                                volume_lots = min(self.symbol_info.volume_max, volume_lots)
                             actual_usd = volume_lots * current_price * contract_size
-
-                except Exception as e:
-                    logger.warning(f"[MARGIN] Pre-flight warning: {e}")
-
-            # ================================================================
-            # STEP 8: Execute order on MT5 (or simulate in paper mode)
-            # ================================================================
-            mt5_ticket = None
-
-            # Determine the price to use for the order
-            tick = mt5.symbol_info_tick(symbol)
-            if tick:
-                execution_price = (
-                    tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-                )
-            else:
-                execution_price = current_price # Fallback if tick fails
-
-            if self.mode.lower() == "paper":
-                mt5_ticket = int(time.time()) # Simulate a ticket
-                logger.info(f"[MT5] [PAPER MODE] ✓ {side.upper()} order simulated: #{mt5_ticket}")
-                # In paper mode, we use the `current_price` for entry and simulate order success
-            else:
-                if not self._is_trading_allowed(symbol):
-                    logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
-                    return False
-
-                filling_mode = mt5.ORDER_FILLING_FOK
-                if self.symbol_info.filling_mode == 1:
+            
+                        # Fetch OHLC for VTM initialization
+                        ohlc_data, df = self._fetch_ohlc_for_vtm(symbol, asset)
+            
+                        # Margin validation
+                        if not self._validate_margin(volume_lots, current_price):
+                            return False
+            
+                        # Execute order
+                        mt5_ticket, execution_price = self._execute_mt5_order(symbol, side, volume_lots, asset, trade_type)
+                        if not mt5_ticket:
+                            return False
+            
+                        # Add to Portfolio
+                        if signal_details is None: signal_details = {}
+                        signal_details.update({"trade_type": trade_type, "strategic_risk_pct": risk_pct})
+                        
+                        success = self.portfolio_manager.add_position(
+                            asset=asset, symbol=symbol, side=side, entry_price=execution_price,
+                            position_size_usd=actual_usd, mt5_ticket=mt5_ticket, ohlc_data=ohlc_data,
+                            use_dynamic_management=True, signal_details=signal_details, leverage=leverage,
+                            margin_type=margin_type, is_futures=is_futures, vtm_overrides=vtm_overrides,
+                        )
+            
+                        if not success:
+                            if self.mode.lower() != "paper" and mt5_ticket:
+                                logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
+                                self._emergency_close_mt5_position(symbol, volume_lots, mt5.ORDER_TYPE_SELL if side == "short" else mt5.ORDER_TYPE_BUY)
+                            return False
+            
+                        logger.info(
+                            f"\n{'='*80}\n"
+                            f"✅ {asset} {side.upper()} POSITION OPENED\n"
+                            f"{'='*80}\n"
+                            f"Trade Type:     {trade_type}\n"
+                            f"Position Size:  ${actual_usd:,.2f}\n"
+                            f"Lots:           {volume_lots:.2f}\n"
+                            f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
+                            f"{'='*80}"
+                        )
+                        return True
+                    except Exception as e:
+                        logger.error(f"[MT5] ❌ Critical Error in _open_mt5_position: {e}", exc_info=True)
+                        return False
+            
+                def _fetch_ohlc_for_vtm(self, symbol, asset):
+                    """Helper to fetch OHLC data for VTM."""
+                    ohlc_data, df = None, None
+                    if self.data_manager:
+                        try:
+                            end_time = datetime.now(timezone.utc)
+                            start_time = end_time - timedelta(days=10)
+                            df = self.data_manager.fetch_mt5_data(
+                                symbol=symbol, timeframe=self.config["assets"][asset].get("timeframe", "H1"),
+                                start_date=start_time.strftime("%Y-%m-%d"), end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                            if len(df) > 50:
+                                ohlc_data = {"high": df["high"].values, "low": df["low"].values, "close": df["close"].values, "volume": df["volume"].values}
+                                logger.info(f"[VTM] ✓ Fetched {len(df)} bars for dynamic management")
+                            else:
+                                logger.warning(f"[VTM] ⚠️ Insufficient data ({len(df)} bars)")
+                        except Exception as e:
+                            logger.error(f"[VTM] ❌ OHLC fetch failed: {e}")
+                    return ohlc_data, df
+            
+                def _validate_margin(self, volume_lots, current_price):
+                    """Helper to perform pre-flight margin check."""
+                    if self.mode.lower() == "paper":
+                        return True
+                    try:
+                        account_info = mt5.account_info()
+                        if account_info:
+                            leverage_actual = account_info.leverage if account_info.leverage > 0 else 100
+                            estimated_margin = (volume_lots * self.symbol_info.trade_contract_size * current_price) / leverage_actual
+                            estimated_margin *= 1.10  # 10% buffer
+                            logger.info(
+                                f"[MARGIN CHECK]\n"
+                                f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
+                                f"  Required Margin:  ${estimated_margin:,.2f}\n"
+                                f"  Margin Level:     {account_info.margin_level:.2f}%"
+                            )
+                            if estimated_margin > account_info.margin_free:
+                                logger.error(f"[MARGIN] ❌ Insufficient margin. Available: ${account_info.margin_free:,.2f}")
+                                return False
+                    except Exception as e:
+                        logger.warning(f"[MARGIN] Pre-flight warning: {e}")
+                    return True
+            
+                def _execute_mt5_order(self, symbol, side, volume_lots, asset, trade_type):
+                    """Helper to execute order on MT5 or simulate in paper mode."""
+                    order_type = mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL
+                    tick = mt5.symbol_info_tick(symbol)
+                    execution_price = (tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid) if tick else None
+                    if not execution_price:
+                        logger.error(f"[MT5] ❌ Could not get execution price for {symbol}")
+                        return None, None
+            
+                    if self.mode.lower() == "paper":
+                        mt5_ticket = int(time.time())
+                        logger.info(f"[MT5] [PAPER MODE] ✓ {side.upper()} order simulated: #{mt5_ticket}")
+                        return mt5_ticket, execution_price
+            
+                    if not self._is_trading_allowed(symbol):
+                        logger.error(f"[MT5] ❌ Trading not allowed for {symbol}")
+                        return None, None
+            
                     filling_mode = mt5.ORDER_FILLING_FOK
-                elif self.symbol_info.filling_mode == 2:
-                    filling_mode = mt5.ORDER_FILLING_IOC
-
-                request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": volume_lots,
-                    "type": order_type,
-                    "price": execution_price,
-                    "sl": 0.0,  # VTM will manage
-                    "tp": 0.0,
-                    "deviation": 20,
-                    "magic": 234000,
-                    "comment": f"Sig_{signal}_{asset}_{trade_type}",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": filling_mode,
-                }
-
-                result = mt5.order_send(request)
-
-                if result is None:
-                    last_error = mt5.last_error()
-                    logger.error(f"[MT5] ❌ Order Failed: {last_error}")
-                    return False
-
-                if result.retcode != mt5.TRADE_RETCODE_DONE:
-                    logger.error(
-                        f"[MT5] ❌ Rejected: {result.comment} (Code: {result.retcode})"
-                    )
-                    return False
-
-                mt5_ticket = result.order
-                logger.info(f"[MT5] ✓ {side.upper()} order placed: #{mt5_ticket}")
-
-            # ================================================================
-            # STEP 9: Add to Portfolio with VTM (TACTICAL)
-            # ================================================================
-            if signal_details is None:
-                signal_details = {}
-
-            signal_details.update(
-                {
-                    "trade_type": trade_type,
-                    "strategic_risk_pct": risk_pct,
-                    "tactical_validation": "passed",
-                }
-            )
-
-            success = self.portfolio_manager.add_position(
-                asset=asset,
-                symbol=symbol,
-                side=side,
-                entry_price=execution_price,
-                position_size_usd=actual_usd,
-                stop_loss=None,  # VTM will calculate
-                take_profit=None,
-                trailing_stop_pct=None,
-                mt5_ticket=mt5_ticket,
-                ohlc_data=ohlc_data,
-                use_dynamic_management=True,
-                signal_details=signal_details,
-                leverage=leverage,
-                margin_type=margin_type,
-                is_futures=is_futures,
-                vtm_overrides=vtm_overrides,
-            )
-
-            if not success:
-                if self.mode.lower() != "paper" and mt5_ticket:
-                    logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
-                    self._emergency_close_mt5_position(symbol, volume_lots, order_type)
-                return False
-
-            logger.info(
-                f"\n{'='*80}\n"
-                f"✅ {asset} {side.upper()} POSITION OPENED\n"
-                f"{'='*80}\n"
-                f"Strategic Risk: {risk_pct:.3%}\n"
-                f"Trade Type:     {trade_type}\n"
-                f"Position Size:  ${actual_usd:,.2f}\n"
-                f"Lots:           {volume_lots:.2f}\n"
-                f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
-                f"{'='*80}"
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"[MT5] ❌ Critical Error: {e}", exc_info=True)
-            return False
-
-    def _is_market_open_for_closing(self, symbol: str) -> Tuple[bool, str]:
+                    if self.symbol_info.filling_mode == 2: filling_mode = mt5.ORDER_FILLING_IOC
+                    
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": volume_lots,
+                        "type": order_type, "price": execution_price, "sl": 0.0, "tp": 0.0,
+                        "deviation": 20, "magic": 234000, "comment": f"Sig_{1 if side == 'long' else -1}_{asset}_{trade_type}",
+                        "type_time": mt5.ORDER_TIME_GTC, "type_filling": filling_mode,
+                    }
+                    result = mt5.order_send(request)
+            
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"[MT5] ✓ {side.upper()} order placed: #{result.order}")
+                        return result.order, execution_price
+                    else:
+                        last_error = mt5.last_error() or "Unknown error"
+                        logger.error(f"[MT5] ❌ Order Failed: {result.comment if result else last_error}")
+                        return None, None
+                
+                def _is_market_open_for_closing(self, symbol: str) -> Tuple[bool, str]:
         """
         ✅ NEW: Check if market is open for closing positions
 
