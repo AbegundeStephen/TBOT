@@ -1413,18 +1413,25 @@ class PortfolioManager:
                 )
                 return False
 
-        # 1. Check if we can open this position
-        can_open, reason = self.can_open_position(asset, side)
-        if not can_open:
-            logger.warning(f"Cannot open position: {reason}")
-            return False
+        # ✅ NEW: Check if this is an import from sync
+        is_sync_import = signal_details and signal_details.get("source") == "sync_import"
 
-        # 2. Check portfolio exposure limits
-        if not self.check_portfolio_limits(
+        # 2. Check portfolio exposure limits (SKIP IF IMPORTING)
+        if not is_sync_import and not self.check_portfolio_limits(
             new_position_usd=position_size_usd, new_side=side, asset=asset
         ):
             logger.warning(f"Portfolio limits exceeded for {asset} {side.upper()}")
             return False
+
+        # ✅ NEW: Log if the check was bypassed
+        if is_sync_import:
+            # Re-check the limits just to log the warning, but don't block the trade
+            if not self.check_portfolio_limits(
+                new_position_usd=position_size_usd, new_side=side, asset=asset
+            ):
+                logger.warning(
+                    f"[SYNC IMPORT] Bypassing portfolio exposure limits to import existing position for {asset}."
+                )
 
         quantity = position_size_usd / entry_price
         logger.info(
