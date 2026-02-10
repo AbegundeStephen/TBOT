@@ -550,6 +550,7 @@ class PortfolioManager:
             # ================================================================
             fixed_risk_config = asset_cfg.get("fixed_risk_usd")
             base_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
+            strategy_multiplier = 1.0
             
             logger.info(f"\n[RISK BUDGET] Calculating for {asset} {strategy_type}")
 
@@ -676,7 +677,7 @@ class PortfolioManager:
             # STEP 6: Final Validation
             # ================================================================
             # Ensure we don't go below minimum viable risk
-            min_risk = 0.005  # 0.5% absolute minimum
+            min_risk = 0.001  # 0.1% absolute minimum
             if risk_pct < min_risk:
                 logger.error(
                     f"  ❌ Risk budget {risk_pct:.3%} below minimum {min_risk:.3%}"

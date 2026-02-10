@@ -73,7 +73,7 @@
         "lookback_days": 730,
         "weight": 0.5,
         "fixed_risk_usd": {
-          "TREND": 10,
+          "TREND": 15,
           "SCALP": 3
         },
         "min_position_usd": 100,
