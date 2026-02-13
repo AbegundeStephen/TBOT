@@ -19,7 +19,9 @@
         "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 4.0,
-        "council_counter_trend": 4.5
+        "council_counter_trend": 4.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "balanced": {
         "description": "Standard thresholds, standard Council rules. Focus: Balanced Growth.",
@@ -39,7 +41,9 @@
         "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 3.5,
-        "council_counter_trend": 4.0
+        "council_counter_trend": 4.0,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "aggressive": {
         "description": "Lower thresholds, Council accepts weaker confirmation. Focus: Trend Catching.",
@@ -59,7 +63,9 @@
         "opposition_penalty": 0.60,
         "verbose": false,
         "council_trend_aligned": 2.9,
-        "council_counter_trend": 3.5
+        "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "scalper": {
         "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
@@ -81,7 +87,9 @@
         "min_quality_margin": 0.05,
         "opposition_penalty": 0.60,
         "council_trend_aligned": 2.4,
-        "council_counter_trend": 3.5
+        "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       }
     },
     "GOLD": {
@@ -103,7 +111,9 @@
         "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 4.0,
-        "council_counter_trend": 4.5
+        "council_counter_trend": 4.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "balanced": {
         "description": "Standard GOLD settings. Focus: Balanced Growth.",
@@ -123,7 +133,9 @@
         "opposition_penalty": 0.75,
         "verbose": false,
         "council_trend_aligned": 3.5,
-        "council_counter_trend": 4.0
+        "council_counter_trend": 4.0,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "aggressive": {
         "description": "Active GOLD settings. Focus: Trend Catching.",
@@ -143,7 +155,9 @@
         "opposition_penalty": 0.60,
         "verbose": false,
         "council_trend_aligned": 3.0,
-        "council_counter_trend": 3.5
+        "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       },
       "scalper": {
         "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
@@ -165,7 +179,9 @@
         "min_quality_margin": 0.06,
         "opposition_penalty": 0.60,
         "council_trend_aligned": 2.5,
-        "council_counter_trend": 3.5
+        "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.0,
+        "trend_following_weight": 1.0
       }
     }
   }

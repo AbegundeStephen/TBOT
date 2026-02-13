@@ -19,9 +19,9 @@ ENV/
 models/*.pkl
 data/*.csv
 data/*.parquet
-logs/*.log
-log/
-logs/*
+
+
+
 
 
 # IDE
@@ -45,6 +45,9 @@ models/ai/*.weights.h5
 models/ai/*_config.pkl
 models/ai/*_history.png
 models/ai/*_mapping.pkl
+
+logs/
+logs/*.log
 
 data/historical/
 data/raw/

@@ -88,6 +88,11 @@ class SignalMonitoringIntegration:
             "aggregator_mode": details.get("aggregator_mode"),
             "council_score": details.get("total_score"),
             "council_decision": details.get("decision_type"),
+            # NEW: Regime details from main.py
+            "regime_score": details.get("regime_score"),
+            "regime_is_bullish": details.get("regime_is_bullish"),
+            "regime_is_bearish": details.get("regime_is_bearish"),
+            "regime_reasoning": details.get("regime_reasoning"),
         }
 
         self.signal_history[asset].append(entry)
@@ -636,6 +641,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("debug", self.cmd_debug_positions))
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
+        self.application.add_handler(CommandHandler("lastdecision", self.cmd_last_decision)) # NEW COMMAND
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
         self.application.add_handler(CommandHandler("VTM", self.cmd_VTM_status))
 
@@ -913,6 +919,102 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Error: {e}")
             await update.message.reply_text("❌ Error")
+
+    async def cmd_last_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /lastdecision command - Show the last trading decision for each asset."""
+        try:
+            if not self.trading_bot.config["assets"]:
+                await update.message.reply_text("❌ No assets configured.")
+                return
+
+            msg = "🕰️ *Last Trading Decisions*\n\n"
+            found_decisions = False
+
+            for asset_name in self.trading_bot.config["assets"].keys():
+                if not self.trading_bot.config["assets"][asset_name].get("enabled", False):
+                    continue
+
+                last_signal_entry = self.signal_monitor.get_last_signals(asset_name, n=1)
+
+                if last_signal_entry:
+                    found_decisions = True
+                    entry = last_signal_entry[0]
+                    
+                    signal_type = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(entry["signal"], "UNKNOWN")
+                    # Use the 'score' from the new RegimeStatus object
+                    regime_score = entry.get("regime_score") 
+                    regime_is_bullish = entry.get("regime_is_bullish")
+                    regime_is_bearish = entry.get("regime_is_bearish")
+                    regime_reasoning = entry.get("regime_reasoning")
+                    timestamp = entry["timestamp"].strftime("%H:%M:%S")
+
+                    msg += f"*{asset_name}* ({timestamp}): {signal_type}\n"
+                    # Only display regime score if it exists
+                    if regime_score is not None:
+                         msg += f"  Regime Score: {regime_score:.2f}\n"
+                         if regime_is_bullish:
+                             msg += "  Regime Bias: BULLISH 📈\n"
+                         elif regime_is_bearish:
+                             msg += "  Regime Bias: BEARISH 📉\n"
+                         else:
+                             msg += "  Regime Bias: NEUTRAL ⚖️\n"
+                         msg += f"  Regime Reasoning: {regime_reasoning}\n"
+
+                    msg += f"  Reasoning: {entry.get('reasoning', 'N/A')}\n\n"
+                else:
+                    msg += f"*{asset_name}*: No recent decision.\n\n"
+
+            if not found_decisions:
+                msg = "🤷 No trading decisions recorded yet."
+
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+        except Exception as e:
+            logger.error(f"Error in cmd_last_decision: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching last decisions.")
+
+    async def cmd_last_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /lastdecision command - Show the last trading decision for each asset."""
+        try:
+            if not self.trading_bot.config["assets"]:
+                await update.message.reply_text("❌ No assets configured.")
+                return
+
+            msg = "🕰️ *Last Trading Decisions*\n\n"
+            found_decisions = False
+
+            for asset_name in self.trading_bot.config["assets"].keys():
+                if not self.trading_bot.config["assets"][asset_name].get("enabled", False):
+                    continue
+
+                last_signal_entry = self.signal_monitor.get_last_signals(asset_name, n=1)
+
+                if last_signal_entry:
+                    found_decisions = True
+                    entry = last_signal_entry[0]
+                    
+                    signal_type = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(entry["signal"], "UNKNOWN")
+                    # Use the 'score' from the new RegimeStatus object
+                    regime_score = entry.get("regime_score") 
+                    reasoning = entry.get("reasoning", "No specific reasoning.")
+                    timestamp = entry["timestamp"].strftime("%H:%M:%S")
+
+                    msg += f"*{asset_name}* ({timestamp}): {signal_type}\n"
+                    # Only display regime score if it exists
+                    if regime_score is not None:
+                         msg += f"  Regime Score: {regime_score:.2f}\n"
+                    msg += f"  Reasoning: {reasoning}\n\n"
+                else:
+                    msg += f"*{asset_name}*: No recent decision.\n\n"
+
+            if not found_decisions:
+                msg = "🤷 No trading decisions recorded yet."
+
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+        except Exception as e:
+            logger.error(f"Error in cmd_last_decision: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching last decisions.")
 
     # ====================================================================
     # ✨ NEW: The "Brain" Visualizer Command

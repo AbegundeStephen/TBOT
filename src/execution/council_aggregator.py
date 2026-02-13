@@ -552,6 +552,28 @@ class InstitutionalCouncilAggregator:
                 total_score = max(buy_total, sell_total)
                 required_score = self.trend_aligned_threshold
 
+            # ================================================================
+            # GATEKEEPER FILTERING (Phase 3 for Council Aggregator)
+            # ================================================================
+            # Extract regime score for Gatekeeper
+            regime_score = governor_data.get("regime_score", 0.0)
+            regime_is_bullish = governor_data.get("is_bullish", False)
+            regime_is_bearish = governor_data.get("is_bearish", False)
+
+            if signal != 0: # Only apply Gatekeeper if a signal was generated
+                if regime_score == 0.0:
+                    logger.warning(f"[GATEKEEPER] ❌ BLOCKED ALL: Regime score is 0.0 ({self.asset_type}). Council signal: {signal}")
+                    signal = 0
+                    decision_type = f"BLOCKED (Gatekeeper - Neutral Regime: {decision_type})"
+                elif regime_is_bullish and signal < 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT: Bullish regime ({regime_score:.2f}) for {self.asset_type}. Council signal: {signal}")
+                    signal = 0
+                    decision_type = f"BLOCKED (Gatekeeper - Bullish Regime, Blocked Short: {decision_type})"
+                elif regime_is_bearish and signal > 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG: Bearish regime ({regime_score:.2f}) for {self.asset_type}. Council signal: {signal}")
+                    signal = 0
+                    decision_type = f"BLOCKED (Gatekeeper - Bearish Regime, Blocked Long: {decision_type})"
+
             # ====================================================================
             # ✨ THE INTERCEPTOR: Apply World-Class Filters before finalizing
             # ====================================================================

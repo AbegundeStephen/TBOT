@@ -3467,6 +3467,12 @@ class TradingBot:
 
             # Update Telegram monitor (if available)
             if self.telegram_bot:
+                # Add regime details to the 'details' dictionary for SignalMonitoringIntegration
+                details["regime_score"] = mtf_regime.get("regime_score")
+                details["regime_is_bullish"] = mtf_regime.get("is_bullish")
+                details["regime_is_bearish"] = mtf_regime.get("is_bearish")
+                details["regime_reasoning"] = mtf_regime.get("reasoning")
+                
                 self.telegram_bot.signal_monitor.record_signal(
                     asset=asset_name,
                     signal=signal,
