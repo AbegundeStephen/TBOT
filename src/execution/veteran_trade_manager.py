@@ -274,6 +274,21 @@ class VeteranTradeManager:
         
         self.position_size = quantity
         
+        # Original fixed parameters from __init__ arguments
+        self.enable_early_profit_lock = enable_early_profit_lock
+        self.early_lock_threshold_pct = early_lock_threshold_pct 
+        self.runner_trail_pct = risk_config.get("runner_trail_pct", 0.025) # Default from risk_config
+        
+        # New dynamic multipliers (if provided in risk_config)
+        self.early_lock_atr_multiplier = risk_config.get("early_lock_atr_multiplier") 
+        self.runner_trail_atr_multiplier = risk_config.get("runner_trail_atr_multiplier")
+        
+        # Initialize current calculated dynamic percentages (to be updated during runtime)
+        # These will reflect the actual threshold/trail used based on ATR or fixed default
+        self.current_early_lock_threshold_pct = self.early_lock_threshold_pct # Initialize with fixed default
+        self.current_runner_trail_pct = self.runner_trail_pct # Initialize with fixed default
+
+
         # ✨ Asymmetric constraints for SCALP vs TREND using risk_config
         if self.trade_type == "SCALP":
             self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.01) * 0.5
@@ -283,33 +298,21 @@ class VeteranTradeManager:
             # FORCE tighter SCALP targets (do not read config)
             self.partial_targets = [1.2, 2.0, 3.0]
             self.partial_sizes = [0.5, 0.3, 0.2]
-
-            self.enable_early_profit_lock = True
+            
+            # SCALP-specific fixed early lock and runner trail
             self.early_lock_threshold_pct = 0.005
-                else:  # TREND
-                    self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.008)
-                    self.max_stop_pct = self.risk_config.get("max_stop_pct", 0.06)
-                    self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
-                    self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
-                    self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
-                
-                self.enable_early_profit_lock = enable_early_profit_lock
-                
-                # Original fixed percentage (for backward compatibility)
-                # This will be used if early_lock_atr_multiplier is None
-                self.early_lock_threshold_pct = early_lock_threshold_pct 
-                
-                # New dynamic multipliers (if provided in risk_config)
-                self.early_lock_atr_multiplier = risk_config.get("early_lock_atr_multiplier") 
-                self.runner_trail_atr_multiplier = risk_config.get("runner_trail_atr_multiplier")
-                
-                # Current calculated dynamic percentages (to be updated during runtime)
-                # These will reflect the actual threshold/trail used based on ATR
-                self.current_early_lock_threshold_pct = self.early_lock_threshold_pct # Initialize with fixed default
-                self.current_runner_trail_pct = self.runner_trail_pct # Initialize with fixed default
-        
-                self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
-        self.runner_trail_pct = self.risk_config.get("runner_trail_pct", 0.025)
+            self.runner_trail_pct = 0.005 # Tight trail for scalping
+
+        else:  # TREND
+            self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.008)
+            self.max_stop_pct = self.risk_config.get("max_stop_pct", 0.06)
+            self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
+            self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
+            self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
+            # TREND-specific default runner trail (early_lock_threshold_pct already handled above)
+            self.runner_trail_pct = risk_config.get("runner_trail_pct", 0.025) # Default from risk_config
+
+        self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
         self.time_stop_bars = self.risk_config.get("time_stop_bars", 72)
         self.use_ema_structure = self.risk_config.get("use_ema_structure", False)
         
