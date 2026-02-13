@@ -143,6 +143,7 @@
         "max_position_usd": 50000,
         "lot_size": 0.01,
         "lot_step": 0.01,
+        "leverage": 100,
         "strategies": {
           "mean_reversion": {
             "enabled": true,
@@ -361,7 +362,8 @@
       "min_training_accuracy": 0.60,
       "cross_validation_folds": 5,
       "feature_importance_threshold": 0.01,
-      "retrain_frequency_days": 7
+      "retrain_frequency_days": 7,
+      "enable_autotrain": true
     },
     "aggregator_settings": {
       "mode": "hybrid",

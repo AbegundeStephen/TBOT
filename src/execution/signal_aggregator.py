@@ -1108,6 +1108,43 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Store originals for logging
             mr_original = mr_signal
             tf_original = tf_signal
+
+            # Extract regime score for Gatekeeper (Phase 3)
+            regime_score = governor_data.get("regime_score", 0.0)
+            regime_is_bullish = governor_data.get("is_bullish", False)
+            regime_is_bearish = governor_data.get("is_bearish", False)
+
+            # --- Gatekeeper Filtering (Phase 3) ---
+            # If regime_score is 0, block all signals
+            if regime_score == 0.0:
+                if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
+                    logger.warning(f"[GATEKEEPER] ❌ BLOCKED ALL: Regime score is 0.0 ({self.asset_type}).")
+                mr_signal = 0
+                tf_signal = 0
+                ema_signal = 0
+            # If regime is bullish (score > 0) and a signal is bearish (short), block short signals
+            elif regime_is_bullish and (mr_signal < 0 or tf_signal < 0 or ema_signal < 0):
+                if mr_signal < 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    mr_signal = 0
+                if tf_signal < 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    tf_signal = 0
+                if ema_signal < 0: # Assuming EMA signal can also be filtered
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    ema_signal = 0
+            # If regime is bearish (score < 0) and a signal is bullish (long), block long signals
+            elif regime_is_bearish and (mr_signal > 0 or tf_signal > 0 or ema_signal > 0):
+                if mr_signal > 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    mr_signal = 0
+                if tf_signal > 0:
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    tf_signal = 0
+                if ema_signal > 0: # Assuming EMA signal can also be filtered
+                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    ema_signal = 0
+            # --- End Gatekeeper Filtering ---
             
             # Strict Trend Enforcement & Ranging Logic
             is_ranging = regime_conf <= 0.50
