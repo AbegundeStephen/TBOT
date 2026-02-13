@@ -486,15 +486,23 @@ class TradingTelegramBot:
         Starts the Telegram bot's polling mechanism.
         This can be called independently to restart polling if it stops.
         """
-        logger.info("[TELEGRAM] Starting polling...")
-        await self.application.updater.start_polling(
-            poll_interval=1.0,
-            timeout=30,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            bootstrap_retries=10,
-        )
-        logger.info("[TELEGRAM] Polling started.")
+        try:
+            logger.info("[TELEGRAM] Starting polling...")
+            await self.application.updater.start_polling(
+                poll_interval=1.0,
+                timeout=30,
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                bootstrap_retries=10,
+            )
+            logger.info("[TELEGRAM] Polling started.")
+            return True
+        except asyncio.CancelledError:
+            logger.info("[TELEGRAM] Polling startup cancelled.")
+            return False
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Error starting polling: {e}", exc_info=True)
+            return False
 
     async def _stop_polling(self):
         """
@@ -750,26 +758,34 @@ class TradingTelegramBot:
             try:
                 if not polling_active:
                     logger.info("[TELEGRAM] Attempting to start/restart polling...")
-                    await self._start_polling() # This is now the extracted method
-                    polling_active = True
-                    reconnect_delay_seconds = 5 # Reset delay on success
-                    logger.info("[TELEGRAM] Polling is now active.")
-                
+                    # self._start_polling now returns success status
+                    if await self._start_polling():
+                        polling_active = True
+                        reconnect_delay_seconds = 5 # Reset delay on success
+                        logger.info("[TELEGRAM] Polling is now active.")
+                    else:
+                        logger.warning("[TELEGRAM] _start_polling failed, retrying...")
+                        polling_active = False # Ensure it retries in the next loop iteration
+
                 # Check health of the application object itself, not just loop
                 if self.application and not self.application.running:
+                    if polling_active: # Log only if it was previously active
+                        logger.warning("[TELEGRAM] Application not running, polling needs restart.")
                     polling_active = False
-                    logger.warning("[TELEGRAM] Application not running, polling needs restart.")
                 
                 # Sleep briefly before next check or loop iteration
                 await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 logger.info("[TELEGRAM] Polling loop cancelled (shutdown)")
+                # Cleanly stop polling when cancelled
+                await self._stop_polling()
                 raise # Re-raise to propagate cancellation for graceful shutdown
 
             except Exception as e:
+                # This catches errors in the while loop itself, not start_polling()
                 polling_active = False
-                logger.error(f"[TELEGRAM] Error in polling loop: {e}", exc_info=True)
+                logger.error(f"[TELEGRAM] Error in outer polling loop: {e}", exc_info=True)
                 
                 # Exponential backoff for reconnection attempts
                 logger.info(f"[TELEGRAM] Retrying polling in {reconnect_delay_seconds} seconds...")
