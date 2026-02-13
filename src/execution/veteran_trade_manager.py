@@ -255,7 +255,9 @@ class VeteranTradeManager:
         account_risk: float = 0.015,
         atr_period: int = 14,
         enable_early_profit_lock: bool = True,
-        early_lock_threshold_pct: float = 0.01,
+        early_lock_threshold_pct: float = 0.01, # Keep for backward compatibility/default
+        early_lock_atr_multiplier: Optional[float] = None, # NEW
+        runner_trail_atr_multiplier: Optional[float] = None, # NEW
         trade_type: str = "TREND",
     ):
         self.entry_price = entry_price
@@ -290,9 +292,17 @@ class VeteranTradeManager:
             self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
             self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
             self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
-            self.enable_early_profit_lock = enable_early_profit_lock
-            self.early_lock_threshold_pct = early_lock_threshold_pct
-
+                    self.enable_early_profit_lock = enable_early_profit_lock
+                    
+                    # Original fixed percentage (for backward compatibility)
+                    self.early_lock_threshold_pct = early_lock_threshold_pct 
+                    # New dynamic multipliers (if provided)
+                    self.early_lock_atr_multiplier = risk_config.get("early_lock_atr_multiplier") 
+                    self.runner_trail_atr_multiplier = risk_config.get("runner_trail_atr_multiplier")
+                    
+                    # Initialize dynamic percentages (will be calculated later)
+                    self.dynamic_early_lock_threshold = None
+                    self.dynamic_runner_trail = None
         self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
         self.runner_trail_pct = self.risk_config.get("runner_trail_pct", 0.025)
         self.time_stop_bars = self.risk_config.get("time_stop_bars", 72)
@@ -341,6 +351,18 @@ class VeteranTradeManager:
     
     # ... Rest of the file is the same ...
     # ... I will omit it for brevity but the logic remains ...
+
+    def _get_adaptive_percentage(self, atr_value: float, multiplier: float) -> float:
+        """
+        Calculates an adaptive percentage based on ATR and a given multiplier.
+        This adapts the percentage to current market volatility.
+        """
+        if not atr_value or self.entry_price == 0:
+            return 0.0 # Avoid division by zero or invalid ATR
+
+        # Calculate percentage as a fraction of entry price relative to ATR
+        adaptive_pct = (atr_value * multiplier) / self.entry_price
+        return adaptive_pct
 
     def _calc_pct_distance(self, price1: float, price2: float) -> float:
         return abs(price1 - price2) / price1 * 100
@@ -459,35 +481,59 @@ class VeteranTradeManager:
             self.bars_in_trade += 1
             if self.side == "long": self.highest_price_reached = max(self.highest_price_reached, new_high)
             else: self.lowest_price_reached = min(self.lowest_price_reached, new_low)
-            return self.check_exit(new_close)
+            
+            atr = self._calculate_atr() # Calculate ATR here
+            return self.check_exit(new_close, atr) # Pass ATR to check_exit
         except Exception as e:
             logger.error(f"[VTM] Update error: {e}")
             return None
 
     def update_with_current_price(self, current_price: float) -> Optional[Dict]:
         try:
+            atr = self._calculate_atr() # Calculate ATR here
+            
             if self.side == "long":
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
-                    new_trail = self.highest_price_reached * (1 - self.runner_trail_pct)
+                    # Use dynamic runner_trail_pct
+                    if self.runner_trail_atr_multiplier is not None:
+                        dynamic_runner_trail_pct = self._get_adaptive_percentage(atr, self.runner_trail_atr_multiplier)
+                        new_trail = self.highest_price_reached * (1 - dynamic_runner_trail_pct)
+                    else: # Fallback to fixed if multiplier not provided
+                        new_trail = self.highest_price_reached * (1 - self.runner_trail_pct)
+                    
                     if new_trail > self.current_stop_loss: self.current_stop_loss = new_trail
             else:
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
-                    new_trail = self.lowest_price_reached * (1 + self.runner_trail_pct)
+                    # Use dynamic runner_trail_pct
+                    if self.runner_trail_atr_multiplier is not None:
+                        dynamic_runner_trail_pct = self._get_adaptive_percentage(atr, self.runner_trail_atr_multiplier)
+                        new_trail = self.lowest_price_reached * (1 + dynamic_runner_trail_pct)
+                    else: # Fallback to fixed if multiplier not provided
+                        new_trail = self.lowest_price_reached * (1 + self.runner_trail_pct)
+                    
                     if new_trail < self.current_stop_loss: self.current_stop_loss = new_trail
-            return self.check_exit(current_price)
+            
+            return self.check_exit(current_price, atr) # Pass ATR to check_exit
         except Exception as e:
             logger.error(f"[VTM] Price update error: {e}")
             return None
 
-    def check_exit(self, current_price: float) -> Optional[Dict]:
+    def check_exit(self, current_price: float, atr_value: Optional[float] = None) -> Optional[Dict]:
+        if atr_value is None:
+            atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
-            if self.enable_early_profit_lock and not self.early_profit_locked and pnl_pct >= self.early_lock_threshold_pct:
+            # Calculate dynamic early lock threshold
+            actual_early_lock_threshold = self.early_lock_threshold_pct # Default to fixed
+            if self.early_lock_atr_multiplier is not None:
+                actual_early_lock_threshold = self._get_adaptive_percentage(atr_value, self.early_lock_atr_multiplier)
+
+            if self.enable_early_profit_lock and not self.early_profit_locked and pnl_pct >= actual_early_lock_threshold:
                 self.early_profit_locked = True
                 if self.side == "long":
                     if (new_stop := self.entry_price * 1.001) > self.current_stop_loss: self.current_stop_loss = new_stop

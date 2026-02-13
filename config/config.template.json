@@ -125,7 +125,9 @@
           "breakeven_profit_threshold": 0.012,
           "early_scale_enabled": true,
           "early_scale_threshold": 0.02,
-          "early_scale_bars": 4
+          "early_scale_bars": 4,
+          "early_lock_atr_multiplier": 0.5,
+          "runner_trail_atr_multiplier": 2.0
         }
       },
       "GOLD": {
@@ -191,7 +193,9 @@
           "breakeven_profit_threshold": 0.01,
           "early_scale_enabled": true,
           "early_scale_threshold": 0.015,
-          "early_scale_bars": 4
+          "early_scale_bars": 4,
+          "early_lock_atr_multiplier": 0.5,
+          "runner_trail_atr_multiplier": 2.0
         }
       }
     },
