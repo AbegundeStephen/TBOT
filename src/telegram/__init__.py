@@ -608,6 +608,7 @@ class TradingTelegramBot:
         Run polling loop with built-in retry mechanism for starting/restarting polling.
         This keeps the dedicated Telegram thread alive even if polling temporarily fails.
         """
+        self.is_running = True # Ensure this instance is marked as running
         polling_active = False
         reconnect_delay_seconds = 5 # Initial delay
 
@@ -670,7 +671,7 @@ class TradingTelegramBot:
 
         # Stop flags
         self._shutdown_event.set()
-        self.is_running = False
+        # self.is_running will be set to False by the loop itself when _shutdown_event is set
         self._is_ready = False
 
         try:
