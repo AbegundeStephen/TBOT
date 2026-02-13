@@ -1256,6 +1256,20 @@ class TradingTelegramBot:
                     msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.1f}%)\n"
                     msg += f"🎯 TP: ${vtm_status['take_profit']:,.2f} ({vtm_status['distance_to_tp_pct']:+.1f}%)\n"
                     msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
+                    
+                    # Display dynamic VTM parameters
+                    if vtm_status.get("early_lock_atr_multiplier") is not None:
+                        msg += f"🔗 Early Lock: Dynamic ({vtm_status['early_lock_atr_multiplier']}x ATR)\n"
+                        msg += f"   └─ Threshold: {vtm_status.get('current_early_lock_threshold_pct', 0):.2%}\n"
+                    
+                    if vtm_status.get("runner_trail_atr_multiplier") is not None:
+                        msg += f"🏃 Runner Trail: Dynamic ({vtm_status['runner_trail_atr_multiplier']}x ATR)\n"
+                        msg += f"   └─ Current Trail: {vtm_status.get('current_runner_trail_pct', 0):.2%}\n"
+                    else:
+                        # Fallback to fixed runner_trail_pct if not dynamic
+                        # Note: runner_trail_pct is initialized in VTM __init__
+                        msg += f"🏃 Runner Trail: Fixed ({position.runner_trail_pct:.2%})\n"
+
                     msg += f"🔄 Updates: {vtm_status['update_count']}\n\n"
                 else:
                     msg += f"📊 <b>{position.asset}</b>: Static management (no VTM)\n\n"

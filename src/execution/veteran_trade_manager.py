@@ -286,24 +286,29 @@ class VeteranTradeManager:
 
             self.enable_early_profit_lock = True
             self.early_lock_threshold_pct = 0.005
-        else:  # TREND
-            self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.008)
-            self.max_stop_pct = self.risk_config.get("max_stop_pct", 0.06)
-            self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
-            self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
-            self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
-                    self.enable_early_profit_lock = enable_early_profit_lock
-                    
-                    # Original fixed percentage (for backward compatibility)
-                    self.early_lock_threshold_pct = early_lock_threshold_pct 
-                    # New dynamic multipliers (if provided)
-                    self.early_lock_atr_multiplier = risk_config.get("early_lock_atr_multiplier") 
-                    self.runner_trail_atr_multiplier = risk_config.get("runner_trail_atr_multiplier")
-                    
-                    # Initialize dynamic percentages (will be calculated later)
-                    self.dynamic_early_lock_threshold = None
-                    self.dynamic_runner_trail = None
-        self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
+                else:  # TREND
+                    self.min_stop_pct = self.risk_config.get("min_stop_pct", 0.008)
+                    self.max_stop_pct = self.risk_config.get("max_stop_pct", 0.06)
+                    self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
+                    self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
+                    self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
+                
+                self.enable_early_profit_lock = enable_early_profit_lock
+                
+                # Original fixed percentage (for backward compatibility)
+                # This will be used if early_lock_atr_multiplier is None
+                self.early_lock_threshold_pct = early_lock_threshold_pct 
+                
+                # New dynamic multipliers (if provided in risk_config)
+                self.early_lock_atr_multiplier = risk_config.get("early_lock_atr_multiplier") 
+                self.runner_trail_atr_multiplier = risk_config.get("runner_trail_atr_multiplier")
+                
+                # Current calculated dynamic percentages (to be updated during runtime)
+                # These will reflect the actual threshold/trail used based on ATR
+                self.current_early_lock_threshold_pct = self.early_lock_threshold_pct # Initialize with fixed default
+                self.current_runner_trail_pct = self.runner_trail_pct # Initialize with fixed default
+        
+                self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
         self.runner_trail_pct = self.risk_config.get("runner_trail_pct", 0.025)
         self.time_stop_bars = self.risk_config.get("time_stop_bars", 72)
         self.use_ema_structure = self.risk_config.get("use_ema_structure", False)
@@ -335,6 +340,20 @@ class VeteranTradeManager:
         logger.info(f"Entry:    ${entry_price:,.2f}")
         logger.info(f"Stop:     ${self.initial_stop_loss:,.2f} (-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)")
         logger.info(f"Quantity: {self.position_size:.6f} units")
+        
+        # Log dynamic VTM parameters
+        if self.early_lock_atr_multiplier is not None:
+            logger.info(f"Early Lock: Dynamic ({self.early_lock_atr_multiplier}x ATR)")
+            logger.info(f"  Initial Threshold: {self.early_lock_threshold_pct:.2%}")
+        else:
+            logger.info(f"Early Lock: Fixed ({self.early_lock_threshold_pct:.2%})")
+
+        if self.runner_trail_atr_multiplier is not None:
+            logger.info(f"Runner Trail: Dynamic ({self.runner_trail_atr_multiplier}x ATR)")
+            logger.info(f"  Initial Trail: {self.runner_trail_pct:.2%}")
+        else:
+            logger.info(f"Runner Trail: Fixed ({self.runner_trail_pct:.2%})")
+
         logger.info(f"\n📊 TARGETS:")
         if not self.take_profit_levels or not self.partial_sizes:
             logger.info("  No take profit targets calculated or partial sizes defined.")
@@ -503,7 +522,13 @@ class VeteranTradeManager:
                     else: # Fallback to fixed if multiplier not provided
                         new_trail = self.highest_price_reached * (1 - self.runner_trail_pct)
                     
-                    if new_trail > self.current_stop_loss: self.current_stop_loss = new_trail
+                    if new_trail > self.current_stop_loss: 
+                        logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}). Dynamic Trail: {self.current_runner_trail_pct:.2%}")
+                        self.current_stop_loss = new_trail
+                        if self.runner_trail_atr_multiplier is not None:
+                            self.current_runner_trail_pct = dynamic_runner_trail_pct # Store the dynamic trail
+                        else:
+                            self.current_runner_trail_pct = self.runner_trail_pct # Store the fixed trail
             else:
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
@@ -515,7 +540,13 @@ class VeteranTradeManager:
                     else: # Fallback to fixed if multiplier not provided
                         new_trail = self.lowest_price_reached * (1 + self.runner_trail_pct)
                     
-                    if new_trail < self.current_stop_loss: self.current_stop_loss = new_trail
+                    if new_trail < self.current_stop_loss: 
+                        logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}). Dynamic Trail: {self.current_runner_trail_pct:.2%}")
+                        self.current_stop_loss = new_trail
+                        if self.runner_trail_atr_multiplier is not None:
+                            self.current_runner_trail_pct = dynamic_runner_trail_pct # Store the dynamic trail
+                        else:
+                            self.current_runner_trail_pct = self.runner_trail_pct # Store the fixed trail
             
             return self.check_exit(current_price, atr) # Pass ATR to check_exit
         except Exception as e:
@@ -535,11 +566,12 @@ class VeteranTradeManager:
 
             if self.enable_early_profit_lock and not self.early_profit_locked and pnl_pct >= actual_early_lock_threshold:
                 self.early_profit_locked = True
+                self.current_early_lock_threshold_pct = actual_early_lock_threshold # Store the actual threshold that triggered the lock
                 if self.side == "long":
                     if (new_stop := self.entry_price * 1.001) > self.current_stop_loss: self.current_stop_loss = new_stop
                 else:
                     if (new_stop := self.entry_price * 0.999) < self.current_stop_loss: self.current_stop_loss = new_stop
-                logger.info(f"[VTM] 🛡️ Break-even @ +{pnl_pct:.2%}")
+                logger.info(f"[VTM] 🛡️ Break-even @ +{pnl_pct:.2%} (Dynamic Lock Threshold: {actual_early_lock_threshold:.2%})")
 
             if (self.side == "long" and current_price <= self.current_stop_loss) or (self.side == "short" and current_price >= self.current_stop_loss):
                 return {"reason": ExitReason.STOP_LOSS, "price": current_price, "size": self.remaining_position}
@@ -568,7 +600,25 @@ class VeteranTradeManager:
         pnl_pct = (current_price - self.entry_price) / self.entry_price * 100 if self.side == "long" else (self.entry_price - current_price) / self.entry_price * 100
         next_target_idx = len(self.partials_hit)
         next_target = self.take_profit_levels[next_target_idx] if next_target_idx < len(self.take_profit_levels) else None
-        return {"entry_price": self.entry_price, "current_price": current_price, "stop_loss": self.current_stop_loss, "initial_stop": self.initial_stop_loss, "next_target": next_target, "all_targets": self.take_profit_levels, "remaining_position_pct": self.remaining_position, "pnl_pct": pnl_pct, "bars_in_trade": self.bars_in_trade, "partials_hit": len(self.partials_hit), "runner_active": self.runner_activated, "highest_reached": self.highest_price_reached, "lowest_reached": self.lowest_price_reached}
+        return {
+            "entry_price": self.entry_price,
+            "current_price": current_price,
+            "stop_loss": self.current_stop_loss,
+            "initial_stop": self.initial_stop_loss,
+            "next_target": next_target,
+            "all_targets": self.take_profit_levels,
+            "remaining_position_pct": self.remaining_position,
+            "pnl_pct": pnl_pct,
+            "bars_in_trade": self.bars_in_trade,
+            "partials_hit": len(self.partials_hit),
+            "runner_active": self.runner_activated,
+            "highest_reached": self.highest_price_reached,
+            "lowest_reached": self.lowest_price_reached,
+            "early_lock_atr_multiplier": self.early_lock_atr_multiplier, # New
+            "runner_trail_atr_multiplier": self.runner_trail_atr_multiplier, # New
+            "current_early_lock_threshold_pct": self.current_early_lock_threshold_pct, # New
+            "current_runner_trail_pct": self.current_runner_trail_pct # New
+        }
 
     def to_dict(self) -> Dict:
         return {"entry_price": self.entry_price, "side": self.side, "asset": self.asset, "position_size": self.position_size, "initial_stop_loss": self.initial_stop_loss, "current_stop_loss": self.current_stop_loss, "take_profit_levels": self.take_profit_levels, "partial_sizes": self.partial_sizes, "remaining_position": self.remaining_position, "partials_hit": self.partials_hit, "bars_in_trade": self.bars_in_trade, "highest_price_reached": self.highest_price_reached, "lowest_price_reached": self.lowest_price_reached, "runner_activated": self.runner_activated, "early_profit_locked": self.early_profit_locked, "trade_type": self.trade_type, "entry_time": self.entry_time.isoformat()}
