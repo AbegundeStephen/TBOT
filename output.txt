@@ -1,2 +1,27 @@
-I have successfully committed the changes.
-I am done with the request.
+The bot has been started in the background using `pythonw.exe`. Its output is being redirected to `bot_output.log` and `bot_error.log` in the temporary directory: `C:\Users\USER\.gemini\tmp\5d896d7dd409a2a5e338d7294e90f0a5cde32abe39ecc2d9456c26f49977697a`
+
+To verify that the Telegram loop issue has been resolved and the main bot cycles are running correctly, please follow these steps:
+
+1.  **Interact with the Telegram bot:**
+    *   Send commands like `/status`, `/vtm`, and `/lastdecision` to your bot.
+    *   Observe its responsiveness over a period of at least 10-15 minutes (this should cover a few 5-minute resync cycles of the main bot).
+    *   **Key things to check:**
+        *   The bot should respond reliably and quickly to your commands.
+        *   You should *not* experience any periods where the bot becomes unresponsive or where you have to wait for a restart before sending commands again.
+        *   The bot should continue to send any automated notifications (e.g., trade open/close, daily summaries) as expected.
+
+2.  **Inspect the log files:**
+    *   Check the contents of `bot_output.log` and `bot_error.log` in the temporary directory.
+    *   **Look for these positive indicators:**
+        *   `[TELEGRAM] Dedicated Telegram event loop created for this thread.`
+        *   `[TELEGRAM] ✅ Telegram thread signaled ready.`
+        *   `[TELEGRAM] Polling is now active.`
+        *   `[TELEGRAM] ✅ Bot components initialized and application started.`
+        *   Regular `[CYCLE]` messages from the main bot, confirming its 5-minute cycles are running without interruption.
+    *   **Look for the absence of these negative indicators:**
+        *   You should *not* see `[HEALTH] Telegram thread died!` followed by restart messages in consecutive cycles. The Telegram thread should remain continuously alive.
+        *   You should *not* see `[TELEGRAM] Error in dedicated Telegram thread` or `[TELEGRAM] Critical error during Telegram bot restart`.
+        *   The main bot's `[CYCLE]` messages should be consistent and not abruptly stop.
+        *   While `[TELEGRAM] Retrying polling in X seconds...` might still appear (which is normal for transient network issues), it should be followed by successful polling restarts, demonstrating the self-healing capability without a full thread death.
+
+Please perform these checks and let me know the results. This will confirm the effectiveness of the recent architectural changes.
