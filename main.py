@@ -495,10 +495,7 @@ class TradingBot:
                 signal_monitor=self.signal_monitor
             )
             
-            # ✅ NEW: Start dedicated loop immediately
-            self.telegram_bot._start_dedicated_loop()
-            
-            logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s)")
+            logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s) (Loop will be started by main thread)")
 
         except Exception as e:
             logger.warning(f"[TELEGRAM] Initialization failed: {e}")
@@ -1949,31 +1946,43 @@ class TradingBot:
             raise
 
     def _run_telegram_loop(self):
-        """Run Telegram in its dedicated loop"""
+        """
+        Target function for the dedicated Telegram thread.
+        It sets up its own asyncio event loop and runs the Telegram bot's polling.
+        This function blocks the thread, keeping it alive for continuous operation.
+        """
         try:
-            logger.info("[TELEGRAM] Starting bot's dedicated loop...")
-            
-            # Ensure the dedicated loop is started (it handles its own resilience)
-            self.telegram_bot._start_dedicated_loop()
-            
-            loop = self.telegram_bot._loop
-            if not loop or loop.is_closed():
-                logger.error("[TELEGRAM] Dedicated loop failed to start.")
-                self._telegram_ready.clear()
-                return
+            # ✅ FIX: Use selector loop on Windows (not proactor) for stability
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-            # Run the Telegram bot's main polling logic within its own loop.
-            # This method now contains the retry and re-initialization logic.
-            asyncio.run_coroutine_threadsafe(self.telegram_bot.run_polling(), loop)
-            
-            # Signal that the Telegram bot's thread is ready to attempt polling
+            # Create a NEW event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self.telegram_bot._current_loop = loop # Inform the bot about its loop
+
+            logger.info("[TELEGRAM] Dedicated Telegram event loop created for this thread.")
+
+            # Signal that the Telegram bot's thread is ready for operations
             self._telegram_ready.set()
-            
-            logger.info("[TELEGRAM] Telegram polling management started in dedicated thread.")
+            logger.info("[TELEGRAM] ✅ Telegram thread signaled ready.")
 
+            # Run the Telegram bot's main polling logic within THIS thread's event loop.
+            # This call is blocking and keeps the thread alive.
+            loop.run_until_complete(self.telegram_bot.run_polling()) # Blocking call
+
+            # If loop.run_until_complete finishes, the bot has stopped.
+            logger.info("[TELEGRAM] Telegram polling management stopped in dedicated thread.")
+            
+        except asyncio.CancelledError:
+            logger.info("[TELEGRAM] Telegram thread cancelled gracefully.")
         except Exception as e:
-            logger.error(f"[TELEGRAM] Error in dedicated Telegram thread: {e}", exc_info=True)
-            self._telegram_ready.clear()
+            logger.error(f"[TELEGRAM] Critical error in dedicated Telegram thread: {e}", exc_info=True)
+        finally:
+            self._telegram_ready.clear() # Ensure ready state is cleared if thread exits
+            if loop and not loop.is_closed():
+                loop.close()
+                logger.info("[TELEGRAM] Dedicated Telegram event loop closed.")
 
     def _send_telegram_notification(self, coro):
         """

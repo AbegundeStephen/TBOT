@@ -223,11 +223,9 @@ class TradingTelegramBot:
         # Signal monitoring (keep existing)
         self.signal_monitor = signal_monitor
 
-        # ✅ CRITICAL: Single persistent loop
-        self._loop = None
-        self._loop_thread = None
-        self._loop_ready = threading.Event()
         self._shutdown_event = threading.Event()
+        # The asyncio loop for this bot instance will be managed by the calling thread
+        self._current_loop = None # Stores the loop that is running this bot's operations
 
         # State tracking
         self._is_ready = False
@@ -236,146 +234,19 @@ class TradingTelegramBot:
 
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
 
-    def start_loop_thread(self):
-        """
-        ✅ CRITICAL: Start persistent event loop that NEVER closes
-        This must be called BEFORE any async operations
-        """
-        if self._loop and not self._loop.is_closed():
-            logger.info("[TELEGRAM] Loop already running")
-            return
 
-        def _run_forever():
-            """Background thread that runs the event loop forever"""
-            try:
-                # ✅ FIX: Use selector loop on Windows (not proactor)
-                # Proactor has issues with httpx connection cleanup
-                if sys.platform == "win32":
-                    # Use selector event loop (more stable with httpx)
-                    asyncio.set_event_loop_policy(
-                        asyncio.WindowsSelectorEventLoopPolicy()
-                    )
 
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
 
-                logger.info("[TELEGRAM] ✅ Persistent event loop created")
-                self._loop_ready.set()
-
-                # Run until explicitly stopped
-                self._loop.run_forever()
-
-                logger.info("[TELEGRAM] Event loop stopped")
-
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Loop thread crashed: {e}", exc_info=True)
-            finally:
-                try:
-                    # Cleanup tasks
-                    pending = asyncio.all_tasks(self._loop)
-                    for task in pending:
-                        task.cancel()
-
-                    self._loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
-                except Exception as e:
-                    logger.debug(f"[TELEGRAM] Cleanup: {e}")
-                finally:
-                    self._loop.close()
-
-        self._loop_thread = threading.Thread(
-            target=_run_forever, daemon=True, name="TelegramLoop"
-        )
-        self._loop_thread.start()
-
-        # Wait for loop to start
-        if not self._loop_ready.wait(timeout=10):
-            raise RuntimeError("Telegram loop failed to start")
-
-        logger.info("[TELEGRAM] ✅ Loop thread started and ready")
-
-    def _start_dedicated_loop(self):
-        """
-        ✅ NEW: Start dedicated event loop in separate thread
-        This loop stays alive for the bot's entire lifetime
-        """
-
-        def run_loop():
-            """Thread target: Create and run event loop forever"""
-            try:
-                # ✅ FIX: Use selector loop on Windows (not proactor) to prevent cleanup errors
-                if sys.platform == "win32":
-                    asyncio.set_event_loop_policy(
-                        asyncio.WindowsSelectorEventLoopPolicy()
-                    )
-
-                # Create new loop for this thread
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
-
-                logger.info("[TELEGRAM] Dedicated event loop created")
-                self._loop_ready.set()  # Signal that loop is ready
-
-                # Run forever until shutdown
-                self._loop.run_forever()
-
-                logger.info("[TELEGRAM] Event loop stopped")
-
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Loop thread error: {e}", exc_info=True)
-            finally:
-                try:
-                    # Cleanup
-                    pending = asyncio.all_tasks(self._loop)
-                    for task in pending:
-                        task.cancel()
-
-                    self._loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
-                    self._loop.close()
-                except Exception as e:
-                    logger.debug(f"[TELEGRAM] Loop cleanup: {e}")
-
-        # Start loop thread
-        self._loop_thread = threading.Thread(
-            target=run_loop, daemon=True, name="TelegramLoop"
-        )
-        self._loop_thread.start()
-
-        # Wait for loop to be ready
-        if not self._loop_ready.wait(timeout=10):
-            raise RuntimeError("Telegram loop failed to start")
-
-        logger.info("[TELEGRAM] ✅ Dedicated loop thread started")
-
-    def _ensure_loop_alive(self) -> bool:
-        """
-        ✅ NEW: Check if loop is alive and restart if needed
-        Returns: True if loop is ready
-        """
-        if not self._loop or self._loop.is_closed():
-            logger.warning("[TELEGRAM] Loop is closed, restarting...")
-            self._loop_ready.clear()
-            self._start_dedicated_loop()
-            return self._loop_ready.is_set()
-
-        if not self._loop.is_running():
-            logger.warning("[TELEGRAM] Loop not running")
-            return False
-
-        return True
 
     def _run_in_loop(self, coro, timeout: float = 30.0):
         """
-        ✅ NEW: Run coroutine in dedicated loop with timeout
-        Safe to call from any thread
+        Run coroutine in the bot's currently active event loop with timeout.
+        Safe to call from any thread (assumes loop is set for this bot instance).
         """
-        if not self._ensure_loop_alive():
-            raise RuntimeError("Telegram loop not available")
+        if self._current_loop is None or self._current_loop.is_closed():
+            raise RuntimeError("Telegram event loop not available or closed for this bot instance.")
 
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = asyncio.run_coroutine_threadsafe(coro, self._current_loop)
 
         try:
             return future.result(timeout=timeout)
@@ -415,13 +286,16 @@ class TradingTelegramBot:
 
         logger.info("[TELEGRAM] Keepalive task stopped")
 
-    async def initialize(self):
+    async def initialize(self, loop: asyncio.AbstractEventLoop):
         """
-        Initialize bot with proper connection pool lifecycle
+        Initialize bot components (Application, handlers).
+        Assumes an event loop is already set for the current thread.
         """
+        self._current_loop = loop # Store the loop that is running this bot's operations
+
         with self._initialization_lock:
             try:
-                logger.info("[TELEGRAM] Initializing bot...")
+                logger.info("[TELEGRAM] Initializing bot components...")
 
                 from telegram.request import HTTPXRequest
 
@@ -445,40 +319,23 @@ class TradingTelegramBot:
                 await self.application.initialize()
                 await self.application.start()
 
-                # ✅ NEW: Store the event loop reference for cross-thread access
-                self._application_loop = asyncio.get_running_loop()
-                logger.info(
-                    f"[TELEGRAM] Stored loop reference: {self._application_loop}"
-                )
+                # No longer storing _application_loop here, as it's the loop passed in
+                self._is_ready = True # Application is built and started, but not necessarily polling
+                self.is_running = True # Signal that the bot instance is generally ready
 
-                await self._start_polling()
+                logger.info("[TELEGRAM] ✅ Bot components initialized and application started.")
+                
+                # Process any queued messages after the app is ready to send
+                await self._process_message_queue()
 
-                await asyncio.sleep(3)
-
-                if await self._verify_bot_ready():
-                    self._is_ready = True
-                    self.is_running = True
-
-                    logger.info("[TELEGRAM] ✅ Bot fully operational")
-
-                    """ await self.send_notification(
-                        "🤖 *Trading Bot Started*\n\n"
-                        f"Initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        "Commands available: /help"
-                    ) """
-
-                    await self._process_message_queue()
-
-                    # Start keepalive task
-                    asyncio.create_task(self._keepalive_task())
-
-                    logger.info("[TELEGRAM] ✅ Ready for commands")
-                else:
-                    raise Exception("Bot verification failed")
+                # Start keepalive task (runs within this loop)
+                asyncio.create_task(self._keepalive_task())
 
             except Exception as e:
-                logger.error(f"[TELEGRAM] Initialization failed: {e}", exc_info=True)
+                logger.error(f"[TELEGRAM] Initialization of components failed: {e}", exc_info=True)
                 self._is_ready = False
+                self.is_running = False
+                self.application = None # Clear application on failure
                 raise
 
     async def _start_polling(self):
@@ -756,6 +613,19 @@ class TradingTelegramBot:
 
         while self.is_running and not self._shutdown_event.is_set():
             try:
+                # If application is not initialized, try to initialize it first
+                if self.application is None:
+                    logger.info("[TELEGRAM] Application not yet initialized. Attempting initialization...")
+                    # Get the current running event loop in this thread
+                    current_loop = asyncio.get_running_loop()
+                    await self.initialize(current_loop) # Pass the loop
+                    if self.application is None: # Initialization failed
+                        logger.error("[TELEGRAM] Failed to initialize application, cannot start polling.")
+                        polling_active = False
+                        await asyncio.sleep(reconnect_delay_seconds) # Wait before retrying initialization
+                        reconnect_delay_seconds = min(reconnect_delay_seconds * 2, 60)
+                        continue # Skip to next loop iteration
+
                 if not polling_active:
                     logger.info("[TELEGRAM] Attempting to start/restart polling...")
                     # self._start_polling now returns success status
