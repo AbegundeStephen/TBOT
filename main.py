@@ -1951,39 +1951,28 @@ class TradingBot:
     def _run_telegram_loop(self):
         """Run Telegram in its dedicated loop"""
         try:
-            logger.info("[TELEGRAM] Starting bot...")
+            logger.info("[TELEGRAM] Starting bot's dedicated loop...")
             
-            # ✅ FIX: Start the dedicated loop FIRST
-            if not self.telegram_bot._loop or self.telegram_bot._loop.is_closed():
-                logger.info("[TELEGRAM] Creating new event loop...")
-                self.telegram_bot.start_loop_thread()  # This creates _loop
+            # Ensure the dedicated loop is started (it handles its own resilience)
+            self.telegram_bot._start_dedicated_loop()
             
-            # Now the loop exists and is ready
             loop = self.telegram_bot._loop
-            
             if not loop or loop.is_closed():
-                logger.error("[TELEGRAM] Loop creation failed")
+                logger.error("[TELEGRAM] Dedicated loop failed to start.")
+                self._telegram_ready.clear()
                 return
+
+            # Run the Telegram bot's main polling logic within its own loop.
+            # This method now contains the retry and re-initialization logic.
+            asyncio.run_coroutine_threadsafe(self.telegram_bot.run_polling(), loop)
             
-            # Run initialization in the dedicated loop
-            future = asyncio.run_coroutine_threadsafe(
-                self.telegram_bot.initialize(), 
-                loop
-            )
+            # Signal that the Telegram bot's thread is ready to attempt polling
+            self._telegram_ready.set()
             
-            try:
-                future.result(timeout=60)
-                logger.info("[TELEGRAM] Bot initialized successfully")
-                self._telegram_ready.set()
-            except TimeoutError:
-                logger.error("[TELEGRAM] Initialization timeout")
-                self._telegram_ready.clear()
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Initialization error: {e}")
-                self._telegram_ready.clear()
-            
+            logger.info("[TELEGRAM] Telegram polling management started in dedicated thread.")
+
         except Exception as e:
-            logger.error(f"[TELEGRAM] Loop error: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] Error in dedicated Telegram thread: {e}", exc_info=True)
             self._telegram_ready.clear()
 
     def _send_telegram_notification(self, coro):
@@ -3686,93 +3675,77 @@ class TradingBot:
 
     def _restart_telegram_thread(self):
         """
-        ✅ FIXED: Properly shutdown and restart with fresh loop
+        Restart the Telegram bot's thread and instance as a last resort.
+        This will signal the old thread to stop and then start a fresh one.
         """
         try:
-            logger.info("[TELEGRAM] Attempting to restart bot...")
+            logger.info("[TELEGRAM] Attempting to restart bot thread (last resort)...")
 
             # ================================================================
-            # STEP 1: Stop old instance
+            # STEP 1: Signal the old Telegram bot instance to gracefully shut down
             # ================================================================
             if self.telegram_bot:
-                logger.info("[TELEGRAM] Stopping old instance...")
-                
-                # Signal shutdown
+                logger.info("[TELEGRAM] Signaling old instance to shut down...")
+                # The _shutdown_event is monitored by TradingTelegramBot.run_polling()
+                # to exit its loop.
                 if hasattr(self.telegram_bot, '_shutdown_event'):
                     self.telegram_bot._shutdown_event.set()
                 
-                # Stop the loop
-                if hasattr(self.telegram_bot, '_loop') and self.telegram_bot._loop:
-                    loop = self.telegram_bot._loop
-                    
-                    if not loop.is_closed():
-                        try:
-                            # Stop the loop
-                            loop.call_soon_threadsafe(loop.stop)
-                            
-                            # Wait for it to stop
-                            time.sleep(2)
-                            
-                            # Close it
-                            if not loop.is_closed():
-                                loop.close()
-                                
-                            logger.info("[TELEGRAM] Old loop closed")
-                        except Exception as e:
-                            logger.warning(f"[TELEGRAM] Loop cleanup: {e}")
-                
-                # Wait for thread to die
+                # Give the old thread some time to react and stop itself
                 if self.telegram_thread and self.telegram_thread.is_alive():
-                    logger.info("[TELEGRAM] Waiting for old thread...")
-                    self.telegram_thread.join(timeout=5)
-                    
+                    logger.info("[TELEGRAM] Waiting for old Telegram thread to terminate...")
+                    # A join with a timeout is crucial to avoid blocking indefinitely
+                    self.telegram_thread.join(timeout=10) 
                     if self.telegram_thread.is_alive():
-                        logger.warning("[TELEGRAM] Thread still alive, continuing anyway")
+                        logger.warning("[TELEGRAM] Old Telegram thread did not terminate gracefully.")
+                    else:
+                        logger.info("[TELEGRAM] Old Telegram thread terminated.")
+
+            # Clear the old bot instance to ensure a fresh start
+            self.telegram_bot = None
+            self.telegram_thread = None
 
             # ================================================================
-            # STEP 2: Wait for Telegram API cooldown
+            # STEP 2: Create a fresh Telegram bot instance
             # ================================================================
-            logger.info("[TELEGRAM] Waiting 5s for API cooldown...")
-            time.sleep(5)
-
-            # ================================================================
-            # STEP 3: Create fresh bot instance
-            # ================================================================
-            logger.info("[TELEGRAM] Creating new bot instance...")
-            
-            from src.telegram import TradingTelegramBot
+            logger.info("[TELEGRAM] Creating new Telegram bot instance...")
+            from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
             from telegram_config import TELEGRAM_CONFIG
             
             self.telegram_bot = TradingTelegramBot(
-                            token=TELEGRAM_CONFIG["bot_token"],
-                            admin_ids=TELEGRAM_CONFIG["admin_ids"],
-                            trading_bot=self,
-                            signal_monitor=self.signal_monitor
-                        )            # ✅ CRITICAL: Don't call start_loop_thread here!
-            # Let _run_telegram_loop do it
+                token=TELEGRAM_CONFIG["bot_token"],
+                admin_ids=TELEGRAM_CONFIG["admin_ids"],
+                trading_bot=self,
+                signal_monitor=self.signal_monitor
+            )
             
+            # Reset shutdown event for the new bot instance
+            self.telegram_bot._shutdown_event.clear()
+
             # ================================================================
-            # STEP 4: Start new thread
+            # STEP 3: Start a new dedicated thread for the Telegram bot
             # ================================================================
-            logger.info("[TELEGRAM] Starting new thread...")
-            
-            self._telegram_ready.clear()
-            self._telegram_should_stop.clear()
+            logger.info("[TELEGRAM] Starting new dedicated Telegram thread...")
+            self._telegram_ready.clear() # Clear event for new instance
             
             self.telegram_thread = Thread(
-                target=self._run_telegram_loop,
+                target=self._run_telegram_loop, # This will now start the resilient run_polling
                 daemon=True,
                 name="TelegramBot-Restart"
             )
             self.telegram_thread.start()
 
-            # Wait for ready signal
+            # Wait for the new bot instance to signal its readiness
             if self._telegram_ready.wait(timeout=30):
-                logger.info("[TELEGRAM] ✅ Restart successful")
+                logger.info("[TELEGRAM] ✅ Telegram bot restart successful.")
                 return True
             else:
-                logger.error("[TELEGRAM] ❌ Restart timeout")
+                logger.error("[TELEGRAM] ❌ Telegram bot restart timed out.")
                 return False
+
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Critical error during Telegram bot restart: {e}", exc_info=True)
+            return False
 
         except Exception as e:
             logger.error(f"[TELEGRAM] Restart error: {e}", exc_info=True)
@@ -3839,13 +3812,9 @@ class TradingBot:
 
             # Start Telegram (existing code continues)
             if self.telegram_bot:
-                logger.info("\n[TELEGRAM] Starting bot thread...")
+                logger.info("\n[TELEGRAM] Starting bot's dedicated thread...")
 
-            # ✨  Start Telegram in dedicated thread
-            if self.telegram_bot:
-                logger.info("\n[TELEGRAM] Starting bot thread...")
-
-                self._telegram_should_stop.clear()
+                # No need for _telegram_should_stop here, it's managed by the bot itself
                 self.telegram_thread = Thread(
                     target=self._run_telegram_loop, daemon=True, name="TelegramBot"
                 )
@@ -3856,7 +3825,12 @@ class TradingBot:
                 if self._telegram_ready.wait(timeout=30):
                     logger.info("[TELEGRAM] ✅ Bot ready for notifications")
                 else:
-                    logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout")
+                    logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout or failed")
+                    # If initialization fails, try to stop the thread gracefully
+                    if self.telegram_bot:
+                        self.telegram_bot._shutdown_event.set() # Signal internal shutdown
+                    if self.telegram_thread and self.telegram_thread.is_alive():
+                        self.telegram_thread.join(timeout=5) # Give it time to stop
 
             # Setup signal handlers
             def signal_handler(signum, frame):
