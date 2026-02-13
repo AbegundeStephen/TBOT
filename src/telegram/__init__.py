@@ -800,13 +800,6 @@ class TradingTelegramBot:
             # Use the dedicated _stop_polling method
             await self._stop_polling()
 
-                try:
-                    logger.info("[TELEGRAM] Shutting down application...")
-                    await asyncio.wait_for(self.application.shutdown(), timeout=5.0)
-                    logger.info("[TELEGRAM] Application shut down")
-                except Exception as e:
-                    logger.warning(f"[TELEGRAM] Application shutdown error: {e}")
-
             logger.info("[TELEGRAM] ✅ Shutdown complete")
 
         except Exception as e:
