@@ -22,7 +22,7 @@ data/*.parquet
 
 
 
-
+logs/
 
 # IDE
 .vscode/
@@ -46,8 +46,7 @@ models/ai/*_config.pkl
 models/ai/*_history.png
 models/ai/*_mapping.pkl
 
-logs/
-logs/*.log
+
 
 data/historical/
 data/raw/

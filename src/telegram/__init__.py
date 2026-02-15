@@ -21,6 +21,7 @@ import threading
 import time
 import httpcore
 import httpx
+import uuid
 
 matplotlib.use("Agg")  # Non-interactive backend
 
@@ -214,6 +215,8 @@ class TradingTelegramBot:
         trading_bot,
         signal_monitor: SignalMonitoringIntegration,
     ):
+        self.instance_id = uuid.uuid4()
+        logger.info(f"Creating new TradingTelegramBot instance with ID: {self.instance_id}")
         self.token = token
         self.admin_ids = admin_ids
         self.trading_bot = trading_bot
@@ -223,7 +226,7 @@ class TradingTelegramBot:
         # Signal monitoring (keep existing)
         self.signal_monitor = signal_monitor
 
-        self._shutdown_event = threading.Event()
+        self._shutdown_event = None
         # The asyncio loop for this bot instance will be managed by the calling thread
         self._current_loop = None # Stores the loop that is running this bot's operations
 
@@ -231,6 +234,13 @@ class TradingTelegramBot:
         self._is_ready = False
         self._initialization_lock = threading.Lock()
         self._message_queue = []
+
+        # Error handling attributes
+        self._network_error_count = 0
+        self._last_network_error = None
+        self._max_consecutive_errors = 5  # Max errors before forceful reconnect
+        self._reconnect_delay = 10  # Initial reconnect delay in seconds
+
 
         logger.info(f"TelegramBot initialized - Admins: {admin_ids}")
 
@@ -286,19 +296,54 @@ class TradingTelegramBot:
 
         logger.info("[TELEGRAM] Keepalive task stopped")
 
-    async def initialize(self, loop: asyncio.AbstractEventLoop):
+    def _register_handlers(self):
+        """Register all command and message handlers."""
+        # Information Commands
+        self.application.add_handler(CommandHandler("start", self.cmd_start))
+        self.application.add_handler(CommandHandler("help", self.cmd_help))
+        self.application.add_handler(CommandHandler("status", self.cmd_status))
+        self.application.add_handler(CommandHandler("brain", self.cmd_brain))
+        self.application.add_handler(CommandHandler("positions", self.cmd_positions))
+        self.application.add_handler(CommandHandler("modes", self.cmd_aggregator_modes))
+        self.application.add_handler(CommandHandler("history", self.cmd_history))
+        self.application.add_handler(CommandHandler("performance", self.cmd_performance))
+        self.application.add_handler(CommandHandler("presets", self.cmd_presets))
+        self.application.add_handler(CommandHandler("signals", self.cmd_signals))
+        self.application.add_handler(CommandHandler("vtm", self.cmd_VTM_status))
+        self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
+        self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
+        self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
+        self.application.add_handler(CommandHandler("chart", self.cmd_chart))
+        self.application.add_handler(CommandHandler("lastdecision", self.cmd_last_decision))
+        self.application.add_handler(CommandHandler("modedetails", self.cmd_mode_details))
+        self.application.add_handler(CommandHandler("preset_history", self.cmd_preset_history))
+        self.application.add_handler(CommandHandler("debug_positions", self.cmd_debug_positions))
+        self.application.add_handler(CommandHandler("test_viz", self.cmd_test_viz))
+
+
+        # Admin Commands
+        self.application.add_handler(CommandHandler("stop_trading", self.cmd_stop_trading))
+        self.application.add_handler(CommandHandler("start_trading", self.cmd_start_trading))
+        self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
+        self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
+
+        # Callback Query Handler
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+
+    def initialize(self):
         """
         Initialize bot components (Application, handlers).
-        Assumes an event loop is already set for the current thread.
+        This method is synchronous and should be called before run_polling.
         """
-        self._current_loop = loop # Store the loop that is running this bot's operations
-
         with self._initialization_lock:
+            if self.application:
+                logger.info("[TELEGRAM] Already initialized.")
+                return
+
             try:
                 logger.info("[TELEGRAM] Initializing bot components...")
 
                 from telegram.request import HTTPXRequest
-
                 request = HTTPXRequest(
                     http_version="1.1",
                     connection_pool_size=50,
@@ -312,385 +357,95 @@ class TradingTelegramBot:
                     Application.builder().token(self.token).request(request).build()
                 )
 
-                logger.info("[TELEGRAM] Registering handlers...")
                 self._register_handlers()
-
-                logger.info("[TELEGRAM] Starting application...")
-                await self.application.initialize()
-                await self.application.start()
-
-                # No longer storing _application_loop here, as it's the loop passed in
-                self._is_ready = True # Application is built and started, but not necessarily polling
-                self.is_running = True # Signal that the bot instance is generally ready
-
-                logger.info("[TELEGRAM] ✅ Bot components initialized and application started.")
-                
-                # Process any queued messages after the app is ready to send
-                await self._process_message_queue()
-
-                # Start keepalive task (runs within this loop)
-                asyncio.create_task(self._keepalive_task())
+                self._is_ready = True
+                logger.info("[TELEGRAM] ✅ Bot components initialized.")
 
             except Exception as e:
                 logger.error(f"[TELEGRAM] Initialization of components failed: {e}", exc_info=True)
                 self._is_ready = False
-                self.is_running = False
-                self.application = None # Clear application on failure
-                raise
+                self.application = None
 
-    async def _start_polling(self):
+    def run_polling(self):
         """
-        Starts the Telegram bot's polling mechanism.
-        This can be called independently to restart polling if it stops.
+        Run the bot's polling loop. This is a blocking call.
+        It sets up its own asyncio event loop and runs until shutdown.
         """
-        try:
+        if not self._is_ready or not self.application:
+            self.initialize()
+            if not self._is_ready:
+                logger.error("[TELEGRAM] Cannot start polling, initialization failed.")
+                return
+
+        self.is_running = True
+        
+        async def main():
+            self._shutdown_event = asyncio.Event()
+            self._current_loop = asyncio.get_running_loop()
+
+            await self.application.initialize()
+            await self.application.start()
+            
+            logger.info("[TELEGRAM] Starting keepalive task...")
+            asyncio.create_task(self._keepalive_task())
+
             logger.info("[TELEGRAM] Starting polling...")
             await self.application.updater.start_polling(
                 poll_interval=1.0,
                 timeout=30,
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
-                bootstrap_retries=10,
+                bootstrap_retries=-1,
             )
-            logger.info("[TELEGRAM] Polling started.")
-            return True
-        except asyncio.CancelledError:
-            logger.info("[TELEGRAM] Polling startup cancelled.")
-            return False
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Error starting polling: {e}", exc_info=True)
-            return False
-
-    async def _stop_polling(self):
-        """
-        Stops the Telegram bot's polling mechanism.
-        """
-        logger.info("[TELEGRAM] Stopping polling...")
-        if self.application and self.application.updater and self.application.updater.running:
+            
+            await self._shutdown_event.wait()
+            
             await self.application.updater.stop()
-        if self.application and self.application.running:
             await self.application.stop()
-        logger.info("[TELEGRAM] Polling stopped.")
+            logger.info("[TELEGRAM] Polling stopped.")
 
-    async def _process_message_queue(self):
-        """Process queued messages"""
-        if not self._message_queue:
-            return
-
-        logger.info(f"[TELEGRAM] Processing {len(self._message_queue)} queued messages")
-
-        for msg in self._message_queue:
-            try:
-                await self.send_notification(msg, disable_preview=True)
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Queued message failed: {e}")
-
-        self._message_queue.clear()
-
-    async def _keepalive_monitor(self):
-        """Monitor bot health and restart if needed"""
-        while self.is_running:
-            try:
-                await asyncio.sleep(300)  # Check every 5 minutes
-                if self._is_ready:
-                    # Ping the bot
-                    await self.application.bot.get_me()
-                    logger.debug("[TELEGRAM] Keepalive check passed")
-            except Exception as e:
-                logger.warning(f"[TELEGRAM] Keepalive failed: {e}")
-                await self._attempt_reconnection()
-
-    async def _verify_bot_ready(self) -> bool:
-        """Verify bot can communicate"""
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                bot_info = await self.application.bot.get_me()
-                logger.info(f"[TELEGRAM] Bot verified: @{bot_info.username}")
-                return True
-            except Exception as e:
-                logger.warning(
-                    f"[TELEGRAM] Verification {attempt + 1}/{max_retries}: {e}"
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
-        return False
-
-    def queue_command(self, command_func, *args, **kwargs):
-        """
-        ✅ NEW: Queue a command to run in the bot's event loop
-        Safe to call from any thread (e.g., main trading loop)
-        """
-        with self._command_lock:
-            self._command_queue.append(
-                {
-                    "func": command_func,
-                    "args": args,
-                    "kwargs": kwargs,
-                    "timestamp": time.time(),
-                    "retries": 0,
-                }
-            )
-            logger.debug(f"[TELEGRAM] Queued command: {command_func.__name__}")
-
-    async def _process_command_queue(self):
-        """
-        ✅ NEW: Background task to process queued commands
-        Runs in the bot's event loop
-        """
-        logger.info("[TELEGRAM] Command queue processor started")
-
-        while self.is_running and not self._shutdown_event.is_set():
-            try:
-                # Check if we have commands
-                with self._command_lock:
-                    if not self._command_queue:
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    command = self._command_queue.popleft()
-
-                # Execute command
-                try:
-                    func = command["func"]
-                    args = command["args"]
-                    kwargs = command["kwargs"]
-
-                    if asyncio.iscoroutinefunction(func):
-                        await func(*args, **kwargs)
-                    else:
-                        func(*args, **kwargs)
-
-                    logger.debug(f"[TELEGRAM] Executed: {func.__name__}")
-
-                except Exception as e:
-                    logger.error(f"[TELEGRAM] Command error: {e}")
-
-                    # Retry logic
-                    if command["retries"] < 3:
-                        command["retries"] += 1
-                        with self._command_lock:
-                            self._command_queue.append(command)
-                        logger.info(
-                            f"[TELEGRAM] Requeued command (retry {command['retries']})"
-                        )
-
-                await asyncio.sleep(0.1)  # Small delay between commands
-
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Queue processor error: {e}")
-                await asyncio.sleep(1)
-
-        logger.info("[TELEGRAM] Command queue processor stopped")
-
-    def _register_handlers(self):
-        """Register all command handlers"""
-        self.application.add_handler(CommandHandler("start", self.cmd_start))
-        self.application.add_handler(CommandHandler("help", self.cmd_help))
-        self.application.add_handler(CommandHandler("status", self.cmd_status))
-        self.application.add_handler(CommandHandler("positions", self.cmd_positions))
-        self.application.add_handler(CommandHandler("modes", self.cmd_aggregator_modes))
-        self.application.add_handler(
-            CommandHandler("modedetails", self.cmd_mode_details)
-        )
-
-        # ✨ NEW: Register the Brain command
-        self.application.add_handler(CommandHandler("brain", self.cmd_brain))
-        self.application.add_handler(
-            CommandHandler("asymmetric", self.cmd_brain)
-        )  # Alias
-
-        self.application.add_handler(CommandHandler("history", self.cmd_history))
-        self.application.add_handler(
-            CommandHandler("performance", self.cmd_performance)
-        )
-        self.application.add_handler(CommandHandler("signals", self.cmd_signals))
-        self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
-        self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
-        self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
-        self.application.add_handler(CommandHandler("test_viz", self.cmd_test_viz))
-        self.application.add_handler(CommandHandler("chart", self.cmd_chart))
-        self.application.add_handler(CommandHandler("charts", self.cmd_chart))
-        self.application.add_handler(
-            CommandHandler("start_trading", self.cmd_start_trading)
-        )
-        self.application.add_handler(
-            CommandHandler("stop_trading", self.cmd_stop_trading)
-        )
-        self.application.add_handler(CommandHandler("presets", self.cmd_presets))
-        self.application.add_handler(
-            CommandHandler("presethistory", self.cmd_preset_history)
-        )
-        self.application.add_handler(CommandHandler("debug", self.cmd_debug_positions))
-        self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
-        self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
-        self.application.add_handler(CommandHandler("lastdecision", self.cmd_last_decision)) # NEW COMMAND
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
-        self.application.add_handler(CommandHandler("VTM", self.cmd_VTM_status))
-
-        self.application.add_error_handler(self.error_handler)
-
-    async def error_handler(
-        self, update: object, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """
-        ✨ NEW: Global error handler for Telegram errors
-        Handles network issues gracefully without crashing
-        """
-        error = context.error
-
-        # Log all errors
-        logger.error(
-            f"[TELEGRAM] Error handler caught: {error}", exc_info=context.error
-        )
-
-        # Handle specific Telegram errors
-        if isinstance(error, NetworkError):
-            self._network_error_count += 1
-            self._last_network_error = datetime.now()
-            logger.warning(
-                f"[TELEGRAM] Network error #{self._network_error_count}: {error}"
-            )
-
-            # If too many consecutive errors, attempt reconnection
-            if self._network_error_count >= self._max_consecutive_errors:
-                logger.error(
-                    f"[TELEGRAM] Too many network errors ({self._network_error_count}), "
-                    f"attempting reconnection..."
-                )
-                await self._attempt_reconnection()
-
-        elif isinstance(error, TimedOut):
-            logger.warning(f"[TELEGRAM] Request timed out: {error}")
-            # Don't count timeouts as critical errors
-
-        elif isinstance(error, RetryAfter):
-            retry_after = error.retry_after
-            logger.warning(f"[TELEGRAM] Rate limited, retry after {retry_after}s")
-            await asyncio.sleep(retry_after)
-
-        elif isinstance(error, TelegramError):
-            logger.error(f"[TELEGRAM] Telegram error: {error}")
-
-        else:
-            logger.error(f"[TELEGRAM] Unexpected error: {error}")
-
-        # Don't let errors crash the bot
-        return None
-
-    async def _attempt_reconnection(self):
-        """
-        ✨ NEW: Attempt to reconnect after network issues
-        """
         try:
-            logger.info(
-                f"[TELEGRAM] Waiting {self._reconnect_delay}s before reconnection..."
-            )
-            await asyncio.sleep(self._reconnect_delay)
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            
+            asyncio.run(main())
 
-            logger.info("[TELEGRAM] Testing connection...")
-            if await self._verify_bot_ready():
-                logger.info("[TELEGRAM] ✅ Reconnection successful")
-                self._network_error_count = 0
-                self._last_network_error = None
-            else:
-                logger.error("[TELEGRAM] ❌ Reconnection failed")
-                self._reconnect_delay = min(
-                    self._reconnect_delay * 2, 60
-                )  # Exponential backoff
-
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("[TELEGRAM] Polling loop interrupted.")
         except Exception as e:
-            logger.error(f"[TELEGRAM] Reconnection error: {e}")
+            logger.error(f"[TELEGRAM] Unhandled error in run_polling: {e}", exc_info=True)
+        finally:
+            self.is_running = False
+            self._is_ready = False
+            self._current_loop = None
+            logger.info("[TELEGRAM] Polling loop finished.")
 
-    async def run_polling(self):
+    async def _keepalive_task(self):
         """
-        Run polling loop with built-in retry mechanism for starting/restarting polling.
-        This keeps the dedicated Telegram thread alive even if polling temporarily fails.
+        ✅ NEW: Keepalive task to prevent connection timeout
+        Runs in background and pings Telegram API every 5 minutes
         """
-        self.is_running = True # Ensure this instance is marked as running
-        polling_active = False
-        reconnect_delay_seconds = 5 # Initial delay
-
-        while self.is_running and not self._shutdown_event.is_set():
+        logger.info("[TELEGRAM] Keepalive task started")
+        while not self._shutdown_event.is_set():
             try:
-                # If application is not initialized, try to initialize it first
-                if self.application is None:
-                    logger.info("[TELEGRAM] Application not yet initialized. Attempting initialization...")
-                    # Get the current running event loop in this thread
-                    current_loop = asyncio.get_running_loop()
-                    await self.initialize(current_loop) # Pass the loop
-                    if self.application is None: # Initialization failed
-                        logger.error("[TELEGRAM] Failed to initialize application, cannot start polling.")
-                        polling_active = False
-                        await asyncio.sleep(reconnect_delay_seconds) # Wait before retrying initialization
-                        reconnect_delay_seconds = min(reconnect_delay_seconds * 2, 60)
-                        continue # Skip to next loop iteration
-
-                if not polling_active:
-                    logger.info("[TELEGRAM] Attempting to start/restart polling...")
-                    # self._start_polling now returns success status
-                    if await self._start_polling():
-                        polling_active = True
-                        reconnect_delay_seconds = 5 # Reset delay on success
-                        logger.info("[TELEGRAM] Polling is now active.")
-                    else:
-                        logger.warning("[TELEGRAM] _start_polling failed, retrying...")
-                        polling_active = False # Ensure it retries in the next loop iteration
-
-                # Check health of the application object itself, not just loop
-                if self.application and not self.application.running:
-                    if polling_active: # Log only if it was previously active
-                        logger.warning("[TELEGRAM] Application not running, polling needs restart.")
-                    polling_active = False
-                
-                # Sleep briefly before next check or loop iteration
-                await asyncio.sleep(1)
-
+                await asyncio.sleep(300)
+                if self._is_ready and self.application:
+                    try:
+                        await self.application.bot.get_me()
+                        logger.debug("[TELEGRAM] Keepalive ping successful")
+                    except Exception as e:
+                        logger.warning(f"[TELEGRAM] Keepalive ping failed: {e}")
             except asyncio.CancelledError:
-                logger.info("[TELEGRAM] Polling loop cancelled (shutdown)")
-                # Cleanly stop polling when cancelled
-                await self._stop_polling()
-                raise # Re-raise to propagate cancellation for graceful shutdown
-
+                break
             except Exception as e:
-                # This catches errors in the while loop itself, not start_polling()
-                polling_active = False
-                logger.error(f"[TELEGRAM] Error in outer polling loop: {e}", exc_info=True)
-                
-                # Exponential backoff for reconnection attempts
-                logger.info(f"[TELEGRAM] Retrying polling in {reconnect_delay_seconds} seconds...")
-                await asyncio.sleep(reconnect_delay_seconds)
-                reconnect_delay_seconds = min(reconnect_delay_seconds * 2, 60) # Max 1 minute delay
-
-        logger.info("[TELEGRAM] Polling loop ended.")
+                logger.error(f"[TELEGRAM] Keepalive error: {e}")
+                await asyncio.sleep(60)
+        logger.info("[TELEGRAM] Keepalive task stopped")
 
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("[TELEGRAM] Shutdown initiated...")
-
-        # Stop flags
         self._shutdown_event.set()
-        # self.is_running will be set to False by the loop itself when _shutdown_event is set
-        self._is_ready = False
-
-        try:
-            # Send shutdown notification
-            if self.application and self._is_ready:
-                try:
-                    await asyncio.wait_for(
-                        self.send_notification("🛑 Trading Bot Stopped"), timeout=5.0
-                    )
-                except:
-                    pass
-
-            # Use the dedicated _stop_polling method
-            await self._stop_polling()
-
-            logger.info("[TELEGRAM] ✅ Shutdown complete")
-
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Shutdown error: {e}")
 
     # ==================== COMMAND HANDLERS ====================
 
@@ -1112,8 +867,22 @@ class TradingTelegramBot:
 
             msg = "🎯 <b>VETERAN TRADE MANAGER STATUS</b>\n\n"
 
-            for position_id, position in positions.items():  # ✅  iterate over items()
-                vtm_status = position.get_vtm_status()  # ✅  correct method name
+            for position_id, position in positions.items():
+                # 1. Get the correct handler for the asset
+                asset_cfg = self.trading_bot.config['assets'].get(position.asset, {})
+                exchange = asset_cfg.get('exchange', 'binance')
+                handler = self.trading_bot.binance_handler if exchange == 'binance' else self.trading_bot.mt5_handler
+
+                # 2. Fetch the live price
+                live_price = None
+                if handler:
+                    try:
+                        live_price = handler.get_current_price(force_live=True)
+                    except Exception as e:
+                        logger.warning(f"Could not fetch live price for {position.asset}: {e}")
+
+                # 3. Pass live price to get VTM status
+                vtm_status = position.get_vtm_status(live_price=live_price)
 
                 if vtm_status:
                     side_emoji = "🟢" if vtm_status["side"] == "long" else "🔴"
@@ -1125,7 +894,7 @@ class TradingTelegramBot:
                     msg += f"💵 Entry: ${vtm_status['entry_price']:,.2f}\n"
                     msg += f"📍 Current: ${vtm_status['current_price']:,.2f}\n"
                     msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.1f}%)\n"
-                    msg += f"🎯 TP: ${vtm_status['take_profit']:,.2f} ({vtm_status['distance_to_tp_pct']:+.1f}%)\n"
+                    msg += f"🎯 TP: ${vtm_status.get('take_profit', 0):,.2f} ({vtm_status['distance_to_tp_pct']:+.1f}%)\n"
                     msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
                     
                     # Display dynamic VTM parameters
@@ -1137,9 +906,7 @@ class TradingTelegramBot:
                         msg += f"🏃 Runner Trail: Dynamic ({vtm_status['runner_trail_atr_multiplier']}x ATR)\n"
                         msg += f"   └─ Current Trail: {vtm_status.get('current_runner_trail_pct', 0):.2%}\n"
                     else:
-                        # Fallback to fixed runner_trail_pct if not dynamic
-                        # Note: runner_trail_pct is initialized in VTM __init__
-                        msg += f"🏃 Runner Trail: Fixed ({position.runner_trail_pct:.2%})\n"
+                        msg += f"🏃 Runner Trail: Fixed ({vtm_status.get('current_runner_trail_pct', 0):.2%})\n"
 
                     msg += f"🔄 Updates: {vtm_status['update_count']}\n\n"
                 else:

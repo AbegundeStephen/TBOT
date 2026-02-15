@@ -703,13 +703,22 @@ class InstitutionalCouncilAggregator:
                     }
             
             elif self.ai_validator and signal == 0:
-                details['ai_validation'] = {
-                    "pattern_detected": False,
-                    "pattern_name": "None",
-                    "pattern_confidence": 0.0,
-                    "validation_passed": True,
-                    "action": "hold",
-                }
+                try:
+                    details['ai_validation'] = self._format_ai_validation_for_viz(
+                        final_signal=signal,
+                        details=details.copy(),
+                        df=df
+                    )
+                except Exception as e:
+                    logger.error(f"[COUNCIL] AI formatting for hold signal failed: {e}")
+                    details['ai_validation'] = {
+                        "pattern_detected": False,
+                        "pattern_name": "None",
+                        "pattern_confidence": 0.0,
+                        "validation_passed": True,
+                        "action": "hold",
+                        "error": str(e),
+                    }
             
             return signal, details
             

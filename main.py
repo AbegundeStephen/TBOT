@@ -174,14 +174,8 @@ class TradingBot:
 
         # Telegram thread management
         self.telegram_bot = None
-        self.telegram_loop = None
         self.telegram_thread = None
-        self._telegram_ready = Event()
-        self._telegram_should_stop = Event()
-        self._telegram_error_count = 0
-        self._max_telegram_restarts = 3
-        self._telegram_last_restart = None
-        self._telegram_is_healthy = True
+        self.vtm_thread = None
 
         # Main bot state
         self._shutdown_requested = False
@@ -472,6 +466,17 @@ class TradingBot:
         self.portfolio_manager.execution_handlers = execution_handlers
 
         logger.info("[OK] Portfolio can now close positions on exchanges")
+
+        # NEW: Load portfolio state
+        try:
+            if not self.portfolio_manager.is_paper_mode:
+                logger.info("\n" + "-" * 70)
+                logger.info("STEP 5: Loading Saved Portfolio State")
+                logger.info("-" * 70)
+                self.portfolio_manager.load_portfolio_state(self.data_manager)
+        except Exception as e:
+            logger.error(f"Error loading portfolio state: {e}")
+            
         logger.info("-" * 70)
 
     def _initialize_telegram(self):
@@ -1868,121 +1873,18 @@ class TradingBot:
         else:
             logger.info("[AUTO-TRAIN] Disabled in config.")
 
-    # ✨ NEW:  Telegram thread management
-    def _start_telegram_with_monitoring(self):
-        """Start Telegram bot with health monitoring and auto-restart"""
-        max_restart_interval = 300  # 5 minutes
-
-        while not self._shutdown_requested:
-            try:
-                # Check if we should attempt restart
-                if self._telegram_error_count >= self._max_telegram_restarts:
-                    if self._telegram_last_restart:
-                        time_since_restart = (
-                            datetime.now() - self._telegram_last_restart
-                        ).total_seconds()
-                        if time_since_restart < max_restart_interval:
-                            logger.warning(
-                                f"[TELEGRAM] Max restarts reached, waiting {max_restart_interval - time_since_restart:.0f}s"
-                            )
-                            time.sleep(60)
-                            continue
-
-                    # Reset counter after cooldown
-                    logger.info("[TELEGRAM] Resetting restart counter after cooldown")
-                    self._telegram_error_count = 0
-
-                logger.info(
-                    f"[TELEGRAM] Starting bot (attempt {self._telegram_error_count + 1}/{self._max_telegram_restarts})..."
-                )
-                self._run_telegram_loop()
-
-                # If we get here, the loop exited normally
-                if self._shutdown_requested:
-                    logger.info("[TELEGRAM] Normal shutdown")
-                    break
-                else:
-                    logger.warning("[TELEGRAM] Loop exited unexpectedly")
-                    self._telegram_error_count += 1
-                    self._telegram_last_restart = datetime.now()
-
-                    if not self._shutdown_requested:
-                        logger.info("[TELEGRAM] Restarting in 10 seconds...")
-                        time.sleep(10)
-
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Critical error: {e}", exc_info=True)
-                self._telegram_error_count += 1
-                self._telegram_last_restart = datetime.now()
-
-                if not self._shutdown_requested:
-                    logger.info("[TELEGRAM] Restarting in 10 seconds...")
-                    time.sleep(10)
-
-        logger.info("[TELEGRAM] Monitoring thread stopped")
-
-    async def _start_telegram_bot(self):
-        """
-        ✨  Start bot with proper cancellation handling
-        """
-        try:
-            logger.info("[TELEGRAM] Initializing bot...")
-            await self.telegram_bot.initialize()
-
-            self._telegram_ready.set()
-            logger.info("[TELEGRAM] ✅ Bot ready")
-
-            # Run polling until shutdown requested
-            await self.telegram_bot.run_polling()
-
-        except asyncio.CancelledError:
-            # ✨ FIX: Expected during shutdown - don't log as error
-            logger.info("[TELEGRAM] Bot cancelled (shutdown)")
-            raise  # Re-raise to propagate cancellation
-
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Bot error: {e}", exc_info=True)
-            self._telegram_ready.clear()
-            raise
-
     def _run_telegram_loop(self):
         """
         Target function for the dedicated Telegram thread.
-        It sets up its own asyncio event loop and runs the Telegram bot's polling.
         This function blocks the thread, keeping it alive for continuous operation.
         """
         try:
-            # ✅ FIX: Use selector loop on Windows (not proactor) for stability
-            if sys.platform == "win32":
-                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-            # Create a NEW event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self.telegram_bot._current_loop = loop # Inform the bot about its loop
-
-            logger.info("[TELEGRAM] Dedicated Telegram event loop created for this thread.")
-
-            # Signal that the Telegram bot's thread is ready for operations
-            self._telegram_ready.set()
-            logger.info("[TELEGRAM] ✅ Telegram thread signaled ready.")
-
-            # Run the Telegram bot's main polling logic within THIS thread's event loop.
-            # This call is blocking and keeps the thread alive.
-            loop.run_until_complete(self.telegram_bot.run_polling()) # Blocking call
-
-            # If loop.run_until_complete finishes, the bot has stopped.
-            logger.info("[TELEGRAM] Telegram polling management stopped in dedicated thread.")
-            
-        except asyncio.CancelledError:
-            logger.info("[TELEGRAM] Telegram thread cancelled gracefully.")
+            if self.telegram_bot:
+                logger.info("[TELEGRAM] Starting Telegram polling loop in dedicated thread.")
+                self.telegram_bot.run_polling()
+                logger.info("[TELEGRAM] Telegram polling loop has finished.")
         except Exception as e:
             logger.error(f"[TELEGRAM] Critical error in dedicated Telegram thread: {e}", exc_info=True)
-        finally:
-            self._telegram_ready.clear() # Ensure ready state is cleared if thread exits
-            if loop and not loop.is_closed():
-                loop.close()
-                logger.info("[TELEGRAM] Dedicated Telegram event loop closed.")
 
     def _send_telegram_notification(self, coro):
         """
@@ -1995,41 +1897,10 @@ class TradingBot:
             return
 
         try:
-            # ✅ FIX: Get the correct event loop from the Application
-            if not self.telegram_bot.application:
-                logger.warning("[TELEGRAM] Application not available")
-                return
-
-            # The Application runs in its own loop created by updater.start_polling()
-            # We need to get that loop's reference
-            
-            # Option 1: Use the updater's loop if available
-            loop = None
-            
-            if hasattr(self.telegram_bot.application, 'updater') and self.telegram_bot.application.updater:
-                # Try to get the loop from the updater
-                if hasattr(self.telegram_bot.application.updater, '_loop'):
-                    loop = self.telegram_bot.application.updater._loop
-            
-            # Option 2: Try to detect the running loop
-            if not loop:
-                try:
-                    # Get the loop that's currently running the bot
-                    import asyncio
-                    import threading
-                    
-                    # Store loop reference when bot starts
-                    if hasattr(self.telegram_bot, '_application_loop'):
-                        loop = self.telegram_bot._application_loop
-                    else:
-                        logger.warning("[TELEGRAM] Could not find application loop")
-                        return
-                except Exception as e:
-                    logger.error(f"[TELEGRAM] Loop detection error: {e}")
-                    return
+            loop = self.telegram_bot._current_loop
 
             if not loop or loop.is_closed():
-                logger.warning("[TELEGRAM] Event loop is closed or unavailable")
+                logger.warning("[TELEGRAM] Event loop is closed or unavailable, cannot send notification.")
                 return
 
             # ✅ Submit coroutine to the bot's event loop
@@ -2284,7 +2155,6 @@ class TradingBot:
                     logger.error(f"[ERROR] Failed to refresh capital: {e}")
 
             self.reset_daily_counters()
-            self._check_VTM_positions()
             self._consecutive_errors = 0
             self._last_successful_cycle = datetime.now()
 
@@ -2392,7 +2262,7 @@ class TradingBot:
                         )
 
                         # Send Telegram notification
-                        if self.telegram_bot and self._telegram_ready.is_set():
+                        if self.telegram_bot and self.telegram_bot._is_ready:
                             for asset in enabled:
                                 if not self.portfolio_manager.has_position(asset):
                                     closed = self.portfolio_manager.closed_positions
@@ -2510,6 +2380,32 @@ class TradingBot:
                     component="main",
                 )
                 time.sleep(300)
+
+    def _vtm_management_loop(self):
+        """
+        A dedicated loop for updating VTM positions at a high frequency.
+        """
+        logger.info("[VTM LOOP] Starting high-frequency VTM update loop.")
+        
+        # Get the VTM update interval from config, default to 5 seconds
+        update_interval = self.config["trading"].get("vtm_update_interval_seconds", 5)
+        logger.info(f"[VTM LOOP] Update interval set to {update_interval} seconds.")
+
+        while self.is_running:
+            try:
+                # Check if there are any positions to manage to avoid unnecessary work
+                if self.portfolio_manager and self.portfolio_manager.get_open_positions_count() > 0:
+                    self._check_VTM_positions()
+                
+                # Sleep until the next update
+                time.sleep(update_interval)
+
+            except Exception as e:
+                logger.error(f"[VTM LOOP] Error in VTM management loop: {e}", exc_info=True)
+                # Sleep longer on error to prevent spamming logs
+                time.sleep(60)
+        
+        logger.info("[VTM LOOP] VTM management loop has stopped.")
 
     def _check_VTM_positions(self):
         """
@@ -2693,7 +2589,7 @@ class TradingBot:
                     logger.error(f"[ERROR] Failed to refresh capital: {e}")
 
             # Send daily summary via Telegram
-            if self.telegram_bot and self._telegram_ready.is_set():
+            if self.telegram_bot and self.telegram_bot._is_ready:
                 try:
                     self._send_telegram_notification(
                         self.telegram_bot.send_daily_summary()
@@ -2909,24 +2805,30 @@ class TradingBot:
             ):
                 mtf_regime = self._current_regime_data[asset_name]
 
+                # Determine regime string for logging
+                regime_str = "NEUTRAL"
+                if mtf_regime.get('is_bullish'):
+                    regime_str = "BULLISH"
+                elif mtf_regime.get('is_bearish'):
+                    regime_str = "BEARISH"
+
                 logger.info(f"\n[MTF FILTER] Checking regime filters:")
-                logger.info(f"  Current Regime: {mtf_regime['regime'].upper()}")
+                logger.info(f"  Current Regime: {regime_str}")
                 logger.info(
-                    f"  Direction:      {'BULL' if mtf_regime['is_bull'] else 'BEAR'}"
+                    f"  Direction:      {'BULL' if mtf_regime.get('is_bullish') else 'BEARISH' if mtf_regime.get('is_bearish') else 'NEUTRAL'}"
                 )
-                logger.info(f"  Confidence:     {mtf_regime['confidence']:.2%}")
+                logger.info(f"  Confidence:     {mtf_regime.get('confidence', 0):.2%}")
                 logger.info(
-                    f"  Recommended:    {mtf_regime['recommended_mode'].upper()}"
+                    f"  Recommended:    {mtf_regime.get('recommended_mode', 'N/A').upper()}"
                 )
-                logger.info(f"  Risk Level:     {mtf_regime['risk_level'].upper()}")
+                logger.info(f"  Risk Level:     {mtf_regime.get('risk_level', 'N/A').upper()}")
 
                 # --------------------------------------------------------
                 # Filter 1: Counter-trend blocking
                 # --------------------------------------------------------
                 if not mtf_regime.get("allow_counter_trend", True):
-                    is_counter_trend = (signal == 1 and not mtf_regime["is_bull"]) or (
-                        signal == -1 and mtf_regime["is_bull"]
-                    )
+                    is_counter_trend = (signal == 1 and not mtf_regime.get("is_bullish")) or \
+                                     (signal == -1 and mtf_regime.get("is_bullish"))
 
                     if is_counter_trend:
                         logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
@@ -2934,11 +2836,11 @@ class TradingBot:
                             f"  Signal Direction: {'LONG' if signal == 1 else 'SHORT'}"
                         )
                         logger.info(
-                            f"  MTF Regime:       {'BULL' if mtf_regime['is_bull'] else 'BEAR'}"
+                            f"  MTF Regime:       {'BULL' if mtf_regime.get('is_bullish') else 'BEARISH'}"
                         )
                         logger.info(
-                            f"  Reason:           MTF confidence {mtf_regime['confidence']:.2%} "
-                            f"blocks counter-trend"
+                            f"  Reason:           MTF confidence {mtf_regime.get('confidence', 0):.2%} "
+                            f"blocks counter-trend in {regime_str} regime."
                         )
                         return  # ← Block the trade
 
@@ -3082,7 +2984,7 @@ class TradingBot:
                         if (
                             new_pos
                             and self.telegram_bot
-                            and self._telegram_ready.is_set()
+                            and self.telegram_bot._is_ready
                         ):
                             try:
                                 leverage = getattr(new_pos, "leverage", 1)
@@ -3143,7 +3045,7 @@ class TradingBot:
                         if (
                             matching_trade
                             and self.telegram_bot
-                            and self._telegram_ready.is_set()
+                            and self.telegram_bot._is_ready
                         ):
                             try:
                                 self._send_telegram_notification(
@@ -3682,83 +3584,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
-    def _restart_telegram_thread(self):
-        """
-        Restart the Telegram bot's thread and instance as a last resort.
-        This will signal the old thread to stop and then start a fresh one.
-        """
-        try:
-            logger.info("[TELEGRAM] Attempting to restart bot thread (last resort)...")
 
-            # ================================================================
-            # STEP 1: Signal the old Telegram bot instance to gracefully shut down
-            # ================================================================
-            if self.telegram_bot:
-                logger.info("[TELEGRAM] Signaling old instance to shut down...")
-                # The _shutdown_event is monitored by TradingTelegramBot.run_polling()
-                # to exit its loop.
-                if hasattr(self.telegram_bot, '_shutdown_event'):
-                    self.telegram_bot._shutdown_event.set()
-                
-                # Give the old thread some time to react and stop itself
-                if self.telegram_thread and self.telegram_thread.is_alive():
-                    logger.info("[TELEGRAM] Waiting for old Telegram thread to terminate...")
-                    # A join with a timeout is crucial to avoid blocking indefinitely
-                    self.telegram_thread.join(timeout=10) 
-                    if self.telegram_thread.is_alive():
-                        logger.warning("[TELEGRAM] Old Telegram thread did not terminate gracefully.")
-                    else:
-                        logger.info("[TELEGRAM] Old Telegram thread terminated.")
-
-            # Clear the old bot instance to ensure a fresh start
-            self.telegram_bot = None
-            self.telegram_thread = None
-
-            # ================================================================
-            # STEP 2: Create a fresh Telegram bot instance
-            # ================================================================
-            logger.info("[TELEGRAM] Creating new Telegram bot instance...")
-            from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
-            from telegram_config import TELEGRAM_CONFIG
-            
-            self.telegram_bot = TradingTelegramBot(
-                token=TELEGRAM_CONFIG["bot_token"],
-                admin_ids=TELEGRAM_CONFIG["admin_ids"],
-                trading_bot=self,
-                signal_monitor=self.signal_monitor
-            )
-            
-            # Reset shutdown event for the new bot instance
-            self.telegram_bot._shutdown_event.clear()
-
-            # ================================================================
-            # STEP 3: Start a new dedicated thread for the Telegram bot
-            # ================================================================
-            logger.info("[TELEGRAM] Starting new dedicated Telegram thread...")
-            self._telegram_ready.clear() # Clear event for new instance
-            
-            self.telegram_thread = Thread(
-                target=self._run_telegram_loop, # This will now start the resilient run_polling
-                daemon=True,
-                name="TelegramBot-Restart"
-            )
-            self.telegram_thread.start()
-
-            # Wait for the new bot instance to signal its readiness
-            if self._telegram_ready.wait(timeout=30):
-                logger.info("[TELEGRAM] ✅ Telegram bot restart successful.")
-                return True
-            else:
-                logger.error("[TELEGRAM] ❌ Telegram bot restart timed out.")
-                return False
-
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Critical error during Telegram bot restart: {e}", exc_info=True)
-            return False
-
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Restart error: {e}", exc_info=True)
-            return False
     
     def start(self):
         """
@@ -3819,34 +3645,27 @@ class TradingBot:
             # Initialize and start the autotrainer
             self.initialize_autotrainer()
 
-            # Start Telegram (existing code continues)
+            # Start Telegram
             if self.telegram_bot:
                 logger.info("\n[TELEGRAM] Starting bot's dedicated thread...")
-
-                # No need for _telegram_should_stop here, it's managed by the bot itself
                 self.telegram_thread = Thread(
                     target=self._run_telegram_loop, daemon=True, name="TelegramBot"
                 )
                 self.telegram_thread.start()
-
-                # Wait for bot to be ready (with timeout)
-                logger.info("[TELEGRAM] Waiting for bot to be ready...")
-                if self._telegram_ready.wait(timeout=30):
-                    logger.info("[TELEGRAM] ✅ Bot ready for notifications")
-                else:
-                    logger.warning("[TELEGRAM] ⚠️ Bot initialization timeout or failed")
-                    # If initialization fails, try to stop the thread gracefully
-                    if self.telegram_bot:
-                        self.telegram_bot._shutdown_event.set() # Signal internal shutdown
-                    if self.telegram_thread and self.telegram_thread.is_alive():
-                        self.telegram_thread.join(timeout=5) # Give it time to stop
-
+                logger.info("[TELEGRAM] ✅ Telegram thread started.")
+            
+            # NEW: Start high-frequency VTM management thread
+            self.vtm_thread = Thread(
+                target=self._vtm_management_loop, daemon=True, name="VTMManager"
+            )
+            self.vtm_thread.start()
+            logger.info("[VTM] ✅ VTM management thread started.")
+            
             # Setup signal handlers
             def signal_handler(signum, frame):
-                logger.info(f"\n[!] Signal {signum} received, shutting down...")
-                self.stop()
-                sys.exit(0)
-
+                            logger.info(f"\n[!] Signal {signum} received, shutting down...")
+                            self.stop()
+                            sys.exit(0)
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
 
@@ -3870,25 +3689,9 @@ class TradingBot:
             # Run initial cycle
             self.run_trading_cycle()
 
-            # ✨  Main loop with health monitoring
-            last_health_check = datetime.now()
-
             while self.is_running:
                 try:
                     schedule.run_pending()
-
-                    # Periodic Telegram health check
-                    now = datetime.now()
-                    if (now - last_health_check).total_seconds() >= 300:  # 5 min
-                        if self.telegram_thread and not self.telegram_thread.is_alive():
-                            logger.warning("[HEALTH] Telegram thread died!")
-
-                            if not self._telegram_should_stop.is_set():
-                                logger.info("[HEALTH] Attempting Telegram restart...")
-                                self._restart_telegram_thread()
-
-                        last_health_check = now
-
                     time.sleep(1)
 
                 except KeyboardInterrupt:
@@ -3909,45 +3712,7 @@ class TradingBot:
             self.stop()
             sys.exit(1)
 
-        except KeyboardInterrupt:
-            logger.info("\n[!] KeyboardInterrupt received")
-            self.stop()
-        except Exception as e:
-            logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
-            self.stop()
-            sys.exit(1)
 
-    def _perform_health_check(self):
-        """Perform periodic health check"""
-        try:
-            logger.debug("[HEALTH] Performing health check...")
-
-            # Check if we've had a successful cycle recently
-            if self._last_successful_cycle:
-                time_since_cycle = (
-                    datetime.now() - self._last_successful_cycle
-                ).total_seconds()
-                if time_since_cycle > 1800:  # 30 minutes
-                    logger.warning(
-                        f"[HEALTH] No successful cycle in {time_since_cycle/60:.0f} minutes"
-                    )
-
-            # Check consecutive errors
-            if self._consecutive_errors > 0:
-                logger.warning(
-                    f"[HEALTH] Consecutive errors: {self._consecutive_errors}"
-                )
-
-            # Check Telegram bot
-            if self.telegram_bot and not self._telegram_ready.is_set():
-                logger.warning("[HEALTH] Telegram bot not ready")
-                if self._telegram_error_count < self._max_telegram_restarts:
-                    logger.info("[HEALTH] Telegram bot will auto-restart")
-
-            logger.debug("[HEALTH] Health check complete")
-
-        except Exception as e:
-            logger.error(f"[HEALTH] Health check error: {e}")
 
     def stop(self):
         """
@@ -3987,6 +3752,14 @@ class TradingBot:
         self.is_running = False
         self._main_loop_running = False
 
+        # NEW: Save portfolio state BEFORE closing positions
+        try:
+            if self.portfolio_manager:
+                logger.info("[SHUTDOWN] Saving portfolio state...")
+                self.portfolio_manager.save_portfolio_state()
+        except Exception as e:
+            logger.error(f"Error saving portfolio state on exit: {e}")
+
         # Stop the autotrainer
         if self.autotrainer:
             self.autotrainer.stop()
@@ -4000,49 +3773,25 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[STOP] Error closing positions: {e}")
 
+        # ✨  Shutdown VTM thread
+        if self.vtm_thread and self.vtm_thread.is_alive():
+            logger.info("[VTM] Shutting down VTM management thread...")
+            # The loop will exit on the next iteration since self.is_running is False
+            self.vtm_thread.join(timeout=10)
+            if self.vtm_thread.is_alive():
+                logger.warning("[VTM] VTM thread did not terminate gracefully.")
+
         # ✨  Shutdown Telegram properly
-        if self.telegram_bot:
-            logger.info("[TELEGRAM] Initiating shutdown...")
-
-            # Signal shutdown
-            self._telegram_should_stop.set()
-
-            # Try to shutdown gracefully
-            if self.telegram_loop and not self.telegram_loop.is_closed():
-                try:
-                    # Schedule shutdown in the Telegram loop
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.telegram_bot.shutdown(), self.telegram_loop
-                    )
-
-                    # Wait with timeout
-                    try:
-                        future.result(timeout=10)
-                        logger.info("[TELEGRAM] ✅ Bot shutdown complete")
-                    except TimeoutError:
-                        logger.warning("[TELEGRAM] ⚠️ Shutdown timeout")
-                        future.cancel()
-
-                except RuntimeError as e:
-                    if "closed" in str(e).lower():
-                        logger.info("[TELEGRAM] ✅ Loop already closed")
-                    else:
-                        logger.debug(f"[TELEGRAM] Shutdown error: {e}")
-
-                except Exception as e:
-                    logger.debug(f"[TELEGRAM] Shutdown error: {e}")
-
-            # Wait for thread to finish (with timeout)
-            if self.telegram_thread and self.telegram_thread.is_alive():
-                logger.info("[TELEGRAM] Waiting for thread (10s timeout)...")
-                self.telegram_thread.join(timeout=10)
-
-                if self.telegram_thread.is_alive():
-                    logger.warning(
-                        "[TELEGRAM] ⚠️ Thread still alive (will be abandoned)"
-                    )
-                else:
-                    logger.info("[TELEGRAM] ✅ Thread terminated")
+        if self.telegram_bot and self.telegram_thread:
+            logger.info("[TELEGRAM] Shutting down...")
+            if hasattr(self.telegram_bot, '_shutdown_event') and self.telegram_bot._current_loop:
+                self.telegram_bot._current_loop.call_soon_threadsafe(self.telegram_bot._shutdown_event.set)
+            
+            self.telegram_thread.join(timeout=10)
+            if self.telegram_thread.is_alive():
+                logger.warning("[TELEGRAM] Thread did not terminate.")
+            else:
+                logger.info("[TELEGRAM] Thread terminated.")
 
         # Shutdown data manager
         try:
@@ -4248,43 +3997,31 @@ def main():
         if not server_process:
             logger.warning("[DASHBOARD] Subprocess failed, trying thread mode...")
             server_thread = start_dashboard_server_threaded()
-
-    # Track auto_trainer so we can stop it later
-    auto_trainer = None
-
+    
+    bot = None
     try:
-        # 1. Initialize the MAIN BOT first
+        # Initialize and start the main bot.
+        # The bot's constructor and start() method handle the entire lifecycle,
+        # including the auto-trainer.
         bot = TradingBot()
-
-        if bot.db_manager:
-            bot.portfolio_manager.db_manager = bot.db_manager
-
-            # Also pass to all positions
-            for position in bot.portfolio_manager.positions.values():
-                position.db_manager = bot.db_manager
-
-        # 2. ✅ FIXED: Initialize Auto-Trainer AFTER the bot exists
-        auto_trainer = ContinuousLearningPipeline(
-            config=config,
-            trading_bot=bot,  # Now 'bot' is defined!
-            telegram_bot=bot.telegram_bot,  # Access telegram directly from the bot
-        )
-        auto_trainer.start()
-
-        # 3. Start the main bot loop
         bot.start()
 
     except KeyboardInterrupt:
-        logger.info("\n[!] KeyboardInterrupt")
+        logger.info("\n[!] KeyboardInterrupt received in main. Bot's internal signal handler will manage shutdown.")
     except Exception as e:
-        logger.error(f"[FATAL] {e}", exc_info=True)
+        logger.critical(f"[FATAL] Unhandled exception in main: {e}", exc_info=True)
+        if bot:
+            bot.stop() # Attempt graceful stop
         sys.exit(1)
     finally:
-        # ✨ NEW: Stop Auto-Trainer on exit
-        if auto_trainer:
-            auto_trainer.stop()
-
-        # ✨ NEW: Stop dashboard server on exit
+        # The bot's stop() method is called by its signal handler.
+        # This is a fallback for unexpected exits.
+        if bot and hasattr(bot, '_shutdown_in_progress') and not bot._shutdown_in_progress:
+            logger.info("[MAIN] Main function finished, initiating final cleanup.")
+            if bot.is_running:
+                 bot.stop()
+        
+        # Stop dashboard server on exit
         if server_process:
             logger.info("[DASHBOARD] Stopping web server...")
             server_process.terminate()
