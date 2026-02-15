@@ -33,6 +33,7 @@ class GovernorStatus:
 @dataclass
 class RegimeStatus:
     """Simplified aggregated regime status."""
+    asset: str
     score: float
     is_bullish: bool
     is_bearish: bool
@@ -216,7 +217,7 @@ class MultiTimeFrameRegimeDetector:
             )
 
     def get_aggregated_regime_score(
-        self, df_1h: pd.DataFrame, df_4h: pd.DataFrame, governor_status: GovernorStatus
+        self, df_1h: pd.DataFrame, df_4h: pd.DataFrame, governor_status: GovernorStatus, asset_type: str
     ) -> RegimeStatus:
         """
         Implements the Dual-Structure Logic Gates to determine the aggregated regime score.
@@ -236,7 +237,7 @@ class MultiTimeFrameRegimeDetector:
         if df_1h.empty or df_4h.empty:
             reasons.append("Insufficient 1H or 4H data.")
             return RegimeStatus(
-                score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now()
+                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc)
             )
 
         # Calculate indicators for both timeframes
@@ -246,7 +247,7 @@ class MultiTimeFrameRegimeDetector:
         if df_1h_with_ema.empty or df_4h_with_ema.empty:
             reasons.append("Failed to calculate EMAs due to insufficient data.")
             return RegimeStatus(
-                score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now()
+                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc)
             )
 
         latest_1h = df_1h_with_ema.iloc[-1]
@@ -306,11 +307,12 @@ class MultiTimeFrameRegimeDetector:
         final_reasoning = f"Aggregated score: {score:.2f}. " + ", ".join(reasons)
 
         return RegimeStatus(
+            asset=asset_type,
             score=score,
             is_bullish=is_bullish,
             is_bearish=is_bearish,
             reasoning=final_reasoning,
-            timestamp=datetime.now()
+            timestamp=datetime.now(timezone.utc)
         )
 
     def analyze_regime(
@@ -348,7 +350,7 @@ class MultiTimeFrameRegimeDetector:
                 raise ValueError("Insufficient 1H data for EMA calculation.")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 1H data: {e}", exc_info=True)
-            return RegimeStatus(score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 1H data: {str(e)}", timestamp=datetime.now())
+            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 1H data: {str(e)}", timestamp=datetime.now(timezone.utc))
 
         try:
             df_4h = self._fetch_data_from_csv(symbol, "4h", exchange)
@@ -356,15 +358,15 @@ class MultiTimeFrameRegimeDetector:
                 raise ValueError("Insufficient 4H data for EMA calculation.")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 4H data: {e}", exc_info=True)
-            return RegimeStatus(score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now())
+            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc))
 
         # --- STEP 3: Get Aggregated Regime Score ---
-        regime_status = self.get_aggregated_regime_score(df_1h, df_4h, governor_status)
+        regime_status = self.get_aggregated_regime_score(df_1h, df_4h, governor_status, self.asset_type)
 
         logger.info(f"\n[FINAL REGIME] Score: {regime_status.score:.2f}")
         logger.info(f"  Bullish: {regime_status.is_bullish}, Bearish: {regime_status.is_bearish}")
         logger.info(f"  Reasoning: {regime_status.reasoning}")
         logger.info(f"{'='*70}\n")
 
-        self.cache[cache_key] = (regime_status, datetime.now())
+        self.cache[cache_key] = (regime_status, datetime.now(timezone.utc))
         return regime_status

@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+import pickle
+from pathlib import Path
 from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.global_error_handler import handle_errors, ErrorSeverity
 from datetime import datetime, timedelta, timezone
@@ -320,62 +322,37 @@ class Position:
 
         return False, ""
 
-    def get_vtm_status(self) -> Optional[Dict]:
+    def get_vtm_status(self, live_price: Optional[float] = None) -> Optional[Dict]:
         """Get current VTM status for monitoring"""
         if not self.trade_manager:
             return None
 
         try:
-            levels = self.trade_manager.get_current_levels()
+            levels = self.trade_manager.get_current_levels(live_price=live_price)
 
-            current_price = levels["current_price"]
-            stop_loss = levels["stop_loss"]
-            next_target = levels["next_target"]
-
-            # Calculate distances
-            if self.side == "long":
-                distance_to_sl_pct = (
-                    ((current_price - stop_loss) / current_price) * 100
-                    if current_price > 0
-                    else 0
-                )
-                distance_to_tp_pct = (
-                    ((next_target - current_price) / current_price * 100)
-                    if next_target
-                    else 0
-                )
-            else:
-                distance_to_sl_pct = (
-                    ((stop_loss - current_price) / current_price) * 100
-                    if current_price > 0
-                    else 0
-                )
-                distance_to_tp_pct = (
-                    ((current_price - next_target) / current_price * 100)
-                    if next_target
-                    else 0
-                )
+            # The get_current_levels method now returns all necessary calculated fields.
+            # We just need to format them.
+            
+            next_target = levels.get("take_profit")
 
             return {
                 "side": self.side,
                 "entry_price": levels["entry_price"],
-                "current_price": current_price,
+                "current_price": levels["current_price"],
                 "pnl_pct": levels["pnl_pct"],
-                "stop_loss": stop_loss,
+                "stop_loss": levels["stop_loss"],
                 "take_profit": (
                     next_target
                     if next_target
-                    else levels["all_targets"][-1] if levels["all_targets"] else None
+                    else levels.get("all_targets", [])[-1] if levels.get("all_targets") else None
                 ),
-                "distance_to_sl_pct": distance_to_sl_pct,
-                "distance_to_tp_pct": distance_to_tp_pct,
-                "profit_locked": getattr(
-                    self.trade_manager, "early_profit_locked", False
-                ),
-                "bars_in_trade": levels["bars_in_trade"],
+                "distance_to_sl_pct": levels["distance_to_sl_pct"],
+                "distance_to_tp_pct": levels["distance_to_tp_pct"],
+                "profit_locked": levels["profit_locked"],
+                "bars_in_trade": levels["update_count"],
                 "partials_hit": levels["partials_hit"],
                 "runner_active": levels["runner_active"],
-                "update_count": levels["bars_in_trade"],
+                "update_count": levels["update_count"],
                 "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         except Exception as e:
@@ -506,6 +483,7 @@ class PortfolioManager:
         self.session_start_time = None
         self.session_start_equity = None
         self.session_start_capital = None
+        self.state_file = Path("data/portfolio_state.pkl")
 
         logger.info(f"Portfolio Manager initialized in {self.mode.upper()} mode")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
@@ -520,6 +498,126 @@ class PortfolioManager:
             )
         else:
             logger.info("✓ Using PAPER mode with simulated capital")
+
+    def save_portfolio_state(self):
+        """Saves the current open positions to a file atomically."""
+        if self.is_paper_mode:
+            logger.info("[STATE] Paper mode, skipping state save.")
+            return
+
+        # If there are no positions, ensure no state file is left
+        if not self.positions:
+            if self.state_file.exists():
+                try:
+                    self.state_file.unlink()
+                    logger.info("[STATE] No open positions. Removed stale state file.")
+                except Exception as e:
+                    logger.error(f"[STATE] Error removing stale state file: {e}")
+            return
+
+        temp_file_path = self.state_file.with_suffix('.pkl.tmp')
+        try:
+            self.state_file.parent.mkdir(exist_ok=True)
+            with open(temp_file_path, "wb") as f:
+                pickle.dump(self.positions, f)
+            
+            # Atomically rename the temp file to the final file
+            temp_file_path.rename(self.state_file)
+            logger.info(f"[STATE] Successfully saved {len(self.positions)} open positions to {self.state_file}")
+
+        except Exception as e:
+            logger.error(f"[STATE] Failed to save portfolio state: {e}", exc_info=True)
+            if temp_file_path.exists():
+                try:
+                    temp_file_path.unlink()
+                except Exception as e_del:
+                    logger.error(f"[STATE] Failed to clean up temp file {temp_file_path}: {e_del}")
+
+    def load_portfolio_state(self, data_manager):
+        """Loads open positions from a file and re-initializes them."""
+        if self.is_paper_mode:
+            logger.info("[STATE] Paper mode, skipping state load.")
+            return
+
+        if not self.state_file.exists():
+            logger.info("[STATE] No portfolio state file found. Starting fresh.")
+            return
+            
+        # Check for empty file to prevent EOFError
+        if self.state_file.stat().st_size == 0:
+            logger.warning(f"[STATE] State file {self.state_file} is empty. Deleting and starting fresh.")
+            self.state_file.unlink()
+            return
+
+        try:
+            with open(self.state_file, "rb") as f:
+                loaded_positions = pickle.load(f)
+
+            if not loaded_positions:
+                logger.info("[STATE] Portfolio state file is empty.")
+                return
+
+            logger.info(f"[STATE] Found {len(loaded_positions)} positions in state file. Reloading...")
+            self.positions = {} # Clear current positions before loading
+
+            for position_id, position in loaded_positions.items():
+                logger.info(f"[STATE] Reloading position: {position_id} ({position.asset} {position.side})")
+                
+                # Critical step: Re-initialize the VTM with fresh OHLC data
+                if position.trade_manager:
+                    logger.info("[STATE] VTM found. Fetching fresh OHLC data to re-initialize...")
+                    try:
+                        asset_config = self.config['assets'][position.asset]
+                        symbol = asset_config['symbol']
+                        interval = asset_config.get('interval', '1h')
+                        exchange = asset_config.get('exchange', 'binance')
+                        
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=10) # Fetch enough data
+
+                        if exchange == 'binance':
+                            df = data_manager.fetch_binance_data(
+                                symbol=symbol, interval=interval,
+                                start_date=start_time.strftime("%Y-%m-%d"),
+                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                        else: # mt5
+                            df = data_manager.fetch_mt5_data(
+                                symbol=symbol, timeframe=interval,
+                                start_date=start_time.strftime("%Y-%m-%d"),
+                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                        
+                        if len(df) > 50:
+                            position.trade_manager.high = df['high'].values
+                            position.trade_manager.low = df['low'].values
+                            position.trade_manager.close = df['close'].values
+                            position.trade_manager.volume = df['volume'].values if 'volume' in df else None
+                            logger.info(f"[STATE] VTM for {position_id} successfully re-initialized with {len(df)} candles.")
+                        else:
+                            logger.warning(f"[STATE] Could not fetch enough OHLC data for {position_id}. VTM may be impaired.")
+                            position.trade_manager = None # Disable VTM if data is bad
+
+                    except Exception as e:
+                        logger.error(f"[STATE] Failed to re-initialize VTM for {position_id}: {e}", exc_info=True)
+                        position.trade_manager = None # Disable VTM on failure
+                
+                # Re-link the db_manager
+                if self.db_manager:
+                    position.db_manager = self.db_manager
+
+                self.positions[position_id] = position
+
+            logger.info(f"[STATE] Successfully loaded and re-initialized {len(self.positions)} positions.")
+            
+            # Clean up state file after successful load
+            self.state_file.unlink()
+            logger.info(f"[STATE] Removed state file {self.state_file} after successful load.")
+
+        except Exception as e:
+            logger.error(f"[STATE] Failed to load portfolio state: {e}", exc_info=True)
+            # If loading fails, start with a clean slate to avoid corruption
+            self.positions = {}
             
     def get_risk_budget(
         self, 

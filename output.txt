@@ -15,7 +15,7 @@ To verify that the Telegram loop issue has been resolved and the main bot cycles
     *   **Look for these positive indicators:**
         *   `[TELEGRAM] Dedicated Telegram event loop created for this thread.`
         *   `[TELEGRAM] ✅ Telegram thread signaled ready.`
-        *   `[TELEGRAM] Polling is now active.`
+        *   `[TELEGRAM] Polling is now active.` (This message indicates that polling has started inside `run_polling`'s loop).
         *   `[TELEGRAM] ✅ Bot components initialized and application started.`
         *   Regular `[CYCLE]` messages from the main bot, confirming its 5-minute cycles are running without interruption.
     *   **Look for the absence of these negative indicators:**

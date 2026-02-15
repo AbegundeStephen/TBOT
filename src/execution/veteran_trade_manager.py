@@ -598,21 +598,25 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Exit check error: {e}")
             return None
 
-    def get_current_levels(self) -> Dict:
-        current_price = self.close[-1]
+    def get_current_levels(self, live_price: Optional[float] = None) -> Dict:
+        current_price = live_price if live_price is not None else self.close[-1]
         pnl_pct = (current_price - self.entry_price) / self.entry_price * 100 if self.side == "long" else (self.entry_price - current_price) / self.entry_price * 100
         next_target_idx = len(self.partials_hit)
         next_target = self.take_profit_levels[next_target_idx] if next_target_idx < len(self.take_profit_levels) else None
+        
+        distance_to_sl_pct = (current_price - self.current_stop_loss) / self.current_stop_loss * 100 if self.current_stop_loss > 0 else 0
+        distance_to_tp_pct = (next_target - current_price) / current_price * 100 if next_target and current_price > 0 else 0
+        
         return {
             "entry_price": self.entry_price,
             "current_price": current_price,
             "stop_loss": self.current_stop_loss,
             "initial_stop": self.initial_stop_loss,
-            "next_target": next_target,
+            "take_profit": next_target,
             "all_targets": self.take_profit_levels,
             "remaining_position_pct": self.remaining_position,
             "pnl_pct": pnl_pct,
-            "bars_in_trade": self.bars_in_trade,
+            "update_count": self.bars_in_trade,
             "partials_hit": len(self.partials_hit),
             "runner_active": self.runner_activated,
             "highest_reached": self.highest_price_reached,
@@ -620,7 +624,11 @@ class VeteranTradeManager:
             "early_lock_atr_multiplier": self.early_lock_atr_multiplier, # New
             "runner_trail_atr_multiplier": self.runner_trail_atr_multiplier, # New
             "current_early_lock_threshold_pct": self.current_early_lock_threshold_pct, # New
-            "current_runner_trail_pct": self.current_runner_trail_pct # New
+            "current_runner_trail_pct": self.current_runner_trail_pct, # New
+            "side": self.side,
+            "profit_locked": self.early_profit_locked,
+            "distance_to_sl_pct": distance_to_sl_pct,
+            "distance_to_tp_pct": distance_to_tp_pct
         }
 
     def to_dict(self) -> Dict:

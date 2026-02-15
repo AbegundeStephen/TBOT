@@ -181,11 +181,21 @@ class ContinuousLearningPipeline:
         """Train a single strategy in isolation (Shadow Mode)."""
         logger.info(f"[AUTO-TRAIN] Training {strategy_name} for {asset}...")
 
-        # Instantiate fresh strategy for training (won't affect live bot)
-        temp_strategy = strategy_class(asset_type=asset, config=self.config)
+        # Get the specific configuration for this strategy and asset
+        try:
+            strategy_config = self.config["strategy_configs"][strategy_name][asset]
+        except KeyError:
+            logger.error(f"[AUTO-TRAIN] Missing config for {strategy_name} on {asset}")
+            return {"success": False, "error": "Missing configuration"}
 
-        # Train
-        results = temp_strategy.train(df)
+        # Instantiate fresh strategy for training (won't affect live bot)
+        temp_strategy = strategy_class(strategy_config)
+
+        # Define model path
+        model_path = os.path.join(self.models_dir, f"{strategy_name}_{asset.lower()}.pkl")
+
+        # Train and save the model
+        results = temp_strategy.train_model(df, model_path)
 
         # Free memory aggressively
         del temp_strategy
@@ -204,7 +214,7 @@ class ContinuousLearningPipeline:
             strategies = [
                 (MeanReversionStrategy, "mean_reversion"),
                 (TrendFollowingStrategy, "trend_following"),
-                (EMAStrategy, "ema_strategy"),
+                (EMAStrategy, "exponential_moving_averages"),
             ]
 
             for asset in ["BTC", "GOLD"]:
