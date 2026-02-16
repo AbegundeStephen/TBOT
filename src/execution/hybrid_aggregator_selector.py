@@ -594,10 +594,11 @@ class HybridAggregatorSelector:
     Main controller for dynamic aggregator switching
     """
     
-    def __init__(self, data_manager, config,telegram_bot=None):
+    def __init__(self, data_manager, config, mtf_integration=None, telegram_bot=None):
         self.data_manager = data_manager
         self.config = config
-        self.telegram_bot = telegram_bot 
+        self.telegram_bot = telegram_bot
+        self.mtf_integration = mtf_integration
         
         # Initialize analyzers
         self.market_analyzer = MarketRegimeAnalyzer()
@@ -674,11 +675,26 @@ class HybridAggregatorSelector:
                         f"({current_mode} → {recommended_mode} blocked)"
                     )
             
+            
+            # Fetch regime data
+            regime_data = {}
+            if self.mtf_integration:
+                try:
+                    regime_data = self.mtf_integration.get_regime_for_trading(
+                        asset_name=asset_name,
+                        symbol=self.config["assets"][asset_name]["symbol"],
+                        exchange=self.config["assets"][asset_name].get("exchange", "binance")
+                    )
+                except Exception as e:
+                    logger.warning(f"[HYBRID] Failed to fetch MTF regime data for {asset_name}: {e}")
+                    # Fallback to default empty dict if MTF data fetch fails
+
             return {
                 'mode': self.current_modes.get(asset_name, recommended_mode),
                 'confidence': confidence,
                 'switch_occurred': switch_occurred,
                 'analysis': analysis,
+                'regime_data': regime_data, # NEW: Inject regime data here
             }
         
         except Exception as e:
@@ -688,6 +704,7 @@ class HybridAggregatorSelector:
                 'confidence': 0.3,
                 'switch_occurred': False,
                 'analysis': self.market_analyzer._default_analysis(),
+                'regime_data': {}, # Provide empty dict on error
             }
         
     

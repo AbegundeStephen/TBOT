@@ -39,6 +39,7 @@ class RegimeStatus:
     is_bearish: bool
     reasoning: str
     timestamp: datetime
+    consensus_regime: str # NEW: Add human-readable regime string
 
 
 class MultiTimeFrameRegimeDetector:
@@ -304,6 +305,13 @@ class MultiTimeFrameRegimeDetector:
         is_bullish = score > 0.5 # Threshold for bullish bias
         is_bearish = score < -0.5 # Threshold for bearish bias
 
+        if is_bullish:
+            consensus_regime = "BULLISH"
+        elif is_bearish:
+            consensus_regime = "BEARISH"
+        else:
+            consensus_regime = "NEUTRAL"
+
         final_reasoning = f"Aggregated score: {score:.2f}. " + ", ".join(reasons)
 
         return RegimeStatus(
@@ -312,7 +320,8 @@ class MultiTimeFrameRegimeDetector:
             is_bullish=is_bullish,
             is_bearish=is_bearish,
             reasoning=final_reasoning,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            consensus_regime=consensus_regime
         )
 
     def analyze_regime(

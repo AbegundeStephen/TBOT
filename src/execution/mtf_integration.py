@@ -122,9 +122,6 @@ class MTFRegimeIntegration:
                         "asset": regime_status.asset,
                         "timestamp": regime_status.timestamp.isoformat(),
                         "score": regime_status.score,
-                        "is_bullish": regime_status.is_bullish,
-                        "is_bearish": regime_status.is_bearish,
-                        "reasoning": regime_status.reasoning,
                     }
                 )
                 .execute()
@@ -234,6 +231,7 @@ class MTFRegimeIntegration:
             )
 
             return {
+                "regime": regime_status.consensus_regime, # ✅ FIX: Add the missing 'regime' key
                 "regime_score": regime_status.score,
                 "is_bullish": regime_status.is_bullish,
                 "is_bearish": regime_status.is_bearish,

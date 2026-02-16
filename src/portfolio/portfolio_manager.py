@@ -3,6 +3,7 @@ Portfolio Manager - Enhanced with MT5 real-time profit tracking
 """
 
 import logging
+import asyncio
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import numpy as np
@@ -59,6 +60,7 @@ class Position:
         self.leverage = leverage
         self.margin_type = margin_type
         self.is_futures = is_futures
+        self.closing = False
 
         self.stop_loss = None
         self.take_profit = None
@@ -328,18 +330,26 @@ class Position:
             return None
 
         try:
+            # VTM calculates the current price if not provided.
             levels = self.trade_manager.get_current_levels(live_price=live_price)
+            if not levels:
+                return None
 
-            # The get_current_levels method now returns all necessary calculated fields.
-            # We just need to format them.
+            # ✅ FIX: Get the current_price that VTM calculated or used.
+            current_price = levels["current_price"]
             
             next_target = levels.get("take_profit")
+
+            # Calculate absolute P&L
+            pnl_abs = (current_price - self.entry_price) * self.quantity if self.side == "long" else \
+                      (self.entry_price - current_price) * self.quantity
 
             return {
                 "side": self.side,
                 "entry_price": levels["entry_price"],
                 "current_price": levels["current_price"],
                 "pnl_pct": levels["pnl_pct"],
+                "pnl_abs": pnl_abs, # NEW: Absolute P&L
                 "stop_loss": levels["stop_loss"],
                 "take_profit": (
                     next_target
@@ -428,6 +438,27 @@ class Position:
 
         return False, ""
 
+    def __getstate__(self):
+        """
+        Custom method for pickling. Excludes non-serializable attributes.
+        """
+        state = self.__dict__.copy()
+        # Remove the unpickleable db_manager attribute
+        if 'db_manager' in state:
+            del state['db_manager']
+        return state
+
+    def __setstate__(self, state):
+        """
+        Custom method for unpickling. Restores state and re-initializes
+        non-serializable attributes.
+        """
+        self.__dict__.update(state)
+        # Re-initialize the db_manager attribute after unpickling.
+        # It will need to be re-assigned by the PortfolioManager after loading.
+        self.db_manager = None
+
+
 
 class PortfolioManager:
     """
@@ -443,8 +474,10 @@ class PortfolioManager:
         binance_client=None,
         db_manager=None,
         execution_handlers: Dict = None,
+        telegram_bot=None,
     ):
         self.config = config
+        self.telegram_bot = telegram_bot
         self.portfolio_config = config["portfolio"]
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
@@ -1859,6 +1892,14 @@ class PortfolioManager:
             if not position:
                 logger.warning(f"Position {position_id} not found in portfolio")
                 return None
+            
+            # Check if position is already being closed
+            if position.closing:
+                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
+                return None
+            
+            # Mark the position as closing to prevent race conditions
+            position.closing = True
         elif asset:
             positions = self.get_asset_positions(asset)
             if not positions:
@@ -1989,6 +2030,23 @@ class PortfolioManager:
             f"  P&L:       ${pnl:,.2f} ({pnl_pct:.2%})\n"
             f"  Remaining: {remaining_count}/{self.max_positions_per_asset}"
         )
+
+        # Send notification
+        if self.telegram_bot and self.telegram_bot._current_loop:
+            try:
+                # Use a thread-safe method to call the async notification
+                asyncio.run_coroutine_threadsafe(
+                    self.telegram_bot.notify_trade_closed(
+                        asset=trade_result["asset"],
+                        side=trade_result["side"],
+                        pnl=trade_result["pnl"],
+                        pnl_pct=trade_result["pnl_pct"] * 100, # Convert to percentage points
+                        reason=trade_result["reason"],
+                    ),
+                    self.telegram_bot._current_loop
+                )
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Failed to send close notification from PM: {e}")
 
         return trade_result
 

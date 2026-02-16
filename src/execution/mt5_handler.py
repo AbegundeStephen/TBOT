@@ -838,10 +838,9 @@ class MT5ExecutionHandler:
                                 f"  Current:     ${current_price:,.2f}"
                             )
 
-                            success = self._close_position(
-                                position=position,
-                                current_price=current_price,
-                                asset_name=asset_name,
+                            success = self.portfolio_manager.close_position(
+                                position_id=position.position_id,
+                                exit_price=current_price,
                                 reason="sell_signal",
                             )
 
@@ -938,10 +937,9 @@ class MT5ExecutionHandler:
                                 f"  MT5 Ticket:  {position.mt5_ticket}"
                             )
 
-                            success = self._close_position(
-                                position=position,
-                                current_price=current_price,
-                                asset_name=asset_name,
+                            success = self.portfolio_manager.close_position(
+                                position_id=position.position_id,
+                                exit_price=current_price,
                                 reason="buy_signal",
                             )
 
@@ -1032,8 +1030,10 @@ class MT5ExecutionHandler:
                         logger.info(
                             f"[AUTO-CLOSE] {asset_name} {position.position_id}: {close_reason}"
                         )
-                        success = self._close_position(
-                            position, current_price, asset_name, close_reason
+                        success = self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason=close_reason,
                         )
                         if success:
                             positions_closed = True
@@ -1166,8 +1166,11 @@ class MT5ExecutionHandler:
             else:
                 mt5_closed = True  # No MT5 ticket, so no need to close on exchange
 
-            # Return status of MT5 closure
-            return mt5_closed
+            # If MT5 closed successfully, then indicate success
+            if mt5_closed:
+                return True
+            else:
+                return False
 
         except Exception as e:
             logger.error(f"Error closing position: {e}", exc_info=True)
@@ -1407,12 +1410,8 @@ class MT5ExecutionHandler:
             result = mt5.order_send(request)
 
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                self.portfolio_manager.close_position(
-                    asset=asset, exit_price=close_price, reason=reason
-                )
-
                 logger.info(
-                    f"[OK] {asset} {side.upper()} position closed on MT5 and portfolio"
+                    f"[OK] {asset} {side.upper()} position closed on MT5"
                 )
                 return True
             else:
@@ -1422,17 +1421,13 @@ class MT5ExecutionHandler:
                     f"[FAIL] Failed to close MT5 position: {error_msg} (code: {error_code})"
                 )
 
-                logger.warning(f"Closing {asset} in portfolio despite MT5 failure")
-                self.portfolio_manager.close_position(
-                    asset=asset, exit_price=current_price, reason=f"{reason}_mt5_failed"
-                )
                 return False
 
         except Exception as e:
             logger.error(f"Error closing MT5 position: {e}", exc_info=True)
             return False
 
-    def check_and_update_positions_VTM(self, asset_name: str = "GOLD"):
+    def check_and_update_positions_VTM(self, asset_name: str = "GOLD", df_4h: Optional[pd.DataFrame] = None):
         """Check and update ALL positions for an asset with VTM"""
         try:
             # Get ALL positions for this asset
@@ -1453,7 +1448,7 @@ class MT5ExecutionHandler:
                 # Update VTM with current price (intra-bar trailing)
                 if position.trade_manager:
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price
+                        current_price, df_4h=df_4h
                     )
 
                     # ✅ FIX: exit_signal is a dict with 'reason', 'price', 'size'
@@ -1476,11 +1471,10 @@ class MT5ExecutionHandler:
                         )
 
                         # Close the position
-                        self._close_position(
-                            position,
-                            current_price,
-                            asset_name,
-                            f"VTM_{exit_reason_str}",
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason=f"VTM_{exit_reason_str}",
                         )
                         positions_closed = True
                         continue
@@ -1493,13 +1487,61 @@ class MT5ExecutionHandler:
                     logger.info(
                         f"[AUTO-CLOSE] {asset_name} {position.position_id}: {reason}"
                     )
-                    self._close_position(position, current_price, asset_name, reason)
+                    self.portfolio_manager.close_position(
+                        position_id=position.position_id,
+                        exit_price=current_price,
+                        reason=reason,
+                    )
                     positions_closed = True
 
             return positions_closed
 
         except Exception as e:
             logger.error(f"Error checking VTM positions: {e}", exc_info=True)
+            return False
+
+    def check_and_update_positions_VTM(self, asset_name: str = "GOLD", df_4h: Optional[pd.DataFrame] = None):
+        """High-frequency VTM update loop for MT5 positions."""
+        try:
+            positions = self.portfolio_manager.get_asset_positions(asset_name)
+            if not positions:
+                return False
+
+            current_price = self.get_current_price(force_live=True)
+            if not current_price:
+                logger.warning(f"[VTM LOOP] Could not get live price for {asset_name}")
+                return False
+
+            positions_closed = False
+            for position in positions:
+                if position.trade_manager:
+                    exit_signal = position.trade_manager.update_with_current_price(
+                        current_price, df_4h=df_4h
+                    )
+
+                    if exit_signal:
+                        exit_reason = exit_signal.get("reason", "unknown")
+                        if hasattr(exit_reason, "value"):
+                            exit_reason_str = exit_reason.value
+                        else:
+                            exit_reason_str = str(exit_reason)
+
+                        logger.info(
+                            f"[VTM LOOP] {position.position_id} triggered {exit_reason_str.upper()}"
+                        )
+                        
+                        # The portfolio manager's close_position method will call the handler's _close_position
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=exit_signal.get("price", current_price),
+                            reason=f"VTM_{exit_reason_str}",
+                        )
+                        positions_closed = True
+
+            return positions_closed
+
+        except Exception as e:
+            logger.error(f"[VTM LOOP] Error in MT5 VTM update: {e}", exc_info=True)
             return False
 
     def _emergency_close_mt5_position(
@@ -1549,7 +1591,7 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[MT5] Emergency close error: {e}", exc_info=True)
 
-    def check_and_update_positions(self, asset_name: str = "GOLD"):
+    def check_and_update_positions(self, asset_name: str = "GOLD", df_4h: Optional[pd.DataFrame] = None):
         """
         Actively check and update all positions
         NOW WITH VTM SUPPORT
@@ -1557,7 +1599,7 @@ class MT5ExecutionHandler:
         try:
             # Use VTM version if available
             if hasattr(self, "check_and_update_positions_VTM"):
-                return self.check_and_update_positions_VTM(asset_name)
+                return self.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
 
             # Fallback to original implementation
             position = self.portfolio_manager.get_position(asset_name)

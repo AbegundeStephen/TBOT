@@ -7,6 +7,7 @@ Veteran Trade Manager - Strategic/Tactical Risk Architecture
 import logging
 import numpy as np
 import talib
+import pandas as pd
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from enum import Enum
@@ -510,7 +511,7 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Update error: {e}")
             return None
 
-    def update_with_current_price(self, current_price: float) -> Optional[Dict]:
+    def update_with_current_price(self, current_price: float, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         try:
             atr = self._calculate_atr() # Calculate ATR here
             
@@ -551,16 +552,36 @@ class VeteranTradeManager:
                         else:
                             self.current_runner_trail_pct = self.runner_trail_pct # Store the fixed trail
             
-            return self.check_exit(current_price, atr) # Pass ATR to check_exit
+            return self.check_exit(current_price, atr, df_4h=df_4h) # Pass ATR and df_4h to check_exit
         except Exception as e:
             logger.error(f"[VTM] Price update error: {e}")
             return None
 
-    def check_exit(self, current_price: float, atr_value: Optional[float] = None) -> Optional[Dict]:
+    def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
         try:
+            # Fractal Exit Logic for Trend Following
+            if self.trade_type == "TREND" and df_4h is not None and not df_4h.empty:
+                new_stop_loss = None
+                if self.asset == "BTC" and len(df_4h) >= 20:
+                    ema_20_4h = talib.EMA(df_4h['close'], timeperiod=20).iloc[-1]
+                    if not np.isnan(ema_20_4h):
+                        new_stop_loss = ema_20_4h
+                elif self.asset == "GOLD" and len(df_4h) >= 5:
+                    swing_low_4h = df_4h['low'].rolling(5).min().iloc[-1]
+                    if not np.isnan(swing_low_4h):
+                        new_stop_loss = swing_low_4h
+
+                if new_stop_loss is not None:
+                    if self.side == "long" and new_stop_loss > self.current_stop_loss:
+                        logger.info(f"[VTM] Fractal SL updated for {self.asset} LONG to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
+                        self.current_stop_loss = new_stop_loss
+                    elif self.side == "short" and new_stop_loss < self.current_stop_loss:
+                        logger.info(f"[VTM] Fractal SL updated for {self.asset} SHORT to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
+                        self.current_stop_loss = new_stop_loss
+
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
             # Calculate dynamic early lock threshold
             actual_early_lock_threshold = self.early_lock_threshold_pct # Default to fixed
