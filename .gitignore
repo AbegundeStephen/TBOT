@@ -15,6 +15,9 @@ venv/
 ENV/
 .venv
 
+work_summary*
+output.txt*
+
 # Models & Data
 models/*.pkl
 data/*.csv
