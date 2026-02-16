@@ -889,8 +889,13 @@ class TradingTelegramBot:
                     pnl_emoji = "💰" if vtm_status["pnl_pct"] > 0 else "📉"
                     lock_emoji = "🔒" if vtm_status["profit_locked"] else "🔓"
 
+                    # Format P&L string to include absolute and percentage
+                    pnl_abs_val = vtm_status.get('pnl_abs', 0.0)
+                    pnl_sign = "+" if pnl_abs_val >= 0 else ""
+                    pnl_string = f"<b>{pnl_sign}${pnl_abs_val:,.2f} ({vtm_status['pnl_pct']:+.2f}%)</b>"
+
                     msg += f"{side_emoji} <b>{position.asset} {vtm_status['side'].upper()}</b>\n"
-                    msg += f"{pnl_emoji} P&L: <b>{vtm_status['pnl_pct']:+.2f}%</b>\n"
+                    msg += f"{pnl_emoji} P&L: {pnl_string}\n"
                     msg += f"💵 Entry: ${vtm_status['entry_price']:,.2f}\n"
                     msg += f"📍 Current: ${vtm_status['current_price']:,.2f}\n"
                     msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.1f}%)\n"
@@ -2187,6 +2192,14 @@ class TradingTelegramBot:
                             pass
                         await asyncio.sleep(2)
 
+                except RuntimeError as e:
+                    if "Event loop is closed" in str(e):
+                        logger.warning(f"[TELEGRAM] Skipping send to {admin_id}: Event loop is closed.")
+                        # This admin_id cannot be reached right now, no need to retry.
+                        break
+                    else:
+                        logger.error(f"[TELEGRAM] Runtime error sending to {admin_id}: {e}")
+                        break
                 except Exception as e:
                     logger.error(f"[TELEGRAM] Error sending to {admin_id}: {e}")
                     break

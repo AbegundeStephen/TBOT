@@ -10,6 +10,7 @@ IMPROVEMENTS:
 """
 
 import pandas as pd
+from src.utils.trap_filter import validate_candle_structure
 import logging
 from typing import Dict, Tuple, Optional
 import numpy as np
@@ -909,6 +910,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             return True, {'trigger_type': 'DISABLED'}
 
         try:
+            if not validate_candle_structure(df, self.asset_type):
+                logger.info(f"[SNIPER] ❌ BLOCKED - Trap candle detected for {self.asset_type}")
+                return False, {'trigger_type': 'TRAP_CANDLE', 'reason': 'Candle structure indicates a trap'}
+
             latest = df.iloc[-1]
             reasons = []
 

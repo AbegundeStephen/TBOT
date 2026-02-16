@@ -189,6 +189,7 @@ class TradingBot:
         self._snapshot_interval = self.config.get("database", {}).get(
             "snapshot_interval_seconds", 300
         )
+        self._df_4h_cache = {}
 
         # Initialize components in CORRECT order
         self._initialize_telegram()
@@ -299,6 +300,7 @@ class TradingBot:
                 mt5_handler=mt5_initialized,
                 binance_client=self.data_manager.futures_client,  # ✅ FIXED: Use Futures Client
                 db_manager=self.db_manager,
+                telegram_bot=self.telegram_bot,
             )
 
             # ✨ NEW: Enable hedging support
@@ -342,10 +344,24 @@ class TradingBot:
             raise
 
         # ============================================================
-        # STEP 3: Initialize Execution Handlers
+        # STEP 2.5: Load portfolio state BEFORE initializing handlers
+        # ============================================================
+        try:
+            if not self.portfolio_manager.is_paper_mode:
+                logger.info("\n" + "-" * 70)
+                logger.info("STEP 2.5: Loading Saved Portfolio State")
+                logger.info("-" * 70)
+                self.portfolio_manager.load_portfolio_state(self.data_manager)
+        except Exception as e:
+            logger.error(f"Error loading portfolio state: {e}")
+            
+        logger.info("-" * 70)
+
+        # ============================================================
+        # STEP 3: Initialize Execution Handlers (with auto-sync)
         # ============================================================
         logger.info("\n" + "-" * 70)
-        logger.info("STEP 3: Initializing Execution Handlers")
+        logger.info("STEP 3: Initializing Execution Handlers (with auto-sync)")
         logger.info("-" * 70)
 
         # ✅ BINANCE HANDLER
@@ -354,12 +370,7 @@ class TradingBot:
             and self.data_manager.get_futures_client() is not None
         ):
             try:
-                # Temporarily disable auto-sync
-                original_auto_sync = self.config["trading"].get(
-                    "auto_sync_on_startup", True
-                )
-                self.config["trading"]["auto_sync_on_startup"] = False
-
+                # Let the handler run its internal auto-sync on startup
                 self.binance_handler = BinanceExecutionHandler(
                     config=self.config,
                     client=self.data_manager.get_futures_client(),
@@ -367,40 +378,10 @@ class TradingBot:
                     data_manager=self.data_manager,
                 )
 
-                # Restore original setting
-                self.config["trading"]["auto_sync_on_startup"] = original_auto_sync
-
                 self.binance_handler.trading_bot = self
                 if self.binance_handler:
                     self.binance_handler.error_handler = self.error_handler
                     self.binance_handler.trading_bot = self
-
-                # Enable Futures BEFORE sync
-                if self.config["assets"]["BTC"].get("enable_futures", False):
-                    logger.info("\n[FUTURES] Enabling Futures handler...")
-                    from src.execution.binance_futures import (
-                        enable_futures_for_binance_handler,
-                    )
-
-                    futures_enabled = enable_futures_for_binance_handler(
-                        self.binance_handler
-                    )
-
-                    if futures_enabled:
-                        logger.info(
-                            "[FUTURES] ✅ Futures API enabled for FUTURES trading"
-                        )
-                    else:
-                        logger.warning(
-                            "[FUTURES] ⚠️ Futures unavailable, shorts simulated"
-                        )
-
-                # NOW do the sync (after Futures is enabled)
-                if original_auto_sync and not self.portfolio_manager.is_paper_mode:
-                    logger.info(
-                        "\n[SYNC] Running position sync (after Futures setup)..."
-                    )
-                    self.binance_handler.sync_positions_with_binance("BTC")
 
                 # Link database to handler
                 if self.db_manager:
@@ -417,6 +398,7 @@ class TradingBot:
         # ✅ MT5 HANDLER
         if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
             try:
+                # MT5 handler also runs its sync on init
                 self.mt5_handler = MT5ExecutionHandler(
                     config=self.config,
                     portfolio_manager=self.portfolio_manager,
@@ -466,18 +448,6 @@ class TradingBot:
         self.portfolio_manager.execution_handlers = execution_handlers
 
         logger.info("[OK] Portfolio can now close positions on exchanges")
-
-        # NEW: Load portfolio state
-        try:
-            if not self.portfolio_manager.is_paper_mode:
-                logger.info("\n" + "-" * 70)
-                logger.info("STEP 5: Loading Saved Portfolio State")
-                logger.info("-" * 70)
-                self.portfolio_manager.load_portfolio_state(self.data_manager)
-        except Exception as e:
-            logger.error(f"Error loading portfolio state: {e}")
-            
-        logger.info("-" * 70)
 
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
@@ -746,7 +716,7 @@ class TradingBot:
                     logger.info(f"\n[MTF] {asset_name} Analysis:")
                     logger.info(f"  Regime:           {regime_data['regime'].upper()}")
                     logger.info(
-                        f"  Direction:        {'BULL' if regime_data['is_bull'] else 'BEAR'}"
+                        f"  Direction:        {'BULL' if regime_data['is_bullish'] else 'BEAR'}"
                     )
                     logger.info(f"  Confidence:       {regime_data['confidence']:.2%}")
                     logger.info(
@@ -2261,24 +2231,6 @@ class TradingBot:
                             f"[VTM] Closed {closed_count} position(s) via dynamic management"
                         )
 
-                        # Send Telegram notification
-                        if self.telegram_bot and self.telegram_bot._is_ready:
-                            for asset in enabled:
-                                if not self.portfolio_manager.has_position(asset):
-                                    closed = self.portfolio_manager.closed_positions
-                                    if closed:
-                                        last_trade = closed[-1]
-                                        if last_trade["asset"] == asset:
-                                            self._send_telegram_notification(
-                                                self.telegram_bot.notify_trade_closed(
-                                                    asset=asset,
-                                                    side=last_trade["side"],
-                                                    pnl=last_trade["pnl"],
-                                                    pnl_pct=last_trade["pnl_pct"] * 100,
-                                                    reason=last_trade["reason"],
-                                                )
-                                            )
-
             except Exception as e:
                 logger.error(f"[VTM] Error updating positions: {e}")
 
@@ -2409,40 +2361,45 @@ class TradingBot:
 
     def _check_VTM_positions(self):
         """
-        ✅ NEW: Check all VTM-managed positions for exits
-        This runs EVERY cycle (every 5 min) for real-time trailing
+        ✅ FIXED: Iterate through all open positions to ensure every VTM is updated.
         """
         try:
-            for asset_name in ["BTC", "GOLD"]:
+            # Iterate over a copy of the dictionary's items to prevent issues if it's modified during iteration.
+            for position_id, position in list(self.portfolio_manager.positions.items()):
+                if not position.trade_manager:
+                    continue
+
+                asset_name = position.asset
                 if not self.config["assets"][asset_name].get("enabled", False):
                     continue
 
-                position = self.portfolio_manager.get_position(asset_name)
-                if not position or not position.trade_manager:
-                    continue
-
-                # Get handler
+                # Get the appropriate handler for the asset
                 exchange = self.config["assets"][asset_name].get("exchange", "binance")
-                handler = (
-                    self.binance_handler if exchange == "binance" else self.mt5_handler
-                )
+                handler = self.binance_handler if exchange == "binance" else self.mt5_handler
 
                 if not handler:
+                    logger.warning(f"[VTM LOOP] No handler found for asset {asset_name}")
                     continue
+
+                # Get 4H data from the cache populated by the main trading cycle
+                df_4h = self._df_4h_cache.get(asset_name)
 
                 # Check VTM with real-time updates
                 try:
+                    # The handler's check method should ideally handle a specific position,
+                    # but for now, we continue to call the asset-wide check. The handler's
+                    # internal logic will loop through positions for that asset.
                     if exchange == "binance":
-                        handler.check_and_update_positions_VTM(asset_name)
+                        handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
                     else:
-                        # MT5 equivalent
-                        handler.check_and_update_positions(asset_name)
+                        # Use the new high-frequency VTM update for MT5 as well
+                        handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
 
                 except Exception as e:
-                    logger.error(f"[VTM] Error checking {asset_name}: {e}")
+                    logger.error(f"[VTM LOOP] Error checking {asset_name} (Position: {position_id}): {e}")
 
         except Exception as e:
-            logger.error(f"[VTM] Position check error: {e}")
+            logger.error(f"[VTM LOOP] Position check error: {e}", exc_info=True)
 
     def _log_VTM_status(self):
         """Log Veteran Trade Manager status for all positions"""
@@ -2461,7 +2418,9 @@ class TradingBot:
                     logger.info(
                         f"Current Price:    ${VTM_status['current_price']:,.2f}"
                     )
-                    logger.info(f"P&L:              {VTM_status['pnl_pct']:+.2f}%")
+                    # Display both absolute P&L and percentage P&L
+                    pnl_color = "+" if VTM_status['pnl_abs'] >= 0 else ""
+                    logger.info(f"P&L:              {pnl_color}${VTM_status['pnl_abs']:,.2f} ({VTM_status['pnl_pct']:+.2f}%)")
                     logger.info(f"")
                     logger.info(
                         f"Stop Loss:        ${VTM_status['stop_loss']:,.2f} ({VTM_status['distance_to_sl_pct']:+.2f}% away)"
@@ -2732,6 +2691,9 @@ class TradingBot:
                 )
 
             df = self.data_manager.clean_data(df)
+            
+            # Fetch and cache 4H data for VTM loop
+            self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
 
             if len(df) < 250:
                 logger.warning(
@@ -3028,38 +2990,6 @@ class TradingBot:
                                 logger.error(
                                     f"[TELEGRAM] Notification failed: {e}",
                                     exc_info=True,
-                                )
-
-                # Send Notifications (Closed Positions)
-                if closed_position_ids:
-                    closed_trades = self.portfolio_manager.closed_positions
-                    for position_id in closed_position_ids:
-                        matching_trade = next(
-                            (
-                                t
-                                for t in reversed(closed_trades)
-                                if t.get("position_id") == position_id
-                            ),
-                            None,
-                        )
-                        if (
-                            matching_trade
-                            and self.telegram_bot
-                            and self.telegram_bot._is_ready
-                        ):
-                            try:
-                                self._send_telegram_notification(
-                                    self.telegram_bot.notify_trade_closed(
-                                        asset=asset_name,
-                                        side=matching_trade["side"],
-                                        pnl=matching_trade["pnl"],
-                                        pnl_pct=matching_trade["pnl_pct"] * 100,
-                                        reason=matching_trade["reason"],
-                                    )
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"[TELEGRAM] Close notification failed: {e}"
                                 )
 
                 # Send Visualization Chart
@@ -3369,8 +3299,6 @@ class TradingBot:
             if self.telegram_bot:
                 # Add regime details to the 'details' dictionary for SignalMonitoringIntegration
                 details["regime_score"] = mtf_regime.get("regime_score")
-                details["regime_is_bullish"] = mtf_regime.get("is_bullish")
-                details["regime_is_bearish"] = mtf_regime.get("is_bearish")
                 details["regime_reasoning"] = mtf_regime.get("reasoning")
                 
                 self.telegram_bot.signal_monitor.record_signal(
@@ -3603,7 +3531,7 @@ class TradingBot:
                 self.data_manager, self.config, telegram_bot=self.telegram_bot
             )
             self.hybrid_selector = HybridAggregatorSelector(
-                self.data_manager, self.config, telegram_bot=self.telegram_bot
+                self.data_manager, self.config, mtf_integration=self.mtf_integration, telegram_bot=self.telegram_bot
             )
 
             preset_mode = self.config.get("aggregator_settings", {}).get(

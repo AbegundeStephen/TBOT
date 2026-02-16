@@ -79,6 +79,15 @@ class TrendFollowingStrategy(BaseStrategy):
         ]
         return max(periods)
 
+    def generate_labels(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> pd.Series:
+        """
+        Generate training labels based on strategy logic.
+        This method satisfies the abstract base class requirement and delegates
+        to the training-specific signal generation.
+        """
+        return self.generate_signal(mode='train', df=df, df_4h=df_4h)
+
+
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate trend following features"""
         df = df.copy()
@@ -235,11 +244,12 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return bullish_4h, bearish_4h
 
-    def generate_labels(
+    def _generate_training_labels(
         self, df: pd.DataFrame, df_4h: pd.DataFrame = None
     ) -> pd.Series:
         """
-        MULTI-TIMEFRAME label generation with 4H context
+        MULTI-TIMEFRAME label generation with 4H context for TRAINING.
+        This method uses lookahead to create labels for model training.
 
         Parameters:
         -----------
@@ -450,3 +460,159 @@ class TrendFollowingStrategy(BaseStrategy):
             logger.info(f"  ✓ Reasonable signal distribution")
 
         return labels
+
+    def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple[int, float]:
+        """
+        Generate a live trading signal based on the latest data.
+        NO LOOKAHEAD is used.
+
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Primary timeframe data (1H) with features, must contain at least 2 rows.
+        df_4h : pd.DataFrame, optional
+            Higher timeframe data (4H) with features
+
+        Returns:
+        --------
+        tuple[int, float]
+            Signal: -1 (SELL), 0 (HOLD), 1 (BUY)
+            Confidence: 0.0 to 1.0
+        """
+        if len(df) < self.get_warmup_period():
+            logger.warning(
+                f"[{self.name}] Dataframe too short for live signal generation. Need {self.get_warmup_period()}, have {len(df)}"
+            )
+            return 0, 0.0  # Not enough data
+
+        # Get the latest data point
+        latest = df.iloc[-1]
+
+        # === CALCULATE 1H TIMEFRAME SCORES for the latest candle ===
+        bullish_score = 0.0
+        bearish_score = 0.0
+
+        # 1. MA Alignment (0-2 points)
+        if latest["sma_fast"] > latest["sma_slow"]:
+            ma_separation = (latest["sma_fast"] - latest["sma_slow"]) / latest["sma_slow"]
+            bullish_score += 2.0 if ma_separation > 0.001 else 1.0
+        elif latest["sma_fast"] < latest["sma_slow"]:
+            ma_separation = (latest["sma_slow"] - latest["sma_fast"]) / latest["sma_slow"]
+            bearish_score += 2.0 if ma_separation > 0.001 else 1.0
+
+        # 2. MACD (0-1.5 points)
+        if latest["macd_hist"] > 0:
+            macd_strength = abs(latest["macd_hist"])
+            if macd_strength > df["macd_hist"].iloc[-6:-1].std():
+                bullish_score += 1.5
+            else:
+                bullish_score += 1.0
+        elif latest["macd_hist"] < 0:
+            macd_strength = abs(latest["macd_hist"])
+            if macd_strength > df["macd_hist"].iloc[-6:-1].std():
+                bearish_score += 1.5
+            else:
+                bearish_score += 1.0
+
+        # 3. Directional Indicators (0-1.5 points)
+        if latest["plus_di"] > latest["minus_di"]:
+            di_diff = latest["plus_di"] - latest["minus_di"]
+            bullish_score += 1.5 if di_diff > 10 else 1.0
+        elif latest["minus_di"] > latest["plus_di"]:
+            di_diff = latest["minus_di"] - latest["plus_di"]
+            bearish_score += 1.5 if di_diff > 10 else 1.0
+
+        # 4. Price Position (0-1 point)
+        if latest["close"] > latest["sma_fast"]:
+            bullish_score += 1.0
+        elif latest["close"] < latest["sma_fast"]:
+            bearish_score += 1.0
+
+        # 5. ADX Bonus (0-1 point)
+        if latest["adx"] > 25:
+            if bullish_score > bearish_score:
+                bullish_score += 1.0
+            elif bearish_score > bullish_score:
+                bearish_score += 1.0
+        elif latest["adx"] > self.adx_threshold:
+            if bullish_score > bearish_score:
+                bullish_score += 0.5
+            elif bearish_score > bullish_score:
+                bearish_score += 0.5
+
+        # === APPLY 4H CONTEXT ===
+        if self.use_4h_context and df_4h is not None:
+            if "sma_fast" not in df_4h.columns:
+                df_4h = self.generate_features(df_4h)
+
+            df_4h_aligned = self._align_4h_to_1h(df.tail(1), df_4h)
+
+            if df_4h_aligned is not None and not df_4h_aligned.empty:
+                h4_bullish, h4_bearish = self._calculate_4h_trend_score(
+                    df_4h_aligned, -1
+                )
+
+                h4_trend = 0
+                if h4_bullish > h4_bearish + 0.5:
+                    h4_trend = 1
+                elif h4_bearish > h4_bullish + 0.5:
+                    h4_trend = -1
+
+                if h4_trend == 1:
+                    bullish_score += self.h4_trend_weight
+                    bearish_score -= self.h4_counter_penalty
+                elif h4_trend == -1:
+                    bearish_score += self.h4_trend_weight
+                    bullish_score -= self.h4_counter_penalty
+
+                if self.require_4h_alignment:
+                    if h4_trend == 1 and bearish_score > bullish_score:
+                        return 0, 0.0
+                    if h4_trend == -1 and bullish_score > bearish_score:
+                        return 0, 0.0
+                        
+        # === DETERMINE FINAL SIGNAL ===
+        signal = 0
+        confidence = 0.0
+        
+        # Using a normalization factor of 7.0 based on the potential max score.
+        normalization_factor = 7.0
+
+        if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
+            signal = 1
+            confidence = min(bullish_score / normalization_factor, 1.0)
+        elif bearish_score >= self.min_score_threshold and bearish_score > bullish_score:
+            signal = -1
+            confidence = min(bearish_score / normalization_factor, 1.0)
+
+        return signal, confidence
+
+    def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None):
+        """
+        Generates signals for either training or live trading.
+
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Primary timeframe data (1H) with features.
+        mode : str, optional
+            'train' for training labels (with lookahead), 'live' for live signals. Defaults to 'live'.
+        df_4h : pd.DataFrame, optional
+            Higher timeframe data (4H) with features.
+
+        Returns:
+        --------
+        pd.Series or tuple(int, float)
+            - pd.Series of labels for 'train' mode.
+            - (int, float) signal and confidence for 'live' mode.
+        """
+        df = self.generate_features(df)
+        
+        if mode == "train":
+            logger.info(f"[{self.name}] Generating training labels...")
+            return self._generate_training_labels(df, df_4h)
+        elif mode == "live":
+            logger.info(f"[{self.name}] Generating live signal...")
+            return self._generate_live_signal(df, df_4h)
+        else:
+            raise ValueError(f"Invalid mode '{mode}'. Must be 'train' or 'live'.")

@@ -474,52 +474,41 @@ class BinanceExecutionHandler:
     )
     def get_current_price(self, symbol: str = None, force_live: bool = False) -> Optional[float]:
         """
-        Unified price accessor for the entire system.
-        
-        Uses a cache-first approach. The cache is primarily populated by
-        the last kline close price. A live price is only fetched if the
-        cache is stale/empty AND force_live is True (e.g., for execution).
-
-        Args:
-            symbol (str, optional): The symbol to fetch. Defaults to the handler's default.
-            force_live (bool, optional): If True, fetch from the live endpoint if cache is stale. 
-                                         Defaults to False.
-
-        Returns:
-            Optional[float]: The price, or None if unavailable.
+        Unified price accessor for the entire system, with corrected force_live logic.
         """
         if symbol is None:
             symbol = self.symbol
-        
-        # 1. Try to get a fresh price from the cache (populated by kline data)
-        cached_price = price_cache.get(symbol)
-        if cached_price is not None:
-            return cached_price
 
-        # 2. If cache is stale and a live price is requested, fetch it once.
+        # 1. If a live price is forced, attempt to fetch it first.
         if force_live:
-            # ✨ FIX: Return mock price in paper mode
+            # In paper mode, we still return a mock price but log that it's a "live" request.
             if self.is_paper_mode:
-                # Return a sensible mock price for BTCUSDT in paper mode
                 mock_price = 40000.0 
-                price_cache.set(symbol, mock_price) # Update cache with mock price
-                logger.info(f"[CACHE] Price cache updated with MOCK price (Paper Mode): {mock_price}")
+                price_cache.set(symbol, mock_price)
+                logger.info(f"[CACHE] Live price requested in paper mode. Returning mock price: {mock_price}")
                 return mock_price
 
             live_price = self._fetch_live_futures_price(symbol)
             if live_price is not None:
-                # Update cache and return the live price
+                # Update cache and return the fresh price.
                 price_cache.set(symbol, live_price)
-                logger.info(f"[CACHE] Price cache updated with LIVE price: {live_price}")
+                #logger.info(f"[CACHE] Live price fetched and cache updated: {live_price}")
                 return live_price
+            else:
+                logger.warning(f"[PRICE] Live fetch failed. Falling back to cache for {symbol}.")
 
-        # 3. As a fallback, return the last known price from cache, even if it's stale.
+        # 2. If not forcing live, or if live fetch failed, try the cache.
+        cached_price = price_cache.get(symbol)
+        if cached_price is not None:
+            return cached_price
+
+        # 3. As a final fallback, check the last known price from the cache.
         last_known_price = price_cache.get_last_known(symbol)
         if last_known_price:
             logger.warning(f"[PRICE] Using stale cached price for {symbol}: {last_known_price}")
             return last_known_price
         
-        logger.error(f"Error fetching price for {symbol}: All methods failed.")
+        logger.error(f"Error fetching price for {symbol}: All methods (live and cache) failed.")
         return None
 
 
@@ -1151,11 +1140,16 @@ class BinanceExecutionHandler:
                         logger.info(
                             f"[FUTURES] ✓ Close order for {side.upper()} position succeeded."
                         )
-                    else:
-                        logger.error(
-                            f"[FUTURES] ❌ Close order for {side.upper()} position failed."
+                        # Explicitly call portfolio_manager to remove position
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id,
+                            exit_price=current_price,
+                            reason=reason,
                         )
-                    return success
+                        return True
+                    else:
+                        logger.error(f"[FUTURES] ❌ Failed to close {side.upper()}")
+                        return False
                 except Exception as e:
                     logger.error(
                         f"[FUTURES] ❌ Exception during close: {e}", exc_info=True
@@ -1167,6 +1161,12 @@ class BinanceExecutionHandler:
                 if self.is_paper_mode:
                     logger.info(
                         f"[PAPER] Simulated close for spot position: {order_id}"
+                    )
+                    # Explicitly call portfolio_manager to remove position in paper mode
+                    self.portfolio_manager.close_position(
+                        position_id=position.position_id,
+                        exit_price=current_price,
+                        reason=reason,
                     )
                     return True
 
@@ -1197,7 +1197,7 @@ class BinanceExecutionHandler:
             )
             return False
 
-    def check_and_update_positions_VTM(self, asset_name: str = "BTC"):
+    def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None):
         """Check and update ALL positions with VTM"""
         try:
             positions = self.portfolio_manager.get_asset_positions(asset_name)
@@ -1213,7 +1213,7 @@ class BinanceExecutionHandler:
             for position in positions:
                 if position.trade_manager:
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price
+                        current_price, df_4h=df_4h
                     )
 
                     if exit_signal:
@@ -1226,11 +1226,10 @@ class BinanceExecutionHandler:
                         logger.info(
                             f"[VTM] {position.position_id} triggered {exit_reason_str.upper()}"
                         )
-                        self._close_position(
-                            position,
-                            current_price,
-                            asset_name,
-                            f"VTM_{exit_reason_str}",
+                        self.portfolio_manager.close_position(
+                            position_id=position.position_id, # Pass the string position_id
+                            exit_price=current_price,
+                            reason=f"VTM_{exit_reason_str}",
                         )
                         positions_closed = True
                         continue
@@ -1239,7 +1238,11 @@ class BinanceExecutionHandler:
                     position, current_price
                 )
                 if should_close:
-                    self._close_position(position, current_price, asset_name, reason)
+                    self.portfolio_manager.close_position(
+                        position_id=position.position_id, # Pass the string position_id
+                        exit_price=current_price,
+                        reason=reason,
+                    )
                     positions_closed = True
 
             return positions_closed

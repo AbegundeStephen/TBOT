@@ -11,6 +11,7 @@ import logging
 from typing import Dict, Tuple, Optional
 from collections import deque
 from datetime import datetime
+from src.utils.trap_filter import validate_candle_structure
 
 logger = logging.getLogger(__name__)
 
@@ -414,6 +415,10 @@ class InstitutionalCouncilAggregator:
         
         try:
             # ✅ FIXED: Use the highly-accurate MTF data if provided, otherwise fallback
+            mr_signal, mr_conf = 0, 0.0
+            tf_signal, tf_conf = 0, 0.0
+            ema_signal, ema_conf = 0, 0.0
+            
             if governor_data:
                 is_bull = is_bull_market
                 regime_name = current_regime
@@ -422,11 +427,6 @@ class InstitutionalCouncilAggregator:
             # Get regime context
                 is_bull, regime_conf = self._detect_regime(df)
                 regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
-                
-                # Extract strategy signals
-                mr_signal, mr_conf = 0, 0.0
-                tf_signal, tf_conf = 0, 0.0
-                ema_signal, ema_conf = 0, 0.0
             
             if self.s_mean_reversion:
                 try:
@@ -578,9 +578,17 @@ class InstitutionalCouncilAggregator:
             # ✨ THE INTERCEPTOR: Apply World-Class Filters before finalizing
             # ====================================================================
             if signal != 0:
-                # A. GOVERNOR FILTER (✅ FIXED: Now passing governor_data)
+                # A. GOVERNOR FILTER (Run first to get trade type)
                 gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
-                if not gov_passed:
+
+                # E. TRAP FILTER (New)
+                if not validate_candle_structure(df, self.asset_type):
+                    decision_type = f"BLOCKED (Trap candle detected for {self.asset_type})"
+                    signal = 0
+                    logger.info(f"[TRAP_FILTER] ❌ BLOCKED - Trap candle detected for {self.asset_type}")
+                
+                # Check Governor's verdict
+                elif not gov_passed:
                     decision_type = f"BLOCKED (1D Governor vetoed {decision_type})"
                     signal = 0
 
