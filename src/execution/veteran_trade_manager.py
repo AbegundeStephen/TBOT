@@ -255,7 +255,6 @@ class VeteranTradeManager:
         signal_details: Dict = None,
         account_risk: float = 0.015,
         atr_period: int = 14,
-        enable_early_profit_lock: bool = True,
         early_lock_threshold_pct: float = 0.01, # Keep for backward compatibility/default
         early_lock_atr_multiplier: Optional[float] = None, # NEW
         runner_trail_atr_multiplier: Optional[float] = None, # NEW
@@ -276,7 +275,7 @@ class VeteranTradeManager:
         self.position_size = quantity
         
         # Original fixed parameters from __init__ arguments
-        self.enable_early_profit_lock = enable_early_profit_lock
+        self.enable_early_profit_lock = risk_config.get("enable_early_profit_lock", True)
         self.early_lock_threshold_pct = early_lock_threshold_pct 
         self.runner_trail_pct = risk_config.get("runner_trail_pct", 0.025) # Default from risk_config
         
