@@ -158,7 +158,7 @@ class TradingBot:
         self.mt5_handler = None
 
         # Strategy storage
-        self.strategies = {"BTC": {}, "GOLD": {}}
+        self.strategies = {}
 
         # Trading state
         self.is_running = False
@@ -477,62 +477,62 @@ class TradingBot:
             self.telegram_bot = None
 
     def _initialize_strategies(self):
-        """Initialize all strategies"""
+        """Initialize all strategies with extreme safety"""
         logger.info("\n" + "-" * 70)
         logger.info("Initializing Strategies (MR + TF + EMA)")
         logger.info("-" * 70)
+
+        if not hasattr(self, 'strategies') or self.strategies is None:
+            self.strategies = {}
+
+        strategy_cfgs = self.config.get("strategy_configs", {})
 
         for asset_name, asset_config in self.config["assets"].items():
             if not asset_config.get("enabled", False):
                 logger.debug(f"[SKIP] {asset_name}: Disabled")
                 continue
 
+            # Ensure asset dictionary exists
+            self.strategies.setdefault(asset_name, {})
+            
             strategies_cfg = asset_config.get("strategies", {})
-            strategy_cfgs = self.config.get("strategy_configs", {})
 
-            # Mean Reversion
+            # 1. Mean Reversion
             if strategies_cfg.get("mean_reversion", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
-                    self.strategies[asset_name]["mean_reversion"] = (
-                        MeanReversionStrategy(cfg)
-                    )
+                    self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} Mean Reversion: {e}")
 
-            # Trend Following
+            # 2. Trend Following
             if strategies_cfg.get("trend_following", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
-                    self.strategies[asset_name]["trend_following"] = (
-                        TrendFollowingStrategy(cfg)
-                    )
+                    self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Trend Following")
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} Trend Following: {e}")
 
-            # EMA Strategy
-            if strategies_cfg.get("exponential_moving_averages", {}).get(
-                "enabled", False
-            ):
+            # 3. EMA Strategy
+            if strategies_cfg.get("exponential_moving_averages", {}).get("enabled", False):
                 try:
-                    cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(
-                        asset_name, {}
-                    )
+                    cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(asset_name, {})
                     self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: EMA Strategy")
                 except Exception as e:
                     logger.error(f"[FAIL] {asset_name} EMA Strategy: {e}")
 
-            enabled = len(self.strategies[asset_name])
-            if enabled == 0:
+            # Safe length check
+            enabled_strats = self.strategies.get(asset_name, {})
+            enabled_count = len(enabled_strats)
+            
+            if enabled_count == 0:
                 logger.warning(f"[!] {asset_name}: NO strategies enabled")
             else:
-                strat_names = ", ".join(self.strategies[asset_name].keys())
-                logger.info(
-                    f"[OK] {asset_name}: {enabled}/3 strategies → {strat_names}"
-                )
+                strat_names = ", ".join(enabled_strats.keys())
+                logger.info(f"[OK] {asset_name}: {enabled_count}/3 strategies -> {strat_names}")
 
     def initialize_ai_layer(self):
         """
