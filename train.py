@@ -488,44 +488,54 @@ def main():
 
     asset_data = {}
 
-    # Fetch BTC
-    btc_config = config["assets"]["BTC"]
-    btc_fetch_config = {
-        "symbol": btc_config["symbol"],
-        "interval": btc_config["interval"],
-        "lookback_days": btc_config["lookback_days"],
-        "min_bars_required": btc_config["min_bars_training"],
-    }
-
-    btc_df = fetch_btc_data(data_manager, btc_fetch_config)
-
-    if not btc_df.empty and validate_data_quality(
-        btc_df, "BTC", btc_fetch_config["min_bars_required"]
-    ):
-        asset_data["BTC"] = btc_df
-        logger.info("✅ BTC data ready for training")
-    else:
-        logger.error("❌ BTC data failed validation")
-
-    # Fetch Gold (if MT5 available)
-    if data_manager.mt5_initialized:
-        gold_config = config["assets"]["GOLD"]
-        gold_fetch_config = {
-            "symbol": gold_config["symbol"],
-            "timeframe": gold_config["timeframe"],
-            "lookback_days": gold_config["lookback_days"],
-            "min_bars_required": gold_config["min_bars_training"],
-        }
-
-        gold_df = fetch_gold_data(data_manager, gold_fetch_config)
-
-        if not gold_df.empty and validate_data_quality(
-            gold_df, "GOLD", gold_fetch_config["min_bars_required"]
-        ):
-            asset_data["GOLD"] = gold_df
-            logger.info("✅ GOLD data ready for training")
+    # Asset configs to process
+    assets_to_train = ["BTC", "GOLD", "USTEC", "EURJPY", "EURUSD"]
+    
+    for asset_key in assets_to_train:
+        if asset_key not in config["assets"]:
+            logger.warning(f"Asset {asset_key} not in config, skipping.")
+            continue
+            
+        asset_cfg = config["assets"][asset_key]
+        exchange = asset_cfg.get("exchange", "binance")
+        
+        # Try local raw data first if fetch fails or for speed
+        raw_file = f"data/raw/{asset_cfg.get('symbol', asset_key)}_1h.csv"
+        if asset_key == "BTC": raw_file = "data/raw/BTCUSDT_1h.csv"
+        elif asset_key == "GOLD": raw_file = "data/raw/XAUUSDm_1h.csv"
+        else: raw_file = f"data/raw/{asset_key}m_1h.csv"
+        
+        df = pd.DataFrame()
+        if Path(raw_file).exists():
+            logger.info(f"Loading {asset_key} from local file: {raw_file}")
+            df = pd.read_csv(raw_file, index_col=0, parse_dates=True)
+            if 'timestamp' in df.columns:
+                df.set_index('timestamp', inplace=True)
+                df.index = pd.to_datetime(df.index)
+        
+        if df.empty:
+            if exchange == "binance" and binance_ok:
+                fetch_cfg = {
+                    "symbol": asset_cfg["symbol"],
+                    "interval": asset_cfg.get("interval", "1h"),
+                    "lookback_days": asset_cfg["lookback_days"],
+                    "min_bars_required": asset_cfg["min_bars_training"],
+                }
+                df = fetch_btc_data(data_manager, fetch_cfg)
+            elif exchange == "mt5" and mt5_ok:
+                fetch_cfg = {
+                    "symbol": asset_cfg["symbol"],
+                    "timeframe": asset_cfg.get("timeframe", "H1"),
+                    "lookback_days": asset_cfg["lookback_days"],
+                    "min_bars_required": asset_cfg["min_bars_training"],
+                }
+                df = fetch_gold_data(data_manager, fetch_cfg) # fetch_gold_data uses find_available_gold_symbol, might need fix for generic mt5
+        
+        if not df.empty and validate_data_quality(df, asset_key, asset_cfg["min_bars_training"]):
+            asset_data[asset_key] = df
+            logger.info(f"✅ {asset_key} data ready for training")
         else:
-            logger.error("❌ GOLD data failed validation")
+            logger.error(f"❌ {asset_key} data failed validation or could not be fetched")
 
     if not asset_data:
         logger.error("❌ No valid data available for training!")
