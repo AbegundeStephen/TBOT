@@ -1478,12 +1478,41 @@ class PortfolioManager:
 
         return False
 
+    def _get_asset_bucket(self, asset: str) -> Optional[str]:
+        """Identify which exclusion bucket an asset belongs to"""
+        asset_upper = asset.upper()
+        
+        # BTC is explicitly excluded from bucket logic
+        if "BTC" in asset_upper:
+            return None
+            
+        # Bucket A: Gold and NAS100
+        if any(x in asset_upper for x in ["GOLD", "XAUUSD", "USTEC", "NAS100"]):
+            return "A"
+            
+        # Bucket B: EURJPY and EURUSD
+        if any(x in asset_upper for x in ["EURJPY", "EURUSD"]):
+            return "B"
+            
+        return None
+
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """Check both long and short separately"""
         current_count = self.get_asset_position_count(asset, side)
 
         if current_count >= self.max_positions_per_asset:
             return False, f"Max {side} positions reached"
+
+        # Bucket Mutual Exclusion (Institutional Upgrade Phase 4)
+        new_bucket = self._get_asset_bucket(asset)
+        if new_bucket:
+            for pos in self.positions.values():
+                # Check for active trades in same bucket (excluding the same asset)
+                if pos.asset != asset:
+                    pos_bucket = self._get_asset_bucket(pos.asset)
+                    if pos_bucket == new_bucket:
+                        logger.warning(f"Bucket conflict \u2014 trade rejected: {asset} conflicts with {pos.asset} (Bucket {new_bucket})")
+                        return False, f"Bucket conflict ({new_bucket})"
 
         # Check if opposite side exists (if simultaneous trading disabled)
         if not self.config.get("trading", {}).get(

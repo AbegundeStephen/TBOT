@@ -552,6 +552,20 @@ class InstitutionalCouncilAggregator:
                 total_score = max(buy_total, sell_total)
                 required_score = self.trend_aligned_threshold
 
+            # --- Directional Trap Filter Veto (Computational Efficiency) ---
+            if signal != 0:
+                if not validate_candle_structure(df, self.asset_type, direction="long" if signal == 1 else "short"):
+                    logger.info(f"[TRAP] VETO - Council signal rejected by structure check.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': f"BLOCKED (Trap candle detected for {self.asset_type})",
+                        'reasoning': "blocked_by_trap_filter",
+                        'final_signal': 0,
+                        'signal_quality': 0.0
+                    }
+
             # ================================================================
             # GATEKEEPER FILTERING (Phase 3 for Council Aggregator)
             # ================================================================
@@ -581,14 +595,8 @@ class InstitutionalCouncilAggregator:
                 # A. GOVERNOR FILTER (Run first to get trade type)
                 gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
 
-                # E. TRAP FILTER (New)
-                if not validate_candle_structure(df, self.asset_type):
-                    decision_type = f"BLOCKED (Trap candle detected for {self.asset_type})"
-                    signal = 0
-                    logger.info(f"[TRAP_FILTER] ❌ BLOCKED - Trap candle detected for {self.asset_type}")
-                
-                # Check Governor's verdict
-                elif not gov_passed:
+                # Trap filter moved to pre-consensus veto phase
+                if not gov_passed:
                     decision_type = f"BLOCKED (1D Governor vetoed {decision_type})"
                     signal = 0
 
