@@ -2193,7 +2193,10 @@ class PortfolioManager:
         asset_position_counts = {}
         asset_positions_detail = {}
 
-        for asset in ["BTC", "GOLD"]:
+        # Get all enabled assets from config
+        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
+
+        for asset in enabled_assets:
             # Get all positions for this asset
             long_positions = [
                 p
@@ -2307,17 +2310,3 @@ class PortfolioManager:
         },
         }
 
-    def close_all_positions(self, prices: Dict[str, float] = None):
-        """Close all open positions"""
-        logger.info("Closing all positions...")
-
-        for asset in list(self.positions.keys()):
-            position = self.positions[asset]
-            exit_price = (
-                prices.get(asset, position.entry_price)
-                if prices
-                else position.entry_price
-            )
-            self.close_position(asset, exit_price, reason="shutdown")
-
-        logger.info("All positions closed")
