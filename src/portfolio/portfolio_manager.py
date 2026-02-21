@@ -510,7 +510,7 @@ class PortfolioManager:
 
         self.positions: Dict[str, Position] = {}
         self.closed_positions: List[Dict] = []
-        self.price_history: Dict[str, List[float]] = {"BTC": [], "GOLD": []}
+        self.price_history: Dict[str, List[float]] = {asset: [] for asset in config["assets"].keys()}
         self.realized_pnl_today = 0.0
 
         self.session_start_time = None
@@ -859,11 +859,11 @@ class PortfolioManager:
             return "precious_metals"
         
         # Indices group
-        if asset in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW"]:
+        if any(x in asset for x in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW", "USTEC"]):
             return "indices"
         
         # Forex group
-        if asset in ["EUR", "EURUSD", "GBP", "GBPUSD", "JPY", "USDJPY"]:
+        if any(x in asset for x in ["EUR", "GBP", "JPY", "USD", "AUD", "CHF", "CAD"]):
             return "forex"
         
         return "other"
@@ -1769,13 +1769,15 @@ class PortfolioManager:
             return self.paper_capital
 
         # Live mode - fetch from specific exchange
-        if asset == "GOLD":
+        asset_cfg = self.config.get("assets", {}).get(asset, {})
+        exchange = asset_cfg.get("exchange", "binance").lower()
+        
+        if exchange == "mt5":
             balance = self._fetch_mt5_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (MT5)")
                 return balance
-
-        elif asset == "BTC":
+        else: # binance
             balance = self._fetch_binance_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (Binance)")

@@ -1428,88 +1428,21 @@ class MT5ExecutionHandler:
             return False
 
     def check_and_update_positions_VTM(self, asset_name: str = "GOLD", df_4h: Optional[pd.DataFrame] = None):
-        """Check and update ALL positions for an asset with VTM"""
-        try:
-            # Get ALL positions for this asset
-            positions = self.portfolio_manager.get_asset_positions(asset_name)
-
-            if not positions:
-                return False
-
-            current_price = self.get_current_price()
-            if current_price is None or current_price == 0:
-                logger.warning(f"Could not get price for {asset_name}")
-                return False
-
-            positions_closed = False
-
-            # Check each position individually
-            for position in positions:
-                # Update VTM with current price (intra-bar trailing)
-                if position.trade_manager:
-                    exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h
-                    )
-
-                    # ✅ FIX: exit_signal is a dict with 'reason', 'price', 'size'
-                    if exit_signal:
-                        # Extract data from dict
-                        exit_reason = exit_signal.get("reason", "unknown")
-                        exit_price = exit_signal.get("price", current_price)
-                        exit_size = exit_signal.get("size", position.quantity)
-
-                        # Convert ExitReason enum to string
-                        if hasattr(exit_reason, "value"):
-                            exit_reason_str = exit_reason.value
-                        else:
-                            exit_reason_str = str(exit_reason)
-
-                        logger.info(
-                            f"[VTM] {asset_name} {position.position_id} triggered "
-                            f"{exit_reason_str.upper()} @ ${exit_price:,.2f} "
-                            f"(closing {exit_size:.0%} of position)"
-                        )
-
-                        # Close the position
-                        self.portfolio_manager.close_position(
-                            position_id=position.position_id,
-                            exit_price=current_price,
-                            reason=f"VTM_{exit_reason_str}",
-                        )
-                        positions_closed = True
-                        continue
-
-                # Fallback: check traditional SL/TP
-                should_close, reason = self._check_stop_loss_take_profit(
-                    position, current_price
-                )
-                if should_close:
-                    logger.info(
-                        f"[AUTO-CLOSE] {asset_name} {position.position_id}: {reason}"
-                    )
-                    self.portfolio_manager.close_position(
-                        position_id=position.position_id,
-                        exit_price=current_price,
-                        reason=reason,
-                    )
-                    positions_closed = True
-
-            return positions_closed
-
-        except Exception as e:
-            logger.error(f"Error checking VTM positions: {e}", exc_info=True)
-            return False
-
-    def check_and_update_positions_VTM(self, asset_name: str = "GOLD", df_4h: Optional[pd.DataFrame] = None):
         """High-frequency VTM update loop for MT5 positions."""
         try:
             positions = self.portfolio_manager.get_asset_positions(asset_name)
             if not positions:
                 return False
 
-            current_price = self.get_current_price(force_live=True)
+            # Resolve the correct symbol for this asset
+            symbol = self.config["assets"].get(asset_name, {}).get("symbol")
+            if not symbol:
+                logger.error(f"[VTM LOOP] Could not find symbol for asset {asset_name}")
+                return False
+
+            current_price = self.get_current_price(symbol=symbol, force_live=True)
             if not current_price:
-                logger.warning(f"[VTM LOOP] Could not get live price for {asset_name}")
+                logger.warning(f"[VTM LOOP] Could not get live price for {asset_name} ({symbol})")
                 return False
 
             positions_closed = False
