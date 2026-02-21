@@ -226,41 +226,50 @@ class TradingBot:
         logger.info("-" * 70)
 
         mt5_initialized = False
+        binance_initialized = False
+
+        # Get assets by exchange
+        assets_by_exchange = {"binance": [], "mt5": []}
+        for asset, cfg in self.config["assets"].items():
+            if cfg.get("enabled", False):
+                exchange = cfg.get("exchange", "binance").lower()
+                if exchange in assets_by_exchange:
+                    assets_by_exchange[exchange].append(asset)
 
         # ============================================================
-        # Connect to MT5 (for GOLD, USTEC, EURJPY, EURUSD)
+        # Connect to MT5
         # ============================================================
-        mt5_assets = ["GOLD", "USTEC", "EURJPY", "EURUSD"]
-        if any(self.config["assets"].get(a, {}).get("enabled", False) for a in mt5_assets):
+        if assets_by_exchange["mt5"]:
             try:
                 if self.data_manager.initialize_mt5():
-                    logger.info("[OK] MT5 connection established")
+                    logger.info(f"[OK] MT5 connection established for: {', '.join(assets_by_exchange['mt5'])}")
                     mt5_initialized = True
                 else:
                     logger.error("[FAIL] Failed to initialize MT5")
                     # Disable all MT5 assets if connection fails
-                    for a in mt5_assets:
-                        if a in self.config["assets"]:
-                            self.config["assets"][a]["enabled"] = False
+                    for a in assets_by_exchange["mt5"]:
+                        self.config["assets"][a]["enabled"] = False
             except Exception as e:
                 logger.error(f"[FAIL] MT5 initialization error: {e}")
-                for a in mt5_assets:
-                    if a in self.config["assets"]:
-                        self.config["assets"][a]["enabled"] = False
+                for a in assets_by_exchange["mt5"]:
+                    self.config["assets"][a]["enabled"] = False
 
         # ============================================================
-        # Connect to Binance (for BTC)
+        # Connect to Binance
         # ============================================================
-        if self.config["assets"]["BTC"].get("enabled", False):
+        if assets_by_exchange["binance"]:
             try:
                 if self.data_manager.initialize_binance():
-                    logger.info("[OK] Binance connection established")
+                    logger.info(f"[OK] Binance connection established for: {', '.join(assets_by_exchange['binance'])}")
+                    binance_initialized = True
                 else:
                     logger.error("[FAIL] Failed to initialize Binance")
-                    self.config["assets"]["BTC"]["enabled"] = False
+                    for a in assets_by_exchange["binance"]:
+                        self.config["assets"][a]["enabled"] = False
             except Exception as e:
                 logger.error(f"[FAIL] Binance initialization error: {e}")
-                self.config["assets"]["BTC"]["enabled"] = False
+                for a in assets_by_exchange["binance"]:
+                    self.config["assets"][a]["enabled"] = False
 
         # ============================================================
         # STEP 1.5: Initialize Database BEFORE Portfolio
@@ -371,10 +380,7 @@ class TradingBot:
         logger.info("-" * 70)
 
         # ✅ BINANCE HANDLER
-        if (
-            self.config["assets"]["BTC"].get("enabled", False)
-            and self.data_manager.get_futures_client() is not None
-        ):
+        if assets_by_exchange["binance"] and binance_initialized:
             try:
                 # Let the handler run its internal auto-sync on startup
                 self.binance_handler = BinanceExecutionHandler(
@@ -399,10 +405,11 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[FAIL] Binance handler: {e}")
                 self.binance_handler = None
-                self.config["assets"]["BTC"]["enabled"] = False
+                for a in assets_by_exchange["binance"]:
+                    self.config["assets"][a]["enabled"] = False
 
         # ✅ MT5 HANDLER
-        if any(self.config["assets"].get(a, {}).get("enabled", False) for a in mt5_assets) and mt5_initialized:
+        if assets_by_exchange["mt5"] and mt5_initialized:
             try:
                 # MT5 handler also runs its sync on init
                 self.mt5_handler = MT5ExecutionHandler(
@@ -427,7 +434,8 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[FAIL] MT5 handler: {e}")
                 self.mt5_handler = None
-                self.config["assets"]["GOLD"]["enabled"] = False
+                for a in assets_by_exchange["mt5"]:
+                    self.config["assets"][a]["enabled"] = False
 
         if not self.binance_handler and not self.mt5_handler:
             raise RuntimeError("No execution handlers available!")
@@ -893,7 +901,7 @@ class TradingBot:
             # Get preset config for this asset
             selected_preset = asset_presets.get(asset_name, "balanced")
 
-            # Handle asset key mapping (BTCUSDT -> BTC)
+            # Handle asset key mapping (BTCUSDT -> BTC, everything else defaults to GOLD presets for now)
             config_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
             preset_config = AGGREGATOR_PRESETS.get(config_key, {}).get(selected_preset)
 
@@ -2622,9 +2630,14 @@ class TradingBot:
 
     def check_market_hours(self, asset_name: str) -> bool:
         """Check if market is open for the asset"""
-        if asset_name == "BTC":
+        asset_name_upper = asset_name.upper()
+        
+        # Crypto is 24/7
+        if "BTC" in asset_name_upper:
             return True
-        elif asset_name == "GOLD":
+            
+        # GOLD and USTEC (Nasdaq) follow similar exchange hours (using GOLD as proxy for now)
+        if "GOLD" in asset_name_upper or "USTEC" in asset_name_upper:
             is_open = should_trade_gold()
             if not is_open:
                 status, message = MarketHours.get_market_status("gold")
@@ -2633,6 +2646,25 @@ class TradingBot:
                     logger.info(f"[MARKET] {asset_name}: {message}")
                     self.last_market_status_log = current_hour
             return is_open
+            
+        # Forex (EURJPY, EURUSD) is 24/5
+        if "EUR" in asset_name_upper:
+            # Simple check for weekend (Saturday/Sunday UTC)
+            # Forex typically closes Friday 22:00 UTC and opens Sunday 22:00 UTC
+            now = datetime.now(timezone.utc)
+            weekday = now.weekday() # 0=Mon, 5=Sat, 6=Sun
+            
+            if weekday == 5: # Saturday
+                return False
+            if weekday == 6: # Sunday
+                # Optional: check if Sunday evening
+                if now.hour < 22:
+                    return False
+            if weekday == 4 and now.hour >= 22: # Friday evening
+                return False
+                
+            return True
+            
         return True
 
     @handle_errors(
