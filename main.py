@@ -228,19 +228,25 @@ class TradingBot:
         mt5_initialized = False
 
         # ============================================================
-        # Connect to MT5 (for GOLD)
+        # Connect to MT5 (for GOLD, USTEC, EURJPY, EURUSD)
         # ============================================================
-        if self.config["assets"]["GOLD"].get("enabled", False):
+        mt5_assets = ["GOLD", "USTEC", "EURJPY", "EURUSD"]
+        if any(self.config["assets"].get(a, {}).get("enabled", False) for a in mt5_assets):
             try:
                 if self.data_manager.initialize_mt5():
                     logger.info("[OK] MT5 connection established")
                     mt5_initialized = True
                 else:
                     logger.error("[FAIL] Failed to initialize MT5")
-                    self.config["assets"]["GOLD"]["enabled"] = False
+                    # Disable all MT5 assets if connection fails
+                    for a in mt5_assets:
+                        if a in self.config["assets"]:
+                            self.config["assets"][a]["enabled"] = False
             except Exception as e:
                 logger.error(f"[FAIL] MT5 initialization error: {e}")
-                self.config["assets"]["GOLD"]["enabled"] = False
+                for a in mt5_assets:
+                    if a in self.config["assets"]:
+                        self.config["assets"][a]["enabled"] = False
 
         # ============================================================
         # Connect to Binance (for BTC)
@@ -396,7 +402,7 @@ class TradingBot:
                 self.config["assets"]["BTC"]["enabled"] = False
 
         # ✅ MT5 HANDLER
-        if self.config["assets"]["GOLD"].get("enabled", False) and mt5_initialized:
+        if any(self.config["assets"].get(a, {}).get("enabled", False) for a in mt5_assets) and mt5_initialized:
             try:
                 # MT5 handler also runs its sync on init
                 self.mt5_handler = MT5ExecutionHandler(
@@ -3326,18 +3332,21 @@ class TradingBot:
 
                 # Get current prices
                 current_prices = {}
-                for asset_name in ["BTC", "GOLD"]:
+                for asset_name in self.config["assets"].keys():
                     if not self.config["assets"][asset_name].get("enabled", False):
                         continue
 
+                    exchange = self.config["assets"][asset_name].get("exchange", "binance")
                     handler = (
                         self.binance_handler
-                        if asset_name == "BTC"
+                        if exchange == "binance"
                         else self.mt5_handler
                     )
                     if handler:
                         try:
-                            current_prices[asset_name] = handler.get_current_price()
+                            # Resolve symbol
+                            symbol = self.config["assets"][asset_name].get("symbol")
+                            current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                         except:
                             pass
 
@@ -3445,7 +3454,8 @@ class TradingBot:
 
                 if handler:
                     try:
-                        current_prices[asset_name] = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                     except:
                         pass
 

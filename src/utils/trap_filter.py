@@ -59,15 +59,26 @@ def validate_candle_structure(df: pd.DataFrame, asset_type: str, direction: str 
                 logger.debug(f"BTC Short Trap (LowerWick): {lower_wick=} > {0.6 * body=}")
                 return False
 
-    elif asset_type.upper() == 'GOLD':
-        # Rule 1: Directional Wick trap
+    elif asset_type.upper() in ['GOLD', 'XAUUSD', 'USTEC', 'NAS100']:
+        # Rule 1: Directional Wick trap (Strict for volatile indices/metals)
         if direction == "long":
             if upper_wick > 0.4 * body:
-                logger.debug(f"Gold Long Trap (UpperWick): {upper_wick=} > {0.4 * body=}")
+                logger.debug(f"{asset_type} Long Trap (UpperWick): {upper_wick=} > {0.4 * body=}")
                 return False
         else: # short
             if lower_wick > 0.4 * body:
-                logger.debug(f"Gold Short Trap (LowerWick): {lower_wick=} > {0.4 * body=}")
+                logger.debug(f"{asset_type} Short Trap (LowerWick): {lower_wick=} > {0.4 * body=}")
+                return False
+
+    elif asset_type.upper() in ['EURJPY', 'EURUSD']:
+        # Rule 1: Directional Wick trap (Standard for Forex)
+        if direction == "long":
+            if upper_wick > 0.5 * body:
+                logger.debug(f"{asset_type} Long Trap (UpperWick): {upper_wick=} > {0.5 * body=}")
+                return False
+        else: # short
+            if lower_wick > 0.5 * body:
+                logger.debug(f"{asset_type} Short Trap (LowerWick): {lower_wick=} > {0.5 * body=}")
                 return False
     else:
         logger.warning(f"Unsupported asset_type '{asset_type}'. No trap filter applied. Returning True.")

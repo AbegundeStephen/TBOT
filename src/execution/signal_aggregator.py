@@ -587,6 +587,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ================================================================
             try:
                 sr_result = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type,
                     df=df,
                     current_price=current_price,
                     signal=final_signal,
