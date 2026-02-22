@@ -2177,7 +2177,8 @@ class TradingBot:
                     )
 
                     if handler:
-                        current_prices[asset_name] = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                 except Exception as e:
                     logger.error(f"Failed to get {asset_name} price: {e}")
 

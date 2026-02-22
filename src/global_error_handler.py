@@ -492,7 +492,7 @@ def handle_errors(
 # ====================================================================================
 
 
-class ErrorContext:
+class ErrorContextManager:
     """Context manager for error handling in code blocks"""
 
     def __init__(
