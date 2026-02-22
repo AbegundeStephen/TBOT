@@ -508,10 +508,18 @@ def main():
         df = pd.DataFrame()
         if Path(raw_file).exists():
             logger.info(f"Loading {asset_key} from local file: {raw_file}")
-            df = pd.read_csv(raw_file, index_col=0, parse_dates=True)
-            if 'timestamp' in df.columns:
-                df.set_index('timestamp', inplace=True)
-                df.index = pd.to_datetime(df.index)
+            df = pd.read_csv(raw_file, index_col=0)
+            
+            # Ensure index is datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, errors='coerce')
+            
+            # Drop rows with invalid index
+            if df.index.isnull().any():
+                logger.warning(f"⚠️  Removing {df.index.isnull().sum()} rows with invalid timestamps for {asset_key}")
+                df = df[df.index.notnull()]
+            
+            df.sort_index(inplace=True)
         
         if df.empty:
             if exchange == "binance" and binance_ok:
