@@ -3,7 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def validate_candle_structure(df: pd.DataFrame, asset_type: str) -> bool:
+def validate_candle_structure(df: pd.DataFrame, asset_type: str, direction: str = "long") -> bool:
     """
     Validates the structure of the latest closed candle based on asset-specific rules
     to identify potential 'trap' candles.
@@ -15,6 +15,8 @@ def validate_candle_structure(df: pd.DataFrame, asset_type: str) -> bool:
         For BTC, 'average_volume' is also expected.
     asset_type : str
         The type of asset, e.g., 'BTC', 'Gold'.
+    direction : str
+        The direction of the trade ('long' or 'short'). Defaults to 'long'.
 
     Returns:
     --------
@@ -35,6 +37,7 @@ def validate_candle_structure(df: pd.DataFrame, asset_type: str) -> bool:
 
     body = abs(close_price - open_price)
     upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
 
     if asset_type.upper() == 'BTC':
         avg_volume = latest_candle.get('average_volume')
@@ -46,20 +49,37 @@ def validate_candle_structure(df: pd.DataFrame, asset_type: str) -> bool:
             logger.debug(f"BTC Trap (Volume): {volume=} < {1.2 * avg_volume=}")
             return False
 
-        # Rule 2: Upper Wick trap
-        # This condition is true if upper_wick is positive and
-        # greater than 0.6 * body. If body is zero, it simplifies to upper_wick > 0.
-        if upper_wick > 0.6 * body:
-            logger.debug(f"BTC Trap (UpperWick): {upper_wick=} > {0.6 * body=}")
-            return False
+        # Rule 2: Directional Wick trap
+        if direction == "long":
+            if upper_wick > 0.6 * body:
+                logger.debug(f"BTC Long Trap (UpperWick): {upper_wick=} > {0.6 * body=}")
+                return False
+        else: # short
+            if lower_wick > 0.6 * body:
+                logger.debug(f"BTC Short Trap (LowerWick): {lower_wick=} > {0.6 * body=}")
+                return False
 
-    elif asset_type.upper() == 'GOLD':
-        # Rule 1: Upper Wick trap
-        # This condition is true if upper_wick is positive and
-        # greater than 0.4 * body. If body is zero, it simplifies to upper_wick > 0.
-        if upper_wick > 0.4 * body:
-            logger.debug(f"Gold Trap (UpperWick): {upper_wick=} > {0.4 * body=}")
-            return False
+    elif asset_type.upper() in ['GOLD', 'XAUUSD', 'USTEC', 'NAS100']:
+        # Rule 1: Directional Wick trap (Strict for volatile indices/metals)
+        if direction == "long":
+            if upper_wick > 0.4 * body:
+                logger.debug(f"{asset_type} Long Trap (UpperWick): {upper_wick=} > {0.4 * body=}")
+                return False
+        else: # short
+            if lower_wick > 0.4 * body:
+                logger.debug(f"{asset_type} Short Trap (LowerWick): {lower_wick=} > {0.4 * body=}")
+                return False
+
+    elif asset_type.upper() in ['EURJPY', 'EURUSD']:
+        # Rule 1: Directional Wick trap (Standard for Forex)
+        if direction == "long":
+            if upper_wick > 0.5 * body:
+                logger.debug(f"{asset_type} Long Trap (UpperWick): {upper_wick=} > {0.5 * body=}")
+                return False
+        else: # short
+            if lower_wick > 0.5 * body:
+                logger.debug(f"{asset_type} Short Trap (LowerWick): {lower_wick=} > {0.5 * body=}")
+                return False
     else:
         logger.warning(f"Unsupported asset_type '{asset_type}'. No trap filter applied. Returning True.")
         return True # If asset type is not recognized, assume valid by default.

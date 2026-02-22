@@ -1204,7 +1204,13 @@ class BinanceExecutionHandler:
             if not positions:
                 return False
 
-            current_price = self.get_current_price(force_live=True)
+            # Get the correct symbol for this asset from config
+            symbol = self.config["assets"].get(asset_name, {}).get("symbol")
+            if not symbol:
+                logger.error(f"[VTM] Could not find symbol for asset {asset_name}")
+                return False
+
+            current_price = self.get_current_price(symbol=symbol, force_live=True)
             if not current_price:
                 return False
 

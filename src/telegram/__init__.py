@@ -9,6 +9,7 @@ import logging
 import asyncio
 import io
 import sys
+import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from functools import wraps
@@ -73,6 +74,8 @@ class SignalMonitoringIntegration:
         entry = {
             "timestamp": timestamp,
             "signal": signal,
+            "original_signal": details.get("original_signal", signal),
+            "trade_type": details.get("trade_type", "TREND"),
             "price": price,
             "regime": details.get("regime"),
             "is_bull": details.get("is_bull_market"),
@@ -478,8 +481,8 @@ class TradingTelegramBot:
                 "*🎮 Control Commands (Admin Only):*\n"
                 "/stop\\_trading - Pause trading (keep positions)\n"
                 "/close\\_all - Close all open positions\n"
-                "/close BTC - Close BTC positions\n"
-                "/close GOLD - Close GOLD positions\n\n"
+                "/close [ASSET] - Close specific positions\n"
+                "/close [ASSET] - Close specific positions\n\n"
                 "⚠️ *Control commands are restricted to authorized users*"
             )
 
@@ -553,7 +556,8 @@ class TradingTelegramBot:
                 await update.message.reply_text("❌ No assets configured.")
                 return
 
-            msg = "🕰️ *Last Trading Decisions*\n\n"
+            msg = "🕰️ <b>LATEST TRADING DECISIONS</b>\n"
+            msg += "───────────────────\n\n"
             found_decisions = False
 
             for asset_name in self.trading_bot.config["assets"].keys():
@@ -566,81 +570,72 @@ class TradingTelegramBot:
                     found_decisions = True
                     entry = last_signal_entry[0]
                     
-                    signal_type = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(entry["signal"], "UNKNOWN")
-                    # Use the 'score' from the new RegimeStatus object
-                    regime_score = entry.get("regime_score") 
-                    regime_is_bullish = entry.get("regime_is_bullish")
-                    regime_is_bearish = entry.get("regime_is_bearish")
-                    regime_reasoning = entry.get("regime_reasoning")
-                    timestamp = entry["timestamp"].strftime("%H:%M:%S")
-
-                    msg += f"*{asset_name}* ({timestamp}): {signal_type}\n"
-                    # Only display regime score if it exists
-                    if regime_score is not None:
-                         msg += f"  Regime Score: {regime_score:.2f}\n"
-                         if regime_is_bullish:
-                             msg += "  Regime Bias: BULLISH 📈\n"
-                         elif regime_is_bearish:
-                             msg += "  Regime Bias: BEARISH 📉\n"
-                         else:
-                             msg += "  Regime Bias: NEUTRAL ⚖️\n"
-                         msg += f"  Regime Reasoning: {regime_reasoning}\n"
-
-                    msg += f"  Reasoning: {entry.get('reasoning', 'N/A')}\n\n"
-                else:
-                    msg += f"*{asset_name}*: No recent decision.\n\n"
-
-            if not found_decisions:
-                msg = "🤷 No trading decisions recorded yet."
-
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-        except Exception as e:
-            logger.error(f"Error in cmd_last_decision: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error fetching last decisions.")
-
-    async def cmd_last_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /lastdecision command - Show the last trading decision for each asset."""
-        try:
-            if not self.trading_bot.config["assets"]:
-                await update.message.reply_text("❌ No assets configured.")
-                return
-
-            msg = "🕰️ *Last Trading Decisions*\n\n"
-            found_decisions = False
-
-            for asset_name in self.trading_bot.config["assets"].keys():
-                if not self.trading_bot.config["assets"][asset_name].get("enabled", False):
-                    continue
-
-                last_signal_entry = self.signal_monitor.get_last_signals(asset_name, n=1)
-
-                if last_signal_entry:
-                    found_decisions = True
-                    entry = last_signal_entry[0]
+                    # Icons and status
+                    original = entry.get("original_signal", entry["signal"])
+                    final = entry["signal"]
                     
-                    signal_type = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(entry["signal"], "UNKNOWN")
-                    # Use the 'score' from the new RegimeStatus object
-                    regime_score = entry.get("regime_score") 
-                    reasoning = entry.get("reasoning", "No specific reasoning.")
-                    timestamp = entry["timestamp"].strftime("%H:%M:%S")
+                    orig_str = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(original, "UNKNOWN")
+                    final_str = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(final, "UNKNOWN")
+                    
+                    # Determine result status
+                    status_icon = "✅" if original == final and final != 0 else "⚠️" if original != final and final == 0 else "⚪"
+                    if original == 0 and final == 0:
+                        status_icon = "💤"
 
-                    msg += f"*{asset_name}* ({timestamp}): {signal_type}\n"
-                    # Only display regime score if it exists
-                    if regime_score is not None:
-                         msg += f"  Regime Score: {regime_score:.2f}\n"
-                    msg += f"  Reasoning: {reasoning}\n\n"
+                    timestamp = entry["timestamp"].strftime("%H:%M:%S")
+                    
+                    msg += f"<b>{html.escape(asset_name)}</b> <code>[{timestamp}]</code>\n"
+                    msg += f"  ├ Original: {orig_str}\n"
+                    msg += f"  ├ Final:    {final_str} {status_icon}\n"
+                    
+                    # --- Institutional Filter Details ---
+                    if original != final and final == 0:
+                        reason = str(entry.get('reasoning', 'Unknown')).lower()
+                        
+                        # 1. Trap Filter specific reporting
+                        if "trap" in reason:
+                            msg += f"  ├ 🪤 <b>Trap Filter:</b> <code>VETOED (Bad Structure)</code>\n"
+                        
+                        # 2. Gatekeeper specific reporting (Only if it was the reason)
+                        elif "gatekeeper" in reason:
+                            r_score = entry.get("regime_score", 0)
+                            r_bias = "BULLISH" if r_score > 0 else "BEARISH" if r_score < 0 else "NEUTRAL"
+                            msg += f"  ├ 🛡️ <b>Gatekeeper:</b> <code>BLOCKED ({r_bias} @ {r_score:.2f})</code>\n"
+                        
+                        # 3. Momentum / ATR Gate reporting
+                        elif "expansion" in reason or "atr" in reason:
+                            msg += f"  ├ 🚀 <b>Momentum:</b> <code>VETOED (Low Vol Expansion)</code>\n"
+                        
+                        # 4. Volatility Gate
+                        elif "volatility" in reason:
+                            msg += f"  ├ 📉 <b>Volatility:</b> <code>BLOCKED (Dead Market)</code>\n"
+
+                        # 5. Sniper / Pattern rejection
+                        elif "sniper" in reason or "pattern" in reason:
+                            msg += f"  ├ 🎯 <b>Sniper:</b> <code>REJECTED (No Edge)</code>\n"
+                        
+                        # General fallback if not specific
+                        else:
+                            msg += f"  ├ ⚠️ <b>Veto:</b> <code>{html.escape(str(entry.get('reasoning', 'N/A')))}</code>\n"
+                    
+                    elif final != 0:
+                        msg += f"  ├ <b>Status:</b> <code>{html.escape(str(entry.get('reasoning', 'N/A')))}</code>\n"
+                    
+                    # Add trade type and regime context
+                    regime_name = entry.get('regime', 'NEUTRAL')
+                    msg += f"  └ Context:  <code>{entry.get('trade_type', 'TREND')} | {regime_name}</code>\n\n"
                 else:
-                    msg += f"*{asset_name}*: No recent decision.\n\n"
+                    msg += f"<b>{html.escape(asset_name)}</b>: No recent decision.\n\n"
 
             if not found_decisions:
                 msg = "🤷 No trading decisions recorded yet."
 
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
         except Exception as e:
             logger.error(f"Error in cmd_last_decision: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching last decisions.")
+
 
     # ====================================================================
     # ✨ NEW: The "Brain" Visualizer Command
@@ -669,7 +664,7 @@ class TradingTelegramBot:
             msg = "🧠 *THE BRAIN: Asymmetric Engine Status*\n"
             msg += "_(Macro Trend Governor & Risk Management)_\n\n"
 
-            for asset in ["BTC", "GOLD"]:
+            for asset in list(self.trading_bot.config["assets"].keys()):
                 if asset not in self.trading_bot.config[
                     "assets"
                 ] or not self.trading_bot.config["assets"][asset].get("enabled", False):
@@ -685,7 +680,7 @@ class TradingTelegramBot:
                 else:
                     regime_data = regime_data_obj
 
-                emoji = "₿" if asset == "BTC" else "🥇"
+                emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
                 msg += f"{emoji} *{asset} STATE*\n"
 
                 current_regime = str(
@@ -871,13 +866,14 @@ class TradingTelegramBot:
                 # 1. Get the correct handler for the asset
                 asset_cfg = self.trading_bot.config['assets'].get(position.asset, {})
                 exchange = asset_cfg.get('exchange', 'binance')
+                symbol = asset_cfg.get('symbol')
                 handler = self.trading_bot.binance_handler if exchange == 'binance' else self.trading_bot.mt5_handler
 
                 # 2. Fetch the live price
                 live_price = None
-                if handler:
+                if handler and symbol:
                     try:
-                        live_price = handler.get_current_price(force_live=True)
+                        live_price = handler.get_current_price(symbol=symbol, force_live=True)
                     except Exception as e:
                         logger.warning(f"Could not fetch live price for {position.asset}: {e}")
 
@@ -1079,17 +1075,25 @@ class TradingTelegramBot:
         try:
 
             def _close_everything():
-                # Get current prices directly from exchanges
+                # Get current prices directly from exchanges for all enabled assets
                 prices = {}
-                if self.trading_bot.binance_handler:
-                    btc_price = self.trading_bot.binance_handler.get_current_price()
-                    if btc_price:
-                        prices["BTC"] = btc_price
-
-                if self.trading_bot.mt5_handler:
-                    gold_price = self.trading_bot.mt5_handler.get_current_price()
-                    if gold_price:
-                        prices["GOLD"] = gold_price
+                for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
+                    if not asset_cfg.get("enabled", False):
+                        continue
+                    
+                    exchange = asset_cfg.get("exchange", "binance")
+                    symbol = asset_cfg.get("symbol")
+                    
+                    handler = (
+                        self.trading_bot.binance_handler
+                        if exchange == "binance"
+                        else self.trading_bot.mt5_handler
+                    )
+                    
+                    if handler and symbol:
+                        price = handler.get_current_price(symbol=symbol)
+                        if price:
+                            prices[asset_name] = price
 
                 # Close all positions
                 self.trading_bot.portfolio_manager.close_all_positions(prices)
@@ -1132,18 +1136,18 @@ class TradingTelegramBot:
 
             asset = context.args[0].upper()
 
-            if asset not in ["BTC", "GOLD"]:
-                await update.message.reply_text("⚠️ Invalid asset. Use: BTC or GOLD")
+            if asset not in list(self.trading_bot.config["assets"].keys()):
+                await update.message.reply_text(f"⚠️ Invalid asset. Available: {list(self.trading_bot.config['assets'].keys())}")
                 return
 
             # Check if market is open for this asset
             asset_cfg = self.trading_bot.config["assets"].get(asset, {})
             exchange = asset_cfg.get("exchange", "binance")
+            symbol = asset_cfg.get("symbol")
 
             if exchange == "mt5":
                 mt5_handler = self.trading_bot.mt5_handler
-                if mt5_handler:
-                    symbol = asset_cfg.get("symbol", "XAUUSD")
+                if mt5_handler and symbol:
                     is_open, market_msg = mt5_handler._is_market_open_for_closing(
                         symbol
                     )
@@ -1190,10 +1194,13 @@ class TradingTelegramBot:
                 def _close_single():
                     # Get exit price
                     price = None
-                    if exchange == "binance" and self.trading_bot.binance_handler:
-                        price = self.trading_bot.binance_handler.get_current_price()
-                    elif exchange == "mt5" and self.trading_bot.mt5_handler:
-                        price = self.trading_bot.mt5_handler.get_current_price()
+                    handler = (
+                        self.trading_bot.binance_handler
+                        if exchange == "binance"
+                        else self.trading_bot.mt5_handler
+                    )
+                    if handler and symbol:
+                        price = handler.get_current_price(symbol=symbol)
 
                     return self.trading_bot.portfolio_manager.close_position(
                         position_id=positions[position_index].position_id,
@@ -1234,10 +1241,13 @@ class TradingTelegramBot:
                 def _close_all_asset():
                     # Get exit price
                     price = None
-                    if exchange == "binance" and self.trading_bot.binance_handler:
-                        price = self.trading_bot.binance_handler.get_current_price()
-                    elif exchange == "mt5" and self.trading_bot.mt5_handler:
-                        price = self.trading_bot.mt5_handler.get_current_price()
+                    handler = (
+                        self.trading_bot.binance_handler
+                        if exchange == "binance"
+                        else self.trading_bot.mt5_handler
+                    )
+                    if handler and symbol:
+                        price = handler.get_current_price(symbol=symbol)
 
                     return self.trading_bot.portfolio_manager.close_all_positions_for_asset(
                         asset=asset, exit_price=price, reason="manual_telegram_all"
@@ -1317,7 +1327,7 @@ class TradingTelegramBot:
                     )
 
                 # Heavy operation: Iterating and sorting history
-                for asset in ["BTC", "GOLD"]:
+                for asset in list(self.trading_bot.config["assets"].keys()):
                     if asset not in self.trading_bot.config[
                         "assets"
                     ] or not self.trading_bot.config["assets"][asset].get(
@@ -1391,8 +1401,8 @@ class TradingTelegramBot:
                 return
 
             asset = context.args[0].upper()
-            if asset not in ["BTC", "GOLD"]:
-                await update.message.reply_text("⚠️ Invalid asset. Use: BTC or GOLD")
+            if asset not in list(self.trading_bot.config["assets"].keys()):
+                await update.message.reply_text(f"⚠️ Invalid asset. Available: {list(self.trading_bot.config['assets'].keys())}")
                 return
 
             def _prepare_mode_details():
@@ -1489,7 +1499,7 @@ class TradingTelegramBot:
                 msg += f"  Performance: {stats['performance_signals']}\n\n"
 
             # Recent switches
-            for asset in ["BTC", "GOLD"]:
+            for asset in list(self.trading_bot.config["assets"].keys()):
                 if asset not in self.trading_bot.config["assets"]:
                     continue
 
@@ -1692,14 +1702,9 @@ class TradingTelegramBot:
 
                 msg += "*Current Presets:*\n"
 
-                if "BTC" in presets:
-                    preset = presets["BTC"]
-                    msg += f"\n₿ *BTC:* `{preset.upper()}`\n"
-                    msg += self._get_preset_description(preset)
-
-                if "GOLD" in presets:
-                    preset = presets["GOLD"]
-                    msg += f"\n🥇 *GOLD:* `{preset.upper()}`\n"
+                for asset, preset in presets.items():
+                    emoji = "₿" if "BTC" in asset.upper() else "🥇" if "GOLD" in asset.upper() else "📈"
+                    msg += f"\n{emoji} *{asset}:* `{preset.upper()}`\n"
                     msg += self._get_preset_description(preset)
 
                 msg += f"\n\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
@@ -1769,14 +1774,11 @@ class TradingTelegramBot:
 
             msg += "*Current Presets:*\n"
 
-            if "BTC" in presets:
-                preset = presets["BTC"]
-                msg += f"\n₿ *BTC:* `{preset.upper()}`\n"
-                msg += self._get_preset_description(preset)
-
-            if "GOLD" in presets:
-                preset = presets["GOLD"]
-                msg += f"\n🥇 *GOLD:* `{preset.upper()}`\n"
+            for asset, preset in presets.items():
+                if not self.trading_bot.config["assets"].get(asset, {}).get("enabled", False):
+                    continue
+                emoji = "₿" if "BTC" in asset.upper() else "🥇" if "GOLD" in asset.upper() else "📈"
+                msg += f"\n{emoji} *{asset}:* `{preset.upper()}`\n"
                 msg += self._get_preset_description(preset)
 
             msg += f"\n\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
@@ -1800,29 +1802,21 @@ class TradingTelegramBot:
     async def _send_regimes_message(self, query):
         """Send regime information (for callback)"""
         try:
-            btc_regime = self.signal_monitor.get_regime_info("BTC")
-            gold_regime = self.signal_monitor.get_regime_info("GOLD")
-
             msg = "🔄 *Market Regimes*\n\n"
-
-            msg += "*₿ BTC*\n"
-            msg += f"Changes: {btc_regime.get('change_count', 0)}\n"
-            if btc_regime.get("last_changes"):
-                msg += "Recent:\n"
-                for change in btc_regime["last_changes"][-3:]:
-                    ts = change["timestamp"].strftime("%H:%M")
-                    regime = "🚀" if "BULL" in change["regime"] else "🐻"
-                    msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
-            msg += "\n"
-
-            msg += "*🥇 GOLD*\n"
-            msg += f"Changes: {gold_regime.get('change_count', 0)}\n"
-            if gold_regime.get("last_changes"):
-                msg += "Recent:\n"
-                for change in gold_regime["last_changes"][-3:]:
-                    ts = change["timestamp"].strftime("%H:%M")
-                    regime = "🚀" if "BULL" in change["regime"] else "🐻"
-                    msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
+            for asset in self.trading_bot.config["assets"].keys():
+                if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                    continue
+                info = self.signal_monitor.get_regime_info(asset)
+                emoji = "₿" if "BTC" in asset.upper() else "🥇" if "GOLD" in asset.upper() else "📈"
+                msg += f"{emoji} *{asset}*\n"
+                msg += f"Changes: {info.get('change_count', 0)}\n"
+                if info.get("last_changes"):
+                    msg += "Recent:\n"
+                    for change in info["last_changes"][-3:]:
+                        ts = change["timestamp"].strftime("%H:%M")
+                        regime_icon = "🚀" if "BULL" in change["regime"] else "🐻"
+                        msg += f"  {ts}: {regime_icon} @ ${change['price']:,.2f}\n"
+                msg += "\n"
 
             keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="regimes")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1836,21 +1830,17 @@ class TradingTelegramBot:
     async def _send_overrides_message(self, query):
         """Send override information (for callback)"""
         try:
-            btc_overrides = self.signal_monitor.get_override_info("BTC")
-            gold_overrides = self.signal_monitor.get_override_info("GOLD")
-
             msg = "🔒 *Golden Cross Overrides*\n\n"
-
-            msg += "*₿ BTC*\n"
-            msg += f"Total: {btc_overrides['total']}\n"
-            if btc_overrides["total"] > 0:
-                msg += f"Avg Quality: {btc_overrides['avg_quality']:.2f}\n"
-            msg += "\n"
-
-            msg += "*🥇 GOLD*\n"
-            msg += f"Total: {gold_overrides['total']}\n"
-            if gold_overrides["total"] > 0:
-                msg += f"Avg Quality: {gold_overrides['avg_quality']:.2f}\n"
+            for asset in self.trading_bot.config["assets"].keys():
+                if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                    continue
+                info = self.signal_monitor.get_override_info(asset)
+                emoji = "₿" if "BTC" in asset.upper() else "🥇" if "GOLD" in asset.upper() else "📈"
+                msg += f"{emoji} *{asset}*\n"
+                msg += f"Total: {info['total']}\n"
+                if info["total"] > 0:
+                    msg += f"Avg Quality: {info['avg_quality']:.2f}\n"
+                msg += "\n"
 
             keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="overrides")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1878,16 +1868,28 @@ class TradingTelegramBot:
             df_4h = self.trading_bot._fetch_4h_data(asset)
             aggregator = self.trading_bot.aggregators.get(asset)
             signal, details = aggregator.get_aggregated_signal(df_15min)
+            
+            asset_cfg = self.trading_bot.config['assets'].get(asset, {})
+            exchange = asset_cfg.get('exchange', 'binance')
+            symbol = asset_cfg.get('symbol')
+            
             handler = (
                 self.trading_bot.binance_handler
-                if asset == "BTC"
+                if exchange == "binance"
                 else self.trading_bot.mt5_handler
             )
-            current_price = handler.get_current_price()
+            
+            current_price = None
+            if handler and symbol:
+                current_price = handler.get_current_price(symbol=symbol)
+            
+            if current_price is None:
+                current_price = df_15min["close"].iloc[-1]
+                
             return df_15min, df_4h, signal, details, current_price
 
         try:
-            for asset_name in ["BTC", "GOLD"]:
+            for asset_name in list(self.trading_bot.config["assets"].keys()):
                 if not self.trading_bot.config["assets"][asset_name].get("enabled"):
                     continue
 
@@ -1928,9 +1930,9 @@ class TradingTelegramBot:
             requested_asset = None
             if context.args and len(context.args) > 0:
                 requested_asset = context.args[0].upper()
-                if requested_asset not in ["BTC", "GOLD"]:
+                if requested_asset not in list(self.trading_bot.config["assets"].keys()):
                     await update.message.reply_text(
-                        "⚠️ Invalid asset. Use: /chart BTC or /chart GOLD"
+                        f"⚠️ Invalid asset. Use: /chart {list(self.trading_bot.config['assets'].keys())}"
                     )
                     return
 
@@ -1945,7 +1947,7 @@ class TradingTelegramBot:
 
             # Get assets to chart
             assets_to_chart = []
-            for asset_name in ["BTC", "GOLD"]:
+            for asset_name in list(self.trading_bot.config["assets"].keys()):
                 if not self.trading_bot.config["assets"][asset_name].get(
                     "enabled", False
                 ):
@@ -1983,16 +1985,19 @@ class TradingTelegramBot:
                         else:
                             sig, det = agg.get_aggregated_signal(df_15.copy())
 
+                        exchange = self.trading_bot.config["assets"].get(asset_name, {}).get("exchange", "binance")
+                        symbol = self.trading_bot.config["assets"].get(asset_name, {}).get("symbol")
                         handler = (
                             self.trading_bot.binance_handler
-                            if asset_name == "BTC"
+                            if exchange == "binance"
                             else self.trading_bot.mt5_handler
                         )
-                        price = (
-                            handler.get_current_price()
-                            if handler
-                            else df_15["close"].iloc[-1]
-                        )
+                        price = None
+                        if handler and symbol:
+                            price = handler.get_current_price(symbol=symbol)
+                        
+                        if price is None:
+                            price = df_15["close"].iloc[-1]
 
                         return df_15, df_4, sig, det, price
 
@@ -2047,26 +2052,23 @@ class TradingTelegramBot:
     async def _send_stats_message(self, query):
         """Send signal statistics (for callback)"""
         try:
-            btc_stats = self.signal_monitor.get_signal_statistics("BTC")
-            gold_stats = self.signal_monitor.get_signal_statistics("GOLD")
-
             msg = "📊 *Signal Statistics*\n\n"
-
-            if btc_stats:
-                msg += "*₿ BTC*\n"
-                msg += f"Total: {btc_stats['total_signals']}\n"
-                msg += f"🟢 BUY: {btc_stats['buy_signals']} ({btc_stats['buy_pct']:.1f}%)\n"
-                msg += f"🔴 SELL: {btc_stats['sell_signals']} ({btc_stats['sell_pct']:.1f}%)\n"
-                msg += f"⚪ HOLD: {btc_stats['hold_signals']} ({btc_stats['hold_pct']:.1f}%)\n"
-                msg += f"⭐ Avg Quality: {btc_stats['avg_quality']:.2f}\n\n"
-
-            if gold_stats:
-                msg += "*🥇 GOLD*\n"
-                msg += f"Total: {gold_stats['total_signals']}\n"
-                msg += f"🟢 BUY: {gold_stats['buy_signals']} ({gold_stats['buy_pct']:.1f}%)\n"
-                msg += f"🔴 SELL: {gold_stats['sell_signals']} ({gold_stats['sell_pct']:.1f}%)\n"
-                msg += f"⚪ HOLD: {gold_stats['hold_signals']} ({gold_stats['hold_pct']:.1f}%)\n"
-                msg += f"⭐ Avg Quality: {gold_stats['avg_quality']:.2f}\n"
+            
+            for asset in list(self.trading_bot.config["assets"].keys()):
+                if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                    continue
+                
+                stats = self.signal_monitor.get_signal_statistics(asset)
+                if not stats:
+                    continue
+                    
+                emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
+                msg += f"*{emoji} {asset}*\n"
+                msg += f"Total: {stats['total_signals']}\n"
+                msg += f"🟢 BUY: {stats['buy_signals']} ({stats['buy_pct']:.1f}%)\n"
+                msg += f"🔴 SELL: {stats['sell_signals']} ({stats['sell_pct']:.1f}%)\n"
+                msg += f"⚪ HOLD: {stats['hold_signals']} ({stats['hold_pct']:.1f}%)\n"
+                msg += f"⭐ Avg Quality: {stats['avg_quality']:.2f}\n\n"
 
             keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="stats")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2081,7 +2083,7 @@ class TradingTelegramBot:
         """Send signals message (for callback)"""
         try:
             msg = "📡 *Latest Trading Signals*\n\n"
-            for asset in ["BTC", "GOLD"]:
+            for asset in list(self.trading_bot.config["assets"].keys()):
                 if not self.trading_bot.config["assets"][asset].get("enabled", False):
                     continue
 
@@ -2434,12 +2436,29 @@ class TradingTelegramBot:
                 f"💰 Portfolio Value: ${total_value:,.2f}\n"
                 f"💵 Cash: ${cash:,.2f}\n"
                 f"📈 Open Positions: {open_positions}\n"
-                # f"{pnl_icon} Daily P&L: {pnl_sign}${daily_pnl:,.2f}\n\n"
-                f"*Market Status:*\n"
-                f"₿ BTC: {btc_status}\n"
-                f"🥇 GOLD: {gold_status}\n\n"
-                f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
+                f"\n*Market Status:*\n"
             )
+
+            for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
+                if not asset_cfg.get("enabled", False):
+                    continue
+                
+                emoji = "₿" if "BTC" in asset_name.upper() else "🥇" if "GOLD" in asset_name.upper() else "📈"
+                
+                if "BTC" in asset_name.upper():
+                    market_status = "✅ 24/7 Open"
+                elif "GOLD" in asset_name.upper() or "USTEC" in asset_name.upper():
+                    market_status = self._get_gold_market_status()
+                elif "EUR" in asset_name.upper():
+                    # Simple Forex status
+                    is_open = self.trading_bot.check_market_hours(asset_name)
+                    market_status = "✅ Open" if is_open else "🔴 Closed (Weekend)"
+                else:
+                    market_status = "❓ Unknown"
+                    
+                status_msg += f"{emoji} {asset_name}: {market_status}\n"
+
+            status_msg += f"\n🕐 Updated: {datetime.now().strftime('%H:%M:%S')}"
 
             keyboard = [
                 [
@@ -2475,7 +2494,8 @@ class TradingTelegramBot:
 
                 if handler:
                     try:
-                        price = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        price = handler.get_current_price(symbol=symbol)
                         if price and price > 0:
                             current_prices[asset_name] = price
                     except Exception as e:
@@ -2561,7 +2581,7 @@ class TradingTelegramBot:
         try:
             # Get current prices
             current_prices = {}
-            for asset_name in ["BTC", "GOLD"]:
+            for asset_name in list(self.trading_bot.config["assets"].keys()):
                 asset_cfg = self.trading_bot.config["assets"].get(asset_name, {})
                 if not asset_cfg.get("enabled", False):
                     continue
@@ -2575,7 +2595,8 @@ class TradingTelegramBot:
 
                 if handler:
                     try:
-                        current_prices[asset_name] = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                     except:
                         pass
 
@@ -2670,30 +2691,24 @@ class TradingTelegramBot:
                 return
 
             def _prepare_stats():
-                btc_stats = self.signal_monitor.get_signal_statistics("BTC")
-                gold_stats = self.signal_monitor.get_signal_statistics("GOLD")
-
                 msg = "📊 *Signal Statistics*\n\n"
-
-                # BTC Stats
-                if btc_stats:
-                    msg += "*₿ BTC*\n"
-                    msg += f"Total: {btc_stats['total_signals']}\n"
-                    msg += f"🟢 BUY: {btc_stats['buy_signals']} ({btc_stats['buy_pct']:.1f}%)\n"
-                    msg += f"🔴 SELL: {btc_stats['sell_signals']} ({btc_stats['sell_pct']:.1f}%)\n"
-                    msg += f"⚪ HOLD: {btc_stats['hold_signals']} ({btc_stats['hold_pct']:.1f}%)\n"
-                    msg += f"⭐ Avg Quality: {btc_stats['avg_quality']:.2f}\n"
-                    msg += f"✨ High Quality: {btc_stats['high_quality_count']}\n\n"
-
-                # GOLD Stats
-                if gold_stats:
-                    msg += "*🥇 GOLD*\n"
-                    msg += f"Total: {gold_stats['total_signals']}\n"
-                    msg += f"🟢 BUY: {gold_stats['buy_signals']} ({gold_stats['buy_pct']:.1f}%)\n"
-                    msg += f"🔴 SELL: {gold_stats['sell_signals']} ({gold_stats['sell_pct']:.1f}%)\n"
-                    msg += f"⚪ HOLD: {gold_stats['hold_signals']} ({gold_stats['hold_pct']:.1f}%)\n"
-                    msg += f"⭐ Avg Quality: {gold_stats['avg_quality']:.2f}\n"
-                    msg += f"✨ High Quality: {gold_stats['high_quality_count']}\n"
+                
+                for asset in list(self.trading_bot.config["assets"].keys()):
+                    if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                        continue
+                        
+                    stats = self.signal_monitor.get_signal_statistics(asset)
+                    if not stats:
+                        continue
+                        
+                    emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
+                    msg += f"*{emoji} {asset}*\n"
+                    msg += f"Total: {stats['total_signals']}\n"
+                    msg += f"🟢 BUY: {stats['buy_signals']} ({stats['buy_pct']:.1f}%)\n"
+                    msg += f"🔴 SELL: {stats['sell_signals']} ({stats['sell_pct']:.1f}%)\n"
+                    msg += f"⚪ HOLD: {stats['hold_signals']} ({stats['hold_pct']:.1f}%)\n"
+                    msg += f"⭐ Avg Quality: {stats['avg_quality']:.2f}\n"
+                    msg += f"✨ High Quality: {stats['high_quality_count']}\n\n"
 
                 keyboard = [
                     [
@@ -2721,11 +2736,11 @@ class TradingTelegramBot:
         """Handle /signals command"""
         try:
             msg = "📡 *Latest Trading Signals*\n\n"
-            for asset in ["BTC", "GOLD"]:
+            for asset in list(self.trading_bot.config["assets"].keys()):
                 if not self.trading_bot.config["assets"][asset].get("enabled", False):
                     continue
 
-                emoji = "₿" if asset == "BTC" else "🥇"
+                emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
                 msg += f"{emoji} *{asset} Signals (last 5)*\n"
 
                 signals = self.signal_monitor.get_last_signals(asset, n=5)
@@ -2783,29 +2798,26 @@ class TradingTelegramBot:
                 return
 
             def _prepare_regimes():
-                btc_regime = self.signal_monitor.get_regime_info("BTC")
-                gold_regime = self.signal_monitor.get_regime_info("GOLD")
-
                 msg = "🔄 *Market Regimes*\n\n"
-
-                msg += "*₿ BTC*\n"
-                msg += f"Changes: {btc_regime.get('change_count', 0)}\n"
-                if btc_regime.get("last_changes"):
-                    msg += "Recent:\n"
-                    for change in btc_regime["last_changes"][-3:]:
-                        ts = change["timestamp"].strftime("%H:%M")
-                        regime = "🚀" if "BULL" in change["regime"] else "🐻"
-                        msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
-                msg += "\n"
-
-                msg += "*🥇 GOLD*\n"
-                msg += f"Changes: {gold_regime.get('change_count', 0)}\n"
-                if gold_regime.get("last_changes"):
-                    msg += "Recent:\n"
-                    for change in gold_regime["last_changes"][-3:]:
-                        ts = change["timestamp"].strftime("%H:%M")
-                        regime = "🚀" if "BULL" in change["regime"] else "🐻"
-                        msg += f"  {ts}: {regime} @ ${change['price']:,.2f}\n"
+                
+                for asset in list(self.trading_bot.config["assets"].keys()):
+                    if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                        continue
+                        
+                    regime_info = self.signal_monitor.get_regime_info(asset)
+                    if not regime_info:
+                        continue
+                        
+                    emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
+                    msg += f"*{emoji} {asset}*\n"
+                    msg += f"Changes: {regime_info.get('change_count', 0)}\n"
+                    if regime_info.get("last_changes"):
+                        msg += "Recent:\n"
+                        for change in regime_info["last_changes"][-3:]:
+                            ts = change["timestamp"].strftime("%H:%M")
+                            regime_icon = "🚀" if "BULL" in change["regime"] else "🐻"
+                            msg += f"  {ts}: {regime_icon} @ ${change['price']:,.2f}\n"
+                    msg += "\n"
 
                 keyboard = [
                     [InlineKeyboardButton("🔄 Refresh", callback_data="regimes")]
@@ -2833,32 +2845,28 @@ class TradingTelegramBot:
                 return
 
             def _prepare_overrides():
-                btc_overrides = self.signal_monitor.get_override_info("BTC")
-                gold_overrides = self.signal_monitor.get_override_info("GOLD")
-
                 msg = "🔒 *Golden Cross Overrides*\n"
                 msg += "(Sells blocked during bull market)\n\n"
-
-                msg += "*₿ BTC*\n"
-                msg += f"Total Overrides: {btc_overrides['total']}\n"
-                if btc_overrides["total"] > 0:
-                    msg += f"Avg Quality: {btc_overrides['avg_quality']:.2f}\n"
-                    if btc_overrides["last_events"]:
-                        msg += "Recent Blocks:\n"
-                        for event in btc_overrides["last_events"][-3:]:
-                            ts = event["timestamp"].strftime("%H:%M")
-                            msg += f"  {ts}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
-                msg += "\n"
-
-                msg += "*🥇 GOLD*\n"
-                msg += f"Total Overrides: {gold_overrides['total']}\n"
-                if gold_overrides["total"] > 0:
-                    msg += f"Avg Quality: {gold_overrides['avg_quality']:.2f}\n"
-                    if gold_overrides["last_events"]:
-                        msg += "Recent Blocks:\n"
-                        for event in gold_overrides["last_events"][-3:]:
-                            ts = event["timestamp"].strftime("%H:%M")
-                            msg += f"  {ts}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
+                
+                for asset in list(self.trading_bot.config["assets"].keys()):
+                    if not self.trading_bot.config["assets"][asset].get("enabled", False):
+                        continue
+                        
+                    overrides = self.signal_monitor.get_override_info(asset)
+                    if not overrides or overrides['total'] == 0:
+                        continue
+                        
+                    emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
+                    msg += f"*{emoji} {asset}*\n"
+                    msg += f"Total Overrides: {overrides['total']}\n"
+                    if overrides["total"] > 0:
+                        msg += f"Avg Quality: {overrides['avg_quality']:.2f}\n"
+                        if overrides["last_events"]:
+                            msg += "Recent Blocks:\n"
+                            for event in overrides["last_events"][-3:]:
+                                ts = event["timestamp"].strftime("%H:%M")
+                                msg += f"  {ts}: @ ${event['price']:,.2f} (Quality: {event['quality']:.2f})\n"
+                    msg += "\n"
 
                 keyboard = [
                     [InlineKeyboardButton("🔄 Refresh", callback_data="overrides")]

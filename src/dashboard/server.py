@@ -594,6 +594,26 @@ def serve_template(filename):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/logs")
+def get_logs():
+    """Read the last N lines of the log file"""
+    try:
+        log_file = os.path.join(project_root, "logs", "trading_bot.log")
+        if not os.path.exists(log_file):
+            return jsonify({"logs": "Log file not found."})
+
+        # Read last 500 lines
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            # Efficiently read last lines
+            lines = f.readlines()
+            last_lines = lines[-500:]
+            return jsonify({"logs": "".join(last_lines)})
+
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/health")
 def health_check():
     """Health check endpoint"""
