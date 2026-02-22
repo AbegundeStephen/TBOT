@@ -145,9 +145,12 @@ class BaseStrategy(ABC):
                 df_clean, self.config.get("outlier_std", 3.0)
             )
 
+        # ONLY take numeric columns for features
+        numeric_cols = df_clean.select_dtypes(include=[np.number]).columns
         self.feature_columns = [
-            col for col in df_clean.columns if col not in ["label", "timestamp"]
+            col for col in numeric_cols if col not in ["label", "timestamp", "time", "date"]
         ]
+        
         X = df_clean[self.feature_columns].values
         y = df_clean["label"].values
 
