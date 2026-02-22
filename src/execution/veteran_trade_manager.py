@@ -564,21 +564,18 @@ class VeteranTradeManager:
             # Fractal Exit Logic for Trend Following
             if self.trade_type == "TREND" and df_4h is not None and not df_4h.empty:
                 new_stop_loss = None
-                if self.asset == "BTC" and len(df_4h) >= 20:
-                    ema_20_4h = talib.EMA(df_4h['close'], timeperiod=20).iloc[-1]
-                    if not np.isnan(ema_20_4h):
-                        new_stop_loss = ema_20_4h
-                elif self.asset == "GOLD" and len(df_4h) >= 5:
-                    swing_low_4h = df_4h['low'].rolling(5).min().iloc[-1]
-                    if not np.isnan(swing_low_4h):
-                        new_stop_loss = swing_low_4h
+                if len(df_4h) >= 5:
+                    if self.side == "long":
+                        new_stop_loss = df_4h['low'].rolling(5).min().iloc[-1]
+                    else: # short
+                        new_stop_loss = df_4h['high'].rolling(5).max().iloc[-1]
 
-                if new_stop_loss is not None:
+                if new_stop_loss is not None and not np.isnan(new_stop_loss):
                     if self.side == "long" and new_stop_loss > self.current_stop_loss:
-                        logger.info(f"[VTM] Fractal SL updated for {self.asset} LONG to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
+                        logger.info(f"[VTM] Structure SL updated for {self.asset} LONG to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
                         self.current_stop_loss = new_stop_loss
                     elif self.side == "short" and new_stop_loss < self.current_stop_loss:
-                        logger.info(f"[VTM] Fractal SL updated for {self.asset} SHORT to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
+                        logger.info(f"[VTM] Structure SL updated for {self.asset} SHORT to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
                         self.current_stop_loss = new_stop_loss
 
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price

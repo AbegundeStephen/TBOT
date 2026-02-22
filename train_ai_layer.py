@@ -34,13 +34,13 @@ from src.ai.analyst import DynamicAnalyst
 
 def train_dual_timeframe_system(
     # DATA SOURCES (must provide both timeframes)
-    assets=["btc", "gold"],
+    assets=["btc", "gold", "ustec", "eurjpy", "eurusd"],
     data_folder="data",
     # TRAINING PARAMETERS
     samples_per_pattern=2000,
     min_samples_per_class=50,
-    epochs=300,
-    batch_size=64,
+    epochs=50,
+    batch_size=128,
     validation_split=0.2,
     use_class_weights=True,
     max_class_weight=10.0,

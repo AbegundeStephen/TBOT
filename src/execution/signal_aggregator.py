@@ -381,6 +381,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             adx = latest.get("adx", 20)
             macd_hist = latest.get("macd_hist", 0)
             rsi = latest.get("rsi", 50)
+            
+            # Asset-specific ADX threshold
+            adx_threshold = getattr(self.s_trend_following, 'adx_threshold', 25)
 
             # ===============================
             # 4️⃣ Multi-factor scoring
@@ -413,7 +416,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 bearish_score += 1
 
             # ADX trend strength
-            if adx > 25:
+            if adx > adx_threshold:
                 if ema_diff_pct > 0:
                     bullish_score += 1
                 else:
@@ -584,6 +587,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ================================================================
             try:
                 sr_result = self.ai_validator._check_support_resistance_fixed(
+                    asset=self.asset_type,
                     df=df,
                     current_price=current_price,
                     signal=final_signal,
@@ -910,9 +914,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             return True, {'trigger_type': 'DISABLED'}
 
         try:
-            if not validate_candle_structure(df, self.asset_type):
-                logger.info(f"[SNIPER] ❌ BLOCKED - Trap candle detected for {self.asset_type}")
-                return False, {'trigger_type': 'TRAP_CANDLE', 'reason': 'Candle structure indicates a trap'}
+            # Trap filter moved to pre-consensus veto phase
 
             latest = df.iloc[-1]
             reasons = []
@@ -1076,6 +1078,49 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             return True, 0.01
     
 
+
+    def _check_atr_expansion_filter(self, df: pd.DataFrame, trade_type: str) -> bool:
+        """
+        Filter 5: ATR Expansion Proxy
+        Pre-trade check: candle_range >= 1.5 * current_ATR
+        Only applies to TREND trades.
+        """
+        if trade_type != "TREND":
+            return True
+            
+        try:
+            if len(df) < 20:
+                return True
+                
+            latest = df.iloc[-1]
+            candle_range = latest['high'] - latest['low']
+            
+            # Calculate ATR (14)
+            try:
+                import talib
+                atr = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            except Exception:
+                # Manual ATR calculation fallback
+                high_low = df['high'] - df['low']
+                high_close = np.abs(df['high'] - df['close'].shift())
+                low_close = np.abs(df['low'] - df['close'].shift())
+                ranges = pd.concat([high_low, high_close, low_close], axis=1)
+                true_range = ranges.max(axis=1)
+                atr = true_range.rolling(14).mean().iloc[-1]
+            
+            if pd.isna(atr) or atr == 0:
+                return True
+                
+            passed = candle_range >= 1.5 * atr
+            
+            if not passed:
+                logger.info(f"[ATR_EXP] ❌ BLOCKED - Range {candle_range:.5f} < 1.5 * ATR ({1.5*atr:.5f})")
+                
+            return passed
+        except Exception as e:
+            logger.error(f"[ATR_EXP] Error: {e}")
+            return True # Fail-open
+
     def get_aggregated_signal(
         self,
         df: pd.DataFrame,
@@ -1168,6 +1213,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
             signal_quality = max(mr_conf, tf_conf)
 
+            # --- Directional Trap Filter Veto (Computational Efficiency) ---
+            if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
+                # Determine likely direction for structure check
+                test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
+                if not validate_candle_structure(df, self.asset_type, direction=test_direction):
+                    logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
+                    return 0, {
+                        "timestamp": timestamp,
+                        "regime": regime_name,
+                        "reasoning": "blocked_by_trap_filter",
+                        "final_signal": 0,
+                        "signal_quality": 0.0,
+                        "mr_signal": 0,
+                        "tf_signal": 0,
+                        "ema_signal": 0
+                    }
+
             # STEP 3: AI VALIDATION (with circuit breaker)
             ai_bypass = False
             ai_validation_details = {}
@@ -1233,8 +1295,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         sniper_passed, _ = self._check_sniper_filter(df, final_signal)
                         if not sniper_passed: final_signal = 0; reasoning = "no_sniper_confirmation"
                         else:
-                            profit_passed, _ = self._check_profit_filter(df)
-                            if not profit_passed: final_signal = 0; reasoning = "insufficient_profit_potential"
+                            atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
+                            if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_candle_expansion"
+                            else:
+                                profit_passed, _ = self._check_profit_filter(df)
+                                if not profit_passed: final_signal = 0; reasoning = "insufficient_profit_potential"
             
             # STEP 7: Build response
             details = {

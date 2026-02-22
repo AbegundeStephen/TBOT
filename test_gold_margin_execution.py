@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Complete GOLD Margin Trading Test Suite for MetaTrader 5
+Multi-Asset Margin Trading Test Suite for MetaTrader 5
 Tests the entire trading pipeline: LONG → HOLD → SHORT → CLOSE
 
 Usage:
-  python test_gold_margin_execution.py --mode live    # Execute real trades on MT5
-  python test_gold_margin_execution.py --mode paper   # Simulated trades (default)
-  python test_gold_margin_execution.py --test long    # Test only LONG
-  python test_gold_margin_execution.py --test short   # Test only SHORT
-  python test_gold_margin_execution.py --test full    # Full cycle (default)
+  python test_gold_margin_execution.py --asset USTEC --mode live    # Execute real trades
+  python test_gold_margin_execution.py --asset EURJPY --mode paper  # Simulated trades
+  python test_gold_margin_execution.py --test long                 # Test only LONG
 """
 
 import subprocess
@@ -17,7 +15,7 @@ import logging
 import sys
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import MetaTrader5 as mt5
 
@@ -64,9 +62,9 @@ def initialize_mt5(config):
     return True
 
 
-def create_signal_details(signal_type: str, confidence: float = 0.85):
+def create_signal_details(asset_name: str, signal_type: str, confidence: float = 0.85):
     """
-    Create realistic signal_details matching what your strategies generate for GOLD.
+    Create realistic signal_details matching what your strategies generate.
     """
     regime_map = {
         "buy": {
@@ -95,7 +93,7 @@ def create_signal_details(signal_type: str, confidence: float = 0.85):
         "signal_quality": confidence,
         "regime": regime["emoji"],
         "regime_confidence": confidence,
-        "reasoning": f"TEST SCRIPT: Simulated {signal_type.upper()} signal for GOLD validation",
+        "reasoning": f"TEST SCRIPT: Simulated {signal_type.upper()} signal for {asset_name} validation",
         "aggregator_mode": "council",
         "mode_confidence": confidence,
         "regime_analysis": {
@@ -133,13 +131,13 @@ def check_mt5_account_info() -> dict:
         return {'balance': 0, 'equity': 0, 'margin': 0, 'margin_free': 0}
 
 
-def test_long_position(handler, current_price, config):
-    """Test opening a LONG position for GOLD"""
+def test_long_position(handler, asset_name, current_price, config):
+    """Test opening a LONG position"""
     logger.info("\n" + "=" * 80)
-    logger.info("🧪 TEST 1: LONG POSITION (BUY SIGNAL)")
+    logger.info(f"🧪 TEST 1: {asset_name} LONG POSITION (BUY SIGNAL)")
     logger.info("=" * 80)
     
-    signal_details = create_signal_details("buy", confidence=0.85)
+    signal_details = create_signal_details(asset_name, "buy", confidence=0.85)
     
     logger.info(f"📊 Signal Details:")
     logger.info(f"  Quality:     {signal_details['signal_quality']:.0%}")
@@ -148,21 +146,21 @@ def test_long_position(handler, current_price, config):
     try:
         success = handler.execute_signal(
             signal=1,  # BUY
-            asset_name="GOLD",
+            asset_name=asset_name,
             confidence_score=0.85,
             market_condition="bull",
             signal_details=signal_details,
         )
         
         if success:
-            logger.info("\n✅ LONG POSITION OPENED SUCCESSFULLY")
-            positions = handler.portfolio_manager.get_asset_positions("GOLD")
+            logger.info(f"\n✅ {asset_name} LONG POSITION OPENED SUCCESSFULLY")
+            positions = handler.portfolio_manager.get_asset_positions(asset_name)
             if positions:
                 pos = positions[-1]
                 logger.info(f"\n📈 Position Details:")
                 logger.info(f"  ID:          {pos.position_id}")
                 logger.info(f"  Side:        {pos.side.upper()}")
-                logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
+                logger.info(f"  Entry:       ${pos.entry_price:,.5f}")
                 logger.info(f"  Quantity:    {pos.quantity} units")
                 logger.info(f"  Size:        ${(pos.quantity * pos.entry_price):,.2f}")
                 logger.info(f"  MT5 Ticket:  {pos.mt5_ticket}")
@@ -170,11 +168,11 @@ def test_long_position(handler, current_price, config):
                 if pos.trade_manager:
                     logger.info(f"  VTM:         ACTIVE ✓")
                     vtm_status = pos.get_vtm_status()
-                    logger.info(f"    SL: ${vtm_status.get('stop_loss', 0):,.2f}")
-                    logger.info(f"    TP: ${vtm_status.get('take_profit', 0):,.2f}")
+                    logger.info(f"    SL: ${vtm_status.get('stop_loss', 0):,.5f}")
+                    logger.info(f"    TP: ${vtm_status.get('take_profit', 0):,.5f}")
                 return True
         else:
-            logger.error("\n❌ LONG POSITION FAILED")
+            logger.error(f"\n❌ {asset_name} LONG POSITION FAILED")
             return False
             
     except Exception as e:
@@ -182,35 +180,35 @@ def test_long_position(handler, current_price, config):
         return False
 
 
-def test_hold_signal(handler, current_price):
+def test_hold_signal(handler, asset_name):
     """Test HOLD signal (checks SL/TP on existing positions)"""
     logger.info("\n" + "=" * 80)
-    logger.info("🧪 TEST 2: HOLD SIGNAL (Position Management)")
+    logger.info(f"🧪 TEST 2: {asset_name} HOLD SIGNAL (Position Management)")
     logger.info("=" * 80)
     
-    if not handler.portfolio_manager.get_asset_positions("GOLD"):
-        logger.warning("⚠️  No positions to manage - skipping HOLD test")
+    if not handler.portfolio_manager.get_asset_positions(asset_name):
+        logger.warning(f"⚠️  No {asset_name} positions to manage - skipping HOLD test")
         return True # Not a failure
     
     try:
         success = handler.execute_signal(
             signal=0,  # HOLD
-            asset_name="GOLD",
+            asset_name=asset_name,
         )
-        logger.info("\n✅ HOLD SIGNAL PROCESSED (Checked SL/TP)")
+        logger.info(f"\n✅ {asset_name} HOLD SIGNAL PROCESSED (Checked SL/TP)")
         return True
     except Exception as e:
-        logger.error(f"\n❌ EXCEPTION during HOLD: {e}", exc_info=True)
+        logger.error(f"\n❌ EXCEPTION during HOLD for {asset_name}: {e}", exc_info=True)
         return False
 
 
-def test_short_position(handler, current_price, config):
-    """Test opening a SHORT position for GOLD"""
+def test_short_position(handler, asset_name, current_price, config):
+    """Test opening a SHORT position"""
     logger.info("\n" + "=" * 80)
-    logger.info("🧪 TEST 3: SHORT POSITION (SELL SIGNAL)")
+    logger.info(f"🧪 TEST 3: {asset_name} SHORT POSITION (SELL SIGNAL)")
     logger.info("=" * 80)
     
-    signal_details = create_signal_details("sell", confidence=0.88)
+    signal_details = create_signal_details(asset_name, "sell", confidence=0.88)
     
     logger.info(f"📊 Signal Details:")
     logger.info(f"  Quality:      {signal_details['signal_quality']:.0%}")
@@ -219,22 +217,22 @@ def test_short_position(handler, current_price, config):
     try:
         success = handler.execute_signal(
             signal=-1,  # SELL
-            asset_name="GOLD",
+            asset_name=asset_name,
             confidence_score=0.88,
             market_condition="bear",
             signal_details=signal_details,
         )
         
         if success:
-            logger.info("\n✅ SHORT POSITION OPENED SUCCESSFULLY")
-            positions = handler.portfolio_manager.get_asset_positions("GOLD")
+            logger.info(f"\n✅ {asset_name} SHORT POSITION OPENED SUCCESSFULLY")
+            positions = handler.portfolio_manager.get_asset_positions(asset_name)
             shorts = [p for p in positions if p.side == "short"]
             if shorts:
                 pos = shorts[-1]
                 logger.info(f"\n📉 Position Details:")
                 logger.info(f"  ID:          {pos.position_id}")
                 logger.info(f"  Side:        {pos.side.upper()}")
-                logger.info(f"  Entry:       ${pos.entry_price:,.2f}")
+                logger.info(f"  Entry:       ${pos.entry_price:,.5f}")
                 logger.info(f"  Quantity:    {pos.quantity} units")
                 logger.info(f"  Size:        ${(pos.quantity * pos.entry_price):,.2f}")
                 logger.info(f"  MT5 Ticket:  {pos.mt5_ticket}")
@@ -242,11 +240,11 @@ def test_short_position(handler, current_price, config):
                 if pos.trade_manager:
                     logger.info(f"  VTM:         ACTIVE ✓")
                     vtm_status = pos.get_vtm_status()
-                    logger.info(f"    SL: ${vtm_status.get('stop_loss', 0):,.2f}")
-                    logger.info(f"    TP: ${vtm_status.get('take_profit', 0):,.2f}")
+                    logger.info(f"    SL: ${vtm_status.get('stop_loss', 0):,.5f}")
+                    logger.info(f"    TP: ${vtm_status.get('take_profit', 0):,.5f}")
                 return True
         else:
-            logger.error("\n❌ SHORT POSITION FAILED")
+            logger.error(f"\n❌ {asset_name} SHORT POSITION FAILED")
             return False
             
     except Exception as e:
@@ -254,41 +252,39 @@ def test_short_position(handler, current_price, config):
         return False
 
 
-def test_close_all(handler, current_price):
+def test_close_all(handler, asset_name, current_price):
     """Test closing all positions"""
     logger.info("\n" + "=" * 80)
-    logger.info("🧪 TEST 4: CLOSE ALL POSITIONS")
+    logger.info(f"🧪 TEST 4: CLOSE ALL {asset_name} POSITIONS")
     logger.info("=" * 80)
     
-    positions = handler.portfolio_manager.get_asset_positions("GOLD")
+    positions = handler.portfolio_manager.get_asset_positions(asset_name)
     if not positions:
-        logger.warning("⚠️  No positions to close")
+        logger.warning(f"⚠️  No {asset_name} positions to close")
         return True
     
     # Use portfolio_manager's dedicated method to close all positions for the asset.
-    # This ensures proper state management within the portfolio.
     closed_positions_results = handler.portfolio_manager.close_all_positions_for_asset(
-        asset="GOLD",
+        asset=asset_name,
         exit_price=current_price,
         reason="test_suite_close_all"
     )
 
-    remaining = handler.portfolio_manager.get_asset_positions("GOLD")
+    remaining = handler.portfolio_manager.get_asset_positions(asset_name)
     if not remaining:
-        logger.info("\n✅ ALL POSITIONS CLOSED SUCCESSFULLY")
-        # Check if the number of successfully closed positions matches the initial count
+        logger.info(f"\n✅ ALL {asset_name} POSITIONS CLOSED SUCCESSFULLY")
         success = len(closed_positions_results) == len(positions)
     else:
-        logger.error(f"\n❌ FAILED TO CLOSE ALL POSITIONS. {len(remaining)} remaining.")
+        logger.error(f"\n❌ FAILED TO CLOSE ALL {asset_name} POSITIONS. {len(remaining)} remaining.")
         success = False
 
     return success
 
 
-def run_full_test_suite(mode="paper", test_type="full"):
-    """Run complete test suite for GOLD on MT5"""
+def run_full_test_suite(asset_name="GOLD", mode="paper", test_type="full"):
+    """Run complete test suite for an asset on MT5"""
     logger.info("=" * 80)
-    logger.info("🚀 GOLD MARGIN COMPLETE TEST SUITE (MT5)")
+    logger.info(f"🚀 {asset_name} MARGIN COMPLETE TEST SUITE (MT5)")
     logger.info("=" * 80)
     logger.info(f"Mode: {mode.upper()}")
     logger.info(f"Test Type: {test_type.upper()}")
@@ -298,8 +294,8 @@ def run_full_test_suite(mode="paper", test_type="full"):
     config = load_config()
     config["trading"]["mode"] = mode
     
-    if not config["assets"]["GOLD"].get("enabled", False):
-        logger.error("❌ GOLD is disabled in config!")
+    if not config["assets"].get(asset_name, {}).get("enabled", False):
+        logger.error(f"❌ {asset_name} is disabled in config!")
         return False
 
     if not initialize_mt5(config):
@@ -331,21 +327,19 @@ def run_full_test_suite(mode="paper", test_type="full"):
     logger.info(f"  Equity:       ${account_info['equity']:,.2f}")
     logger.info(f"  Free Margin:  ${account_info['margin_free']:,.2f}")
     
-    if mode == "live" and account_info['margin_free'] < 100:
-        logger.error("\n❌ INSUFFICIENT MARGIN! Need at least $100 free margin for live testing.")
+    if mode == "live" and account_info['margin_free'] < 50:
+        logger.error("\n❌ INSUFFICIENT MARGIN! Need at least $50 free margin for live testing.")
         mt5.shutdown()
         return False
 
-    # Initialize Portfolio Manager and Execution Handler in two stages to resolve circular dependency
+    # Initialize Portfolio Manager and Execution Handler
     try:
-        # Stage 1: Create PortfolioManager without handlers
         portfolio_manager = PortfolioManager(
             config=config,
             db_manager=db_manager
         )
         logger.info("✅ Portfolio Manager initialized (Stage 1)")
 
-        # Stage 2: Create Handler and link it to PortfolioManager
         handler = MT5ExecutionHandler(
             config=config,
             portfolio_manager=portfolio_manager,
@@ -353,12 +347,10 @@ def run_full_test_suite(mode="paper", test_type="full"):
         )
         logger.info("✅ MT5 Execution Handler initialized")
 
-        # Stage 3: Link handler back to Portfolio Manager
         portfolio_manager.mt5_handler = handler
         portfolio_manager.execution_handlers = {'mt5': handler}
         logger.info("✅ Portfolio Manager linked with MT5 Handler (Stage 2)")
 
-        # Refresh capital now that handlers are linked
         portfolio_manager.refresh_capital(force=True)
         logger.info(f"   Live Capital Refreshed: ${portfolio_manager.current_capital:,.2f}")
 
@@ -367,10 +359,10 @@ def run_full_test_suite(mode="paper", test_type="full"):
         mt5.shutdown()
         return False
 
-    symbol = config["assets"]["GOLD"]["symbol"]
+    symbol = config["assets"][asset_name]["symbol"]
     try:
         current_price = handler.get_current_price(symbol)
-        logger.info(f"\n💰 Current GOLD ({symbol}) Price: ${current_price:,.2f}")
+        logger.info(f"\n💰 Current {asset_name} ({symbol}) Price: ${current_price:,.5f}")
     except Exception as e:
         logger.error(f"❌ Could not fetch price for {symbol}: {e}")
         mt5.shutdown()
@@ -378,35 +370,31 @@ def run_full_test_suite(mode="paper", test_type="full"):
 
     results = {"long": False, "hold": False, "short": False, "close": False}
     
-    # Since hedging is enabled, closing positions before starting is a good idea.
-    logger.info("Attempting to close any existing GOLD positions before starting test...")
-    test_close_all(handler, current_price)
+    logger.info(f"Attempting to close any existing {asset_name} positions before starting test...")
+    test_close_all(handler, asset_name, current_price)
 
 
     try:
         if test_type in ["long", "full"]:
-            results["long"] = test_long_position(handler, current_price, config)
+            results["long"] = test_long_position(handler, asset_name, current_price, config)
             time.sleep(2)
         
         if test_type == "full":
-            # Update price for next test
             current_price = handler.get_current_price(symbol)
-            results["hold"] = test_hold_signal(handler, current_price)
+            results["hold"] = test_hold_signal(handler, asset_name)
             time.sleep(2)
         
         if test_type in ["short", "full"]:
             current_price = handler.get_current_price(symbol)
-            results["short"] = test_short_position(handler, current_price, config)
+            results["short"] = test_short_position(handler, asset_name, current_price, config)
             time.sleep(2)
         
         if test_type == "full":
             current_price = handler.get_current_price(symbol)
-            # The logic in MT5Handler for a SELL signal will close existing LONGs if hedging is off.
-            # If hedging is ON, both can exist. The test should try to close everything.
             config['trading']['allow_simultaneous_long_short'] = False # Force close
             logger.info("Temporarily disabling hedging to ensure shorts close longs.")
-            handler.config = config # update handler's config
-            results["close"] = test_close_all(handler, current_price)
+            handler.config = config 
+            results["close"] = test_close_all(handler, asset_name, current_price)
     
     except KeyboardInterrupt:
         logger.warning("\n⚠️  Test interrupted by user")
@@ -426,12 +414,12 @@ def run_full_test_suite(mode="paper", test_type="full"):
             logger.info(f"{status} - {test_name.upper()}")
             if not result: all_passed = False
     
-    positions = handler.portfolio_manager.get_asset_positions("GOLD")
+    positions = handler.portfolio_manager.get_asset_positions(asset_name)
     logger.info(f"\n📈 Final State:")
     logger.info(f"  Open Positions: {len(positions)}")
     if positions:
         for pos in positions:
-            logger.info(f"    {pos.position_id}: {pos.side.upper()} @ ${pos.entry_price:,.2f}")
+            logger.info(f"    {pos.position_id}: {pos.side.upper()} @ ${pos.entry_price:,.5f}")
 
     logger.info("\n" + "=" * 80)
     logger.info("TEST SUITE COMPLETE")
@@ -441,7 +429,8 @@ def run_full_test_suite(mode="paper", test_type="full"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GOLD Margin Trading Test Suite for MT5")
+    parser = argparse.ArgumentParser(description="MT5 Margin Trading Test Suite")
+    parser.add_argument("--asset", default="GOLD", help="Asset to test (GOLD, USTEC, EURJPY, EURUSD)")
     parser.add_argument("--mode", choices=["paper", "live"], default="paper", help="Trading mode")
     parser.add_argument("--test", choices=["long", "short", "full"], default="full", help="Test type")
     
@@ -456,5 +445,5 @@ if __name__ == "__main__":
             logger.info("Test cancelled")
             sys.exit(0)
     
-    success = run_full_test_suite(mode=args.mode, test_type=args.test)
+    success = run_full_test_suite(asset_name=args.asset.upper(), mode=args.mode, test_type=args.test)
     sys.exit(0 if success else 1)

@@ -460,6 +460,31 @@
             flex: 1;
         }
         
+        .terminal-box {
+            background: #0f172a;
+            color: #38bdf8;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Fira Code', 'Courier New', Courier, monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            border: 1px solid #334155;
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+            min-height: 400px;
+        }
+
+        .terminal-line {
+            margin-bottom: 2px;
+        }
+
+        .log-info { color: #38bdf8; }
+        .log-warning { color: #fbbf24; }
+        .log-error { color: #ef4444; }
+        .log-timestamp { color: #94a3b8; margin-right: 8px; }
+
         .header-left {
             display: flex;
             align-items: center;
@@ -527,6 +552,10 @@
                     <a href="/debrief" class="nav-btn">
                         🎬 Trade Debrief
                     </a>
+
+                    <button class="nav-btn" id="logs-btn" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);">
+                        💻 Terminal Logs
+                    </button>
 
                     <div class="docs-dropdown">
                         <button class="docs-btn" id="docs-btn">
@@ -642,6 +671,7 @@
             setupTabs();
             setupDropdown();
             setupModal();
+            setupLogs();
             await loadAllData();
             
             // Auto-refresh every 30 seconds
@@ -649,6 +679,78 @@
             
             console.log('✅ Dashboard ready');
         });
+
+        function setupLogs() {
+            const logsBtn = document.getElementById('logs-btn');
+            if (logsBtn) {
+                logsBtn.addEventListener('click', showLogs);
+            }
+        }
+
+        async function showLogs() {
+            const modal = document.getElementById('signal-modal');
+            const modalBody = document.getElementById('modal-body');
+            const modalTitle = document.querySelector('.modal-header h2');
+            
+            modalTitle.innerHTML = '💻 Terminal Logs <span style="font-size: 12px; font-weight: normal; opacity: 0.8;">(Last 500 lines)</span>';
+            modalBody.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching terminal output...</div>';
+            modal.classList.add('show');
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/logs`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                let logContent = data.logs || 'No logs found.';
+                
+                // Colorize logs
+                const colorizedLogs = logContent.split('\n').map(line => {
+                    if (!line.trim()) return '';
+                    
+                    let className = 'log-info';
+                    if (line.includes('WARNING')) className = 'log-warning';
+                    if (line.includes('ERROR') || line.includes('CRITICAL')) className = 'log-error';
+                    
+                    // Try to separate timestamp if it exists (assuming YYYY-MM-DD HH:MM:SS format)
+                    const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})/);
+                    if (timestampMatch) {
+                        const ts = timestampMatch[1];
+                        const rest = line.substring(ts.length);
+                        return `<div class="terminal-line"><span class="log-timestamp">${ts}</span><span class="${className}">${htmlEscape(rest)}</span></div>`;
+                    }
+                    
+                    return `<div class="terminal-line ${className}">${htmlEscape(line)}</div>`;
+                }).join('');
+                
+                modalBody.innerHTML = `
+                    <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                        <span style="color: #64748b; font-size: 13px;">Real-time feed from <code>logs/trading_bot.log</code></span>
+                        <button onclick="showLogs()" class="nav-btn" style="padding: 5px 15px; font-size: 12px; background: #667eea;">🔄 Refresh</button>
+                    </div>
+                    <div class="terminal-box" id="terminal-output">${colorizedLogs}</div>
+                `;
+                
+                // Scroll to bottom
+                const terminal = document.getElementById('terminal-output');
+                terminal.scrollTop = terminal.scrollHeight;
+                
+            } catch (error) {
+                console.error('Error loading logs:', error);
+                modalBody.innerHTML = `<div class="error">Failed to load logs: ${error.message}</div>`;
+            }
+        }
+
+        function htmlEscape(str) {
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
 
         // ============================================================================
         // TAB SWITCHING

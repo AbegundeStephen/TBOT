@@ -510,7 +510,7 @@ class PortfolioManager:
 
         self.positions: Dict[str, Position] = {}
         self.closed_positions: List[Dict] = []
-        self.price_history: Dict[str, List[float]] = {"BTC": [], "GOLD": []}
+        self.price_history: Dict[str, List[float]] = {asset: [] for asset in config["assets"].keys()}
         self.realized_pnl_today = 0.0
 
         self.session_start_time = None
@@ -859,11 +859,11 @@ class PortfolioManager:
             return "precious_metals"
         
         # Indices group
-        if asset in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW"]:
+        if any(x in asset for x in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW", "USTEC"]):
             return "indices"
         
         # Forex group
-        if asset in ["EUR", "EURUSD", "GBP", "GBPUSD", "JPY", "USDJPY"]:
+        if any(x in asset for x in ["EUR", "GBP", "JPY", "USD", "AUD", "CHF", "CAD"]):
             return "forex"
         
         return "other"
@@ -1478,12 +1478,41 @@ class PortfolioManager:
 
         return False
 
+    def _get_asset_bucket(self, asset: str) -> Optional[str]:
+        """Identify which exclusion bucket an asset belongs to"""
+        asset_upper = asset.upper()
+        
+        # BTC is explicitly excluded from bucket logic
+        if "BTC" in asset_upper:
+            return None
+            
+        # Bucket A: Gold and NAS100
+        if any(x in asset_upper for x in ["GOLD", "XAUUSD", "USTEC", "NAS100"]):
+            return "A"
+            
+        # Bucket B: EURJPY and EURUSD
+        if any(x in asset_upper for x in ["EURJPY", "EURUSD"]):
+            return "B"
+            
+        return None
+
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """Check both long and short separately"""
         current_count = self.get_asset_position_count(asset, side)
 
         if current_count >= self.max_positions_per_asset:
             return False, f"Max {side} positions reached"
+
+        # Bucket Mutual Exclusion (Institutional Upgrade Phase 4)
+        new_bucket = self._get_asset_bucket(asset)
+        if new_bucket:
+            for pos in self.positions.values():
+                # Check for active trades in same bucket (excluding the same asset)
+                if pos.asset != asset:
+                    pos_bucket = self._get_asset_bucket(pos.asset)
+                    if pos_bucket == new_bucket:
+                        logger.warning(f"Bucket conflict \u2014 trade rejected: {asset} conflicts with {pos.asset} (Bucket {new_bucket})")
+                        return False, f"Bucket conflict ({new_bucket})"
 
         # Check if opposite side exists (if simultaneous trading disabled)
         if not self.config.get("trading", {}).get(
@@ -1740,13 +1769,15 @@ class PortfolioManager:
             return self.paper_capital
 
         # Live mode - fetch from specific exchange
-        if asset == "GOLD":
+        asset_cfg = self.config.get("assets", {}).get(asset, {})
+        exchange = asset_cfg.get("exchange", "binance").lower()
+        
+        if exchange == "mt5":
             balance = self._fetch_mt5_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (MT5)")
                 return balance
-
-        elif asset == "BTC":
+        else: # binance
             balance = self._fetch_binance_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (Binance)")
@@ -2162,7 +2193,10 @@ class PortfolioManager:
         asset_position_counts = {}
         asset_positions_detail = {}
 
-        for asset in ["BTC", "GOLD"]:
+        # Get all enabled assets from config
+        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
+
+        for asset in enabled_assets:
             # Get all positions for this asset
             long_positions = [
                 p
@@ -2276,17 +2310,3 @@ class PortfolioManager:
         },
         }
 
-    def close_all_positions(self, prices: Dict[str, float] = None):
-        """Close all open positions"""
-        logger.info("Closing all positions...")
-
-        for asset in list(self.positions.keys()):
-            position = self.positions[asset]
-            exit_price = (
-                prices.get(asset, position.entry_price)
-                if prices
-                else position.entry_price
-            )
-            self.close_position(asset, exit_price, reason="shutdown")
-
-        logger.info("All positions closed")
