@@ -196,56 +196,70 @@ def main():
     logger.info("MULTI-ASSET CSV DIAGNOSTIC & REPAIR TOOL")
     logger.info("=" * 70)
 
-    # Load config to get enabled assets
+    # Load config to get enabled assets and their symbols
     config_path = Path("config/config.json")
     enabled_assets = []
+    active_symbols = []
     if config_path.exists():
         try:
             with open(config_path, "r") as f:
                 config = json.load(f)
-                enabled_assets = [a.lower() for a, cfg in config.get("assets", {}).items() if cfg.get("enabled")]
+                for a, cfg in config.get("assets", {}).items():
+                    if cfg.get("enabled"):
+                        enabled_assets.append(a.lower())
+                        if cfg.get("symbol"):
+                            active_symbols.append(cfg.get("symbol"))
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
 
-    data_dir = Path("data")
+    # Search in both data/ and data/raw/
+    search_dirs = [Path("data"), Path("data/raw")]
+    files_to_process = []
     
-    # Dynamically find files for enabled assets
-    # Pattern: train_data_[asset]_[timeframe].csv
-    files = []
-    if enabled_assets:
-        for asset in enabled_assets:
-            # Check for common timeframes used in training
-            for tf in ["15m", "4h", "1h"]:
-                filename = f"train_data_{asset}_{tf}.csv"
-                if (data_dir / filename).exists():
-                    files.append(filename)
-    
-    # Fallback to general scan if no config-based files found
-    if not files:
-        logger.info("No specific asset files found via config, scanning data directory...")
-        files = [f.name for f in data_dir.glob("train_data_*.csv")]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+            
+        # Scan all CSVs in the directory
+        for csv_file in d.glob("*.csv"):
+            filename = csv_file.name.upper()
+            
+            # Match if filename contains the asset key (BTC) or the symbol (BTCUSDT)
+            is_match = False
+            for asset in enabled_assets:
+                if asset.upper() in filename:
+                    is_match = True
+                    break
+            
+            for symbol in active_symbols:
+                if symbol.upper() in filename:
+                    is_match = True
+                    break
+            
+            if is_match and ".backup" not in filename:
+                files_to_process.append(csv_file)
 
-    if not files:
-        logger.error("❌ No CSV files found to process in data/ directory.")
+    if not files_to_process:
+        logger.error("❌ No CSV files found to process in data/ or data/raw/.")
         return
 
-    logger.info(f"Found {len(files)} files to process: {files}")
+    logger.info(f"Found {len(files_to_process)} files to process:")
+    for f in files_to_process:
+        logger.info(f"  • {f}")
 
     # PHASE 1: Diagnose first file
     logger.info("\n" + "=" * 70)
     logger.info("PHASE 1: DIAGNOSIS")
     logger.info("=" * 70)
 
-    first_file = data_dir / files[0]
+    first_file = files_to_process[0]
     df_sample = diagnose_csv(str(first_file))
 
     if df_sample is not None:
         logger.info("\n" + "=" * 70)
-        logger.info("DIAGNOSIS COMPLETE - See data structure above")
+        logger.info("DIAGNOSIS COMPLETE")
         logger.info("=" * 70)
-        
-        # Non-interactive skip for automation
-        logger.info("Proceeding with repair in 3 seconds...")
+        logger.info("Proceeding with multi-file repair in 3 seconds...")
         time.sleep(3)
 
     # PHASE 2: Repair all files
@@ -255,20 +269,41 @@ def main():
 
     results = {}
 
-    for filename in files:
-        filepath = data_dir / filename
-
+    for filepath in files_to_process:
+        filename = filepath.name
+        
         # Create backup
-        backup_path = data_dir / f"{filename}.backup"
+        backup_path = filepath.with_suffix('.csv.backup')
         import shutil
-
         shutil.copy(filepath, backup_path)
-        logger.info(f"\n📦 Backup created for: {filename}")
+        logger.info(f"\n📦 Backup created: {backup_path}")
 
         # Fix the file
         success = fix_csv_smart(str(filepath))
         results[filename] = success
 
+    # PHASE 3: Summary
+    logger.info("\n" + "=" * 70)
+    logger.info("REPAIR SUMMARY")
+    logger.info("=" * 70)
+
+    for filename, success in results.items():
+        status = "✅" if success else "❌"
+        logger.info(f"{status} {filename}")
+
+    success_count = sum(results.values())
+    total = len(results)
+
+    logger.info("\n" + "=" * 70)
+    logger.info(f"Final Result: {success_count}/{total} files repaired.")
+    logger.info("=" * 70)
+
+    if success_count == total:
+        logger.info("\n🎉 All Multi-Asset files processed successfully!")
+    elif success_count > 0:
+        logger.info(f"\n⚠ Partial success: {success_count}/{total} files processed.")
+    else:
+        logger.error("\n❌ All processing failed!")
     # PHASE 3: Summary
     logger.info("\n" + "=" * 70)
     logger.info("REPAIR SUMMARY")
