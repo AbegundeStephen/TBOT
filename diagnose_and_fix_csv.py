@@ -191,17 +191,43 @@ def main():
     """Main diagnostic and repair pipeline"""
 
     logger.info("=" * 70)
-    logger.info("CSV DIAGNOSTIC & REPAIR TOOL")
+    logger.info("MULTI-ASSET CSV DIAGNOSTIC & REPAIR TOOL")
     logger.info("=" * 70)
 
-    data_dir = Path("data")
+    # Load config to get enabled assets
+    config_path = Path("config/config.json")
+    enabled_assets = []
+    if config_path.exists():
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                enabled_assets = [a.lower() for a, cfg in config.get("assets", {}).items() if cfg.get("enabled")]
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
 
-    files = [
-        "train_data_btc_15m.csv",
-        "train_data_btc_4h.csv",
-        "train_data_gold_15m.csv",
-        "train_data_gold_4h.csv",
-    ]
+    data_dir = Path("data")
+    
+    # Dynamically find files for enabled assets
+    # Pattern: train_data_[asset]_[timeframe].csv
+    files = []
+    if enabled_assets:
+        for asset in enabled_assets:
+            # Check for common timeframes used in training
+            for tf in ["15m", "4h", "1h"]:
+                filename = f"train_data_{asset}_{tf}.csv"
+                if (data_dir / filename).exists():
+                    files.append(filename)
+    
+    # Fallback to general scan if no config-based files found
+    if not files:
+        logger.info("No specific asset files found via config, scanning data directory...")
+        files = [f.name for f in data_dir.glob("train_data_*.csv")]
+
+    if not files:
+        logger.error("❌ No CSV files found to process in data/ directory.")
+        return
+
+    logger.info(f"Found {len(files)} files to process: {files}")
 
     # PHASE 1: Diagnose first file
     logger.info("\n" + "=" * 70)
@@ -209,15 +235,16 @@ def main():
     logger.info("=" * 70)
 
     first_file = data_dir / files[0]
-    if first_file.exists():
-        df_sample = diagnose_csv(str(first_file))
+    df_sample = diagnose_csv(str(first_file))
 
-        if df_sample is not None:
-            logger.info("\n" + "=" * 70)
-            logger.info("DIAGNOSIS COMPLETE - See data structure above")
-            logger.info("=" * 70)
-
-            input("\nPress ENTER to proceed with repair...")
+    if df_sample is not None:
+        logger.info("\n" + "=" * 70)
+        logger.info("DIAGNOSIS COMPLETE - See data structure above")
+        logger.info("=" * 70)
+        
+        # Non-interactive skip for automation
+        logger.info("Proceeding with repair in 3 seconds...")
+        time.sleep(3)
 
     # PHASE 2: Repair all files
     logger.info("\n" + "=" * 70)
@@ -229,17 +256,12 @@ def main():
     for filename in files:
         filepath = data_dir / filename
 
-        if not filepath.exists():
-            logger.warning(f"\n⚠ File not found: {filepath}")
-            results[filename] = False
-            continue
-
         # Create backup
         backup_path = data_dir / f"{filename}.backup"
         import shutil
 
         shutil.copy(filepath, backup_path)
-        logger.info(f"\n📦 Backup: {backup_path}")
+        logger.info(f"\n📦 Backup created for: {filename}")
 
         # Fix the file
         success = fix_csv_smart(str(filepath))
@@ -262,18 +284,16 @@ def main():
     logger.info("=" * 70)
 
     if success_count == total:
-        logger.info("\n🎉 All files repaired successfully!")
-        logger.info("\nNext step:")
-        logger.info("  python train_ai_layer.py")
+        logger.info("\n🎉 All files processed successfully!")
     elif success_count > 0:
-        logger.info(f"\n⚠ Partial success: {success_count}/{total} files repaired")
-        logger.info("You can proceed with training using the successful files")
+        logger.info(f"\n⚠ Partial success: {success_count}/{total} files processed")
     else:
-        logger.error("\n❌ All repairs failed!")
-        logger.info("\nPossible issues:")
-        logger.info("  1. CSV files are completely empty")
-        logger.info("  2. Wrong column names (check diagnosis output)")
-        logger.info("  3. All data is corrupted")
+        logger.error("\n❌ All processing failed!")
+
+
+if __name__ == "__main__":
+    import json
+    main()
 
 
 if __name__ == "__main__":
