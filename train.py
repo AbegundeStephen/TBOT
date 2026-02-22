@@ -468,16 +468,17 @@ def main():
 
     # Initialize Binance
     logger.info("\nInitializing Binance API...")
-    if not data_manager.initialize_binance():
-        logger.error("❌ Failed to initialize Binance")
-        return
-    logger.info("✓ Binance API ready")
+    binance_ok = data_manager.initialize_binance()
+    if not binance_ok:
+        logger.warning("⚠️  Failed to initialize Binance. Will rely on local files for Binance assets.")
+    else:
+        logger.info("✓ Binance API ready")
 
     # Initialize MT5
     logger.info("\nInitializing MT5...")
-    if not data_manager.initialize_mt5():
-        logger.error("❌ Failed to initialize MT5")
-        logger.warning("Continuing with BTC only...")
+    mt5_ok = data_manager.initialize_mt5()
+    if not mt5_ok:
+        logger.warning("⚠️  Failed to initialize MT5. Will rely on local files for MT5 assets.")
     else:
         logger.info("✓ MT5 ready")
 
@@ -520,6 +521,12 @@ def main():
                 df = df[df.index.notnull()]
             
             df.sort_index(inplace=True)
+
+            # Check if local data is sufficient
+            if len(df) < asset_cfg["min_bars_training"]:
+                logger.warning(f"⚠️  Local data for {asset_key} is insufficient ({len(df)} < {asset_cfg['min_bars_training']}).")
+                logger.info(f"🔄 Attempting to fetch fresh data from API...")
+                df = pd.DataFrame() # Reset to trigger fetch logic below
         
         if df.empty:
             if exchange == "binance" and binance_ok:
@@ -537,7 +544,7 @@ def main():
                     "lookback_days": asset_cfg["lookback_days"],
                     "min_bars_required": asset_cfg["min_bars_training"],
                 }
-                df = fetch_gold_data(data_manager, fetch_cfg) # fetch_gold_data uses find_available_gold_symbol, might need fix for generic mt5
+                df = fetch_gold_data(data_manager, fetch_cfg) 
         
         if not df.empty and validate_data_quality(df, asset_key, asset_cfg["min_bars_training"]):
             asset_data[asset_key] = df
