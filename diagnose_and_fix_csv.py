@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
+import time
+import json
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -289,11 +291,6 @@ def main():
         logger.info(f"\n⚠ Partial success: {success_count}/{total} files processed")
     else:
         logger.error("\n❌ All processing failed!")
-
-
-if __name__ == "__main__":
-    import json
-    main()
 
 
 if __name__ == "__main__":
