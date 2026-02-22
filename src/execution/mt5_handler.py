@@ -222,13 +222,14 @@ class MT5ExecutionHandler:
                     self.sync_positions_with_mt5(asset, symbol)
 
     def get_current_price(
-        self, symbol: str, force_live: bool = False
+        self, symbol: str = None, force_live: bool = False
     ) -> Optional[float]:
         """
         Unified price accessor for MT5, using the central price cache.
         """
         if not symbol:
-            logger.error("[MT5] Cannot fetch price: No symbol provided")
+            # Fallback to a default if possible, or log error
+            logger.error("[MT5] get_current_price called without symbol and no fallback available.")
             return None
 
         # 1. Try to get a fresh price from the cache

@@ -2494,7 +2494,8 @@ class TradingTelegramBot:
 
                 if handler:
                     try:
-                        price = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        price = handler.get_current_price(symbol=symbol)
                         if price and price > 0:
                             current_prices[asset_name] = price
                     except Exception as e:
@@ -2594,7 +2595,8 @@ class TradingTelegramBot:
 
                 if handler:
                     try:
-                        current_prices[asset_name] = handler.get_current_price()
+                        symbol = asset_cfg.get("symbol")
+                        current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                     except:
                         pass
 
