@@ -98,22 +98,14 @@ def validate_data_quality(df: pd.DataFrame, asset_name: str, min_bars: int) -> b
     return True
 
 
-def fetch_btc_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
-    """Fetch BTC data from Binance"""
+def fetch_binance_training_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
+    """Fetch training data from Binance"""
     logger.info("\n" + "=" * 70)
-    logger.info("Fetching BTC Data from Binance")
+    logger.info(f"Fetching {config['symbol']} Data from Binance")
     logger.info("=" * 70)
 
     end_date = datetime.now()
     start_date = end_date - timedelta(days=config["lookback_days"])
-
-    logger.info(f"Symbol: {config['symbol']}")
-    logger.info(f"Interval: {config['interval']}")
-    logger.info(
-        f"Start Date: {start_date.strftime('%Y-%m-%d')} (going back {config['lookback_days']} days)"
-    )
-    logger.info(f"End Date: {end_date.strftime('%Y-%m-%d')} (today)")
-    logger.info(f"Expected bars: ~{config['lookback_days'] * 24} (for hourly data)")
 
     try:
         df = data_manager.fetch_binance_data(
@@ -124,90 +116,49 @@ def fetch_btc_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
         )
 
         if df.empty:
-            logger.error("❌ No data received from Binance")
+            logger.error(f"❌ No data received for {config['symbol']}")
             return pd.DataFrame()
 
-        logger.info(f"✓ Fetched {len(df)} bars from Binance")
-
-        logger.info("\nCleaning data...")
         df = data_manager.clean_data(df)
-        logger.info(f"✓ After cleaning: {len(df)} bars")
-
         return df
 
     except Exception as e:
-        logger.error(f"❌ Error fetching BTC data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching {config['symbol']} data: {e}")
         return pd.DataFrame()
 
 
-def find_available_gold_symbol(data_manager) -> str:
-    """Find available gold symbol on MT5 account"""
+def verify_mt5_symbol(symbol: str) -> bool:
+    """Verify if symbol is available on MT5 account"""
     try:
         import MetaTrader5 as mt5
-
-        symbols = mt5.symbols_get()
-        if symbols is None:
-            logger.error("Could not retrieve MT5 symbols")
-            return None
-
-        priority_patterns = ["XAUUSD", "XAU/USD", "GOLD"]
-        found_symbols = []
-
-        for symbol in symbols:
-            symbol_name = symbol.name
-            symbol_upper = symbol_name.upper()
-
-            if "BTC" not in symbol_upper:
-                if any(
-                    pattern.upper() in symbol_upper for pattern in priority_patterns
-                ):
-                    found_symbols.append(symbol.name)
-
-        if found_symbols:
-            logger.info(f"\n📋 Found {len(found_symbols)} gold symbols:")
-            for sym in found_symbols:
-                logger.info(f"   • {sym}")
-
-            for sym in found_symbols:
-                if "XAUUSD" in sym.upper():
-                    logger.info(f"\n✓ Using symbol: {sym} (preferred XAUUSD variant)")
-                    return sym
-
-            logger.info(f"\n✓ Using symbol: {found_symbols[0]}")
-            return found_symbols[0]
-        else:
-            logger.warning("No gold symbols found on this account")
-            return None
-
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            logger.error(f"❌ Symbol {symbol} not found on this MT5 account")
+            return False
+        
+        if not info.visible:
+            if not mt5.symbol_select(symbol, True):
+                logger.error(f"❌ Failed to select symbol {symbol}")
+                return False
+        
+        return True
     except Exception as e:
-        logger.error(f"Error finding gold symbol: {e}")
-        return None
+        logger.error(f"Error verifying symbol {symbol}: {e}")
+        return False
 
 
-def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
-    """Fetch Gold data from MT5"""
+def fetch_mt5_training_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
+    """Fetch training data from MT5"""
+    symbol = config["symbol"]
     logger.info("\n" + "=" * 70)
-    logger.info("Fetching Gold Data from MT5")
+    logger.info(f"Fetching {symbol} Data from MT5")
     logger.info("=" * 70)
 
-    logger.info("\nSearching for available gold symbols...")
-    available_symbol = find_available_gold_symbol(data_manager)
-
-    if not available_symbol:
-        logger.error("❌ No gold symbols available on this MT5 account")
+    if not verify_mt5_symbol(symbol):
         return pd.DataFrame()
-
-    symbol = available_symbol
 
     end_date = datetime.now()
     start_date = end_date - timedelta(days=config["lookback_days"])
-
-    logger.info(f"\nSymbol: {symbol}")
-    logger.info(f"Timeframe: {config['timeframe']}")
-    logger.info(
-        f"Start Date: {start_date.strftime('%Y-%m-%d')} (going back {config['lookback_days']} days)"
-    )
-    logger.info(f"End Date: {end_date.strftime('%Y-%m-%d')} (today)")
 
     try:
         df = data_manager.fetch_mt5_data(
@@ -218,19 +169,14 @@ def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
         )
 
         if df.empty:
-            logger.error("❌ No data received from MT5")
+            logger.error(f"❌ No data received for {symbol}")
             return pd.DataFrame()
 
-        logger.info(f"✓ Fetched {len(df)} bars from MT5")
-
-        logger.info("\nCleaning data...")
         df = data_manager.clean_data(df)
-        logger.info(f"✓ After cleaning: {len(df)} bars")
-
         return df
 
     except Exception as e:
-        logger.error(f"❌ Error fetching Gold data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching {symbol} data: {e}")
         return pd.DataFrame()
 
 
@@ -253,189 +199,73 @@ def train_asset_strategies(
     logger.info("=" * 70)
 
     # Get configs from config.json
-    mr_config = config["strategy_configs"]["mean_reversion"][asset_key]
-    tf_config = config["strategy_configs"]["trend_following"][asset_key]
-    ema_config = config["strategy_configs"]["exponential_moving_averages"][asset_key]
-
-    # Log the actual config being used
-    logger.info(f"\n📋 Configuration for {asset_key}:")
-    logger.info(f"  Mean Reversion:")
-    logger.info(f"    RSI: {mr_config['rsi_oversold']}/{mr_config['rsi_overbought']}")
-    logger.info(
-        f"    BB: {mr_config['bb_lower_threshold']}/{mr_config['bb_upper_threshold']}"
-    )
-    logger.info(f"    Min Return: {mr_config['min_return_threshold']:.3f}")
-    logger.info(f"    Min Conditions: {mr_config['min_conditions']}")
-    logger.info(f"  Trend Following:")
-    logger.info(f"    MA: {tf_config['fast_ma']}/{tf_config['slow_ma']}")
-    logger.info(f"    ADX Threshold: {tf_config['adx_threshold']}")
-    logger.info(f"    Min Return: {tf_config['min_return_threshold']:.3f}")
-    logger.info(f"  EMA Strategy:")
-    logger.info(f"    EMA: {ema_config['ema_fast']}/{ema_config['ema_slow']}")
-    logger.info(f"    Min Distance: {ema_config['min_distance_pct']}%")
-    logger.info(f"    Min Return: {ema_config['min_return_threshold']:.3f}")
-    logger.info(f"    Min Conditions: {ema_config['min_conditions']}")
+    try:
+        mr_config = config["strategy_configs"]["mean_reversion"][asset_key]
+        tf_config = config["strategy_configs"]["trend_following"][asset_key]
+        ema_config = config["strategy_configs"]["exponential_moving_averages"][asset_key]
+    except KeyError as e:
+        logger.error(f"❌ Missing strategy configuration for {asset_key}: {e}")
+        return results
 
     # =====================================================
     # 1. Train Mean Reversion
     # =====================================================
-    logger.info(f"\n{'─'*70}")
-    logger.info("1. Mean Reversion Strategy")
-    logger.info("─" * 70)
-
     try:
         mr_strategy = MeanReversionStrategy(mr_config)
         mr_model_path = f"models/mean_reversion_{asset_key.lower()}.pkl"
-
-        logger.info(f"Training on {len(train_df)} bars...")
         mr_metrics = mr_strategy.train_model(train_df, mr_model_path)
-
-        if mr_metrics.get("success"):
-            logger.info(f"\n✅ Mean Reversion - {asset_key} TRAINED")
-            logger.info(
-                f"   CV Accuracy: {mr_metrics.get('cv_mean_accuracy', 0):.2%} ± {mr_metrics.get('cv_std_accuracy', 0):.2%}"
-            )
-            logger.info(f"   Train Samples: {mr_metrics.get('train_samples', 0)}")
-            logger.info(f"   Features: {mr_metrics.get('n_features', 0)}")
-            logger.info(f"   Model saved: {mr_model_path}")
-        else:
-            logger.error(f"\n❌ Mean Reversion - {asset_key} FAILED")
-            logger.error(f"   Error: {mr_metrics.get('error', 'Unknown')}")
-
         results["mean_reversion"] = mr_metrics
-
     except Exception as e:
-        logger.error(f"❌ Exception training Mean Reversion: {e}", exc_info=True)
-        results["mean_reversion"] = {"success": False, "error": str(e)}
+        logger.error(f"❌ Mean Reversion training failed for {asset_key}: {e}")
 
     # =====================================================
     # 2. Train Trend Following
     # =====================================================
-    logger.info(f"\n{'─'*70}")
-    logger.info("2. Trend Following Strategy")
-    logger.info("─" * 70)
-
     try:
         tf_strategy = TrendFollowingStrategy(tf_config)
         tf_model_path = f"models/trend_following_{asset_key.lower()}.pkl"
-
-        logger.info(f"Training on {len(train_df)} bars...")
         tf_metrics = tf_strategy.train_model(train_df, tf_model_path)
-
-        if tf_metrics.get("success"):
-            logger.info(f"\n✅ Trend Following - {asset_key} TRAINED")
-            logger.info(
-                f"   CV Accuracy: {tf_metrics.get('cv_mean_accuracy', 0):.2%} ± {tf_metrics.get('cv_std_accuracy', 0):.2%}"
-            )
-            logger.info(f"   Train Samples: {tf_metrics.get('train_samples', 0)}")
-            logger.info(f"   Features: {tf_metrics.get('n_features', 0)}")
-            logger.info(f"   Model saved: {tf_model_path}")
-        else:
-            logger.error(f"\n❌ Trend Following - {asset_key} FAILED")
-            logger.error(f"   Error: {tf_metrics.get('error', 'Unknown')}")
-
         results["trend_following"] = tf_metrics
-
     except Exception as e:
-        logger.error(f"❌ Exception training Trend Following: {e}", exc_info=True)
-        results["trend_following"] = {"success": False, "error": str(e)}
+        logger.error(f"❌ Trend Following training failed for {asset_key}: {e}")
 
     # =====================================================
-    # 3. Train EMA Strategy (NEW!)
+    # 3. Train EMA Strategy
     # =====================================================
-    logger.info(f"\n{'─'*70}")
-    logger.info("3. EMA Crossover Strategy")
-    logger.info("─" * 70)
-
     try:
         ema_strategy = EMAStrategy(ema_config)
         ema_model_path = f"models/ema_strategy_{asset_key.lower()}.pkl"
-
-        logger.info(f"Training on {len(train_df)} bars...")
         ema_metrics = ema_strategy.train_model(train_df, ema_model_path)
-
-        if ema_metrics.get("success"):
-            logger.info(f"\n✅ EMA Strategy - {asset_key} TRAINED")
-            logger.info(
-                f"   CV Accuracy: {ema_metrics.get('cv_mean_accuracy', 0):.2%} ± {ema_metrics.get('cv_std_accuracy', 0):.2%}"
-            )
-            logger.info(f"   Train Samples: {ema_metrics.get('train_samples', 0)}")
-            logger.info(f"   Features: {ema_metrics.get('n_features', 0)}")
-            logger.info(f"   Model saved: {ema_model_path}")
-        else:
-            logger.error(f"\n❌ EMA Strategy - {asset_key} FAILED")
-            logger.error(f"   Error: {ema_metrics.get('error', 'Unknown')}")
-
         results["ema_strategy"] = ema_metrics
-
     except Exception as e:
-        logger.error(f"❌ Exception training EMA Strategy: {e}", exc_info=True)
-        results["ema_strategy"] = {"success": False, "error": str(e)}
+        logger.error(f"❌ EMA Strategy training failed for {asset_key}: {e}")
 
     return results
 
 
-def calculate_data_correlation(btc_df: pd.DataFrame, gold_df: pd.DataFrame) -> dict:
-    """
-    Calculate correlation between BTC and Gold
-    Handles timezone-aware and timezone-naive dataframes
-    """
+def calculate_data_correlation(data_map: dict) -> Optional[pd.DataFrame]:
+    """Calculate correlation matrix between all assets"""
     try:
-        # : Normalize timezones before merging
-        btc_close = btc_df[["close"]].rename(columns={"close": "BTC"})
-        gold_close = gold_df[["close"]].rename(columns={"close": "GOLD"})
+        closes = {}
+        for asset, df in data_map.items():
+            s = df["close"].copy()
+            if s.index.tz is not None:
+                s.index = s.index.tz_localize(None)
+            closes[asset] = s
 
-        # Remove timezone if present (normalize to tz-naive)
-        if (
-            isinstance(btc_close.index, pd.DatetimeIndex)
-            and btc_close.index.tz is not None
-        ):
-            btc_close.index = btc_close.index.tz_localize(None)
-
-        if (
-            isinstance(gold_close.index, pd.DatetimeIndex)
-            and gold_close.index.tz is not None
-        ):
-            gold_close.index = gold_close.index.tz_localize(None)
-
-        # Now merge on timezone-naive indices
-        merged = pd.merge(
-            btc_close, gold_close, left_index=True, right_index=True, how="inner"
-        )
-
+        merged = pd.DataFrame(closes).dropna()
         if len(merged) < 50:
-            logger.warning(
-                f"Insufficient overlapping data for correlation: {len(merged)} bars"
-            )
             return None
 
         returns = merged.pct_change().dropna()
-        correlation = returns["BTC"].corr(returns["GOLD"])
-
-        btc_vol = returns["BTC"].std() * np.sqrt(24)  # Annualized for hourly data
-        gold_vol = returns["GOLD"].std() * np.sqrt(24)
-
+        correlation = returns.corr()
+        
         logger.info(f"\n{'='*70}")
-        logger.info("Asset Correlation Analysis")
+        logger.info("Multi-Asset Correlation Matrix")
         logger.info("=" * 70)
-        logger.info(f"Overlapping bars: {len(merged)}")
-        logger.info(f"BTC-GOLD correlation: {correlation:.3f}")
-        logger.info(f"BTC annualized volatility: {btc_vol:.1%}")
-        logger.info(f"GOLD annualized volatility: {gold_vol:.1%}")
-
-        if correlation > 0.7:
-            logger.info("  ⚠ High positive correlation - reduce concurrent positions")
-        elif correlation < -0.5:
-            logger.info("  ℹ Negative correlation - good diversification")
-        else:
-            logger.info("  ✓ Low correlation - good diversification")
-
-        return {
-            "correlation": correlation,
-            "overlapping_bars": len(merged),
-            "btc_volatility": btc_vol,
-            "gold_volatility": gold_vol,
-        }
+        logger.info(f"\n{correlation}")
+        
+        return correlation
 
     except Exception as e:
         logger.error(f"Error calculating correlation: {e}")
@@ -445,12 +275,10 @@ def calculate_data_correlation(btc_df: pd.DataFrame, gold_df: pd.DataFrame) -> d
 def main():
     """Main training pipeline"""
     logger.info("=" * 70)
-    logger.info("MULTI-SOURCE TRADING BOT TRAINING")
-    logger.info("BTC: Binance | GOLD: MT5")
+    logger.info("MULTI-ASSET TRADING BOT TRAINING ENGINE")
     logger.info("Strategies: Mean Reversion + Trend Following + EMA Crossover")
     logger.info("=" * 70)
 
-    # Load config from config.json
     config_path = Path("config/config.json")
     if not config_path.exists():
         logger.error("config.json not found!")
@@ -459,34 +287,12 @@ def main():
     with open(config_path) as f:
         config = json.load(f)
 
-    # Initialize data manager
-    logger.info("\n" + "=" * 70)
-    logger.info("STEP 1: Initializing Data Sources")
-    logger.info("=" * 70)
-
     data_manager = DataManager(config)
-
-    # Initialize Binance
-    logger.info("\nInitializing Binance API...")
-    if not data_manager.initialize_binance():
-        logger.error("❌ Failed to initialize Binance")
-        return
-    logger.info("✓ Binance API ready")
-
-    # Initialize MT5
-    logger.info("\nInitializing MT5...")
-    if not data_manager.initialize_mt5():
-        logger.error("❌ Failed to initialize MT5")
-        logger.warning("Continuing with BTC only...")
-    else:
-        logger.info("✓ MT5 ready")
-
-    # Fetch data for all assets
-    logger.info("\n" + "=" * 70)
-    logger.info("STEP 2: Fetching Historical Data")
-    logger.info("=" * 70)
+    binance_ok = data_manager.initialize_binance()
+    mt5_ok = data_manager.initialize_mt5()
 
     asset_data = {}
+<<<<<<< Updated upstream
 
     # Asset configs to process
     assets_to_train = ["BTC", "GOLD", "USTEC", "EURJPY", "EURUSD"]
@@ -536,153 +342,88 @@ def main():
             logger.info(f"✅ {asset_key} data ready for training")
         else:
             logger.error(f"❌ {asset_key} data failed validation or could not be fetched")
+=======
+    enabled_assets = [a for a, cfg in config["assets"].items() if cfg.get("enabled", False)]
+    
+    for asset_key in enabled_assets:
+        asset_cfg = config["assets"][asset_key]
+        exchange = asset_cfg.get("exchange", "binance")
+        symbol = asset_cfg.get("symbol")
+        
+        # Try local raw data first
+        raw_file = f"data/raw/{symbol}_1h.csv"
+        df = pd.DataFrame()
+        
+        if Path(raw_file).exists():
+            logger.info(f"Loading {asset_key} from local file: {raw_file}")
+            df = pd.read_csv(raw_file, index_col=0, parse_dates=True)
+        
+        if df.empty:
+            fetch_cfg = {
+                "symbol": symbol,
+                "lookback_days": asset_cfg.get("lookback_days", 730),
+                "interval": asset_cfg.get("interval", "1h"),
+                "timeframe": asset_cfg.get("timeframe", "H1"),
+            }
+            if exchange == "binance" and binance_ok:
+                df = fetch_binance_training_data(data_manager, fetch_cfg)
+            elif exchange == "mt5" and mt5_ok:
+                df = fetch_mt5_training_data(data_manager, fetch_cfg)
+        
+        if not df.empty and validate_data_quality(df, asset_key, asset_cfg.get("min_bars_training", 1000)):
+            asset_data[asset_key] = df
+            logger.info(f"✅ {asset_key} data ready")
+>>>>>>> Stashed changes
 
     if not asset_data:
-        logger.error("❌ No valid data available for training!")
+        logger.error("❌ No data available for training!")
         return
 
-    # Correlation analysis
-    if "BTC" in asset_data and "GOLD" in asset_data:
-        logger.info("\n" + "=" * 70)
-        logger.info("STEP 3: Cross-Asset Analysis")
-        logger.info("=" * 70)
-        correlation_stats = calculate_data_correlation(
-            asset_data["BTC"], asset_data["GOLD"]
-        )
-    else:
-        correlation_stats = None
+    # Correlation
+    correlation_matrix = calculate_data_correlation(asset_data)
 
-    # Split train/test
-    logger.info("\n" + "=" * 70)
-    logger.info("STEP 4: Splitting Train/Test Sets")
-    logger.info("=" * 70)
-
-    train_test_data = {}
-    for asset_key, df in asset_data.items():
-        logger.info(f"\n{asset_key}:")
-        train_df, test_df = data_manager.split_train_test(df, train_pct=0.8)
-
-        # Save both train and test for backtest
-        train_file = f"data/train_data_{asset_key.lower()}.csv"
-        test_file = f"data/test_data_{asset_key.lower()}.csv"
-
-        train_df.to_csv(train_file)
-        test_df.to_csv(test_file)
-
-        train_test_data[asset_key] = {"train": train_df, "test": test_df}
-
-        logger.info(f"✓ Train data saved: {train_file}")
-        logger.info(f"✓ Test data saved: {test_file}")
-
-    # Train models using config.json
-    logger.info("\n" + "=" * 70)
-    logger.info("STEP 5: Training Models (ALL 3 STRATEGIES)")
-    logger.info("=" * 70)
-
+    # Train/Test Split & Train
     training_results = {}
-    for asset_key, data in train_test_data.items():
-        results = train_asset_strategies(asset_key, data["train"], config)
+    train_test_stats = {}
+    
+    for asset_key, df in asset_data.items():
+        train_df, test_df = data_manager.split_train_test(df, train_pct=0.8)
+        
+        # Save split data
+        train_df.to_csv(f"data/train_data_{asset_key.lower()}.csv")
+        test_df.to_csv(f"data/test_data_{asset_key.lower()}.csv")
+        
+        results = train_asset_strategies(asset_key, train_df, config)
         training_results[asset_key] = results
+        
+        train_test_stats[asset_key] = {
+            "total_bars": len(df),
+            "train_bars": len(train_df),
+            "test_bars": len(test_df),
+            "range": f"{df.index[0]} to {df.index[-1]}"
+        }
 
-    # Final report
-    logger.info("\n" + "=" * 70)
-    logger.info("TRAINING COMPLETE - FINAL REPORT")
-    logger.info("=" * 70)
-
-    logger.info("\n📊 Model Performance Summary:")
-    logger.info("─" * 70)
-
-    for asset_key, results in training_results.items():
-        logger.info(f"\n{asset_key}:")
-
-        mr = results["mean_reversion"]
-        tf = results["trend_following"]
-        ema = results["ema_strategy"]
-
-        if mr.get("success"):
-            logger.info(
-                f"  ✅ Mean Reversion:   {mr.get('cv_mean_accuracy', 0):.2%} ± {mr.get('cv_std_accuracy', 0):.2%}"
-            )
-        else:
-            logger.info(f"  ❌ Mean Reversion:   FAILED")
-
-        if tf.get("success"):
-            logger.info(
-                f"  ✅ Trend Following:  {tf.get('cv_mean_accuracy', 0):.2%} ± {tf.get('cv_std_accuracy', 0):.2%}"
-            )
-        else:
-            logger.info(f"  ❌ Trend Following:  FAILED")
-
-        if ema.get("success"):
-            logger.info(
-                f"  ✅ EMA Strategy:     {ema.get('cv_mean_accuracy', 0):.2%} ± {ema.get('cv_std_accuracy', 0):.2%}"
-            )
-        else:
-            logger.info(f"  ❌ EMA Strategy:     FAILED")
-
-    # Save metadata
+    # Metadata & Report
     metadata = {
         "training_date": datetime.now().isoformat(),
-        "data_sources": {"BTC": "Binance", "GOLD": "MT5"},
-        "strategies": ["mean_reversion", "trend_following", "ema_strategy"],
-        "training_results": training_results,
-        "correlation": correlation_stats,
-        "data_stats": {
-            asset_key: {
-                "total_bars": len(data["train"]) + len(data["test"]),
-                "train_bars": len(data["train"]),
-                "test_bars": len(data["test"]),
-                "date_range": f"{data['train'].index[0]} to {data['test'].index[-1]}",
-            }
-            for asset_key, data in train_test_data.items()
-        },
+        "assets_trained": list(training_results.keys()),
+        "results": training_results,
+        "data_stats": train_test_stats
     }
 
-    metadata_file = "models/training_metadata.json"
-    with open(metadata_file, "w") as f:
+    with open("models/training_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2, default=str)
-    logger.info(f"\n✓ Metadata saved: {metadata_file}")
-
-    logger.info("\n📁 Trained Models:")
-    logger.info("─" * 70)
-    for asset_key in training_results.keys():
-        logger.info(f"  • models/mean_reversion_{asset_key.lower()}.pkl")
-        logger.info(f"  • models/trend_following_{asset_key.lower()}.pkl")
-        logger.info(f"  • models/ema_strategy_{asset_key.lower()}.pkl")
 
     logger.info("\n" + "=" * 70)
-    logger.info("NEXT STEPS:")
+    logger.info("TRAINING SUMMARY")
     logger.info("=" * 70)
-    logger.info("  1. Review performance metrics above")
-    logger.info("  2. Check model files in models/ directory")
-    logger.info("  3. Run backtest: python backtest.py --asset BTC --preset balanced")
-    logger.info("  4. If no trades: python backtest.py --asset BTC --preset aggressive")
-    logger.info("  5. Paper trade: python main.py --mode paper")
-    logger.info("\n  Note: You now have 3 strategies generating signals!")
-    logger.info("        Mean Reversion + Trend Following + EMA Crossover")
+    for asset, res in training_results.items():
+        logger.info(f"\n{asset}:")
+        for strat in ["mean_reversion", "trend_following", "ema_strategy"]:
+            metrics = res.get(strat, {})
+            status = "✅" if metrics.get("success") else "❌"
+            acc = metrics.get("cv_mean_accuracy", 0)
+            logger.info(f"  {status} {strat:18}: {acc:.2%}")
 
-    # Cleanup
     data_manager.shutdown()
-
-    logger.info("\n✅ Training pipeline completed successfully!")
-
-
-if __name__ == "__main__":
-    Path("models").mkdir(exist_ok=True)
-    Path("data").mkdir(exist_ok=True)
-    Path("logs").mkdir(exist_ok=True)
-
-    try:
-        from binance.client import Client
-    except ImportError:
-        logger.error("python-binance not installed!")
-        logger.info("Install with: pip install python-binance")
-        sys.exit(1)
-
-    try:
-        import MetaTrader5 as mt5
-    except ImportError:
-        logger.warning("MetaTrader5 not installed (Gold trading disabled)")
-        logger.info("Install with: pip install MetaTrader5")
-
-    main()
+    logger.info("\n✅ Multi-asset training pipeline completed!")

@@ -208,7 +208,12 @@ class ContinuousLearningPipeline:
         with self._lock:
             self._safe_send_telegram("🧠 *Auto-Trainer Initiated*\n\nFetching new market data and retraining ML models...")
 
-            summary = {"BTC": {}, "GOLD": {}}
+            # Get all enabled assets
+            enabled_assets = [
+                a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)
+            ]
+            
+            summary = {asset: {} for asset in enabled_assets}
             all_successful = True
 
             strategies = [
@@ -217,14 +222,14 @@ class ContinuousLearningPipeline:
                 (EMAStrategy, "exponential_moving_averages"),
             ]
 
-            for asset in ["BTC", "GOLD"]:
-                if not self.config["assets"][asset]["enabled"]:
-                    continue
+            for asset in enabled_assets:
+                asset_cfg = self.config["assets"][asset]
+                min_bars = asset_cfg.get("min_bars_training", 5000)
 
                 # 1. Fetch Latest Data
                 df = self._fetch_latest_data(asset)
-                if df is None or len(df) < 5000:
-                    logger.error(f"[AUTO-TRAIN] Insufficient data for {asset}, skipping.")
+                if df is None or len(df) < min_bars:
+                    logger.error(f"[AUTO-TRAIN] Insufficient data for {asset} ({len(df) if df is not None else 0}/{min_bars}), skipping.")
                     continue
 
                 # 2. Train Each Strategy in Shadow Mode

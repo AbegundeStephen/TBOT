@@ -54,7 +54,7 @@ class MultiTimeFrameRegimeDetector:
 
         # Governor thresholds (simplified, only relevant for _analyze_governor for Constitution Gate)
         self.governor_thresholds = {
-            "min_required_bars_1d": BASELINE_EMA + 20, # At least 220 bars for 200 EMA + 20 for slope
+            "min_required_bars_1d": 100, # Lowered from 220 to allow faster startup
             "ema_slope_positive": 0.0005, # Positive slope threshold for 200 EMA
         }
 
@@ -76,7 +76,10 @@ class MultiTimeFrameRegimeDetector:
         df_copy = df.copy()
         df_copy[f"ema_{FAST_EMA}"] = df_copy["close"].ewm(span=FAST_EMA, adjust=False).mean()
         df_copy[f"ema_{SLOW_EMA}"] = df_copy["close"].ewm(span=SLOW_EMA, adjust=False).mean()
-        df_copy[f"ema_{BASELINE_EMA}"] = df_copy["close"].ewm(span=BASELINE_EMA, adjust=False).mean()
+        
+        # Use fallback span if not enough data for BASELINE
+        baseline_span = min(BASELINE_EMA, len(df_copy))
+        df_copy[f"ema_{BASELINE_EMA}"] = df_copy["close"].ewm(span=baseline_span, adjust=False).mean()
         return df_copy
 
     def _fetch_data_from_csv(
@@ -86,9 +89,9 @@ class MultiTimeFrameRegimeDetector:
         Fetches data from the 'data/raw/' local directory.
         Falls back to API if CSV doesn't exist or is stale.
         """
-        # Determine CSV file path based on the new data/raw/ structure
-        asset_prefix = "BTCUSDT" if exchange == "binance" else "XAUUSDm"
-        csv_file = Path(f"data/raw/{asset_prefix}_{timeframe_str}.csv")
+        # Determine CSV file path dynamically based on symbol
+        # Example: BTCUSDT_1h.csv, USTECm_1h.csv
+        csv_file = Path(f"data/raw/{symbol}_{timeframe_str}.csv")
 
         # Try to read from CSV
         if csv_file.exists():
@@ -191,12 +194,13 @@ class MultiTimeFrameRegimeDetector:
                     is_bullish=False, is_bearish=False, reasoning="1D 200 EMA is NaN"
                  )
 
-            # Check slope of 200 EMA (over last 20 bars)
-            if len(df_daily) < BASELINE_EMA + 20: # Ensure enough data for slope
-                ema_slope = 0.0 # Cannot calculate slope
+            # Check slope of 200 EMA (use available data if less than 20)
+            slope_lookback = min(20, len(df_daily) - 1)
+            if slope_lookback < 5: 
+                ema_slope = 0.0 # Not enough data for meaningful slope
             else:
                 ema_200_series = df_daily[f"ema_{BASELINE_EMA}"]
-                ema_slope = (ema_200_series.iloc[-1] - ema_200_series.iloc[-20]) / ema_200_series.iloc[-20]
+                ema_slope = (ema_200_series.iloc[-1] - ema_200_series.iloc[-slope_lookback]) / ema_200_series.iloc[-slope_lookback]
 
 
             is_bullish = (current_price > ema_200) and (ema_slope > self.governor_thresholds["ema_slope_positive"])

@@ -576,9 +576,8 @@ class InstitutionalCouncilAggregator:
 
             if signal != 0: # Only apply Gatekeeper if a signal was generated
                 if regime_score == 0.0:
-                    logger.warning(f"[GATEKEEPER] ❌ BLOCKED ALL: Regime score is 0.0 ({self.asset_type}). Council signal: {signal}")
-                    signal = 0
-                    decision_type = f"BLOCKED (Gatekeeper - Neutral Regime: {decision_type})"
+                    # Allow trading in neutral regimes (don't block everything)
+                    logger.info(f"[GATEKEEPER] ⚖️ NEUTRAL REGIME: Allowing {decision_type} for {self.asset_type}.")
                 elif regime_is_bullish and signal < 0:
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT: Bullish regime ({regime_score:.2f}) for {self.asset_type}. Council signal: {signal}")
                     signal = 0
