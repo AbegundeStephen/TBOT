@@ -60,12 +60,16 @@ class ThreadSafeBotDataManager:
                 # Safely gather data
                 portfolio_status = trading_bot.portfolio_manager.get_portfolio_status()
                 
-                # Get current prices
+                # Get current prices for ALL enabled assets
                 current_prices = {}
-                for asset_name in ["BTC", "GOLD"]:
-                    if not trading_bot.config["assets"][asset_name].get("enabled", False):
+                for asset_name, asset_cfg in trading_bot.config["assets"].items():
+                    if not asset_cfg.get("enabled", False):
                         continue
                     
+                    symbol = asset_cfg.get("symbol")
+                    if not symbol:
+                        continue
+
                     handler = (
                         trading_bot.binance_handler if asset_name == "BTC" 
                         else trading_bot.mt5_handler
@@ -73,7 +77,7 @@ class ThreadSafeBotDataManager:
                     
                     if handler:
                         try:
-                            current_prices[asset_name] = handler.get_current_price()
+                            current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                         except:
                             pass
                 
@@ -252,7 +256,8 @@ class ThreadSafeBotDataManager:
                     trading_bot.binance_handler if asset == "BTC"
                     else trading_bot.mt5_handler
                 )
-                exit_price = handler.get_current_price() if handler else None
+                symbol = trading_bot.config["assets"].get(asset, {}).get("symbol")
+                exit_price = handler.get_current_price(symbol=symbol) if handler and symbol else None
                 
                 # Close position
                 result = trading_bot.portfolio_manager.close_position(
@@ -271,7 +276,8 @@ class ThreadSafeBotDataManager:
                 trading_bot.binance_handler if asset == "BTC"
                 else trading_bot.mt5_handler
             )
-            exit_price = handler.get_current_price() if handler else None
+            symbol = trading_bot.config["assets"].get(asset, {}).get("symbol")
+            exit_price = handler.get_current_price(symbol=symbol) if handler and symbol else None
             
             results = trading_bot.portfolio_manager.close_all_positions_for_asset(
                 asset=asset,
