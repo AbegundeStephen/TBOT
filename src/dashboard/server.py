@@ -606,7 +606,7 @@ def get_logs():
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             # Efficiently read last lines
             lines = f.readlines()
-            last_lines = lines[-500:]
+            last_lines = lines[-2000:]
             return jsonify({"logs": "".join(last_lines)})
 
     except Exception as e:
