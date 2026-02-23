@@ -1675,7 +1675,7 @@ class MT5ExecutionHandler:
                     f"{'='*80}"
                 )
 
-                current_price = self.get_current_price(self.symbol)
+                current_price = self.get_current_price(symbol)
                 closed_count = 0
 
                 for position in portfolio_positions:
@@ -1713,7 +1713,7 @@ class MT5ExecutionHandler:
                         positions_to_remove.append(pos)
 
                 if positions_to_remove:
-                    current_price = self.get_current_price(self.symbol)
+                    current_price = self.get_current_price(symbol)
                     for pos in positions_to_remove:
                         self.portfolio_manager.close_position(
                             position_id=pos.position_id,

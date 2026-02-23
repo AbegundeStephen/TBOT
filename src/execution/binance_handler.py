@@ -541,7 +541,7 @@ class BinanceExecutionHandler:
 
         try:
             if current_price is None:
-                current_price = self.get_current_price(force_live=True)
+                current_price = self.get_current_price(symbol=self.symbol, force_live=True)
 
             if current_price is None or current_price <= 0:
                 logger.error(f"{asset_name}: Invalid price: {current_price}")
