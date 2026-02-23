@@ -22,6 +22,7 @@ class ExitReason(Enum):
     TAKE_PROFIT_2 = "take_profit_2"
     TAKE_PROFIT_3 = "take_profit_3"
     TRAILING_STOP = "trailing_stop"
+    BREAK_EVEN = "break_even"
     MANUAL = "manual"
     TIME_STOP = "time_stop"
 
@@ -433,11 +434,11 @@ class VeteranTradeManager:
                 logger.info("\n" + "=" * 70 + "\n🚀 TRADE PROMOTION TRIGGERED\n" + "=" * 70)
                 self.runner_activated = True
                 self.take_profit_levels, self.partial_sizes = [], []
-                self.current_stop_loss = self.entry_price * (1.001 if self.side == "long" else 0.999)
-                logger.info(f"[VTM] Stop moved to break-even: ${self.current_stop_loss:,.2f}")
+                # Keep current structural stop loss, do not force break-even
+                logger.info(f"[VTM] Runner activated. SL remains at structural level: ${self.current_stop_loss:,.2f}")
                 return True
             else:
-                self.current_stop_loss = self.entry_price * (1.001 if self.side == "long" else 0.999)
+                # Do not modify SL if promotion fails
                 return False
         
         except Exception as e:
@@ -561,23 +562,6 @@ class VeteranTradeManager:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
         try:
-            # Fractal Exit Logic for Trend Following
-            if self.trade_type == "TREND" and df_4h is not None and not df_4h.empty:
-                new_stop_loss = None
-                if len(df_4h) >= 5:
-                    if self.side == "long":
-                        new_stop_loss = df_4h['low'].rolling(5).min().iloc[-1]
-                    else: # short
-                        new_stop_loss = df_4h['high'].rolling(5).max().iloc[-1]
-
-                if new_stop_loss is not None and not np.isnan(new_stop_loss):
-                    if self.side == "long" and new_stop_loss > self.current_stop_loss:
-                        logger.info(f"[VTM] Structure SL updated for {self.asset} LONG to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
-                        self.current_stop_loss = new_stop_loss
-                    elif self.side == "short" and new_stop_loss < self.current_stop_loss:
-                        logger.info(f"[VTM] Structure SL updated for {self.asset} SHORT to ${new_stop_loss:,.2f} (from ${self.current_stop_loss:,.2f})")
-                        self.current_stop_loss = new_stop_loss
-
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
             # Calculate dynamic early lock threshold
             actual_early_lock_threshold = self.early_lock_threshold_pct # Default to fixed
@@ -588,13 +572,30 @@ class VeteranTradeManager:
                 self.early_profit_locked = True
                 self.current_early_lock_threshold_pct = actual_early_lock_threshold # Store the actual threshold that triggered the lock
                 if self.side == "long":
-                    if (new_stop := self.entry_price * 1.001) > self.current_stop_loss: self.current_stop_loss = new_stop
+                    if (new_stop := self.entry_price * 1.001) > self.current_stop_loss: 
+                        logger.info(f"[VTM TACTICAL] 🛡️ Early Profit Lock: Moving {self.asset} LONG stop to Break-even (${new_stop:,.2f}) @ +{pnl_pct:.2%}")
+                        self.current_stop_loss = new_stop
                 else:
-                    if (new_stop := self.entry_price * 0.999) < self.current_stop_loss: self.current_stop_loss = new_stop
-                logger.info(f"[VTM] 🛡️ Break-even @ +{pnl_pct:.2%} (Dynamic Lock Threshold: {actual_early_lock_threshold:.2%})")
+                    if (new_stop := self.entry_price * 0.999) < self.current_stop_loss: 
+                        logger.info(f"[VTM TACTICAL] 🛡️ Early Profit Lock: Moving {self.asset} SHORT stop to Break-even (${new_stop:,.2f}) @ +{pnl_pct:.2%}")
+                        self.current_stop_loss = new_stop
 
             if (self.side == "long" and current_price <= self.current_stop_loss) or (self.side == "short" and current_price >= self.current_stop_loss):
-                return {"reason": ExitReason.STOP_LOSS, "price": current_price, "size": self.remaining_position}
+                # Determine specific reason based on stop loss level relative to entry
+                reason = ExitReason.STOP_LOSS
+                
+                if self.side == "long":
+                    if self.current_stop_loss > self.entry_price * 1.001:
+                        reason = ExitReason.TRAILING_STOP
+                    elif self.early_profit_locked or self.runner_activated:
+                        reason = ExitReason.BREAK_EVEN
+                else: # short
+                    if self.current_stop_loss < self.entry_price * 0.999:
+                        reason = ExitReason.TRAILING_STOP
+                    elif self.early_profit_locked or self.runner_activated:
+                        reason = ExitReason.BREAK_EVEN
+                
+                return {"reason": reason, "price": current_price, "size": self.remaining_position}
 
             for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):
                 if i in self.partials_hit: continue
@@ -602,10 +603,14 @@ class VeteranTradeManager:
                     self.partials_hit.append(i)
                     self.remaining_position -= size
                     if len(self.partials_hit) == 1 and self.trade_type == "TREND" and not self.check_promotion_to_runner(current_price) and not self.early_profit_locked:
-                        self.current_stop_loss = max(self.current_stop_loss, self.entry_price * 1.001) if self.side == "long" else min(self.current_stop_loss, self.entry_price * 0.999)
-                    elif len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND": self.runner_activated = True
+                        # Removed automatic break-even move here
+                        pass
+                    elif len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND": 
+                        self.runner_activated = True
+                        logger.info(f"[VTM TACTICAL] 🏃 Runner Activated: Trailing stop will now follow price.")
                     elif len(self.partials_hit) == 1 and not self.early_profit_locked and self.trade_type != "TREND":
-                        self.current_stop_loss = max(self.current_stop_loss, self.entry_price * 1.001) if self.side == "long" else min(self.current_stop_loss, self.entry_price * 0.999)
+                        # Removed automatic break-even move here
+                        pass
                     return {"reason": [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3][i], "price": current_price, "size": size}
 
             if self.bars_in_trade >= self.time_stop_bars:
