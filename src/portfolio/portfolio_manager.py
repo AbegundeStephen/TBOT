@@ -113,7 +113,6 @@ class Position:
                 # Adjust VTM parameters based on hybrid intelligence
                 # --------------------------------------------------------
                 account_risk = 0.015  # Base 1.5%
-                early_lock_threshold_pct = 0.01  # Base 1%
 
                 # Council + strong trend = More aggressive
                 if hybrid_mode == "council" and trend_strength == "strong":
@@ -172,7 +171,6 @@ class Position:
 
                     logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
                     logger.info(f"  Account Risk: {account_risk:.3f}")
-                    logger.info(f"  Early Lock:   {early_lock_threshold_pct:.2%}")
                     logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
                     logger.info(f"  Take Profit:  {f'${self.take_profit:,.2f}' if self.take_profit is not None else 'N/A'}")
 

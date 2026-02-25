@@ -230,14 +230,36 @@ class MTFRegimeIntegration:
                 asset_name=asset_name, symbol=symbol, exchange=exchange
             )
 
+            # Map the new 5-tier model to the legacy expectations of main.py
+            confidence = abs(regime_status.score)
+            risk_level = "low" if regime_status.consensus_regime in ["BULLISH", "BEARISH"] else "medium"
+            if regime_status.consensus_regime == "NEUTRAL":
+                risk_level = "high"
+            
+            volatility = "normal"
+            if regime_status.consensus_regime == "NEUTRAL":
+                volatility = "high" # Neutral often means high uncertainty/chop
+
+            # Institutional Rule: NO counter-trend allowed in Phase 1-5
+            allow_counter_trend = False
+
             return {
-                "regime": regime_status.consensus_regime, # ✅ FIX: Add the missing 'regime' key
+                "regime": regime_status.consensus_regime,
                 "regime_score": regime_status.score,
                 "is_bullish": regime_status.is_bullish,
                 "is_bearish": regime_status.is_bearish,
                 "reasoning": regime_status.reasoning,
                 "timestamp": regime_status.timestamp.isoformat(),
-                # For detailed logging if needed
+                "ema_1d_200": regime_status.ema_1d_200,
+                "ema_4h_200": regime_status.ema_4h_200,
+                "ema_4h_50": regime_status.ema_4h_50,
+                "confidence": confidence,
+                "timeframe_agreement": confidence, # Proxy for agreement in 5-tier
+                "recommended_mode": "council",
+                "risk_level": risk_level,
+                "volatility": volatility,
+                "allow_counter_trend": allow_counter_trend,
+                "max_positions": 3,
                 "full_regime_status": regime_status,
             }
 
@@ -245,9 +267,17 @@ class MTFRegimeIntegration:
             logger.error(f"[MTF] Error getting regime: {e}")
             # Return safe defaults
             return {
+                "regime": "NEUTRAL",
                 "regime_score": 0.0,
                 "is_bullish": False,
                 "is_bearish": False,
-                "reasoning": "Error getting regime",
+                "confidence": 0.0,
+                "timeframe_agreement": 0.0,
+                "recommended_mode": "council",
+                "risk_level": "high",
+                "volatility": "high",
+                "allow_counter_trend": False,
+                "max_positions": 0,
+                "reasoning": f"Error: {str(e)}",
                 "timestamp": datetime.now().isoformat(),
             }

@@ -298,6 +298,7 @@ class HybridSignalValidator:
             pattern_result,
             strategy=strategy,
             validation_time=(datetime.now() - validation_start).total_seconds(),
+            df=df,
         )
 
         self.stats["approved"] += 1
@@ -668,6 +669,7 @@ class HybridSignalValidator:
         pattern_result: dict,
         strategy: str,
         validation_time: float,
+        df: Optional[pd.DataFrame] = None, # Added df for ATR calculation
     ) -> Tuple[int, dict]:
         """Approve signal and add confidence boost"""
         self.rejection_window.append(False)
@@ -681,6 +683,19 @@ class HybridSignalValidator:
             boost = base_boost
         else:
             boost = base_boost - 0.02
+            
+        # ✅ PHASE 4: AI CONFLUENCE BONUS
+        if df is not None and len(df) >= 14:
+            import talib as ta
+            highs, lows, closes = df['high'].values, df['low'].values, df['close'].values
+            atr = ta.ATR(highs, lows, closes, timeperiod=14)[-1]
+            
+            # Distance from nearest level
+            distance = sr_result.get("distance_pct", 999) / 100 * float(df['close'].iloc[-1])
+            
+            if distance < (0.25 * atr):
+                boost += 0.15
+                logger.info(f"  🎯 AI CONFLUENCE BONUS: +15% boost (Pattern near S/R floor)")
 
         self.validation_history.append(
             {

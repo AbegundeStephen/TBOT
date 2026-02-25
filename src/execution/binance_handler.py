@@ -865,16 +865,23 @@ class BinanceExecutionHandler:
             # STEP 2: Calculate initial stop loss for validation
             # ================================================================
             risk_config = self.asset_config.get("risk", {})
-            sl_pct = risk_config.get("stop_loss_pct", 0.02)
-
-            # VTM PRE-FLIGHT FIX: Use tighter SL for TREND trades to meet R:R requirements
-            if trade_type == "TREND":
-                sl_pct = 0.015  # Use 1.5% SL to achieve ~2.0 R:R, satisfying VTM
+            
+            # ATR-based adaptive stop loss distance
+            atr_fast = signal_details.get("atr_fast") if signal_details else None
+            atr_multiplier = risk_config.get("atr_multiplier", 1.8)
+            
+            if atr_fast:
+                initial_sl_dist = atr_fast * atr_multiplier
+                logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+            else:
+                sl_pct = risk_config.get("stop_loss_pct", 0.02)
+                initial_sl_dist = current_price * sl_pct
+                logger.info(f"[TACTICAL] ⚠️ ATR not found, using static SL: {sl_pct:.2%}")
 
             if side == "long":
-                initial_stop = current_price * (1 - sl_pct)
+                initial_stop = current_price - initial_sl_dist
             else:
-                initial_stop = current_price * (1 + sl_pct)
+                initial_stop = current_price + initial_sl_dist
 
             # ================================================================
             # STEP 3: TACTICAL - VTM Pre-Flight Validation
@@ -888,6 +895,7 @@ class BinanceExecutionHandler:
                 stop_loss=initial_stop,
                 risk_config=risk_config,
                 trade_type=trade_type,
+                atr_fast=signal_details.get("atr_fast") if signal_details else None
             )
 
             if not is_valid:

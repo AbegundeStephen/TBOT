@@ -28,6 +28,7 @@ class GovernorStatus:
     is_bullish: bool
     is_bearish: bool
     reasoning: str
+    ema_200: Optional[float] = None
 
 
 @dataclass
@@ -40,6 +41,10 @@ class RegimeStatus:
     reasoning: str
     timestamp: datetime
     consensus_regime: str # NEW: Add human-readable regime string
+    # Macro EMAs for VTM anchoring
+    ema_1d_200: Optional[float] = None
+    ema_4h_200: Optional[float] = None
+    ema_4h_50: Optional[float] = None
 
 
 class MultiTimeFrameRegimeDetector:
@@ -180,7 +185,7 @@ class MultiTimeFrameRegimeDetector:
                     "Cannot establish macro trend. Defaulting to neutral."
                 )
                 return GovernorStatus(
-                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data"
+                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data", ema_200=None
                 )
 
             df_daily = self._calculate_indicators(df_daily)
@@ -191,7 +196,7 @@ class MultiTimeFrameRegimeDetector:
             if pd.isna(ema_200):
                  logger.warning("[CONSTITUTION] 1D 200 EMA is NaN. Defaulting to neutral.")
                  return GovernorStatus(
-                    is_bullish=False, is_bearish=False, reasoning="1D 200 EMA is NaN"
+                    is_bullish=False, is_bearish=False, reasoning="1D 200 EMA is NaN", ema_200=None
                  )
 
             # Check slope of 200 EMA (use available data if less than 20)
@@ -212,28 +217,31 @@ class MultiTimeFrameRegimeDetector:
             )
 
             return GovernorStatus(
-                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning
+                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200
             )
 
         except Exception as e:
             logger.error(f"[CONSTITUTION] Error analyzing 1D Governor: {e}", exc_info=True)
             return GovernorStatus(
-                is_bullish=False, is_bearish=False, reasoning=f"Error: {str(e)}"
+                is_bullish=False, is_bearish=False, reasoning=f"Error: {str(e)}", ema_200=None
             )
 
     def get_aggregated_regime_score(
         self, df_1h: pd.DataFrame, df_4h: pd.DataFrame, governor_status: GovernorStatus, asset_type: str
     ) -> RegimeStatus:
         """
-        Implements the Dual-Structure Logic Gates to determine the aggregated regime score.
+        Implements the INSTITUTIONAL 5-TIER REGIME MODEL.
+        Anchored to 1D 200 EMA (Constitution Gate).
 
-        Gates:
-        1. Constitution (4H BASELINE_EMA): Determines macro trend territory.
-        2. General (4H SLOW_EMA): Defines the intermediate trend direction.
-        3. Captain (1H SLOW_EMA): Gives permission for execution based on short-term trend.
+        Tiers:
+        1. BULLISH: Price > 1D 200 & Price > 4H 50 & Price > 1H 50
+        2. SLIGHTLY_BULLISH: Price > 1D 200 BUT Price < (4H 50 OR 1H 50)
+        3. NEUTRAL: Price near 1D 200 EMA or mixed signals
+        4. SLIGHTLY_BEARISH: Price < 1D 200 BUT Price > (4H 50 OR 1H 50)
+        5. BEARISH: Price < 1D 200 & Price < 4H 50 & Price < 1H 50
 
-        Returns:
-            RegimeStatus: Object indicating bullish/bearish score and reasoning.
+        STRICT LOCK: Price > 1D 200 blocks all BEARISH states.
+                    Price < 1D 200 blocks all BULLISH states.
         """
         score = 0.0
         reasons = []
@@ -242,7 +250,7 @@ class MultiTimeFrameRegimeDetector:
         if df_1h.empty or df_4h.empty:
             reasons.append("Insufficient 1H or 4H data.")
             return RegimeStatus(
-                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc)
+                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL"
             )
 
         # Calculate indicators for both timeframes
@@ -252,7 +260,7 @@ class MultiTimeFrameRegimeDetector:
         if df_1h_with_ema.empty or df_4h_with_ema.empty:
             reasons.append("Failed to calculate EMAs due to insufficient data.")
             return RegimeStatus(
-                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc)
+                asset=asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=", ".join(reasons), timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL"
             )
 
         latest_1h = df_1h_with_ema.iloc[-1]
@@ -266,57 +274,54 @@ class MultiTimeFrameRegimeDetector:
         ema_4h_slow = latest_4h[f"ema_{SLOW_EMA}"]
         ema_4h_baseline = latest_4h[f"ema_{BASELINE_EMA}"]
 
-        # --- Gate 1: Constitution (4H BASELINE_EMA) ---
-        # Macro trend territory from the Governor
-        if governor_status.is_bullish:
-            score += 1.0 # Strong bullish macro environment
-            reasons.append("Constitution: 1D 200 EMA is bullish.")
-        elif governor_status.is_bearish:
-            score -= 1.0 # Strong bearish macro environment
-            reasons.append("Constitution: 1D 200 EMA is bearish.")
-        else:
-            reasons.append("Constitution: 1D 200 EMA is neutral/unclear.")
+        # Macro Trend from Governor (1D 200 EMA)
+        macro_bullish = governor_status.is_bullish
+        macro_bearish = governor_status.is_bearish
 
-        # --- Gate 2: General (4H SLOW_EMA) ---
-        # Intermediate trend direction
-        if price_4h > ema_4h_baseline: # Only consider General if above Constitution line
-            if price_4h > ema_4h_slow:
-                score += 1.0
-                reasons.append("General: 4H price > 4H 50 EMA.")
-            elif price_4h < ema_4h_slow:
-                score -= 0.5 # Slight negative if price below 50 EMA but still above 200
-                reasons.append("General: 4H price < 4H 50 EMA (but above 200).")
-        else: # Below Constitution line, General can only be neutral or bearish
-            if price_4h < ema_4h_slow:
-                score -= 1.0
-                reasons.append("General: 4H price < 4H 50 EMA (below 200).")
+        # Intermediate & Short-term alignment
+        above_4h_50 = price_4h > ema_4h_slow
+        above_1h_50 = price_1h > ema_1h_slow
+
+        # 5-TIER LOGIC
+        if macro_bullish:
+            # BLOCK BEARISH STATES
+            if above_4h_50 and above_1h_50:
+                consensus_regime = "BULLISH"
+                score = 1.0
+                reasons.append("Macro BULLISH: Price above all EMAs.")
+            elif not above_4h_50 or not above_1h_50:
+                consensus_regime = "SLIGHTLY_BULLISH"
+                score = 0.5
+                reasons.append("Macro BULLISH: Mixed fast EMAs (SLIGHTLY_BULLISH).")
             else:
-                score -= 0.5 # Price above 50 EMA but below 200
-                reasons.append("General: 4H price > 4H 50 EMA (but below 200).")
-
-        # --- Gate 3: Captain (1H SLOW_EMA) ---
-        # Short-term execution permission
-        if price_1h > ema_1h_slow:
-            score += 0.5
-            reasons.append("Captain: 1H price > 1H 50 EMA.")
-        elif price_1h < ema_1h_slow:
-            score -= 0.5
-            reasons.append("Captain: 1H price < 1H 50 EMA.")
-        else:
-            reasons.append("Captain: 1H price near 1H 50 EMA (neutral).")
-
-        # Final decision based on score
-        is_bullish = score > 0.5 # Threshold for bullish bias
-        is_bearish = score < -0.5 # Threshold for bearish bias
-
-        if is_bullish:
-            consensus_regime = "BULLISH"
-        elif is_bearish:
-            consensus_regime = "BEARISH"
+                consensus_regime = "NEUTRAL"
+                score = 0.0
+                reasons.append("Macro BULLISH but mixed signals.")
+        
+        elif macro_bearish:
+            # BLOCK BULLISH STATES
+            if not above_4h_50 and not above_1h_50:
+                consensus_regime = "BEARISH"
+                score = -1.0
+                reasons.append("Macro BEARISH: Price below all EMAs.")
+            elif above_4h_50 or above_1h_50:
+                consensus_regime = "SLIGHTLY_BEARISH"
+                score = -0.5
+                reasons.append("Macro BEARISH: Mixed fast EMAs (SLIGHTLY_BEARISH).")
+            else:
+                consensus_regime = "NEUTRAL"
+                score = 0.0
+                reasons.append("Macro BEARISH but mixed signals.")
+        
         else:
             consensus_regime = "NEUTRAL"
+            score = 0.0
+            reasons.append("Constitution: 1D 200 EMA is neutral/unclear.")
 
-        final_reasoning = f"Aggregated score: {score:.2f}. " + ", ".join(reasons)
+        is_bullish = consensus_regime in ["BULLISH", "SLIGHTLY_BULLISH"]
+        is_bearish = consensus_regime in ["BEARISH", "SLIGHTLY_BEARISH"]
+
+        final_reasoning = f"Institutional {consensus_regime} regime. " + ", ".join(reasons)
 
         return RegimeStatus(
             asset=asset_type,
@@ -325,7 +330,10 @@ class MultiTimeFrameRegimeDetector:
             is_bearish=is_bearish,
             reasoning=final_reasoning,
             timestamp=datetime.now(timezone.utc),
-            consensus_regime=consensus_regime
+            consensus_regime=consensus_regime,
+            ema_1d_200=governor_status.ema_200,
+            ema_4h_200=ema_4h_baseline,
+            ema_4h_50=ema_4h_slow
         )
 
     def analyze_regime(
