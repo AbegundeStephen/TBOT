@@ -114,6 +114,14 @@ class MTFRegimeIntegration:
             regime_status: RegimeStatus object
         """
         try:
+            # Map simplified status to the full database schema
+            # Using absolute score as confidence proxy
+            confidence = abs(regime_status.score)
+            
+            # Derived scores
+            bullish_score = max(0.0, regime_status.score)
+            bearish_score = max(0.0, -regime_status.score)
+
             # Insert into mtf_regime_analysis table
             result = (
                 self.db_manager.supabase.table("mtf_regime_analysis")
@@ -121,7 +129,25 @@ class MTFRegimeIntegration:
                     {
                         "asset": regime_status.asset,
                         "timestamp": regime_status.timestamp.isoformat(),
-                        "score": regime_status.score,
+                        "consensus_regime": regime_status.consensus_regime,
+                        "consensus_confidence": confidence,
+                        "timeframe_agreement": confidence, 
+                        "trend_coherence": confidence,     
+                        "risk_level": "low" if confidence > 0.5 else "high",
+                        "volatility_regime": "normal" if confidence > 0.5 else "high",
+                        "recommended_mode": "council",
+                        "allow_counter_trend": False,
+                        "suggested_max_positions": 3,
+                        # Scores
+                        "bullish_score": bullish_score,
+                        "bearish_score": bearish_score,
+                        # Timeframe fallbacks (using consensus as proxy)
+                        "h1_regime": regime_status.consensus_regime,
+                        "h1_confidence": confidence,
+                        "h4_regime": regime_status.consensus_regime,
+                        "h4_confidence": confidence,
+                        "d1_regime": regime_status.consensus_regime,
+                        "d1_confidence": confidence,
                     }
                 )
                 .execute()
