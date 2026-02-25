@@ -436,13 +436,24 @@ class MT5ExecutionHandler:
 
                 # Calculate initial stop loss for validation
                 risk_config = asset_cfg.get("risk", {})
-                sl_pct = risk_config.get("stop_loss_pct", 0.01)
+                
+                # ATR-based adaptive stop loss distance
+                atr_fast = signal_details.get("atr_fast") if signal_details else None
+                atr_multiplier = risk_config.get("atr_multiplier", 1.5)
+                
+                if atr_fast:
+                    initial_sl_dist = atr_fast * atr_multiplier
+                    logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+                else:
+                    sl_pct = risk_config.get("stop_loss_pct", 0.01)
+                    initial_sl_dist = current_price * sl_pct
+                    logger.info(f"[TACTICAL] ⚠️ ATR not found, using static SL: {sl_pct:.2%}")
 
                 side = "long" if signal == 1 else "short"
                 if side == "long":
-                    initial_stop = current_price * (1 - sl_pct)
+                    initial_stop = current_price - initial_sl_dist
                 else:
-                    initial_stop = current_price * (1 + sl_pct)
+                    initial_stop = current_price + initial_sl_dist
 
                 # VTM Pre-Flight Validation
                 logger.info(f"\n{'='*80}")
@@ -454,6 +465,7 @@ class MT5ExecutionHandler:
                     stop_loss=initial_stop,
                     risk_config=risk_config,
                     trade_type=trade_type,
+                    atr_fast=signal_details.get("atr_fast") if signal_details else None
                 )
 
                 if not is_valid:

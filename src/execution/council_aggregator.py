@@ -75,11 +75,9 @@ class InstitutionalCouncilAggregator:
         if config:
             self.config.update(config)
 
-        # ✨ NEW: World-Class Filter Thresholds
+        # ✨ NEW: World-Class Filter Thresholds (Symmetric Logic)
         self.filter_thresholds = {
-            "min_volatility_pct": self.config.get("risk_management", {}).get("min_volatility_pct", 0.002), # 0.2%
             "min_sniper_conf": self.config.get("ai", {}).get("min_sniper_confidence", 0.65),
-            "min_profit_potential": self.config.get("risk_management", {}).get("min_profit_potential", 0.0035) # 0.35%
         }
 
         # Dynamic threshold loading
@@ -136,7 +134,6 @@ class InstitutionalCouncilAggregator:
                 'rsi_bearish_zone': (35, 60),
                 'rsi_oversold_bonus': 30,
                 'rsi_overbought_bonus': 70,
-                'sr_proximity_pct': 0.0035,  # 0.35%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.60,
                 'macd_confirmation': True,
@@ -147,7 +144,6 @@ class InstitutionalCouncilAggregator:
                 'rsi_bearish_zone': (40, 65),
                 'rsi_oversold_bonus': 25,
                 'rsi_overbought_bonus': 75,
-                'sr_proximity_pct': 0.0035,  # 0.35%
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
@@ -182,76 +178,94 @@ class InstitutionalCouncilAggregator:
     def _check_governor_filter(self, df: pd.DataFrame, signal: int, governor_data: Optional[Dict] = None) -> Tuple[bool, str]:
         """
         Check the 1D Macro Trend via pre-injected Governor data.
-        ✅ FIXED: Fail-safe defaults to "SCALP" if Governor is unavailable.
+        ✅ INSTITUTIONAL: Strict TREND-ONLY enforcement. SCALP logic removed.
         """
-        # 1. FAIL-SAFE: If no Governor data, allow safe SCALP trading
+        # 1. FAIL-SAFE: If no Governor data, return NO TRADE (Strict macro dependency)
         if not governor_data or 'governor' not in governor_data:
-            logger.debug("[GOV] No MTF Governor data available. Defaulting to SCALP mode.")
-            return True, "SCALP"
+            logger.warning("[GOV] ❌ BLOCKED - No MTF Governor data available. Blocking trade (Strict Macro Rule).")
+            return False, "NEUTRAL"
 
         try:
             governor = governor_data['governor']
             
             # Handle object vs dict access depending on how MTF serializes it
-            trade_type = getattr(governor.trade_type, 'value', str(governor.trade_type))
-            regime_value = getattr(governor.regime, 'value', str(governor.regime))
+            # trade_type = getattr(governor.trade_type, 'value', str(governor.trade_type))
+            # regime_value = getattr(governor.regime, 'value', str(governor.regime))
+            
+            # Use the new RegimeStatus attributes if available, otherwise fallback
+            regime_name = getattr(governor, 'consensus_regime', "NEUTRAL")
+            is_bullish = getattr(governor, 'is_bullish', False)
+            is_bearish = getattr(governor, 'is_bearish', False)
 
-            # 2. Block strictly neutral markets (The only time we block everything)
-            if trade_type == "NEUTRAL":
-                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Cash (No clear direction)")
+            # 2. Block neutral or mixed markets
+            if regime_name == "NEUTRAL":
+                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Mixed (Institutional Caution)")
                 return False, "NEUTRAL"
 
-            # 3. Macro Trend Alignment (Only active in TREND mode)
-            if trade_type == "TREND":
-                if regime_value == "BULL" and signal == -1:
-                    logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bull Market")
-                    return False, "SCALP"
-                if regime_value == "BEAR" and signal == 1:
-                    logger.info(f"[GOV] ❌ BLOCKED - Council does not counter-trend in a Macro Bear Market")
-                    return False, "SCALP"
+            # 3. Macro Trend Alignment (Strict TREND mode)
+            # If Macro is Bullish, only allow Buys. If Macro is Bearish, only allow Sells.
+            if is_bullish and signal == -1:
+                logger.info(f"[GOV] ❌ BLOCKED - Short attempt in Macro BULLISH regime ({regime_name})")
+                return False, "TREND"
+            if is_bearish and signal == 1:
+                logger.info(f"[GOV] ❌ BLOCKED - Long attempt in Macro BEARISH regime ({regime_name})")
+                return False, "TREND"
 
-            return True, trade_type
+            return True, "TREND"
 
         except Exception as e:
             logger.error(f"[GOV] Error processing Governor data: {e}", exc_info=True)
-            # ULTIMATE FAIL-SAFE: If data is corrupted, allow safe SCALP trading
-            return True, "SCALP"
+            return False, "NEUTRAL"
 
-    def _check_volatility_gate(self, df: pd.DataFrame) -> bool:
-        """Blocks trades in dead markets (Norm ATR < 0.2%)."""
+    def _check_volatility_gate_adaptive(self, atr_fast: float, atr_slow: float) -> bool:
+        """Blocks trades in dead markets (atr_fast < 0.5 * atr_slow)."""
         try:
-            high, low, close = df['high'].values, df['low'].values, df['close'].values
-            atr = ta.ATR(high, low, close, timeperiod=14)
-            norm_atr = atr[-1] / close[-1]
-            min_volatility = self.filter_thresholds["min_volatility_pct"]
-            
-            if norm_atr < min_volatility:
-                logger.info(f"[VOLATILITY] ❌ BLOCKED - Dead Market (ATR: {norm_atr:.2%} < {min_volatility:.2%})")
+            if atr_fast < (0.5 * atr_slow):
+                logger.info(f"[VOLATILITY] ❌ BLOCKED - Dead Market (ATR Fast: {atr_fast:.4f} < 0.5 * ATR Slow: {atr_slow:.4f})")
                 return False
             return True
-        except: return True
+        except Exception as e:
+            logger.error(f"[VOLATILITY] Error: {e}")
+            return True
 
     def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Dict]:
         """
         Hybrid Confirmation: AI Pattern OR Momentum Impulse.
-        
-        Updated to align with the institutional edge confirmation approach from SignalAggregator.
-        A trade is confirmed if ANY of the following institutional edge conditions are met.
-        This prevents rejecting high-quality trades due to cosmetic candle issues.
-        
-        Confirmation Logic (OR-based):
-        1. AI Pattern: A high-confidence AI pattern is detected.
-        2. Momentum Candle: The candle body is at least 60% of the total range.
-        3. Turtle Breakout: Price closes above the 20-period Donchian High or below the Low.
-        4. Volume Surge: Volume is >= 150% of its 20-period rolling average.
-        5. Volatility Breach: Price closes outside the 2.0 standard deviation Bollinger Bands.
-        
-        Returns:
-            (passed, details)
+        ✅ INSTITUTIONAL UPGRADE: Mandatory Displacement Fork (Binance vs Exness).
         """
         try:
             latest = df.iloc[-1]
             reasons = []
+
+            # ================================================================
+            # 0. Institutional Displacement Fork (MANDATORY)
+            # ================================================================
+            # Reason: Proves institutional conviction vs broker tick noise.
+            body = abs(latest['close'] - latest['open'])
+            high, low, close_vals = df['high'].values, df['low'].values, df['close'].values
+            atr_fast = ta.ATR(high, low, close_vals, timeperiod=14)[-1]
+            
+            displacement_passed = False
+            displacement_reason = ""
+            
+            if 'BTC' in self.asset_type:
+                # BINANCE: Real volume is reliable.
+                volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
+                if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
+                    displacement_passed = True
+                else:
+                    displacement_ratio = latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0
+                    displacement_reason = f"BTC Volume Surge < 1.5x ({displacement_ratio:.2f}x)"
+            else:
+                # EXNESS/FOREX: ATR Displacement is King (Ignore tick volume)
+                if body > (1.2 * atr_fast):
+                    displacement_passed = True
+                else:
+                    displacement_reason = f"Forex Displacement < 1.2 * ATR ({body:.4f} < {1.2 * atr_fast:.4f})"
+            
+            if not displacement_passed:
+                logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
+                return False, {'trigger_type': None, 'reason': displacement_reason}
 
             # ================================================================
             # 1. AI Pattern Confidence
@@ -275,23 +289,26 @@ class InstitutionalCouncilAggregator:
                     logger.debug(f"[SNIPER] AI Pattern check failed: {e}")
 
             # ================================================================
-            # 2. Momentum Candle
+            # 2. Institutional Displacement Confirmation
             # ================================================================
-            # Reason: Confirms strong conviction from buyers or sellers in the current period.
-            body = abs(latest['close'] - latest['open'])
-            total_range = latest['high'] - latest['low']
-            if total_range > 0:
-                body_ratio = body / total_range
-                if body_ratio >= 0.60:
-                    is_bullish_candle = latest['close'] > latest['open']
-                    if (signal == 1 and is_bullish_candle) or (signal == -1 and not is_bullish_candle):
-                        reasons.append({
-                            'passed': True,
-                            'trigger_type': 'MOMENTUM_CANDLE',
-                            'body_ratio': body_ratio,
-                        })
+            # Reason: Signal already passed mandatory displacement fork.
+            # We record it here as a confirmed trigger for the audit trail.
+            if 'BTC' in self.asset_type:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'VOLUME_SURGE_INSTITUTIONAL',
+                    'volume': latest['volume'],
+                    'surge_factor': latest['volume'] / volume_rolling_avg,
+                })
+            else:
+                reasons.append({
+                    'passed': True,
+                    'trigger_type': 'MOMENTUM_DISPLACEMENT_INSTITUTIONAL',
+                    'body': body,
+                    'atr_multiplier': body / atr_fast if atr_fast > 0 else 0,
+                })
 
-            # Check if we have enough data for rolling indicators (Donchian, Volume MA, Bollinger Bands)
+            # Check if we have enough data for rolling indicators (Donchian, Bollinger Bands)
             # Need 20 periods + current, so at least 21 bars
             if len(df) < 21:
                 if reasons:
@@ -303,43 +320,6 @@ class InstitutionalCouncilAggregator:
 
             # ================================================================
             # 3. Turtle Breakout (20-period Donchian Channel)
-            # ================================================================
-            # Reason: Captures classic institutional breakout entries.
-            # We look at the previous 20 candles to define the channel *before* the current candle.
-            high_20 = df['high'].iloc[-21:-1].max()
-            low_20 = df['low'].iloc[-21:-1].min()
-
-            if signal == 1 and latest['close'] > high_20:
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'TURTLE_BREAKOUT',
-                    'breakout_level': high_20,
-                    'price': latest['close'],
-                })
-            elif signal == -1 and latest['close'] < low_20:
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'TURTLE_BREAKOUT',
-                    'breakout_level': low_20,
-                    'price': latest['close'],
-                })
-
-            # ================================================================
-            # 4. Volume Surge
-            # ================================================================
-            # Reason: Confirms institutional participation and conviction behind a move.
-            volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
-            if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'VOLUME_SURGE',
-                    'volume': latest['volume'],
-                    'avg_volume': volume_rolling_avg,
-                    'surge_factor': latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0,
-                })
-
-            # ================================================================
-            # 5. Volatility Breach (Bollinger Bands)
             # ================================================================
             # Reason: Detects that price has moved into a new volatility regime.
             close_rolling_mean = df['close'].iloc[-21:-1].mean()
@@ -382,21 +362,20 @@ class InstitutionalCouncilAggregator:
             # Fail-open: If the filter fails, we allow the trade to avoid blocking valid signals due to code errors.
             return True, {'trigger_type': 'ERROR_FALLBACK', 'reason': str(e)}
 
-    def _check_profit_economics(self, df: pd.DataFrame, signal: int) -> bool:
-        """The 'Worth It' Check. Validates if potential RR covers fees."""
+    def _check_profit_economics_adaptive(self, atr_fast: float) -> bool:
+        """The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling."""
         try:
-            close = df['close'].values[-1]
-            atr = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            # Using 1.5 ATR as a proxy for the expected first target distance
+            expected_tp_distance = atr_fast * 1.5
             
-            # Using 1.5 ATR as a proxy for the first target
-            potential_move_pct = (atr * 1.5) / close
-            min_profit = self.filter_thresholds["min_profit_potential"]
-
-            if potential_move_pct < min_profit:
-                logger.info(f"[PROFIT] ❌ BLOCKED - Low Reward (Potential: {potential_move_pct:.2%} < {min_profit:.2%})")
+            # BLOCK trade IF: expected_tp_distance < (0.5 * atr_fast)
+            if expected_tp_distance < (0.5 * atr_fast):
+                logger.info(f"[PROFIT] ❌ BLOCKED - Low Reward (Expected TP Distance: {expected_tp_distance:.4f} < 0.5 * ATR Fast: {0.5 * atr_fast:.4f})")
                 return False
             return True
-        except: return True
+        except Exception as e:
+            logger.error(f"[PROFIT] Error: {e}")
+            return True
 
     
     def get_aggregated_signal(
@@ -408,12 +387,20 @@ class InstitutionalCouncilAggregator:
     ) -> Tuple[int, Dict]:
         """
         Main council decision logic with bidirectional support
-        ✅ FIXED: Injects MTF Governor data to optimize CPU and enable Asymmetry.
+        ✅ INSTITUTIONAL PHASE 4: Dynamic Weights & Penalty Shift
         """
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
         
         try:
+            # ================================================================
+            # VOLATILITY & REGIME CONTEXT
+            # ================================================================
+            high, low, close_vals = df['high'].values, df['low'].values, df['close'].values
+            atr_fast = ta.ATR(high, low, close_vals, timeperiod=14)[-1]
+            atr_slow = ta.ATR(high, low, close_vals, timeperiod=100)[-1]
+            adx = ta.ADX(high, low, close_vals, timeperiod=14)[-1]
+
             # ✅ FIXED: Use the highly-accurate MTF data if provided, otherwise fallback
             mr_signal, mr_conf = 0, 0.0
             tf_signal, tf_conf = 0, 0.0
@@ -428,6 +415,23 @@ class InstitutionalCouncilAggregator:
                 is_bull, regime_conf = self._detect_regime(df)
                 regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
             
+            # ================================================================
+            # ⚖️ DYNAMIC COUNCIL WEIGHTS (Phase 4)
+            # ================================================================
+            w_trend = self.w_trend
+            w_structure = self.w_structure
+            w_momentum = self.w_momentum
+            w_pattern = self.w_pattern
+            w_volume = self.w_volume
+            
+            consensus_regime = governor_data.get("consensus_regime", "NEUTRAL") if governor_data else "NEUTRAL"
+            
+            if consensus_regime in ["SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH"]:
+                w_momentum = 0.0
+                w_structure = 2.5
+                w_pattern = 1.0
+                if self.detailed_logging: logger.info(f"[COUNCIL] ⚖️ DYNAMIC WEIGHTS APPLIED: {consensus_regime}")
+
             if self.s_mean_reversion:
                 try:
                     mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
@@ -474,24 +478,24 @@ class InstitutionalCouncilAggregator:
             is_breakout_mode = self._detect_breakout_state(df)
             
             # Run all judges for both directions
-            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull)
+            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull, w_trend)
             buy_explanations.append(trend_exp['buy'])
             sell_explanations.append(trend_exp['sell'])
             
             # Pass breakout flag to adaptive judges
-            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df, is_breakout_mode)
+            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df, is_breakout_mode, w_structure)
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
-            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode)
+            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode, w_momentum, adx)
             buy_explanations.append(momentum_exp['buy'])
             sell_explanations.append(momentum_exp['sell'])
             
-            buy_scores['pattern'], sell_scores['pattern'], pattern_exp = self._judge_pattern_bidirectional(df)
+            buy_scores['pattern'], sell_scores['pattern'], pattern_exp = self._judge_pattern_bidirectional(df, w_pattern)
             buy_explanations.append(pattern_exp['buy'])
             sell_explanations.append(pattern_exp['sell'])
             
-            buy_scores['volume'], sell_scores['volume'], volume_exp = self._judge_volume_bidirectional(df)
+            buy_scores['volume'], sell_scores['volume'], volume_exp = self._judge_volume_bidirectional(df, w_volume)
             buy_explanations.append(volume_exp['buy'])
             sell_explanations.append(volume_exp['sell'])
             
@@ -507,114 +511,98 @@ class InstitutionalCouncilAggregator:
             chosen_scores = {}
             chosen_explanations = []
             total_score = 0.0
-            required_score = 0.0
+            required_score = 3.5 # Standard institutional threshold
             trade_type = "TREND" # Default
             
-            # BUY decision
+            # Determine preliminary signal
             if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
-                decision_type = "BUY (Trend-Aligned)"
-                chosen_scores = buy_scores
-                chosen_explanations = buy_explanations
                 total_score = buy_total
-                required_score = self.trend_aligned_threshold
-                
             elif not is_bull and buy_total >= self.counter_trend_threshold:
                 signal = 1
-                decision_type = "BUY (Counter-Trend Reversal)"
-                chosen_scores = buy_scores
-                chosen_explanations = buy_explanations
                 total_score = buy_total
-                required_score = self.counter_trend_threshold
-            
-            # SELL decision (only if no BUY signal)
             elif not is_bull and sell_total >= self.trend_aligned_threshold:
                 signal = -1
-                decision_type = "SELL (Trend-Aligned)"
-                chosen_scores = sell_scores
-                chosen_explanations = sell_explanations
                 total_score = sell_total
-                required_score = self.trend_aligned_threshold
-                
             elif is_bull and sell_total >= self.counter_trend_threshold:
                 signal = -1
-                decision_type = "SELL (Counter-Trend Reversal)"
-                chosen_scores = sell_scores
-                chosen_explanations = sell_explanations
                 total_score = sell_total
-                required_score = self.counter_trend_threshold
             
-            else:
-                # HOLD - show both scores
-                decision_type = f"HOLD (BUY: {buy_total:.1f}, SELL: {sell_total:.1f})"
-                chosen_scores = {'buy': buy_scores, 'sell': sell_scores}
-                chosen_explanations = buy_explanations + sell_explanations
-                total_score = max(buy_total, sell_total)
-                required_score = self.trend_aligned_threshold
-
-            # --- Directional Trap Filter Veto (Computational Efficiency) ---
+            # ====================================================================
+            # 🛡️ THE INTERCEPTOR: ABSOLUTE VETO (Phase 4)
+            # ====================================================================
             if signal != 0:
+                # 1. ATR WICK TRAP (ABSOLUTE VETO)
                 if not validate_candle_structure(df, self.asset_type, direction="long" if signal == 1 else "short"):
-                    logger.info(f"[TRAP] VETO - Council signal rejected by structure check.")
+                    logger.info(f"[VETO] ❌ BLOCKED - Institutional Wick Trap.")
                     return 0, {
                         'timestamp': timestamp,
                         'signal': 0,
                         'asset': self.asset_type,
-                        'decision_type': f"BLOCKED (Trap candle detected for {self.asset_type})",
+                        'decision_type': "BLOCKED (Institutional Wick Trap)",
                         'reasoning': "blocked_by_trap_filter",
                         'final_signal': 0,
                         'signal_quality': 0.0
                     }
 
-            # ================================================================
-            # GATEKEEPER FILTERING (Phase 3 for Council Aggregator)
-            # ================================================================
-            # Extract regime score for Gatekeeper
-            regime_score = governor_data.get("regime_score", 0.0)
-            regime_is_bullish = governor_data.get("is_bullish", False)
-            regime_is_bearish = governor_data.get("is_bearish", False)
-
-            if signal != 0: # Only apply Gatekeeper if a signal was generated
-                if regime_score == 0.0:
-                    # Allow trading in neutral regimes (don't block everything)
-                    logger.info(f"[GATEKEEPER] ⚖️ NEUTRAL REGIME: Allowing {decision_type} for {self.asset_type}.")
-                elif regime_is_bullish and signal < 0:
-                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT: Bullish regime ({regime_score:.2f}) for {self.asset_type}. Council signal: {signal}")
-                    signal = 0
-                    decision_type = f"BLOCKED (Gatekeeper - Bullish Regime, Blocked Short: {decision_type})"
-                elif regime_is_bearish and signal > 0:
-                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG: Bearish regime ({regime_score:.2f}) for {self.asset_type}. Council signal: {signal}")
-                    signal = 0
-                    decision_type = f"BLOCKED (Gatekeeper - Bearish Regime, Blocked Long: {decision_type})"
+                # 2. DEAD VOLATILITY GATE (ABSOLUTE VETO)
+                if not self._check_volatility_gate_adaptive(atr_fast, atr_slow):
+                    logger.info(f"[VETO] ❌ BLOCKED - Dead Market Volatility.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "BLOCKED (Dead Market Volatility)",
+                        'reasoning': "low_volatility_veto",
+                        'final_signal': 0,
+                        'signal_quality': 0.0
+                    }
 
             # ====================================================================
-            # ✨ THE INTERCEPTOR: Apply World-Class Filters before finalizing
+            # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)
             # ====================================================================
             if signal != 0:
-                # A. GOVERNOR FILTER (Run first to get trade type)
+                penalty = 0.0
+                
+                # A. GOVERNOR FILTER
                 gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
-
-                # Trap filter moved to pre-consensus veto phase
                 if not gov_passed:
-                    decision_type = f"BLOCKED (1D Governor vetoed {decision_type})"
-                    signal = 0
+                    penalty += 1.0
+                    logger.info(f"[PENALTY] ⚠️ Governor alignment failure: -1.0")
 
-                # B. VOLATILITY GATE
-                elif not self._check_volatility_gate(df):
-                    decision_type = f"BLOCKED (Dead Market - Low Volatility)"
-                    signal = 0
-
-                # C. SNIPER LOCK (Momentum / Pattern)
-                # The _check_sniper_filter now returns a tuple (passed, details_dict)
+                # B. SNIPER LOCK
                 sniper_passed, sniper_details = self._check_sniper_filter(df, signal)
                 if not sniper_passed:
-                    decision_type = f"BLOCKED (No institutional sniper confirmation: {sniper_details.get('reason', 'N/A')})"
-                    signal = 0
+                    penalty += 1.0
+                    logger.info(f"[PENALTY] ⚠️ Sniper confirmation failure: -1.0")
 
-                # D. PROFIT ECONOMICS GATE
-                elif not self._check_profit_economics(df, signal):
-                    decision_type = f"BLOCKED (Potential Reward too low for fees)"
+                # C. PROFIT ECONOMICS
+                if not self._check_profit_economics_adaptive(atr_fast):
+                    penalty += 1.0
+                    logger.info(f"[PENALTY] ⚠️ Low profit economics: -1.0")
+
+                # Apply penalties
+                total_score -= penalty
+                
+                # Final execution check
+                if total_score < 3.5:
+                    logger.info(f"[SIGNAL] ❌ REJECTED - Score after penalties ({total_score:.2f}) < 3.5")
                     signal = 0
+                    decision_type = f"REJECTED (Score: {total_score:.2f})"
+                else:
+                    decision_type = f"{'BUY' if signal == 1 else 'SELL'} (Confirmed)"
+
+            # Map back chosen details
+            if signal == 1:
+                chosen_scores = buy_scores
+                chosen_explanations = buy_explanations
+            elif signal == -1:
+                chosen_scores = sell_scores
+                chosen_explanations = sell_explanations
+            else:
+                chosen_scores = {'buy': buy_scores, 'sell': sell_scores}
+                chosen_explanations = buy_explanations + sell_explanations
+                if total_score == 0: total_score = max(buy_total, sell_total)
             
             # Update statistics based on FINAL signal
             if signal == 1:
@@ -645,10 +633,10 @@ class InstitutionalCouncilAggregator:
                 'timestamp': timestamp,
                 'signal': signal,
                 'asset': self.asset_type,
-                'trade_type': trade_type, # ✨ NEW: Pass to Risk Manager
+                'trade_type': trade_type, 
                 'decision_type': decision_type,
                 'total_score': total_score,
-                'required_score': required_score,
+                'required_score': 3.5,
                 'scores': chosen_scores,
                 'buy_scores': buy_scores,
                 'sell_scores': sell_scores,
@@ -658,7 +646,7 @@ class InstitutionalCouncilAggregator:
                 'regime_confidence': regime_conf,
                 'explanations': chosen_explanations,
                 'signal_quality': signal_quality,
-                'reasoning': f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})",
+                'reasoning': f"{decision_type} (Score: {total_score:.2f}/3.5)",
                 'mr_signal': mr_signal,
                 'mr_confidence': mr_conf,
                 'tf_signal': tf_signal,
@@ -669,6 +657,9 @@ class InstitutionalCouncilAggregator:
                 'sell_score': sell_total,
                 'aggregator_type': 'council',
                 'judge_agreement': judge_agreement,
+                'atr_fast': atr_fast,
+                'atr_slow': atr_slow,
+                'governor_data': governor_data
             }
             
             # Log decision
@@ -758,17 +749,9 @@ class InstitutionalCouncilAggregator:
     # BIDIRECTIONAL JUDGES
     # ========================================================================
     
-    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool) -> Tuple[float, float, Dict]:
+    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float) -> Tuple[float, float, Dict]:
         """
         JUDGE 1: TREND (Bidirectional)
-        
-        BUY Rules:
-        - Price > EMA50 AND EMA20 > EMA50 = 1.5 pts
-        - Price > EMA50 BUT EMA20 < EMA50 = 0.75 pts
-        
-        SELL Rules:
-        - Price < EMA50 AND EMA20 < EMA50 = 1.5 pts
-        - Price < EMA50 BUT EMA20 > EMA50 = 0.75 pts
         """
         try:
             features = self.s_ema.generate_features(df.tail(250))
@@ -786,10 +769,10 @@ class InstitutionalCouncilAggregator:
             # BUY scoring
             if price > ema_50:
                 if ema_20 > ema_50:
-                    buy_score = self.w_trend
-                    buy_exp = f"TREND BUY: ✅ Full ({self.w_trend:.1f}) - Price > EMA50, EMA20 > EMA50"
+                    buy_score = weight
+                    buy_exp = f"TREND BUY: ✅ Full ({weight:.1f}) - Price > EMA50, EMA20 > EMA50"
                 else:
-                    buy_score = self.w_trend * 0.5
+                    buy_score = weight * 0.5
                     buy_exp = f"TREND BUY: ⚠️ Partial ({buy_score:.1f}) - Price > EMA50 but EMA20 < EMA50"
             else:
                 buy_exp = "TREND BUY: ❌ No credit - Price < EMA50"
@@ -797,10 +780,10 @@ class InstitutionalCouncilAggregator:
             # SELL scoring
             if price < ema_50:
                 if ema_20 < ema_50:
-                    sell_score = self.w_trend
-                    sell_exp = f"TREND SELL: ✅ Full ({self.w_trend:.1f}) - Price < EMA50, EMA20 < EMA50"
+                    sell_score = weight
+                    sell_exp = f"TREND SELL: ✅ Full ({weight:.1f}) - Price < EMA50, EMA20 < EMA50"
                 else:
-                    sell_score = self.w_trend * 0.5
+                    sell_score = weight * 0.5
                     sell_exp = f"TREND SELL: ⚠️ Partial ({sell_score:.1f}) - Price < EMA50 but EMA20 > EMA50"
             else:
                 sell_exp = "TREND SELL: ❌ No credit - Price > EMA50"
@@ -811,12 +794,9 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[TREND] Error: {e}")
             return 0.0, 0.0, {'buy': f"TREND: Error", 'sell': f"TREND: Error"}
     
-    def _judge_structure_bidirectional(self, df: pd.DataFrame, is_breakout_mode: bool) -> Tuple[float, float, Dict]:
+    def _judge_structure_bidirectional(self, df: pd.DataFrame, is_breakout_mode: bool, weight: float) -> Tuple[float, float, Dict]:
         """
         JUDGE 2: STRUCTURE (Bidirectional & Adaptive)
-        
-        - Normal Mode: Is price at a key decision point (S/R)?
-        - Breakout Mode: Has price decisively broken a structural level?
         """
         try:
             current_price = float(df['close'].iloc[-1])
@@ -825,8 +805,6 @@ class InstitutionalCouncilAggregator:
 
             if is_breakout_mode:
                 # --- BREAKOUT LOGIC: Has structure been broken? ---
-                # "Price breaking a structural floor is a GO for selling."
-                # We use a 20-period Donchian channel as a proxy for recent structure.
                 if len(df) < 21:
                     return 0.0, 0.0, {'buy': "STRUCT: Need 21 bars for breakout", 'sell': "STRUCT: Need 21 bars for breakout"}
                 
@@ -834,20 +812,23 @@ class InstitutionalCouncilAggregator:
                 low_20 = df['low'].iloc[-21:-1].min()
 
                 if current_price > high_20:
-                    buy_score = self.w_structure
-                    buy_exp = f"STRUCT BUY: ✅ Breakout ({self.w_structure:.1f}) - Price > 20-bar high ${high_20:.2f}"
+                    buy_score = weight
+                    buy_exp = f"STRUCT BUY: ✅ Breakout ({weight:.1f}) - Price > 20-bar high ${high_20:.2f}"
                 
                 if current_price < low_20:
-                    sell_score = self.w_structure
-                    sell_exp = f"STRUCT SELL: ✅ Breakdown ({self.w_structure:.1f}) - Price < 20-bar low ${low_20:.2f}"
+                    sell_score = weight
+                    sell_exp = f"STRUCT SELL: ✅ Breakdown ({weight:.1f}) - Price < 20-bar low ${low_20:.2f}"
 
             else:
                 # --- NORMAL LOGIC: Is price reacting to an S/R level? ---
-                # "Price far from resistance is NO justification to sell."
                 if not self.ai_validator:
                     return 0.0, 0.0, {'buy': "STRUCT: AI disabled", 'sell': "STRUCT: AI disabled"}
 
-                threshold_pct = self.config['sr_proximity_pct']
+                # ATR-based proximity scaling
+                high, low, close = df['high'].values, df['low'].values, df['close'].values
+                atr_fast = ta.ATR(high, low, close, timeperiod=14)[-1]
+                threshold_val = (0.25 * atr_fast)
+                threshold_pct = threshold_val / current_price
                 
                 # Check for reaction at a SUPPORT level (for BUY)
                 sr_buy = self.ai_validator._check_support_resistance_fixed(
@@ -855,8 +836,8 @@ class InstitutionalCouncilAggregator:
                 )
                 if sr_buy.get('near_level'):
                     level = sr_buy.get('nearest_level', 0)
-                    buy_score = self.w_structure
-                    buy_exp = f"STRUCT BUY: ✅ At Support ({self.w_structure:.1f}) - Near level ${level:.2f}"
+                    buy_score = weight
+                    buy_exp = f"STRUCT BUY: ✅ At Support ({weight:.1f}) - Near level ${level:.2f}"
                 else:
                     buy_exp = "STRUCT BUY: ❌ No support nearby"
                 
@@ -866,8 +847,8 @@ class InstitutionalCouncilAggregator:
                 )
                 if sr_sell.get('near_level'):
                     level = sr_sell.get('nearest_level', 0)
-                    sell_score = self.w_structure
-                    sell_exp = f"STRUCT SELL: ✅ At Resistance ({self.w_structure:.1f}) - Near level ${level:.2f}"
+                    sell_score = weight
+                    sell_exp = f"STRUCT SELL: ✅ At Resistance ({weight:.1f}) - Near level ${level:.2f}"
                 else:
                     sell_exp = "STRUCT SELL: ❌ No resistance nearby"
 
@@ -877,15 +858,14 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[STRUCTURE] Error: {e}", exc_info=True)
             return 0.0, 0.0, {'buy': "STRUCT: Error", 'sell': "STRUCT: Error"}
     
-    def _judge_momentum_bidirectional(self, df: pd.DataFrame, is_bull: bool, is_breakout_mode: bool) -> Tuple[float, float, Dict]:
+    def _judge_momentum_bidirectional(self, df: pd.DataFrame, is_bull: bool, is_breakout_mode: bool, weight: float, adx: float) -> Tuple[float, float, Dict]:
         """
         JUDGE 3: MOMENTUM (Bidirectional & Adaptive)
-        
-        Behavior flips based on whether the market is in a breakout state.
-        - Normal Mode: Assumes mean-reversion (buy dips, sell rips).
-        - Breakout Mode: Assumes momentum continuation (buy strength, sell weakness).
         """
         try:
+            if weight == 0:
+                return 0.0, 0.0, {'buy': "MOM: Disabled", 'sell': "MOM: Disabled"}
+
             features_mr = self.s_mean_reversion.generate_features(df.tail(100))
             if features_mr.empty:
                 return 0.0, 0.0, {'buy': "MOM: No data", 'sell': "MOM: No data"}
@@ -905,46 +885,43 @@ class InstitutionalCouncilAggregator:
 
             if is_breakout_mode:
                 # --- BREAKOUT LOGIC (Momentum Continuation) ---
-                # "RSI < 25 indicates strong downside momentum. Go Sell."
                 if rsi < oversold:
-                    sell_score = self.w_momentum
-                    sell_exp = f"MOM SELL: ✅ Breakout ({self.w_momentum:.1f}) - RSI {rsi:.1f} shows downside momentum"
-                # "RSI > 75 indicates strong upside momentum. Go Buy."
+                    sell_score = weight
+                    sell_exp = f"MOM SELL: ✅ Breakout ({weight:.1f}) - RSI {rsi:.1f} shows downside momentum"
                 if rsi > overbought:
-                    buy_score = self.w_momentum
-                    buy_exp = f"MOM BUY: ✅ Breakout ({self.w_momentum:.1f}) - RSI {rsi:.1f} shows upside momentum"
+                    buy_score = weight
+                    buy_exp = f"MOM BUY: ✅ Breakout ({weight:.1f}) - RSI {rsi:.1f} shows upside momentum"
 
             else:
                 # --- NORMAL LOGIC (Mean Reversion) ---
-                # "RSI in bullish zone (40-65) is a buy signal."
+                # Check for Super-Cycle Override (ADX > 35)
+                # If ADX is high, we don't penalize mean-reversion entries for being "overextended"
+                # RSI points are granted normally.
                 if bullish_min <= rsi <= bullish_max:
-                    buy_score = self.w_momentum
-                    buy_exp = f"MOM BUY: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} in bullish zone"
-                # "RSI < 30 is oversold. Stop selling, start buying."
+                    buy_score = weight
+                    buy_exp = f"MOM BUY: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bullish zone"
                 elif rsi < oversold:
-                    buy_score = self.w_momentum
-                    buy_exp = f"MOM BUY: ✅ Oversold ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+                    buy_score = weight
+                    buy_exp = f"MOM BUY: ✅ Oversold ({weight:.1f}) - RSI {rsi:.1f}"
 
-                # "RSI in bearish zone (35-60) is a sell signal."
                 if bearish_min <= rsi <= bearish_max:
-                    sell_score = self.w_momentum
-                    sell_exp = f"MOM SELL: ✅ Full ({self.w_momentum:.1f}) - RSI {rsi:.1f} in bearish zone"
-                # "RSI > 70 is overbought. Stop buying, start selling."
+                    sell_score = weight
+                    sell_exp = f"MOM SELL: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bearish zone"
                 elif rsi > overbought:
-                    sell_score = self.w_momentum
-                    sell_exp = f"MOM SELL: ✅ Overbought ({self.w_momentum:.1f}) - RSI {rsi:.1f}"
+                    sell_score = weight
+                    sell_exp = f"MOM SELL: ✅ Overbought ({weight:.1f}) - RSI {rsi:.1f}"
             
-            # MACD confirmation still adds value in both modes
+            # MACD confirmation
             if self.config['macd_confirmation']:
                 macd = features_mr.iloc[-1].get('macd', 0)
                 macd_signal = features_mr.iloc[-1].get('macd_signal', 0)
                 
                 if buy_score > 0 and macd > macd_signal:
-                    buy_score = min(buy_score + 0.2, self.w_momentum)
+                    buy_score = min(buy_score + 0.2, weight)
                     buy_exp += " +MACD"
                 
                 if sell_score > 0 and macd < macd_signal:
-                    sell_score = min(sell_score + 0.2, self.w_momentum)
+                    sell_score = min(sell_score + 0.2, weight)
                     sell_exp += " +MACD"
             
             return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
@@ -953,12 +930,9 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[MOMENTUM] Error: {e}", exc_info=True)
             return 0.0, 0.0, {'buy': "MOM: Error", 'sell': "MOM: Error"}
     
-    def _judge_pattern_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+    def _judge_pattern_bidirectional(self, df: pd.DataFrame, weight: float) -> Tuple[float, float, Dict]:
         """
         JUDGE 4: PATTERN (Bidirectional)
-        
-        BUY: Bullish AI pattern
-        SELL: Bearish AI pattern
         """
         try:
             if not self.ai_validator:
@@ -979,10 +953,10 @@ class InstitutionalCouncilAggregator:
                 name = pattern_buy.get('pattern_name', 'Unknown')
                 
                 if conf > 0.75:
-                    buy_score = self.w_pattern
-                    buy_exp = f"PATTERN BUY: ✅ Full ({self.w_pattern:.1f}) - {name} ({conf:.0%})"
+                    buy_score = weight
+                    buy_exp = f"PATTERN BUY: ✅ Full ({weight:.1f}) - {name} ({conf:.0%})"
                 else:
-                    buy_score = self.w_pattern * 0.8
+                    buy_score = weight * 0.8
                     buy_exp = f"PATTERN BUY: ⚠️ Partial ({buy_score:.1f}) - {name} ({conf:.0%})"
             else:
                 buy_exp = "PATTERN BUY: ❌ No pattern"
@@ -999,10 +973,10 @@ class InstitutionalCouncilAggregator:
                 name = pattern_sell.get('pattern_name', 'Unknown')
                 
                 if conf > 0.75:
-                    sell_score = self.w_pattern
-                    sell_exp = f"PATTERN SELL: ✅ Full ({self.w_pattern:.1f}) - {name} ({conf:.0%})"
+                    sell_score = weight
+                    sell_exp = f"PATTERN SELL: ✅ Full ({weight:.1f}) - {name} ({conf:.0%})"
                 else:
-                    sell_score = self.w_pattern * 0.8
+                    sell_score = weight * 0.8
                     sell_exp = f"PATTERN SELL: ⚠️ Partial ({sell_score:.1f}) - {name} ({conf:.0%})"
             else:
                 sell_exp = "PATTERN SELL: ❌ No pattern"
@@ -1013,11 +987,9 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[PATTERN] Error: {e}")
             return 0.0, 0.0, {'buy': "PATTERN: Error", 'sell': "PATTERN: Error"}
     
-    def _judge_volume_bidirectional(self, df: pd.DataFrame) -> Tuple[float, float, Dict]:
+    def _judge_volume_bidirectional(self, df: pd.DataFrame, weight: float) -> Tuple[float, float, Dict]:
         """
         JUDGE 5: VOLUME (Same for both directions)
-        
-        Both BUY and SELL benefit from high volume
         """
         try:
             if 'volume' not in df.columns:
@@ -1031,10 +1003,10 @@ class InstitutionalCouncilAggregator:
             
             # Same scoring for both directions
             if vol_ratio > 1.5:
-                score = self.w_volume
-                exp = f"VOLUME: ✅ Strong ({self.w_volume:.1f}) - {vol_ratio:.1f}x avg"
+                score = weight
+                exp = f"VOLUME: ✅ Strong ({weight:.1f}) - {vol_ratio:.1f}x avg"
             elif vol_ratio > 1.0:
-                score = self.w_volume * 0.7
+                score = weight * 0.7
                 exp = f"VOLUME: ⚠️ Partial ({score:.1f}) - {vol_ratio:.1f}x avg"
             else:
                 score = 0.0
@@ -1105,17 +1077,46 @@ class InstitutionalCouncilAggregator:
                 return False
 
             # 3. Structure Check: Price breaks Donchian High/Low
-            # We check the channel from the *previous* 20 bars
-            donchian_high = df['high'].iloc[-donchian_period-1:-1].max()
-            donchian_low = df['low'].iloc[-donchian_period-1:-1].min()
+            # ✅ PHASE 4: STOP-HUNT CEILING LOGIC
+            highs_20 = df['high'].iloc[-donchian_period-1:-1]
+            closes_20 = df['close'].iloc[-donchian_period-1:-1]
+            lows_20 = df['low'].iloc[-donchian_period-1:-1]
+            
+            highest_wick = highs_20.max()
+            highest_close = closes_20.max()
+            lowest_wick = lows_20.min()
+            lowest_close = closes_20.min()
+            
+            atr = ta.ATR(highs, lows, closes, timeperiod=14)[-1]
             latest_close = closes[-1]
-            is_structure_broken = (latest_close > donchian_high) or (latest_close < donchian_low)
+            
+            is_structure_broken = False
+            
+            # Bullish Breakout Check
+            if (highest_wick - highest_close) < (0.25 * atr):
+                # CEILING DETECTED: Must exceed the wick
+                if latest_close > highest_wick:
+                    is_structure_broken = True
+            else:
+                # NORM: Exceeding highest close is sufficient
+                if latest_close > highest_close:
+                    is_structure_broken = True
+                    
+            # Bearish Breakdown Check (Symmetric)
+            if not is_structure_broken:
+                if (lowest_close - lowest_wick) < (0.25 * atr):
+                    # FLOOR DETECTED: Must exceed the wick
+                    if latest_close < lowest_wick:
+                        is_structure_broken = True
+                else:
+                    if latest_close < lowest_close:
+                        is_structure_broken = True
 
             if not is_structure_broken:
-                if self.detailed_logging: logger.info(f"[BREAKOUT] Condition not met: Close {latest_close:.2f} within Donchian({donchian_low:.2f}, {donchian_high:.2f})")
+                if self.detailed_logging: logger.info(f"[BREAKOUT] Condition not met: Structure holding.")
                 return False
 
-            # If all three conditions are met, we are in a breakout state.
+            # If all conditions are met, we are in a breakout state.
             logger.info(f"🔥 BREAKOUT STATE DETECTED: ADX={latest_adx:.1f}, Vol Ratio={current_volume/volume_ma:.1f}x, Price broke structure.")
             return True
 

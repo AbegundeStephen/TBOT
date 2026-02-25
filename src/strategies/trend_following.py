@@ -558,12 +558,23 @@ class TrendFollowingStrategy(BaseStrategy):
                 elif h4_bearish > h4_bullish + 0.5:
                     h4_trend = -1
 
+                # Higher Low (HL) check for 1H
+                # PHASE 4: Waiver Logic
+                current_low = latest["low"]
+                prev_low = df["low"].iloc[-2]
+                is_higher_low = current_low > prev_low
+                
+                h4_penalty = self.h4_counter_penalty
+                if latest["adx"] > 30 and is_higher_low:
+                    h4_penalty = 0.0
+                    logger.info(f"[{self.name}] 🌊 Super-cycle HL: Waiving {self.h4_counter_penalty} counter-trend penalty.")
+
                 if h4_trend == 1:
                     bullish_score += self.h4_trend_weight
-                    bearish_score -= self.h4_counter_penalty
+                    bearish_score -= h4_penalty
                 elif h4_trend == -1:
                     bearish_score += self.h4_trend_weight
-                    bullish_score -= self.h4_counter_penalty
+                    bullish_score -= h4_penalty
 
                 if self.require_4h_alignment:
                     if h4_trend == 1 and bearish_score > bullish_score:
