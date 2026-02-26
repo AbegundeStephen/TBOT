@@ -28,11 +28,11 @@ class InstitutionalCouncilAggregator:
     5. VOLUME (0.5 pt)     - The Validator: Volume confirmation
     
     Total: 5.0 points
-    Trade Threshold: 3.5 / 5.0 (70%)
+    Trade Threshold: 3.0 / 5.0 (60%)
     
     Regime Rules:
-    - Trend-aligned: Need 3.5+ (simple majority)
-    - Counter-trend: Need 4.0+ (unanimous overrule)
+    - Trend-aligned: Need 3.0+ (simple majority)
+    - Counter-trend: Need 3.5+ (unanimous overrule)
     
     NEW: Symmetric scoring for both BUY and SELL signals
     ✨ NEW: Asymmetric Output (TREND vs SCALP) based on MTF Governor
@@ -48,8 +48,8 @@ class InstitutionalCouncilAggregator:
         enable_detailed_logging: bool = False,
         
         # Council thresholds
-        trend_aligned_threshold: float = 3.5,
-        counter_trend_threshold: float = 4.0,
+        trend_aligned_threshold: float = 3.0,
+        counter_trend_threshold: float = 3.5,
         
         # Judge weights (must sum to 5.0)
         weight_trend: float = 1.5,
@@ -511,7 +511,7 @@ class InstitutionalCouncilAggregator:
             chosen_scores = {}
             chosen_explanations = []
             total_score = 0.0
-            required_score = 3.5 # Standard institutional threshold
+            required_score = self.trend_aligned_threshold # Standard institutional threshold
             trade_type = "TREND" # Default
             
             # Determine preliminary signal
@@ -532,7 +532,22 @@ class InstitutionalCouncilAggregator:
             # 🛡️ THE INTERCEPTOR: ABSOLUTE VETO (Phase 4)
             # ====================================================================
             if signal != 0:
-                # 1. ATR WICK TRAP (ABSOLUTE VETO)
+                # 1. MACRO GOVERNOR (ABSOLUTE VETO)
+                # Reason: Proves macro alignment (1D 200 EMA). Sacrosanct macro rule.
+                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
+                if not gov_passed:
+                    logger.info(f"[VETO] ❌ BLOCKED - Macro Regime Conflict.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "BLOCKED (Macro Regime Conflict)",
+                        'reasoning': "blocked_by_macro_governor",
+                        'final_signal': 0,
+                        'signal_quality': 0.0
+                    }
+
+                # 2. ATR WICK TRAP (ABSOLUTE VETO)
                 if not validate_candle_structure(df, self.asset_type, direction="long" if signal == 1 else "short"):
                     logger.info(f"[VETO] ❌ BLOCKED - Institutional Wick Trap.")
                     return 0, {
@@ -545,7 +560,7 @@ class InstitutionalCouncilAggregator:
                         'signal_quality': 0.0
                     }
 
-                # 2. DEAD VOLATILITY GATE (ABSOLUTE VETO)
+                # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
                 if not self._check_volatility_gate_adaptive(atr_fast, atr_slow):
                     logger.info(f"[VETO] ❌ BLOCKED - Dead Market Volatility.")
                     return 0, {
@@ -564,19 +579,13 @@ class InstitutionalCouncilAggregator:
             if signal != 0:
                 penalty = 0.0
                 
-                # A. GOVERNOR FILTER
-                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
-                if not gov_passed:
-                    penalty += 1.0
-                    logger.info(f"[PENALTY] ⚠️ Governor alignment failure: -1.0")
-
-                # B. SNIPER LOCK
+                # A. SNIPER LOCK
                 sniper_passed, sniper_details = self._check_sniper_filter(df, signal)
                 if not sniper_passed:
                     penalty += 1.0
                     logger.info(f"[PENALTY] ⚠️ Sniper confirmation failure: -1.0")
 
-                # C. PROFIT ECONOMICS
+                # B. PROFIT ECONOMICS
                 if not self._check_profit_economics_adaptive(atr_fast):
                     penalty += 1.0
                     logger.info(f"[PENALTY] ⚠️ Low profit economics: -1.0")
@@ -585,8 +594,8 @@ class InstitutionalCouncilAggregator:
                 total_score -= penalty
                 
                 # Final execution check
-                if total_score < 3.5:
-                    logger.info(f"[SIGNAL] ❌ REJECTED - Score after penalties ({total_score:.2f}) < 3.5")
+                if total_score < required_score:
+                    logger.info(f"[SIGNAL] ❌ REJECTED - Score after penalties ({total_score:.2f}) < {required_score:.2f}")
                     signal = 0
                     decision_type = f"REJECTED (Score: {total_score:.2f})"
                 else:
@@ -636,7 +645,7 @@ class InstitutionalCouncilAggregator:
                 'trade_type': trade_type, 
                 'decision_type': decision_type,
                 'total_score': total_score,
-                'required_score': 3.5,
+                'required_score': required_score,
                 'scores': chosen_scores,
                 'buy_scores': buy_scores,
                 'sell_scores': sell_scores,
@@ -646,7 +655,7 @@ class InstitutionalCouncilAggregator:
                 'regime_confidence': regime_conf,
                 'explanations': chosen_explanations,
                 'signal_quality': signal_quality,
-                'reasoning': f"{decision_type} (Score: {total_score:.2f}/3.5)",
+                'reasoning': f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})",
                 'mr_signal': mr_signal,
                 'mr_confidence': mr_conf,
                 'tf_signal': tf_signal,
@@ -865,6 +874,16 @@ class InstitutionalCouncilAggregator:
         try:
             if weight == 0:
                 return 0.0, 0.0, {'buy': "MOM: Disabled", 'sell': "MOM: Disabled"}
+
+            # ✅ SUPER-CYCLE OVERRIDE (ADX > 35)
+            # In a super-trend, we award full weight to the trend-aligned direction
+            # and bypass oscillator (RSI) noise entirely.
+            if adx > 35:
+                buy_score = weight if is_bull else 0.0
+                sell_score = weight if not is_bull else 0.0
+                buy_exp = f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {adx:.1f} > 35" if is_bull else "MOM BUY: ❌ Dead in Bear Super-Cycle"
+                sell_exp = f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {adx:.1f} > 35" if not is_bull else "MOM SELL: ❌ Dead in Bull Super-Cycle"
+                return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
 
             features_mr = self.s_mean_reversion.generate_features(df.tail(100))
             if features_mr.empty:

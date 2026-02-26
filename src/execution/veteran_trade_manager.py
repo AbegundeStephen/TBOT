@@ -419,30 +419,40 @@ class VeteranTradeManager:
                 structure_stop = pivot_level - (atr * 1.0) if pivot_level else self.entry_price - actual_stop_dist
                 preliminary_stop = min(atr_stop, structure_stop)
                 
-                # ✅ PHASE 5: DYNAMIC MA SHIELD (Stop Loss)
-                # If macro MA (1D200, 4H200, 4H50) lies between entry and normal ATR stop
-                for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and preliminary_stop < ma < self.entry_price:
-                        shielded_stop = ma - (0.5 * atr)
-                        if shielded_stop > preliminary_stop:
-                            logger.info(f"[VTM] 🛡️ MA Shield applied (SL: ${shielded_stop:,.2f} behind MA ${ma:,.2f})")
-                            preliminary_stop = shielded_stop
+                # Apply boundary clamp FIRST to get base_stop
+                base_stop = max(self.entry_price - max_stop_dist, min(self.entry_price - min_stop_dist, preliminary_stop))
+                final_stop = base_stop
 
-                self.initial_stop_loss = max(self.entry_price - max_stop_dist, min(self.entry_price - min_stop_dist, preliminary_stop))
+                # ✅ PHASE 5: DYNAMIC MA SHIELD (Stop Loss)
+                # If macro MA (1D200, 4H200, 4H50) lies between entry and normal stop
+                for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                    if ma and final_stop < ma < self.entry_price:
+                        shielded_stop = ma - (0.5 * atr)
+                        # If MA shield produces a TIGHTER (higher) stop, it overrides
+                        if shielded_stop > final_stop:
+                            logger.info(f"[VTM] 🛡️ MA Shield applied (SL: ${shielded_stop:,.2f} behind MA ${ma:,.2f})")
+                            final_stop = shielded_stop
+
+                self.initial_stop_loss = final_stop
             else: # short
                 atr_stop = self.entry_price + actual_stop_dist
                 structure_stop = pivot_level + (atr * 1.0) if pivot_level else self.entry_price + actual_stop_dist
                 preliminary_stop = max(atr_stop, structure_stop)
                 
+                # Apply boundary clamp FIRST to get base_stop
+                base_stop = min(self.entry_price + max_stop_dist, max(self.entry_price + min_stop_dist, preliminary_stop))
+                final_stop = base_stop
+
                 # ✅ PHASE 5: DYNAMIC MA SHIELD (Stop Loss) - SHORT
                 for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and self.entry_price < ma < preliminary_stop:
+                    if ma and self.entry_price < ma < final_stop:
                         shielded_stop = ma + (0.5 * atr)
-                        if shielded_stop < preliminary_stop:
+                        # If MA shield produces a TIGHTER (lower) stop, it overrides
+                        if shielded_stop < final_stop:
                             logger.info(f"[VTM] 🛡️ MA Shield applied (SL: ${shielded_stop:,.2f} behind MA ${ma:,.2f})")
-                            preliminary_stop = shielded_stop
+                            final_stop = shielded_stop
 
-                self.initial_stop_loss = min(self.entry_price + max_stop_dist, max(self.entry_price + min_stop_dist, preliminary_stop))
+                self.initial_stop_loss = final_stop
 
             # ATR-based adaptive tolerance for structure identification
             tolerance = 0.5 * atr
