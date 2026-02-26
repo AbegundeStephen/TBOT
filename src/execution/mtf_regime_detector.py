@@ -279,6 +279,7 @@ class MultiTimeFrameRegimeDetector:
         macro_bearish = governor_status.is_bearish
 
         # Intermediate & Short-term alignment
+        above_4h_200 = price_4h > ema_4h_baseline
         above_4h_50 = price_4h > ema_4h_slow
         above_1h_50 = price_1h > ema_1h_slow
 
@@ -289,14 +290,14 @@ class MultiTimeFrameRegimeDetector:
                 consensus_regime = "BULLISH"
                 score = 1.0
                 reasons.append("Macro BULLISH: Price above all EMAs.")
-            elif not above_4h_50 or not above_1h_50:
+            elif above_4h_200 and (not above_4h_50 or not above_1h_50):
                 consensus_regime = "SLIGHTLY_BULLISH"
                 score = 0.5
-                reasons.append("Macro BULLISH: Mixed fast EMAs (SLIGHTLY_BULLISH).")
+                reasons.append("Macro BULLISH: Above 4H 200 but mixed fast EMAs.")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
-                reasons.append("Macro BULLISH but mixed signals.")
+                reasons.append("Macro BULLISH but below 4H 200 or conflicting signals.")
         
         elif macro_bearish:
             # BLOCK BULLISH STATES
@@ -304,14 +305,14 @@ class MultiTimeFrameRegimeDetector:
                 consensus_regime = "BEARISH"
                 score = -1.0
                 reasons.append("Macro BEARISH: Price below all EMAs.")
-            elif above_4h_50 or above_1h_50:
+            elif not above_4h_200 and (above_4h_50 or above_1h_50):
                 consensus_regime = "SLIGHTLY_BEARISH"
                 score = -0.5
-                reasons.append("Macro BEARISH: Mixed fast EMAs (SLIGHTLY_BEARISH).")
+                reasons.append("Macro BEARISH: Below 4H 200 but mixed fast EMAs.")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
-                reasons.append("Macro BEARISH but mixed signals.")
+                reasons.append("Macro BEARISH but above 4H 200 or conflicting signals.")
         
         else:
             consensus_regime = "NEUTRAL"
@@ -349,7 +350,7 @@ class MultiTimeFrameRegimeDetector:
         cache_key = f"{symbol}_{exchange}"
         if not force_refresh and cache_key in self.cache:
             cached_result, cached_time = self.cache[cache_key]
-            if (datetime.now() - cached_time).total_seconds() < self.cache_duration:
+            if (datetime.now(timezone.utc) - cached_time).total_seconds() < self.cache_duration:
                 logger.debug(f"[MTF] Using cached result for {symbol}")
                 return cached_result
 
@@ -371,7 +372,7 @@ class MultiTimeFrameRegimeDetector:
                 raise ValueError("Insufficient 1H data for EMA calculation.")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 1H data: {e}", exc_info=True)
-            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 1H data: {str(e)}", timestamp=datetime.now(timezone.utc))
+            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 1H data: {str(e)}", timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL")
 
         try:
             df_4h = self._fetch_data_from_csv(symbol, "4h", exchange)
@@ -379,7 +380,7 @@ class MultiTimeFrameRegimeDetector:
                 raise ValueError("Insufficient 4H data for EMA calculation.")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 4H data: {e}", exc_info=True)
-            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc))
+            return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL")
 
         # --- STEP 3: Get Aggregated Regime Score ---
         regime_status = self.get_aggregated_regime_score(df_1h, df_4h, governor_status, self.asset_type)

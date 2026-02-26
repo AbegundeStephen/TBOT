@@ -9,7 +9,7 @@ Integrates MTF regime detection with:
 
 import logging
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from src.execution.mtf_regime_detector import (
     MultiTimeFrameRegimeDetector,
     RegimeStatus,  # Updated import
@@ -305,5 +305,5 @@ class MTFRegimeIntegration:
                 "allow_counter_trend": False,
                 "max_positions": 0,
                 "reasoning": f"Error: {str(e)}",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
