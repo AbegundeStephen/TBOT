@@ -22,9 +22,8 @@ class EMAStrategy(BaseStrategy):
         super().__init__(config, "EMA")
         
         # EMA periods
-    # EMA periods (use 100 for GOLD instead of 200)
         self.fast_period = config.get("ema_fast", 50)
-        self.slow_period = config.get("ema_slow", 100)  # Default to 100 for GOLD
+        self.slow_period = config.get("ema_slow", 200)  # Institutional baseline
 
         # Signal thresholds (relaxed for GOLD)
         self.min_distance_pct = config.get("min_distance_pct", 0.001)  # 0.001%

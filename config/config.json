@@ -1,21 +1,21 @@
 {
   "api": {
     "binance": {
-      "api_key": "",
-      "api_secret": "",
+      "api_key": "Aa2uEpEUT0698RC6D7ZRIf4UC676tG7wgzDH1h0DksS3vfePezxT7G5UCmTQE5yd",
+      "api_secret": "6ilqrV2KBxCm0It8RypefeOQve62uy50OjKizQtnzW4u3i2hYtXl42fw9y8CKArk",
       "testnet": false,
-      "api_base": "https://fapi.binance.com"
+      "api_base": "https://testnet.binancefuture.com"
     },
     "binance_futures": {
-      "api_key": "",
-      "api_secret": "",
-      "testnet": false,
-      "api_base": "https://fapi.binance.com"
+      "api_key": "Aa2uEpEUT0698RC6D7ZRIf4UC676tG7wgzDH1h0DksS3vfePezxT7G5UCmTQE5yd",
+      "api_secret": "6ilqrV2KBxCm0It8RypefeOQve62uy50OjKizQtnzW4u3i2hYtXl42fw9y8CKArk",
+      "testnet": true,
+      "api_base": "https://testnet.binancefuture.com"
     },
     "mt5": {
-      "login": 0,
-      "password": "",
-      "server": "",
+      "login": 297047456,
+      "password": "Stepheng01@",
+      "server": "Exness-MT5Trial9",
       "path": "C:\\Program Files\\MetaTrader 5 EXNESS\\terminal64.exe"
     }
   },
@@ -27,8 +27,8 @@
   },
   "database": {
     "enabled": true,
-    "supabase_url": "https://gpzrdpnfurztclznlnan.supabase.co",
-    "supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwenJkcG5mdXJ6dGNsem5sbmFuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDM5NjAyNSwiZXhwIjoyMDc1OTcyMDI1fQ.GP3osW7aCAO0hOG3EZOZA_YgaX61vFVTd48xUmwTXgE",
+    "supabase_url": "https://bnwjssyykyklexvzbqho.supabase.co",
+    "supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJud2pzc3l5a3lrbGV4dnpicWhvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MzA3OTc4NiwiZXhwIjoyMDY4NjU1Nzg2fQ.f3CzPKeKbk89-rT4Gt7wOT6R50ycdoKnNpH0gquukPM",
     "snapshot_interval_seconds": 300,
     "log_all_signals": true,
     "log_system_events": true
@@ -65,7 +65,7 @@
       "enable_futures": true,
       "use_futures_for_longs": true,
       "leverage": 20,
-      "margin_type": "CROSSED",
+      "margin_type": "ISOLATED",
       "symbol": "BTCUSDT",
       "exchange": "binance",
       "interval": "1h",
@@ -100,6 +100,11 @@
         "take_profit_pct": 0.05,
         "trailing_stop_pct": 0.01,
         "max_holding_hours": 72,
+        "enable_early_profit_lock": false,
+        "min_stop_distance_pct": 0.015,
+        "max_stop_distance_pct": 0.06,
+        "min_stop_pct": 0.008,
+        "max_stop_pct": 0.06,
         "atr_multiplier": 1.8,
         "pivot_lookback": 30,
         "partial_targets": [
@@ -121,9 +126,7 @@
         "breakeven_profit_threshold": 0.012,
         "early_scale_enabled": true,
         "early_scale_threshold": 0.02,
-        "early_scale_bars": 4,
-        "early_lock_atr_multiplier": 0.5,
-        "runner_trail_atr_multiplier": 2.0
+        "early_scale_bars": 4
       }
     },
     "GOLD": {
@@ -164,6 +167,11 @@
         "take_profit_pct": 0.015,
         "trailing_stop_pct": 0.01,
         "max_holding_hours": 72,
+        "enable_early_profit_lock": false,
+        "min_stop_distance_pct": 0.008,
+        "max_stop_distance_pct": 0.03,
+        "min_stop_pct": 0.0025,
+        "max_stop_pct": 0.025,
         "atr_multiplier": 1.5,
         "pivot_lookback": 25,
         "partial_targets": [
@@ -185,9 +193,7 @@
         "breakeven_profit_threshold": 0.01,
         "early_scale_enabled": true,
         "early_scale_threshold": 0.015,
-        "early_scale_bars": 4,
-        "early_lock_atr_multiplier": 0.5,
-        "runner_trail_atr_multiplier": 2.0
+        "early_scale_bars": 4
       }
     },
     "USTEC": {
@@ -228,6 +234,10 @@
         "take_profit_pct": 0.03,
         "trailing_stop_pct": 0.01,
         "max_holding_hours": 72,
+        "min_stop_distance_pct": 0.01,
+        "max_stop_distance_pct": 0.05,
+        "min_stop_pct": 0.005,
+        "max_stop_pct": 0.05,
         "atr_multiplier": 2.0,
         "pivot_lookback": 25,
         "partial_targets": [
@@ -292,6 +302,10 @@
         "take_profit_pct": 0.02,
         "trailing_stop_pct": 0.008,
         "max_holding_hours": 72,
+        "min_stop_distance_pct": 0.005,
+        "max_stop_distance_pct": 0.03,
+        "min_stop_pct": 0.004,
+        "max_stop_pct": 0.03,
         "atr_multiplier": 1.5,
         "pivot_lookback": 25,
         "partial_targets": [
@@ -356,6 +370,10 @@
         "take_profit_pct": 0.015,
         "trailing_stop_pct": 0.005,
         "max_holding_hours": 72,
+        "min_stop_distance_pct": 0.003,
+        "max_stop_distance_pct": 0.02,
+        "min_stop_pct": 0.003,
+        "max_stop_pct": 0.02,
         "atr_multiplier": 1.5,
         "pivot_lookback": 25,
         "partial_targets": [
@@ -571,7 +589,7 @@
       "GOLD": {
         "fast_ma": 20,
         "slow_ma": 50,
-        "adx_threshold": 25,
+        "adx_threshold": 15,
         "adx_required": false,
         "min_return_threshold": 0.001,
         "min_return_pct": 0.0015,
@@ -784,7 +802,7 @@
   },
   "ml": {
     "train_test_split": 0.8,
-    "min_training_accuracy": 0.6,
+    "min_training_accuracy": 0.35,
     "cross_validation_folds": 5,
     "feature_importance_threshold": 0.01,
     "retrain_frequency_days": 7,
@@ -808,7 +826,7 @@
     "check_interval_seconds": 300,
     "max_positions_per_asset": 3,
     "allow_hedging": true,
-    "small_account_protocol": false
+    "small_account_protocol": true
   },
   "risk_management": {
     "max_daily_trades": 10,
@@ -861,9 +879,9 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "8363934797:AAGlppCaYhutDSMhIWZZMRABB7Kv2BofTCQ",
+    "bot_token": "8303335226:AAFwYVMPyAqxTz7kB0fteGhhg7m_wWK5UaU",
     "admin_ids": [
-      1733929110
+      6243323974
     ],
     "notifications": {
       "trade_opened": true,
