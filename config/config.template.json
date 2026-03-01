@@ -545,8 +545,8 @@
     },
     "trend_following": {
       "BTC": {
-        "fast_ma": 21,
-        "slow_ma": 55,
+        "fast_ma": 20,
+        "slow_ma": 50,
         "adx_threshold": 18,
         "adx_required": false,
         "min_return_threshold": 0.002,
@@ -569,8 +569,8 @@
         }
       },
       "GOLD": {
-        "fast_ma": 22,
-        "slow_ma": 70,
+        "fast_ma": 20,
+        "slow_ma": 50,
         "adx_threshold": 25,
         "adx_required": false,
         "min_return_threshold": 0.001,
@@ -593,8 +593,8 @@
         }
       },
       "USTEC": {
-        "fast_ma": 22,
-        "slow_ma": 70,
+        "fast_ma": 20,
+        "slow_ma": 50,
         "adx_threshold": 25,
         "adx_required": false,
         "min_return_threshold": 0.001,
@@ -617,8 +617,8 @@
         }
       },
       "EURJPY": {
-        "fast_ma": 22,
-        "slow_ma": 70,
+        "fast_ma": 20,
+        "slow_ma": 50,
         "adx_threshold": 25,
         "adx_required": false,
         "min_return_threshold": 0.001,
@@ -641,8 +641,8 @@
         }
       },
       "EURUSD": {
-        "fast_ma": 22,
-        "slow_ma": 70,
+        "fast_ma": 20,
+        "slow_ma": 50,
         "adx_threshold": 20,
         "adx_required": false,
         "min_return_threshold": 0.001,
@@ -690,7 +690,7 @@
       },
       "GOLD": {
         "ema_fast": 50,
-        "ema_slow": 100,
+        "ema_slow": 200,
         "min_distance_pct": 0.001,
         "min_return_threshold": 0.0025,
         "min_conditions": 3,
@@ -713,7 +713,7 @@
       },
       "USTEC": {
         "ema_fast": 50,
-        "ema_slow": 100,
+        "ema_slow": 200,
         "min_distance_pct": 0.001,
         "min_return_threshold": 0.0025,
         "min_conditions": 3,
@@ -736,7 +736,7 @@
       },
       "EURJPY": {
         "ema_fast": 50,
-        "ema_slow": 100,
+        "ema_slow": 200,
         "min_distance_pct": 0.001,
         "min_return_threshold": 0.0025,
         "min_conditions": 3,
@@ -759,7 +759,7 @@
       },
       "EURUSD": {
         "ema_fast": 50,
-        "ema_slow": 100,
+        "ema_slow": 200,
         "min_distance_pct": 0.001,
         "min_return_threshold": 0.0025,
         "min_conditions": 3,

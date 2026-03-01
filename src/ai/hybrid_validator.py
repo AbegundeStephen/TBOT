@@ -478,6 +478,21 @@ class HybridSignalValidator:
             level_type = "support"
 
             if not relevant_levels:
+                ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                
+                if current_price > ema_20:
+                    lows = df['low'].values
+                    if len(lows) >= 4 and lows[-2] < lows[-3] and lows[-2] < lows[-1] and lows[-2] > ema_20:
+                        return {
+                            "near_level": True,
+                            "level_type": "dynamic_ema_support",
+                            "nearest_level": ema_20,
+                            "distance_pct": ((current_price - ema_20) / current_price) * 100,
+                            "threshold_used": threshold,
+                            "all_levels": [],
+                            "total_levels_found": 1,
+                            "reason": "riding_dynamic_20_ema",
+                        }
                 # No support below - check if we're AT a level
                 any_level_distances = [
                     abs(current_price - l) / current_price for l in all_levels
@@ -517,6 +532,21 @@ class HybridSignalValidator:
             level_type = "resistance"
 
             if not relevant_levels:
+                ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                
+                if current_price < ema_20:
+                    highs = df['high'].values
+                    if len(highs) >= 4 and highs[-2] > highs[-3] and highs[-2] > highs[-1] and highs[-2] < ema_20:
+                        return {
+                            "near_level": True,
+                            "level_type": "dynamic_ema_resistance",
+                            "nearest_level": ema_20,
+                            "distance_pct": ((ema_20 - current_price) / current_price) * 100,
+                            "threshold_used": threshold,
+                            "all_levels": [],
+                            "total_levels_found": 1,
+                            "reason": "riding_dynamic_20_ema",
+                        }
                 # No resistance above - check if we're AT a level
                 any_level_distances = [
                     abs(current_price - l) / current_price for l in all_levels

@@ -763,7 +763,7 @@ class InstitutionalCouncilAggregator:
         JUDGE 1: TREND (Bidirectional)
         """
         try:
-            features = self.s_ema.generate_features(df.tail(250))
+            features = self.s_trend_following.generate_features(df.tail(250))
             if features.empty:
                 return 0.0, 0.0, {'buy': "TREND: No data", 'sell': "TREND: No data"}
             

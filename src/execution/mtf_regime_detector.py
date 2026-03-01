@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Centralized Indicator Constants
-FAST_EMA = 10
+FAST_EMA = 20
 SLOW_EMA = 50
 BASELINE_EMA = 200
 

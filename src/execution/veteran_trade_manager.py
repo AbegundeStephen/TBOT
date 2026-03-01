@@ -385,74 +385,52 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Promotion check error: {e}")
             return False
 
-    def _find_pivot_structure(self) -> Optional[float]:
-        try:
-            lookback = min(self.pivot_lookback, len(self.close) - 3)
-
-            if self.side == "long":
-                for i in range(lookback - 2, 1, -1):
-                    current, left, right = self.low[-(i + 1)], self.low[-(i + 2)], self.low[-i]
-                    if current < left and current < right: return current
-                return np.min(self.low[-lookback:])
-            else:
-                for i in range(lookback - 2, 1, -1):
-                    current, left, right = self.high[-(i + 1)], self.high[-(i + 2)], self.high[-i]
-                    if current > left and current > right: return current
-                return np.max(self.high[-lookback:])
-        except Exception as e:
-            logger.error(f"[VTM] Pivot error: {e}")
-            return None
-
     def _calculate_initial_levels(self):
         try:
             atr = self._calculate_atr()
-            pivot_level = self._find_pivot_structure()
 
             # ATR-based adaptive floors and caps
             min_stop_dist = atr * 0.5
             max_stop_dist = atr * 5.0
-            target_stop_dist = atr * self.atr_multiplier
-            actual_stop_dist = max(min_stop_dist, min(max_stop_dist, target_stop_dist))
 
             if self.side == "long":
-                atr_stop = self.entry_price - actual_stop_dist
-                structure_stop = pivot_level - (atr * 1.0) if pivot_level else self.entry_price - actual_stop_dist
-                preliminary_stop = min(atr_stop, structure_stop)
-                
-                # Apply boundary clamp FIRST to get base_stop
-                base_stop = max(self.entry_price - max_stop_dist, min(self.entry_price - min_stop_dist, preliminary_stop))
-                final_stop = base_stop
+                # 1. Standard ATR Baseline
+                target_stop_dist = atr * self.atr_multiplier
+                standard_sl = self.entry_price - target_stop_dist
+                final_sl = standard_sl
 
-                # ✅ PHASE 5: DYNAMIC MA SHIELD (Stop Loss)
-                # If macro MA (1D200, 4H200, 4H50) lies between entry and normal stop
+                # 2. Joint Synergy: MA Shield
                 for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and final_stop < ma < self.entry_price:
-                        shielded_stop = ma - (0.5 * atr)
-                        # If MA shield produces a TIGHTER (higher) stop, it overrides
-                        if shielded_stop > final_stop:
-                            logger.info(f"[VTM] 🛡️ MA Shield applied (SL: ${shielded_stop:,.2f} behind MA ${ma:,.2f})")
-                            final_stop = shielded_stop
+                    if ma and standard_sl < ma < self.entry_price:
+                        buffered_ma_sl = ma - (0.5 * atr)
+                        if buffered_ma_sl > final_sl:
+                            logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                            final_sl = buffered_ma_sl
 
-                self.initial_stop_loss = final_stop
+                # 3. Apply global clamps
+                self.initial_stop_loss = max(
+                    self.entry_price - max_stop_dist,
+                    min(self.entry_price - min_stop_dist, final_sl)
+                )
             else: # short
-                atr_stop = self.entry_price + actual_stop_dist
-                structure_stop = pivot_level + (atr * 1.0) if pivot_level else self.entry_price + actual_stop_dist
-                preliminary_stop = max(atr_stop, structure_stop)
-                
-                # Apply boundary clamp FIRST to get base_stop
-                base_stop = min(self.entry_price + max_stop_dist, max(self.entry_price + min_stop_dist, preliminary_stop))
-                final_stop = base_stop
+                # 1. Standard ATR Baseline
+                target_stop_dist = atr * self.atr_multiplier
+                standard_sl = self.entry_price + target_stop_dist
+                final_sl = standard_sl
 
-                # ✅ PHASE 5: DYNAMIC MA SHIELD (Stop Loss) - SHORT
+                # 2. Joint Synergy: MA Shield
                 for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and self.entry_price < ma < final_stop:
-                        shielded_stop = ma + (0.5 * atr)
-                        # If MA shield produces a TIGHTER (lower) stop, it overrides
-                        if shielded_stop < final_stop:
-                            logger.info(f"[VTM] 🛡️ MA Shield applied (SL: ${shielded_stop:,.2f} behind MA ${ma:,.2f})")
-                            final_stop = shielded_stop
+                    if ma and standard_sl > ma > self.entry_price:
+                        buffered_ma_sl = ma + (0.5 * atr)
+                        if buffered_ma_sl < final_sl:
+                            logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                            final_sl = buffered_ma_sl
 
-                self.initial_stop_loss = final_stop
+                # 3. Apply global clamps
+                self.initial_stop_loss = min(
+                    self.entry_price + max_stop_dist,
+                    max(self.entry_price + min_stop_dist, final_sl)
+                )
 
             # ATR-based adaptive tolerance for structure identification
             tolerance = 0.5 * atr
@@ -570,21 +548,7 @@ class VeteranTradeManager:
                     self.partials_hit.append(i)
                     self.remaining_position -= size
                     
-                    # ✅ PHASE 5: TP1 FRACTAL TRAILING
-                    if len(self.partials_hit) == 1:
-                        fractal_pivot = self._find_pivot_structure()
-                        if fractal_pivot:
-                            if self.side == "long":
-                                new_stop = fractal_pivot - (1.0 * atr_value)
-                                if new_stop > self.current_stop_loss:
-                                    logger.info(f"[VTM] 🧩 TP1 Hit: Moving SL to Fractal Low Trailing (${new_stop:,.2f})")
-                                    self.current_stop_loss = new_stop
-                            else: # short
-                                new_stop = fractal_pivot + (1.0 * atr_value)
-                                if new_stop < self.current_stop_loss:
-                                    logger.info(f"[VTM] 🧩 TP1 Hit: Moving SL to Fractal High Trailing (${new_stop:,.2f})")
-                                    self.current_stop_loss = new_stop
-
+                    # ✅ PHASE 5: TP1 TRAILING (Simplified to ATR baseline)
                     if len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND": 
                         self.runner_activated = True
                         logger.info(f"[VTM TACTICAL] 🏃 Runner Activated: Trailing stop will now follow price.")
