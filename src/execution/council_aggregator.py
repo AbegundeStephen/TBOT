@@ -181,21 +181,23 @@ class InstitutionalCouncilAggregator:
         ✅ INSTITUTIONAL: Strict TREND-ONLY enforcement. SCALP logic removed.
         """
         # 1. FAIL-SAFE: If no Governor data, return NO TRADE (Strict macro dependency)
-        if not governor_data or 'governor' not in governor_data:
+        # ✨ IMPROVED: Check for both 'governor' and 'full_regime_status'
+        if not governor_data:
             logger.warning("[GOV] ❌ BLOCKED - No MTF Governor data available. Blocking trade (Strict Macro Rule).")
+            return False, "NEUTRAL"
+            
+        governor = governor_data.get('governor') or governor_data.get('full_regime_status')
+        
+        if not governor:
+            logger.warning("[GOV] ❌ BLOCKED - No Governor status object found in data. Blocking trade.")
             return False, "NEUTRAL"
 
         try:
-            governor = governor_data['governor']
-            
             # Handle object vs dict access depending on how MTF serializes it
-            # trade_type = getattr(governor.trade_type, 'value', str(governor.trade_type))
-            # regime_value = getattr(governor.regime, 'value', str(governor.regime))
-            
             # Use the new RegimeStatus attributes if available, otherwise fallback
-            regime_name = getattr(governor, 'consensus_regime', "NEUTRAL")
-            is_bullish = getattr(governor, 'is_bullish', False)
-            is_bearish = getattr(governor, 'is_bearish', False)
+            regime_name = getattr(governor, 'consensus_regime', governor_data.get('regime', "NEUTRAL"))
+            is_bullish = getattr(governor, 'is_bullish', governor_data.get('is_bullish', False))
+            is_bearish = getattr(governor, 'is_bearish', governor_data.get('is_bearish', False))
 
             # 2. Block neutral or mixed markets
             if regime_name == "NEUTRAL":
@@ -427,9 +429,9 @@ class InstitutionalCouncilAggregator:
             consensus_regime = governor_data.get("consensus_regime", "NEUTRAL") if governor_data else "NEUTRAL"
             
             if consensus_regime in ["SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH"]:
-                w_momentum = 0.0
-                w_structure = 2.5
-                w_pattern = 1.0
+                w_momentum = 0.5  # ✨ Allow partial momentum points
+                w_structure = 1.5 # ✨ Standard structure weight
+                w_pattern = 1.0   # ✨ Increased pattern weight for trigger clarity
                 if self.detailed_logging: logger.info(f"[COUNCIL] ⚖️ DYNAMIC WEIGHTS APPLIED: {consensus_regime}")
 
             if self.s_mean_reversion:
@@ -482,8 +484,8 @@ class InstitutionalCouncilAggregator:
             buy_explanations.append(trend_exp['buy'])
             sell_explanations.append(trend_exp['sell'])
             
-            # Pass breakout flag to adaptive judges
-            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df, is_breakout_mode, w_structure)
+            # Pass breakout flag and ADX to adaptive judges
+            buy_scores['structure'], sell_scores['structure'], structure_exp = self._judge_structure_bidirectional(df, is_breakout_mode, w_structure, adx)
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
@@ -544,7 +546,12 @@ class InstitutionalCouncilAggregator:
                         'decision_type': "BLOCKED (Macro Regime Conflict)",
                         'reasoning': "blocked_by_macro_governor",
                         'final_signal': 0,
-                        'signal_quality': 0.0
+                        'signal_quality': 0.0,
+                        'total_score': total_score, # ✨ ADDED
+                        'scores': chosen_scores,     # ✨ ADDED
+                        'buy_total': buy_total,
+                        'sell_total': sell_total,
+                        'regime': regime_name,
                     }
 
                 # 2. ATR WICK TRAP (ABSOLUTE VETO)
@@ -557,7 +564,12 @@ class InstitutionalCouncilAggregator:
                         'decision_type': "BLOCKED (Institutional Wick Trap)",
                         'reasoning': "blocked_by_trap_filter",
                         'final_signal': 0,
-                        'signal_quality': 0.0
+                        'signal_quality': 0.0,
+                        'total_score': total_score, # ✨ ADDED
+                        'scores': chosen_scores,     # ✨ ADDED
+                        'buy_total': buy_total,
+                        'sell_total': sell_total,
+                        'regime': regime_name,
                     }
 
                 # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
@@ -570,7 +582,12 @@ class InstitutionalCouncilAggregator:
                         'decision_type': "BLOCKED (Dead Market Volatility)",
                         'reasoning': "low_volatility_veto",
                         'final_signal': 0,
-                        'signal_quality': 0.0
+                        'signal_quality': 0.0,
+                        'total_score': total_score, # ✨ ADDED
+                        'scores': chosen_scores,     # ✨ ADDED
+                        'buy_total': buy_total,
+                        'sell_total': sell_total,
+                        'regime': regime_name,
                     }
 
             # ====================================================================
@@ -803,7 +820,7 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[TREND] Error: {e}")
             return 0.0, 0.0, {'buy': f"TREND: Error", 'sell': f"TREND: Error"}
     
-    def _judge_structure_bidirectional(self, df: pd.DataFrame, is_breakout_mode: bool, weight: float) -> Tuple[float, float, Dict]:
+    def _judge_structure_bidirectional(self, df: pd.DataFrame, is_breakout_mode: bool, weight: float, adx: float = 20.0) -> Tuple[float, float, Dict]:
         """
         JUDGE 2: STRUCTURE (Bidirectional & Adaptive)
         """
@@ -833,10 +850,13 @@ class InstitutionalCouncilAggregator:
                 if not self.ai_validator:
                     return 0.0, 0.0, {'buy': "STRUCT: AI disabled", 'sell': "STRUCT: AI disabled"}
 
-                # ATR-based proximity scaling
+                # ✨ ADAPTIVE: ATR-based proximity scaling
                 high, low, close = df['high'].values, df['low'].values, df['close'].values
                 atr_fast = ta.ATR(high, low, close, timeperiod=14)[-1]
-                threshold_val = (0.25 * atr_fast)
+                
+                # If trending (ADX > 25), be more lenient with distance
+                multiplier = 2.5 if adx > 25 else 1.5
+                threshold_val = (multiplier * atr_fast)
                 threshold_pct = threshold_val / current_price
                 
                 # Check for reaction at a SUPPORT level (for BUY)
@@ -846,7 +866,7 @@ class InstitutionalCouncilAggregator:
                 if sr_buy.get('near_level'):
                     level = sr_buy.get('nearest_level', 0)
                     buy_score = weight
-                    buy_exp = f"STRUCT BUY: ✅ At Support ({weight:.1f}) - Near level ${level:.2f}"
+                    buy_exp = f"STRUCT BUY: ✅ At Support ({weight:.1f}) - Near level ${level:.2f} (±{multiplier}*ATR)"
                 else:
                     buy_exp = "STRUCT BUY: ❌ No support nearby"
                 
@@ -857,7 +877,7 @@ class InstitutionalCouncilAggregator:
                 if sr_sell.get('near_level'):
                     level = sr_sell.get('nearest_level', 0)
                     sell_score = weight
-                    sell_exp = f"STRUCT SELL: ✅ At Resistance ({weight:.1f}) - Near level ${level:.2f}"
+                    sell_exp = f"STRUCT SELL: ✅ At Resistance ({weight:.1f}) - Near level ${level:.2f} (±{multiplier}*ATR)"
                 else:
                     sell_exp = "STRUCT SELL: ❌ No resistance nearby"
 

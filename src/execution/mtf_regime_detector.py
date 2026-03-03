@@ -14,12 +14,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+from enum import Enum
+
 logger = logging.getLogger(__name__)
 
 # Centralized Indicator Constants
 FAST_EMA = 20
 SLOW_EMA = 50
 BASELINE_EMA = 200
+
+class TradeType(Enum):
+    """Supported institutional trade types."""
+    TREND = "TREND"
+    SCALP = "SCALP"
+    V_SHAPE = "V_SHAPE"
+    NEUTRAL = "NEUTRAL"
 
 
 @dataclass
@@ -29,6 +38,7 @@ class GovernorStatus:
     is_bearish: bool
     reasoning: str
     ema_200: Optional[float] = None
+    trade_type: TradeType = TradeType.TREND
 
 
 @dataclass
@@ -45,6 +55,7 @@ class RegimeStatus:
     ema_1d_200: Optional[float] = None
     ema_4h_200: Optional[float] = None
     ema_4h_50: Optional[float] = None
+    trade_type: TradeType = TradeType.TREND
 
 
 class MultiTimeFrameRegimeDetector:
@@ -211,13 +222,17 @@ class MultiTimeFrameRegimeDetector:
             is_bullish = (current_price > ema_200) and (ema_slope > self.governor_thresholds["ema_slope_positive"])
             is_bearish = (current_price < ema_200) and (ema_slope < -self.governor_thresholds["ema_slope_positive"])
 
+            trade_type = TradeType.NEUTRAL
+            if is_bullish or is_bearish:
+                trade_type = TradeType.TREND
+
             reasoning = (
                 f"Price {'above' if is_bullish else 'below' if is_bearish else 'near'} 200 EMA "
                 f"with {'positive' if ema_slope > 0 else 'negative' if ema_slope < 0 else 'flat'} slope."
             )
 
             return GovernorStatus(
-                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200
+                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200, trade_type=trade_type
             )
 
         except Exception as e:
@@ -322,6 +337,10 @@ class MultiTimeFrameRegimeDetector:
         is_bullish = consensus_regime in ["BULLISH", "SLIGHTLY_BULLISH"]
         is_bearish = consensus_regime in ["BEARISH", "SLIGHTLY_BEARISH"]
 
+        trade_type = TradeType.NEUTRAL
+        if is_bullish or is_bearish:
+            trade_type = TradeType.TREND
+
         final_reasoning = f"Institutional {consensus_regime} regime. " + ", ".join(reasons)
 
         return RegimeStatus(
@@ -334,7 +353,8 @@ class MultiTimeFrameRegimeDetector:
             consensus_regime=consensus_regime,
             ema_1d_200=governor_status.ema_200,
             ema_4h_200=ema_4h_baseline,
-            ema_4h_50=ema_4h_slow
+            ema_4h_50=ema_4h_slow,
+            trade_type=trade_type
         )
 
     def analyze_regime(
