@@ -286,6 +286,7 @@ class MTFRegimeIntegration:
                 "volatility": volatility,
                 "allow_counter_trend": allow_counter_trend,
                 "max_positions": 3,
+                "governor": regime_status, # ✨ ADDED: For Council & Performance Aggregators
                 "full_regime_status": regime_status,
             }
 

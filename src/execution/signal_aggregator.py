@@ -837,12 +837,25 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Get Governor analysis from MTF
             regime_data = self.mtf_integration._current_regime_data.get(self.asset_type)
             
-            if not regime_data or 'governor' not in regime_data:
+            if not regime_data:
                 logger.debug(f"[GOV] No data for {self.asset_type}, allowing trade")
                 return True, "TREND"
             
-            governor = regime_data['governor']
-            trade_type = governor.trade_type.value  # "TREND", "SCALP", or "V_SHAPE"
+            # ✨ IMPROVED: Robust key check
+            governor = regime_data.get('governor') or regime_data.get('full_regime_status')
+            
+            if not governor:
+                logger.debug(f"[GOV] No governor object for {self.asset_type}, allowing trade")
+                return True, "TREND"
+            
+            # ✨ IMPROVED: Handle Enum vs String vs Attribute
+            raw_trade_type = getattr(governor, 'trade_type', None)
+            if raw_trade_type is None:
+                # Fallback to consensus_regime if trade_type is missing
+                regime_name = getattr(governor, 'consensus_regime', "NEUTRAL")
+                trade_type = "NEUTRAL" if regime_name == "NEUTRAL" else "TREND"
+            else:
+                trade_type = getattr(raw_trade_type, 'value', str(raw_trade_type))
 
             # IF the Governor says NEUTRAL, BLOCK THE TRADE.
             if trade_type == "NEUTRAL":
