@@ -1,12 +1,13 @@
 """
-Enhanced Dynamic Preset Selector - 3-Preset Support
+Enhanced Dynamic Preset Selector - 4-Preset Support
 ====================================================
 IMPROVEMENTS:
-✅ 3-tier regime detection (conservative → balanced → aggressive)
+✅ 4-tier regime detection (mr → conservative → balanced → aggressive)
 ✅ Multi-factor scoring system for precise preset selection
+✅ Asset-DNA Gating: MTF Regime becomes a HARD LOCK for Mean Reversion
 ✅ Better separation between presets using volatility + trend + momentum
 ✅ Scalper preset removed to avoid noise trading
-✅ Telegram notifications with 3 presets
+✅ Telegram notifications with 4 presets
 """
 
 import pandas as pd
@@ -20,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 class DynamicPresetSelector:
     """
-    Real-time preset selector with 3-preset support:
-    CONSERVATIVE → BALANCED → AGGRESSIVE
+    Real-time preset selector with 4-preset support:
+    MR → CONSERVATIVE → BALANCED → AGGRESSIVE
     """
     
     def __init__(self, data_manager, config, telegram_bot=None):
@@ -38,12 +39,13 @@ class DynamicPresetSelector:
         self.min_switch_interval = 60
         
         # ================================================================
-        # ENHANCED THRESHOLDS - 3 PRESET SYSTEM
+        # ENHANCED THRESHOLDS - 4 PRESET SYSTEM
         # ================================================================
         # Scoring system:
         # - High score (65+) = AGGRESSIVE (stable, trending)
-        # - Medium (35-64) = BALANCED (normal conditions)
-        # - Low (0-34) = CONSERVATIVE (high vol, weak trend, uncertainty)
+        # - Medium (40-64) = BALANCED (normal conditions)
+        # - Low (20-39) = CONSERVATIVE (high vol, weak trend, uncertainty)
+        # - Very Low (0-19) = MR (Mean Reversion / Ranging)
         # ================================================================
         
         self.thresholds = {
@@ -91,11 +93,13 @@ class DynamicPresetSelector:
     def update_market_regime(
         self, 
         asset_name: str, 
-        market_data: pd.DataFrame
+        market_data: pd.DataFrame,
+        regime_data: Optional[Dict] = None
     ) -> Optional[str]:
         """
         Analyze current market conditions and return optimal preset
-        Uses multi-factor scoring for precise 3-preset classification
+        Uses multi-factor scoring for precise 4-preset classification
+        ✅ ENHANCED: Asset-DNA Gating & MR Preset Support.
         """
         try:
             asset_type = 'BTC' if 'BTC' in asset_name.upper() else 'GOLD'
@@ -107,6 +111,11 @@ class DynamicPresetSelector:
             if metrics is None:
                 logger.warning(f"[REGIME] {asset_name}: Failed to calculate metrics")
                 return None
+
+            # Extract MTF Regime Context for Gating
+            regime_name = "NEUTRAL"
+            if regime_data:
+                regime_name = regime_data.get('regime', 'NEUTRAL')
             
             # ================================================================
             # MULTI-FACTOR PRESET SCORING (0-100 scale)
@@ -213,22 +222,44 @@ class DynamicPresetSelector:
             score = max(0, min(100, score))
             
             # ================================================================
-            # MAP SCORE TO PRESET (3-TIER SYSTEM)
+            # MAP SCORE TO PRESET (4-TIER SYSTEM)
             # ================================================================
             # 65-100: AGGRESSIVE (good conditions - trending market)
-            # 35-64:  BALANCED (normal conditions)
-            # 0-34:   CONSERVATIVE (poor conditions - high vol, weak trend)
+            # 40-64:  BALANCED (normal conditions)
+            # 20-39:  CONSERVATIVE (high vol, weak trend)
+            # 0-19:   MR (Mean Reversion)
             # ================================================================
             
             if score >= 65:
                 new_preset = 'aggressive'
                 preset_reason = "AGGRESSIVE - Strong trend with manageable volatility"
-            elif score >= 35:
+            elif score >= 40:
                 new_preset = 'balanced'
                 preset_reason = "BALANCED - Normal market conditions"
-            else:
+            elif score >= 20:
                 new_preset = 'conservative'
                 preset_reason = "CONSERVATIVE - High risk or uncertain conditions"
+            else:
+                new_preset = 'mr'
+                preset_reason = "MR - Neutral/Mean Reversion conditions (Low score)"
+            
+            # ================================================================
+            # 🛡️ ASSET-DNA HARD LOCKS (Gating)
+            # ================================================================
+            asset = asset_name.upper()
+            
+            if new_preset == "mr":
+                # BTC / USTEC: Block MR during BULLISH or SLIGHTLY_BULLISH
+                if "BTC" in asset or "USTEC" in asset:
+                    if regime_name in ["BULLISH", "SLIGHTLY_BULLISH"]:
+                        logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
+                        new_preset = "conservative"
+                
+                # GOLD: Only allow MR in BEARISH or NEUTRAL (Safety rule)
+                elif "GOLD" in asset:
+                    if regime_name not in ["BEARISH", "NEUTRAL"]:
+                        logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
+                        new_preset = "conservative"
             
             # Build detailed reason
             reason = self._format_reason_with_score(
@@ -327,13 +358,14 @@ class DynamicPresetSelector:
         metrics: Dict,
         score: int
     ):
-        """Send Telegram notification with 3-preset support"""
+        """Send Telegram notification with 4-preset support"""
         if not self.telegram_bot:
             return
         
         try:
-            # Emoji mapping for 3 presets
+            # Emoji mapping for 4 presets
             emoji_map = {
+                'mr': '🔄',
                 'conservative': '🛡️',
                 'balanced': '⚖️',
                 'aggressive': '⚡'
@@ -352,6 +384,7 @@ class DynamicPresetSelector:
             
             # Add preset description
             preset_desc = {
+                'mr': '🔄 Mean Reversion - Optimal for Ranging/Neutral markets',
                 'conservative': '🛡️ Most restrictive - High thresholds, safety-first',
                 'balanced': '⚖️ Standard - Moderate thresholds, balanced approach',
                 'aggressive': '⚡ Active - Lower thresholds, trend-following'
@@ -530,7 +563,7 @@ class DynamicPresetSelector:
         self.current_presets[asset] = new_preset
         self.last_update[asset] = datetime.now()
     
-    def get_preset_for_asset(self, asset_name: str) -> Optional[str]:
+    def get_preset_for_asset(self, asset_name: str, regime_data: Optional[Dict] = None) -> Optional[str]:
         """
         Main method: Get current optimal preset for asset
         Call this before each trading cycle
@@ -567,7 +600,7 @@ class DynamicPresetSelector:
                 return self.current_presets.get(asset_name, 'balanced')
             
             # Analyze and potentially switch preset
-            new_preset = self.update_market_regime(asset_name, df)
+            new_preset = self.update_market_regime(asset_name, df, regime_data)
             
             # Return current preset (updated or unchanged)
             return self.current_presets.get(asset_name, new_preset or 'balanced')
@@ -588,8 +621,8 @@ class DynamicPresetSelector:
             'last_update_times': self.last_update.copy(),
         }
         
-        # Add preset distribution (3 presets only)
-        preset_counts = {'conservative': 0, 'balanced': 0, 'aggressive': 0}
+        # Add preset distribution (4 presets)
+        preset_counts = {'mr': 0, 'conservative': 0, 'balanced': 0, 'aggressive': 0}
         for history in self.preset_history.values():
             for record in history:
                 preset = record.get('new_preset')
