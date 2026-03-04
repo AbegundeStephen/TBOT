@@ -2062,7 +2062,15 @@ class TradingBot:
             changes = []
             for asset_name in enabled_assets:
                 # Get optimal preset for current market conditions
-                new_preset = self.dynamic_selector.get_preset_for_asset(asset_name)
+                # Fetch the latest MTF regime data to pass to the selector for Asset-DNA Gating
+                regime_data = None
+                if (
+                    hasattr(self, "_current_regime_data")
+                    and asset_name in self._current_regime_data
+                ):
+                    regime_data = self._current_regime_data[asset_name]
+
+                new_preset = self.dynamic_selector.get_preset_for_asset(asset_name, regime_data=regime_data)
 
                 if new_preset:
                     old_preset = self.selected_presets.get(asset_name)

@@ -273,236 +273,170 @@ class MeanReversionStrategy(BaseStrategy):
 
         return context
 
+    def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 14) -> bool:
+        """
+        Check for Bullish/Bearish Divergence on RSI (1H context)
+        ✅ BULLISH: Price Lower Low + RSI Higher Low
+        ✅ BEARISH: Price Higher High + RSI Lower High
+        """
+        if len(df) < 30:
+            return False
+            
+        close = df['close'].values
+        rsi = df['rsi'].values
+        
+        # Simple divergence logic looking for last two local extremes
+        # Bullish Divergence (for Long)
+        if signal == 1:
+            # Look for last two local lows in price
+            # Simplified: check current low vs previous low
+            # Price (last 5 bars) vs Price (5-15 bars ago)
+            current_price_low = np.min(close[-5:])
+            prev_price_low = np.min(close[-15:-5])
+            
+            current_rsi_low = np.min(rsi[-5:])
+            prev_rsi_low = np.min(rsi[-15:-5])
+            
+            if current_price_low < prev_price_low and current_rsi_low > prev_rsi_low:
+                return True
+                
+        # Bearish Divergence (for Short)
+        elif signal == -1:
+            current_price_high = np.max(close[-5:])
+            prev_price_high = np.max(close[-15:-5])
+            
+            current_rsi_high = np.max(rsi[-5:])
+            prev_rsi_high = np.max(rsi[-15:-5])
+            
+            if current_price_high > prev_price_high and current_rsi_high < prev_rsi_high:
+                return True
+                
+        return False
+
     def generate_labels(
-        self, df: pd.DataFrame, df_4h: pd.DataFrame = None
+        self, df: pd.DataFrame, df_4h: pd.DataFrame = None, pattern_miner = None
     ) -> pd.Series:
         """
-        MULTI-TIMEFRAME label generation with 4H context
-
-        Mean Reversion Logic with 4H:
-        - BEST: 4H extreme + 1H counter-extreme (e.g., 4H oversold + 1H overbought)
-        - GOOD: 4H ranging + 1H extreme
-        - AVOID: 4H trending strongly
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Primary timeframe data (1H) with features
-        df_4h : pd.DataFrame, optional
-            Higher timeframe data (4H) with features
-
-        Returns:
-        --------
-        pd.Series
-            Labels: -1 (SELL), 0 (HOLD), 1 (BUY)
+        INSTITUTIONAL Mean Reversion with 3 Pillars + Slope Veto (Phase 3)
         """
+        from src.utils.math_utils import calculate_normalized_slope_degrees
+        
         df = df.copy()
         labels = pd.Series(0, index=df.index)
 
+        # Generate core features
+        df = self.generate_features(df)
+        
         close = df["close"].values
-        bb_position = df["bb_position"].values
+        high = df["high"].values
+        low = df["low"].values
+        bb_upper = df["bb_upper"].values
+        bb_lower = df["bb_lower"].values
         rsi = df["rsi"].values
-        stoch_k = df["stoch_k"].values
-        bb_width = df["bb_width_norm"].values
-        atr_pct = df["atr_pct"].values
+        atr = df["atr"].values
+        
+        # Calculate EMA 50 for "The Stretch"
+        df["ema_50"] = ta.EMA(close, timeperiod=50)
+        ema_50 = df["ema_50"].values
 
         # Align 4H data if provided
         df_4h_aligned = None
         if self.use_4h_context and df_4h is not None:
-            # Generate features for 4H if not already done
             if "bb_position" not in df_4h.columns:
                 df_4h = self.generate_features(df_4h)
             df_4h_aligned = self._align_4h_to_1h(df, df_4h)
-            logger.info(f"[{self.name}] 4H context aligned successfully")
-
-        # Calculate adaptive thresholds based on market regime
-        median_vol = np.nanmedian(atr_pct)
-        high_vol_threshold = np.nanpercentile(atr_pct, 75)
 
         signal_count = {"buy": 0, "sell": 0, "hold": 0}
-        filtered_by_4h = 0
-        boosted_by_4h = 0
 
-        for i in range(len(df) - self.reversion_window - 1):
-            # Skip if ANY missing data
-            if (
-                pd.isna(bb_position[i])
-                or pd.isna(rsi[i])
-                or pd.isna(stoch_k[i])
-                or pd.isna(bb_width[i])
-                or pd.isna(atr_pct[i])
-            ):
-                continue
-
-            # Skip if extreme volatility
-            if atr_pct[i] > high_vol_threshold:
+        for i in range(100, len(df) - self.reversion_window - 1):
+            if pd.isna(ema_50[i]) or pd.isna(rsi[i]):
                 continue
 
             current_close = close[i]
-            future_closes = close[i + 1 : i + 1 + self.reversion_window]
+            
+            # ================================================================
+            # 🛡️ THE LINEAR REGRESSION SLOPE VETO (Step 7)
+            # ================================================================
+            # Prevent fading violent momentum collapses
+            slope_deg = calculate_normalized_slope_degrees(df['close'].iloc[:i+1], period=100)
+            
+            # ================================================================
+            # PILLAR 1: THE STRETCH (Volatility Exhaustion)
+            # ================================================================
+            # Price > 2.0 ATR away from ema_50 OR pierce 2.0 StdDev Bollinger Band
+            stretch_long = (ema_50[i] - current_close > 2.0 * atr[i]) or (current_close < bb_lower[i])
+            stretch_short = (current_close - ema_50[i] > 2.0 * atr[i]) or (current_close > bb_upper[i])
 
-            if len(future_closes) < self.reversion_window:
-                continue
+            # ================================================================
+            # PILLAR 2: THE DIVERGENCE (1H)
+            # ================================================================
+            # Done via _check_divergence helper
+            div_long = self._check_divergence(df.iloc[:i+1], signal=1)
+            div_short = self._check_divergence(df.iloc[:i+1], signal=-1)
 
-            # Calculate future returns
-            max_future = np.max(future_closes)
-            min_future = np.min(future_closes)
-            avg_future = np.mean(future_closes)
+            # ================================================================
+            # PILLAR 3: THE EXHAUSTION (Pattern Recognition)
+            # ================================================================
+            exhaustion_long = False
+            exhaustion_short = False
+            
+            if (stretch_long and div_long) or (stretch_short and div_short):
+                # Pattern Detection (Must be Hammer, Doji, or Engulfing)
+                # For training context, we might simulate or check if miner is passed
+                if pattern_miner:
+                    snippet = df[["open", "high", "low", "close"]].iloc[i-14:i+1].values
+                    first_open = snippet[0, 0]
+                    if first_open > 0:
+                        snippet_norm = (snippet / first_open - 1).reshape(1, 15, 4)
+                        # We would use sniper.predict_single here, but for label gen we'll use TA-Lib as ground truth
+                        patterns_to_check = {
+                            'Hammer': ta.CDLHAMMER,
+                            'Doji': ta.CDLDOJI,
+                            'Engulfing': ta.CDLENGULFING
+                        }
+                        
+                        o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
+                        
+                        for name, func in patterns_to_check.items():
+                            res = func(o, h, l, c)
+                            if res[-1] != 0:
+                                if stretch_long and res[-1] > 0: exhaustion_long = True
+                                if stretch_short and res[-1] < 0: exhaustion_short = True
+                else:
+                    # Fallback to pure TA-Lib pattern detection if no miner passed
+                    patterns_to_check = {
+                        'Hammer': ta.CDLHAMMER,
+                        'Doji': ta.CDLDOJI,
+                        'Engulfing': ta.CDLENGULFING
+                    }
+                    o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
+                    for name, func in patterns_to_check.items():
+                        res = func(o, h, l, c)
+                        if res[-1] != 0:
+                            if stretch_long and res[-1] > 0: exhaustion_long = True
+                            if stretch_short and res[-1] < 0: exhaustion_short = True
 
-            future_return_up = (max_future - current_close) / current_close
-            future_return_down = (current_close - min_future) / current_close
-            avg_return = (avg_future - current_close) / current_close
-
-            # Adaptive threshold based on volatility
-            vol_mult = max(0.7, min(1.5, atr_pct[i] / median_vol))
-            adj_min_return = self.min_return_threshold * vol_mult
-
-            if self.asset == "GOLD":
-                adj_min_return *= 0.7
-
-            # === GET 4H CONTEXT ===
-            h4_context = {
-                "is_extreme_oversold": False,
-                "is_extreme_overbought": False,
-                "is_trending": False,
-                "trend_direction": 0,
-                "reversion_score": 0.0,
-            }
-
-            if df_4h_aligned is not None:
-                h4_context = self._calculate_4h_reversion_context(df_4h_aligned, i)
-
-            # === CALCULATE 1H BUY SIGNAL ===
-            buy_score = 0.0
-
-            # 1. Extreme oversold on 1H
-            if bb_position[i] < 0.10:
-                buy_score += 2.5
-            elif bb_position[i] < 0.15:
-                buy_score += 1.5
-            elif bb_position[i] < self.bb_lower_threshold:
-                buy_score += 0.5
-
-            # 2. RSI extreme
-            if rsi[i] < 25:
-                buy_score += 2.0
-            elif rsi[i] < 30:
-                buy_score += 1.0
-            elif rsi[i] < self.rsi_oversold:
-                buy_score += 0.3
-
-            # 3. Stochastic confirmation
-            if stoch_k[i] < 15:
-                buy_score += 1.5
-            elif stoch_k[i] < 20:
-                buy_score += 0.5
-
-            # 4. NOT in squeeze
-            if bb_width[i] > 0.015:
-                buy_score += 1.0
-
-            # 5. Require consistent upward movement
-            direction_score = 0
-            for j in range(1, min(4, len(future_closes))):
-                if future_closes[j] > future_closes[j - 1]:
-                    direction_score += 1
-
-            if direction_score >= 2:
-                buy_score += 1.0
-
-            # === APPLY 4H CONTEXT TO BUY SIGNAL ===
-            if df_4h_aligned is not None:
-                # BEST CASE: 4H is also oversold (double bottom opportunity)
-                if h4_context["is_extreme_oversold"]:
-                    buy_score += self.h4_extreme_weight
-                    boosted_by_4h += 1
-
-                # GOOD CASE: 4H is overbought (expecting reversion from high to low)
-                elif h4_context["is_extreme_overbought"]:
-                    buy_score += self.h4_extreme_weight * 0.5  # Smaller boost
-
-                # BAD CASE: 4H is in strong downtrend (avoid catching falling knife)
-                elif h4_context["is_trending"] and h4_context["trend_direction"] == -1:
-                    buy_score -= self.h4_trend_penalty
-                    if self.h4_reversion_mode == "smart":
-                        filtered_by_4h += 1
-                        continue  # Skip this signal
-
-                # NEUTRAL: 4H is ranging or trending up (allow signal)
-
-            # Generate BUY label
-            if (
-                buy_score >= self.min_score_threshold
-                and future_return_up > adj_min_return
-                and avg_return > adj_min_return * 0.5
-            ):
-                labels.iloc[i] = 1
-                signal_count["buy"] += 1
-
-            # === CALCULATE 1H SELL SIGNAL ===
-            sell_score = 0.0
-
-            # 1. Extreme overbought on 1H
-            if bb_position[i] > 0.90:
-                sell_score += 2.5
-            elif bb_position[i] > 0.85:
-                sell_score += 1.5
-            elif bb_position[i] > self.bb_upper_threshold:
-                sell_score += 0.5
-
-            # 2. RSI extreme
-            if rsi[i] > 75:
-                sell_score += 2.0
-            elif rsi[i] > 70:
-                sell_score += 1.0
-            elif rsi[i] > self.rsi_overbought:
-                sell_score += 0.3
-
-            # 3. Stochastic confirmation
-            if stoch_k[i] > 85:
-                sell_score += 1.5
-            elif stoch_k[i] > 80:
-                sell_score += 0.5
-
-            # 4. NOT in squeeze
-            if bb_width[i] > 0.015:
-                sell_score += 1.0
-
-            # 5. Require consistent downward movement
-            direction_score = 0
-            for j in range(1, min(4, len(future_closes))):
-                if future_closes[j] < future_closes[j - 1]:
-                    direction_score += 1
-
-            if direction_score >= 2:
-                sell_score += 1.0
-
-            # === APPLY 4H CONTEXT TO SELL SIGNAL ===
-            if df_4h_aligned is not None:
-                # BEST CASE: 4H is also overbought (double top opportunity)
-                if h4_context["is_extreme_overbought"]:
-                    sell_score += self.h4_extreme_weight
-                    boosted_by_4h += 1
-
-                # GOOD CASE: 4H is oversold (expecting reversion from low to high)
-                elif h4_context["is_extreme_oversold"]:
-                    sell_score += self.h4_extreme_weight * 0.5
-
-                # BAD CASE: 4H is in strong uptrend (avoid selling into strength)
-                elif h4_context["is_trending"] and h4_context["trend_direction"] == 1:
-                    sell_score -= self.h4_trend_penalty
-                    if self.h4_reversion_mode == "smart":
-                        filtered_by_4h += 1
-                        continue  # Skip this signal
-
-            # Generate SELL label
-            if (
-                sell_score >= self.min_score_threshold
-                and future_return_down > adj_min_return
-                and avg_return < -adj_min_return * 0.5
-            ):
-                labels.iloc[i] = -1
-                signal_count["sell"] += 1
+            # ================================================================
+            # CONFLUENCE & FINAL VETO
+            # ================================================================
+            
+            # BUY setup
+            if stretch_long and div_long and exhaustion_long:
+                # VETO if slope equivalent to > 45-degree downward trajectory
+                if slope_deg < -45:
+                    logger.debug(f"[{self.name}] VETO BUY: Violent downward slope ({slope_deg:.1f} deg)")
+                else:
+                    labels.iloc[i] = 1
+                    signal_count["buy"] += 1
+            
+            # SELL setup
+            elif stretch_short and div_short and exhaustion_short:
+                # VETO if slope equivalent to > 45-degree upward trajectory
+                if slope_deg > 45:
+                    logger.debug(f"[{self.name}] VETO SELL: Violent upward slope ({slope_deg:.1f} deg)")
+                else:
+                    labels.iloc[i] = -1
+                    signal_count["sell"] += 1
 
         # Remove labels from last N bars
         labels.iloc[-self.reversion_window :] = 0
@@ -522,24 +456,16 @@ class MeanReversionStrategy(BaseStrategy):
             f"  BUY:  {signal_count['buy']:>5} ({signal_count['buy']/total*100:>5.2f}%)"
         )
 
-        if df_4h_aligned is not None:
-            logger.info(f"[{self.name}] 4H Context Impact:")
-            logger.info(f"  Filtered: {filtered_by_4h} signals")
-            logger.info(f"  Boosted: {boosted_by_4h} signals")
-
         buy_pct = signal_count["buy"] / total * 100
         sell_pct = signal_count["sell"] / total * 100
         total_signals = buy_pct + sell_pct
 
-        if total_signals < 5:
+        if total_signals < 2:
             logger.warning(
-                f"  ⚠ Very few signals ({total_signals:.1f}%) - consider loosening"
-            )
-        elif total_signals > 69:
-            logger.warning(
-                f"  ⚠ Too many signals ({total_signals:.1f}%) - tighten thresholds"
+                f"  ⚠ Very few signals ({total_signals:.1f}%) - Phase 3 is highly selective"
             )
         else:
-            logger.info(f"  ✓ Good signal rate: {total_signals:.1f}%")
+            logger.info(f"  ✓ Phase 3 signal rate: {total_signals:.1f}%")
 
         return labels
+

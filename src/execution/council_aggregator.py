@@ -175,13 +175,12 @@ class InstitutionalCouncilAggregator:
     # ✨ WORLD-CLASS FILTERS (Asymmetric Logic)
     # ========================================================================
 
-    def _check_governor_filter(self, df: pd.DataFrame, signal: int, governor_data: Optional[Dict] = None) -> Tuple[bool, str]:
+    def _check_governor_filter(self, df: pd.DataFrame, signal: int, governor_data: Optional[Dict] = None, preset_trade_type: str = "TREND") -> Tuple[bool, str]:
         """
         Check the 1D Macro Trend via pre-injected Governor data.
-        ✅ INSTITUTIONAL: Strict TREND-ONLY enforcement. SCALP logic removed.
+        ✅ INSTITUTIONAL: Strict TREND enforcement. Supports REVERSION gating.
         """
         # 1. FAIL-SAFE: If no Governor data, return NO TRADE (Strict macro dependency)
-        # ✨ IMPROVED: Check for both 'governor' and 'full_regime_status'
         if not governor_data:
             logger.warning("[GOV] ❌ BLOCKED - No MTF Governor data available. Blocking trade (Strict Macro Rule).")
             return False, "NEUTRAL"
@@ -193,27 +192,63 @@ class InstitutionalCouncilAggregator:
             return False, "NEUTRAL"
 
         try:
-            # Handle object vs dict access depending on how MTF serializes it
-            # Use the new RegimeStatus attributes if available, otherwise fallback
+            # Extract regime context
             regime_name = getattr(governor, 'consensus_regime', governor_data.get('regime', "NEUTRAL"))
             is_bullish = getattr(governor, 'is_bullish', governor_data.get('is_bullish', False))
             is_bearish = getattr(governor, 'is_bearish', governor_data.get('is_bearish', False))
 
-            # 2. Block neutral or mixed markets
-            if regime_name == "NEUTRAL":
+            # 2. Block neutral or mixed markets (Except for REVERSION)
+            if regime_name == "NEUTRAL" and preset_trade_type == "TREND":
                 logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Mixed (Institutional Caution)")
                 return False, "NEUTRAL"
 
-            # 3. Macro Trend Alignment (Strict TREND mode)
-            # If Macro is Bullish, only allow Buys. If Macro is Bearish, only allow Sells.
-            if is_bullish and signal == -1:
-                logger.info(f"[GOV] ❌ BLOCKED - Short attempt in Macro BULLISH regime ({regime_name})")
-                return False, "TREND"
-            if is_bearish and signal == 1:
-                logger.info(f"[GOV] ❌ BLOCKED - Long attempt in Macro BEARISH regime ({regime_name})")
-                return False, "TREND"
+            # 3. ASSET-DNA Gating & Trade Alignment
+            asset = self.asset_type.upper()
 
-            return True, "TREND"
+            if preset_trade_type == "REVERSION":
+                # --- REVERSION GATING (DNA) ---
+                if "BTC" in asset or "USTEC" in asset:
+                    # Block MR during BULLISH or SLIGHTLY_BULLISH
+                    if regime_name in ["BULLISH", "SLIGHTLY_BULLISH"]:
+                        logger.info(f"[GOV] ❌ BLOCKED - MR forbidden in {regime_name} regime for {asset}")
+                        return False, "REVERSION"
+                    # Allow MR Buys only in BEARISH or NEUTRAL
+                    if signal == -1: # MR Short
+                        logger.info(f"[GOV] ❌ BLOCKED - MR Shorts forbidden for {asset}")
+                        return False, "REVERSION"
+                    # Buys in BEARISH or NEUTRAL are allowed
+                    return True, "REVERSION"
+                
+                elif "GOLD" in asset:
+                    # Allow MR Buys in BEARISH
+                    if signal == 1:
+                        if regime_name == "BEARISH":
+                            return True, "REVERSION"
+                        else:
+                            logger.info(f"[GOV] ❌ BLOCKED - MR Buys only allowed in BEARISH for {asset} (Current: {regime_name})")
+                            return False, "REVERSION"
+                    # Block MR Shorts in BULLISH
+                    elif signal == -1:
+                        if regime_name == "BULLISH":
+                            logger.info(f"[GOV] ❌ BLOCKED - MR Shorts forbidden in BULLISH for {asset}")
+                            return False, "REVERSION"
+                        else:
+                            # Implies allowed in BEARISH or NEUTRAL
+                            return True, "REVERSION"
+
+                # EURUSD / EURJPY allow symmetric MR (no extra blocks here)
+                return True, "REVERSION"
+
+            else:
+                # --- TREND GATING (STRICT) ---
+                if is_bullish and signal == -1:
+                    logger.info(f"[GOV] ❌ BLOCKED - Short attempt in Macro BULLISH regime ({regime_name})")
+                    return False, "TREND"
+                if is_bearish and signal == 1:
+                    logger.info(f"[GOV] ❌ BLOCKED - Long attempt in Macro BEARISH regime ({regime_name})")
+                    return False, "TREND"
+
+                return True, "TREND"
 
         except Exception as e:
             logger.error(f"[GOV] Error processing Governor data: {e}", exc_info=True)
@@ -260,10 +295,11 @@ class InstitutionalCouncilAggregator:
                     displacement_reason = f"BTC Volume Surge < 1.5x ({displacement_ratio:.2f}x)"
             else:
                 # EXNESS/FOREX: ATR Displacement is King (Ignore tick volume)
-                if body > (1.2 * atr_fast):
+                candle_range = latest['high'] - latest['low']
+                if body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
                     displacement_passed = True
                 else:
-                    displacement_reason = f"Forex Displacement < 1.2 * ATR ({body:.4f} < {1.2 * atr_fast:.4f})"
+                    displacement_reason = f"Forex Displacement < 0.5*ATR ({body:.4f} < {0.5 * atr_fast:.4f}) AND Range < 1.0*ATR ({candle_range:.4f} < {1.0 * atr_fast:.4f})"
             
             if not displacement_passed:
                 logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
@@ -480,7 +516,7 @@ class InstitutionalCouncilAggregator:
             is_breakout_mode = self._detect_breakout_state(df)
             
             # Run all judges for both directions
-            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull, w_trend)
+            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull, w_trend, consensus_regime)
             buy_explanations.append(trend_exp['buy'])
             sell_explanations.append(trend_exp['sell'])
             
@@ -509,26 +545,36 @@ class InstitutionalCouncilAggregator:
             # DECISION LOGIC: Choose strongest direction
             # ================================================================
             signal = 0
-            decision_type = "HOLD"
-            chosen_scores = {}
-            chosen_explanations = []
             total_score = 0.0
-            required_score = self.trend_aligned_threshold # Standard institutional threshold
-            trade_type = "TREND" # Default
+            required_score = self.trend_aligned_threshold
+            chosen_scores = {}
+            decision_type = "HOLD"
+            
+            # Determine preliminary trade type from preset
+            preset_name = self.config.get('name', 'balanced').lower()
+            trade_type = "REVERSION" if preset_name == "mr" else "TREND"
             
             # Determine preliminary signal
             if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
                 total_score = buy_total
+                required_score = self.trend_aligned_threshold
+                chosen_scores = buy_scores
             elif not is_bull and buy_total >= self.counter_trend_threshold:
                 signal = 1
                 total_score = buy_total
+                required_score = self.counter_trend_threshold
+                chosen_scores = buy_scores
             elif not is_bull and sell_total >= self.trend_aligned_threshold:
                 signal = -1
                 total_score = sell_total
+                required_score = self.trend_aligned_threshold
+                chosen_scores = sell_scores
             elif is_bull and sell_total >= self.counter_trend_threshold:
                 signal = -1
                 total_score = sell_total
+                required_score = self.counter_trend_threshold
+                chosen_scores = sell_scores
             
             # ====================================================================
             # 🛡️ THE INTERCEPTOR: ABSOLUTE VETO (Phase 4)
@@ -536,7 +582,7 @@ class InstitutionalCouncilAggregator:
             if signal != 0:
                 # 1. MACRO GOVERNOR (ABSOLUTE VETO)
                 # Reason: Proves macro alignment (1D 200 EMA). Sacrosanct macro rule.
-                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data)
+                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data, trade_type)
                 if not gov_passed:
                     logger.info(f"[VETO] ❌ BLOCKED - Macro Regime Conflict.")
                     return 0, {
@@ -547,8 +593,8 @@ class InstitutionalCouncilAggregator:
                         'reasoning': "blocked_by_macro_governor",
                         'final_signal': 0,
                         'signal_quality': 0.0,
-                        'total_score': total_score, # ✨ ADDED
-                        'scores': chosen_scores,     # ✨ ADDED
+                        'total_score': total_score,
+                        'scores': chosen_scores,
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
@@ -775,7 +821,7 @@ class InstitutionalCouncilAggregator:
     # BIDIRECTIONAL JUDGES
     # ========================================================================
     
-    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float) -> Tuple[float, float, Dict]:
+    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float, consensus_regime: str = "NEUTRAL") -> Tuple[float, float, Dict]:
         """
         JUDGE 1: TREND (Bidirectional)
         """
@@ -788,6 +834,7 @@ class InstitutionalCouncilAggregator:
             price = latest['close']
             ema_20 = latest.get('ema_fast', 0)
             ema_50 = latest.get('ema_slow', 0)
+            ema_200 = latest.get('ema_200', 0)
             
             buy_score = 0.0
             sell_score = 0.0
@@ -800,6 +847,9 @@ class InstitutionalCouncilAggregator:
                 else:
                     buy_score = weight * 0.5
                     buy_exp = f"TREND BUY: ⚠️ Partial ({buy_score:.1f}) - Price > EMA50 but EMA20 < EMA50"
+            elif consensus_regime == "SLIGHTLY_BULLISH" and price < ema_50 and price > ema_200:
+                buy_score = weight * 0.5
+                buy_exp = f"TREND BUY: 🌊 Pullback ({buy_score:.1f}) - Slight Bullish regime, Price > EMA200"
             else:
                 buy_exp = "TREND BUY: ❌ No credit - Price < EMA50"
             
@@ -811,6 +861,9 @@ class InstitutionalCouncilAggregator:
                 else:
                     sell_score = weight * 0.5
                     sell_exp = f"TREND SELL: ⚠️ Partial ({sell_score:.1f}) - Price < EMA50 but EMA20 > EMA50"
+            elif consensus_regime == "SLIGHTLY_BEARISH" and price > ema_50 and price < ema_200:
+                sell_score = weight * 0.5
+                sell_exp = f"TREND SELL: 🌊 Pullback ({sell_score:.1f}) - Slight Bearish regime, Price < EMA200"
             else:
                 sell_exp = "TREND SELL: ❌ No credit - Price > EMA50"
             
