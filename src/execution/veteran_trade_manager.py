@@ -293,6 +293,7 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
+        self.profit_locked = False
         self.entry_time = datetime.now()
         
         # Calculate levels
@@ -326,6 +327,14 @@ class VeteranTradeManager:
     
     # ... Rest of the file is the same ...
     # ... I will omit it for brevity but the logic remains ...
+
+    @property
+    def profit_locked(self) -> bool:
+        """Checks if stop loss is at break-even or better"""
+        if self.side == "long":
+            return self.current_stop_loss >= self.entry_price
+        else:
+            return self.current_stop_loss <= self.entry_price
 
     def _calc_pct_distance(self, price1: float, price2: float) -> float:
         return abs(price1 - price2) / price1 * 100
@@ -578,6 +587,7 @@ class VeteranTradeManager:
             "initial_stop": self.initial_stop_loss,
             "take_profit": next_target,
             "all_targets": self.take_profit_levels,
+            "profit_locked": self.profit_locked,
             "remaining_position_pct": self.remaining_position,
             "pnl_pct": pnl_pct,
             "update_count": self.bars_in_trade,
