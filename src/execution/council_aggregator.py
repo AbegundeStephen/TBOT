@@ -296,8 +296,17 @@ class InstitutionalCouncilAggregator:
             else:
                 # EXNESS/FOREX: ATR Displacement is King (Ignore tick volume)
                 candle_range = latest['high'] - latest['low']
-                if body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
+                
+                # Exhaustion veto (prevents buying news spikes)
+                if body > (2.5 * atr_fast) or candle_range > (3.5 * atr_fast):
+                    displacement_passed = False
+                    displacement_reason = f"Exhaustion Veto: Candle too large. Body ({body:.4f} > 2.5 ATR) or Range ({candle_range:.4f} > 3.5 ATR)"
+                
+                # Valid institutional displacement
+                elif body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
                     displacement_passed = True
+                
+                # Otherwise reject
                 else:
                     displacement_reason = f"Forex Displacement < 0.5*ATR ({body:.4f} < {0.5 * atr_fast:.4f}) AND Range < 1.0*ATR ({candle_range:.4f} < {1.0 * atr_fast:.4f})"
             

@@ -273,54 +273,55 @@ class MeanReversionStrategy(BaseStrategy):
 
         return context
 
-    def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 14) -> bool:
+    def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 60) -> bool:
         """
-        Check for Bullish/Bearish Divergence on RSI (1H context)
-        ✅ BULLISH: Price Lower Low + RSI Higher Low
-        ✅ BEARISH: Price Higher High + RSI Lower High
+        Dynamic Divergence Engine (Institutional Grade)
+        - 60-bar lookback window
+        - price structure divergence
+        - RSI confirmation
         """
-        if len(df) < 30:
+        if len(df) < period:
             return False
             
         close = df['close'].values
         rsi = df['rsi'].values
         
-        # Simple divergence logic looking for last two local extremes
         # Bullish Divergence (for Long)
         if signal == 1:
-            # Look for last two local lows in price
-            # Simplified: check current low vs previous low
-            # Price (last 5 bars) vs Price (5-15 bars ago)
-            current_price_low = np.min(close[-5:])
-            prev_price_low = np.min(close[-15:-5])
+            # Current low vs Previous low in 60-bar window
+            current_low_idx = -1
+            # Find previous significant low
+            prev_low_idx = -1
+            for j in range(5, period):
+                if close[-j] < close[-j-1] and close[-j] < close[-j+1]:
+                    prev_low_idx = -j
+                    break
             
-            current_rsi_low = np.min(rsi[-5:])
-            prev_rsi_low = np.min(rsi[-15:-5])
-            
-            if current_price_low < prev_price_low and current_rsi_low > prev_rsi_low:
-                return True
-                
+            if prev_low_idx != -1:
+                if close[current_low_idx] < close[prev_low_idx] and rsi[current_low_idx] > rsi[prev_low_idx]:
+                    return True
+                    
         # Bearish Divergence (for Short)
         elif signal == -1:
-            current_price_high = np.max(close[-5:])
-            prev_price_high = np.max(close[-15:-5])
+            current_high_idx = -1
+            prev_high_idx = -1
+            for j in range(5, period):
+                if close[-j] > close[-j-1] and close[-j] > close[-j+1]:
+                    prev_high_idx = -j
+                    break
             
-            current_rsi_high = np.max(rsi[-5:])
-            prev_rsi_high = np.max(rsi[-15:-5])
-            
-            if current_price_high > prev_price_high and current_rsi_high < prev_rsi_high:
-                return True
-                
+            if prev_high_idx != -1:
+                if close[current_high_idx] > close[prev_high_idx] and rsi[current_high_idx] < rsi[prev_high_idx]:
+                    return True
+                    
         return False
 
     def generate_labels(
         self, df: pd.DataFrame, df_4h: pd.DataFrame = None, pattern_miner = None
     ) -> pd.Series:
         """
-        INSTITUTIONAL Mean Reversion with 3 Pillars + Slope Veto (Phase 3)
+        INSTITUTIONAL Mean Reversion with 3 pillars (Phase 4)
         """
-        from src.utils.math_utils import calculate_normalized_slope_degrees
-        
         df = df.copy()
         labels = pd.Series(0, index=df.index)
 
@@ -355,24 +356,31 @@ class MeanReversionStrategy(BaseStrategy):
             current_close = close[i]
             
             # ================================================================
-            # 🛡️ THE LINEAR REGRESSION SLOPE VETO (Step 7)
+            # ATR Velocity Veto (Step 3)
             # ================================================================
-            # Prevent fading violent momentum collapses
-            slope_deg = calculate_normalized_slope_degrees(df['close'].iloc[:i+1], period=100)
+            velocity_drop = close[i-3] - current_close
+            velocity_rise = current_close - close[i-3]
+            atr_threshold = 4.0 * atr[i]
             
             # ================================================================
             # PILLAR 1: THE STRETCH (Volatility Exhaustion)
             # ================================================================
-            # Price > 2.0 ATR away from ema_50 OR pierce 2.0 StdDev Bollinger Band
             stretch_long = (ema_50[i] - current_close > 2.0 * atr[i]) or (current_close < bb_lower[i])
             stretch_short = (current_close - ema_50[i] > 2.0 * atr[i]) or (current_close > bb_upper[i])
 
             # ================================================================
             # PILLAR 2: THE DIVERGENCE (1H)
             # ================================================================
-            # Done via _check_divergence helper
-            div_long = self._check_divergence(df.iloc[:i+1], signal=1)
-            div_short = self._check_divergence(df.iloc[:i+1], signal=-1)
+            div_long = self._check_divergence(df.iloc[:i+1], signal=1, period=60)
+            div_short = self._check_divergence(df.iloc[:i+1], signal=-1, period=60)
+            
+            # ================================================================
+            # Liquidity Sweep OR-Gate (Step 4)
+            # ================================================================
+            lookback_100 = low[max(0, i-100):i]
+            highback_100 = high[max(0, i-100):i]
+            sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
+            sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
 
             # ================================================================
             # PILLAR 3: THE EXHAUSTION (Pattern Recognition)
@@ -380,60 +388,35 @@ class MeanReversionStrategy(BaseStrategy):
             exhaustion_long = False
             exhaustion_short = False
             
-            if (stretch_long and div_long) or (stretch_short and div_short):
-                # Pattern Detection (Must be Hammer, Doji, or Engulfing)
-                # For training context, we might simulate or check if miner is passed
-                if pattern_miner:
-                    snippet = df[["open", "high", "low", "close"]].iloc[i-14:i+1].values
-                    first_open = snippet[0, 0]
-                    if first_open > 0:
-                        snippet_norm = (snippet / first_open - 1).reshape(1, 15, 4)
-                        # We would use sniper.predict_single here, but for label gen we'll use TA-Lib as ground truth
-                        patterns_to_check = {
-                            'Hammer': ta.CDLHAMMER,
-                            'Doji': ta.CDLDOJI,
-                            'Engulfing': ta.CDLENGULFING
-                        }
-                        
-                        o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
-                        
-                        for name, func in patterns_to_check.items():
-                            res = func(o, h, l, c)
-                            if res[-1] != 0:
-                                if stretch_long and res[-1] > 0: exhaustion_long = True
-                                if stretch_short and res[-1] < 0: exhaustion_short = True
-                else:
-                    # Fallback to pure TA-Lib pattern detection if no miner passed
-                    patterns_to_check = {
-                        'Hammer': ta.CDLHAMMER,
-                        'Doji': ta.CDLDOJI,
-                        'Engulfing': ta.CDLENGULFING
-                    }
-                    o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
-                    for name, func in patterns_to_check.items():
-                        res = func(o, h, l, c)
-                        if res[-1] != 0:
-                            if stretch_long and res[-1] > 0: exhaustion_long = True
-                            if stretch_short and res[-1] < 0: exhaustion_short = True
+            # Pattern Detection (Must be Hammer, Doji, or Engulfing)
+            patterns_to_check = {
+                'Hammer': ta.CDLHAMMER,
+                'Doji': ta.CDLDOJI,
+                'Engulfing': ta.CDLENGULFING
+            }
+            o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
+            for name, func in patterns_to_check.items():
+                res = func(o, h, l, c)
+                if res[-1] != 0:
+                    if stretch_long and res[-1] > 0: exhaustion_long = True
+                    if stretch_short and res[-1] < 0: exhaustion_short = True
 
             # ================================================================
-            # CONFLUENCE & FINAL VETO
+            # FINAL TRADE TRIGGER (Step 5)
             # ================================================================
             
             # BUY setup
-            if stretch_long and div_long and exhaustion_long:
-                # VETO if slope equivalent to > 45-degree downward trajectory
-                if slope_deg < -45:
-                    logger.debug(f"[{self.name}] VETO BUY: Violent downward slope ({slope_deg:.1f} deg)")
+            if stretch_long and (div_long or sweep_long) and exhaustion_long:
+                if velocity_drop > atr_threshold:
+                    logger.debug(f"[{self.name}] VETO BUY: Velocity drop {velocity_drop:.2f} > {atr_threshold:.2f}")
                 else:
                     labels.iloc[i] = 1
                     signal_count["buy"] += 1
             
             # SELL setup
-            elif stretch_short and div_short and exhaustion_short:
-                # VETO if slope equivalent to > 45-degree upward trajectory
-                if slope_deg > 45:
-                    logger.debug(f"[{self.name}] VETO SELL: Violent upward slope ({slope_deg:.1f} deg)")
+            elif stretch_short and (div_short or sweep_short) and exhaustion_short:
+                if velocity_rise > atr_threshold:
+                    logger.debug(f"[{self.name}] VETO SELL: Velocity rise {velocity_rise:.2f} > {atr_threshold:.2f}")
                 else:
                     labels.iloc[i] = -1
                     signal_count["sell"] += 1
