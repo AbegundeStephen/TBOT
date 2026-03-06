@@ -291,7 +291,29 @@ class HybridSignalValidator:
             level_type = "resistance"
 
         if not relevant_levels:
-            # Check if at level
+            ema_20_series = df["close"].ewm(span=20, adjust=False).mean()
+            current_ema = ema_20_series.iloc[-1]
+            prev_ema = ema_20_series.iloc[-2]
+
+            if signal == 1 and current_price > current_ema and current_ema > prev_ema:
+                return {
+                    "near_level": True,
+                    "level_type": "dynamic_ema_support",
+                    "nearest_level": current_ema,
+                    "distance_pct": ((current_price - current_ema) / current_price) * 100,
+                    "reason": "riding_dynamic_20_ema"
+                }
+
+            elif signal == -1 and current_price < current_ema and current_ema < prev_ema:
+                return {
+                    "near_level": True,
+                    "level_type": "dynamic_ema_resistance",
+                    "nearest_level": current_ema,
+                    "distance_pct": ((current_ema - current_price) / current_price) * 100,
+                    "reason": "riding_dynamic_20_ema"
+                }
+
+            # FALLBACK: Check if at level (boundary detection)
             any_level_distances = [abs(current_price - l) / current_price for l in all_levels]
             min_any_dist = min(any_level_distances) if any_level_distances else float("inf")
             if min_any_dist < threshold:
@@ -451,4 +473,43 @@ class HybridSignalValidator:
         self.rejection_window.clear()
 
     def get_statistics(self) -> dict:
-        return {"total_checks": self.stats["total_checks"], "approved": self.stats["approved"], "rejected": self.stats["rejected"]}
+        """
+        Get comprehensive statistics for the monitor.
+        """
+        total = max(self.stats["total_checks"], 1)
+        
+        # Calculate rates
+        approval_rate = (self.stats["approved"] / total) * 100
+        rejection_rate = (self.stats["rejected"] / total) * 100
+        
+        # Sort and get top rejection reasons
+        top_reasons = dict(sorted(self.rejection_reasons.items(), key=lambda item: item[1], reverse=True)[:5])
+        
+        return {
+            "total_checks": self.stats["total_checks"],
+            "approved": self.stats["approved"],
+            "rejected": self.stats["rejected"],
+            "approval_rate": f"{approval_rate:.1f}%",
+            "rejection_rate": f"{rejection_rate:.1f}%",
+            "rejection_breakdown": {
+                "no_sr_level": self.stats["rejected_no_sr"],
+                "no_pattern": self.stats["rejected_no_pattern"],
+                "low_confidence": self.stats["rejected_low_confidence"],
+                "direction_mismatch": self.stats["rejected_direction_mismatch"],
+            },
+            "bypasses": {
+                "strong_signal": self.stats["bypassed_strong_signal"],
+                "circuit_breaker": self.stats["bypassed_circuit_breaker"],
+            },
+            "current_thresholds": {
+                "sr_threshold": f"{self.current_sr_threshold:.2%}",
+                "pattern_confidence": f"{self.current_pattern_threshold:.0%}",
+            },
+            "adaptive_adjustments": self.stats["adaptive_adjustments"],
+            "circuit_breaker": {
+                "active": self.bypass_mode,
+                "cooldown": self.bypass_cooldown,
+            },
+            "top_rejection_reasons": top_reasons,
+            "per_strategy": dict(self.strategy_stats)
+        }

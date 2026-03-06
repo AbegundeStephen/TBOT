@@ -616,27 +616,38 @@ class MT5ExecutionHandler:
             return True
         try:
             account_info = mt5.account_info()
-            if account_info:
-                leverage_actual = (
-                    account_info.leverage if account_info.leverage > 0 else 100
+            if not account_info:
+                return True
+
+            # ✅ Use broker's native margin calculation (handles leverage/currency automatically)
+            order_type = mt5.ORDER_TYPE_BUY 
+            broker_margin = mt5.order_calc_margin(order_type, symbol_info.name, volume_lots, current_price)
+            
+            if broker_margin is None:
+                logger.warning(f"[MARGIN] Broker calculation failed for {symbol_info.name}, using fallback.")
+                leverage = account_info.leverage if account_info.leverage > 0 else 100
+                # Fallback: Approximate notional (requires conversion usually, so this is very rough)
+                estimated_margin = (volume_lots * symbol_info.trade_contract_size) / leverage
+            else:
+                estimated_margin = broker_margin
+
+            estimated_margin *= 1.10  # 10% safety buffer
+            
+            logger.info(
+                f"[MARGIN CHECK]\n"
+                f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
+                f"  Required Margin:  ${estimated_margin:,.2f}\n"
+                f"  Margin Level:     {account_info.margin_level:.2f}%"
+            )
+            
+            if estimated_margin > account_info.margin_free:
+                logger.error(
+                    f"[MARGIN] ❌ Insufficient margin. Available: ${account_info.margin_free:,.2f}, Required: ${estimated_margin:,.2f}"
                 )
-                estimated_margin = (
-                    volume_lots * symbol_info.trade_contract_size * current_price
-                ) / leverage_actual
-                estimated_margin *= 1.10  # 10% buffer
-                logger.info(
-                    f"[MARGIN CHECK]\n"
-                    f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
-                    f"  Required Margin:  ${estimated_margin:,.2f}\n"
-                    f"  Margin Level:     {account_info.margin_level:.2f}%"
-                )
-                if estimated_margin > account_info.margin_free:
-                    logger.error(
-                        f"[MARGIN] ❌ Insufficient margin. Available: ${account_info.margin_free:,.2f}"
-                    )
-                    return False
+                return False
+                
         except Exception as e:
-            logger.warning(f"[MARGIN] Pre-flight warning: {e}")
+            logger.error(f"[MARGIN] Pre-flight error: {e}")
         return True
 
     def _execute_mt5_order(self, symbol, side, volume_lots, asset, trade_type, symbol_info):

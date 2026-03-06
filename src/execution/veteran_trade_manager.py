@@ -264,7 +264,7 @@ class VeteranTradeManager:
         self.volume = volume
         self.atr_period = atr_period
         self.signal_details = signal_details or {}
-        self.trade_type = "TREND" # Strict TREND enforcement
+        self.trade_type = trade_type
         
         self.position_size = quantity
         
@@ -397,6 +397,25 @@ class VeteranTradeManager:
     def _calculate_initial_levels(self):
         try:
             atr = self._calculate_atr()
+
+            if self.trade_type == "REVERSION":
+                wick_buffer = 0.5 * atr
+
+                if self.side == "long":
+                    self.initial_stop_loss = self.low[-1] - wick_buffer
+                    tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
+
+                else:
+                    self.initial_stop_loss = self.high[-1] + wick_buffer
+                    tp_target = self.ema_4h_50 + (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
+
+                self.current_stop_loss = self.initial_stop_loss
+                self.take_profit_levels = [tp_target]
+                self.partial_sizes = [1.0]
+
+                logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
+
+                return
 
             # ATR-based adaptive floors and caps
             min_stop_dist = atr * 0.5
@@ -564,8 +583,8 @@ class VeteranTradeManager:
                     
                     return {"reason": [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3][i], "price": current_price, "size": size}
 
-            if self.bars_in_trade >= self.time_stop_bars:
-                return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
+            # if self.bars_in_trade >= self.time_stop_bars:
+            #     return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
             return None
         except Exception as e:
             logger.error(f"[VTM] Exit check error: {e}")
