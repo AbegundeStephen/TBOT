@@ -1061,8 +1061,8 @@ class MT5ExecutionHandler:
             mt5_positions = mt5.positions_get(ticket=ticket)
 
             if mt5_positions is None or len(mt5_positions) == 0:
-                logger.warning(f"[MT5] Position ticket {ticket} not found on exchange")
-                return False
+                logger.warning(f"[MT5] Position ticket {ticket} not found on exchange. Clearing local record.")
+                return True
 
             mt5_position = mt5_positions[0]
 
@@ -1201,6 +1201,17 @@ class MT5ExecutionHandler:
 
             positions_closed = False
             for position in positions:
+                # Update P&L from exchange if possible
+                if position.mt5_ticket:
+                    try:
+                        import MetaTrader5 as mt5_internal
+                        mt5_positions = mt5_internal.positions_get(ticket=position.mt5_ticket)
+                        if mt5_positions:
+                            position.mt5_profit = mt5_positions[0].profit
+                            position.mt5_last_update = datetime.now()
+                    except Exception as e:
+                        logger.debug(f"Failed to update MT5 profit for {position.position_id}: {e}")
+
                 if position.trade_manager:
                     exit_signal = position.trade_manager.update_with_current_price(
                         current_price, df_4h=df_4h
