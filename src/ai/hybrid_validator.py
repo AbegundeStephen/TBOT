@@ -281,7 +281,7 @@ class HybridSignalValidator:
         all_levels = asset_cache.get("levels", [])
 
         if not all_levels:
-            return {"near_level": False, "reason": "no_sr_levels_found"}
+            return {"near_level": False, "reason": "no_sr_levels_found", "all_levels": []}
 
         if signal == 1:
             relevant_levels = [l for l in all_levels if l < current_price]
@@ -330,6 +330,7 @@ class HybridSignalValidator:
             "level_type": level_type,
             "nearest_level": nearest_level,
             "distance_pct": min_distance_pct * 100,
+            "all_levels": all_levels,
             "reason": f"near_{level_type}_${nearest_level:.2f}" if near_level else f"{level_type}_too_far"
         }
 
@@ -454,7 +455,14 @@ class HybridSignalValidator:
     def _reject_signal(self, details: dict, sr: dict, pattern: Optional[dict], reason: str, strategy: str) -> Tuple[int, dict]:
         self.rejection_window.append(True)
         self._check_circuit_breaker()
-        return 0, {**details, "ai_validation": "rejected", "ai_rejection_reason": reason, "final_signal": 0}
+        return 0, {
+            **details, 
+            "ai_validation": "rejected", 
+            "ai_rejection_reason": reason, 
+            "ai_sr_check": sr,
+            "ai_pattern_check": pattern,
+            "final_signal": 0
+        }
 
     def _skip_validation(self, signal: int, details: dict, reason: str) -> Tuple[int, dict]:
         return signal, {**details, "ai_validation": f"skipped_{reason}"}

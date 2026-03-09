@@ -479,12 +479,22 @@ class VeteranTradeManager:
                         # "Near" defined as within 0.5 * ATR
                         if self.side == "long":
                             if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
-                                adjusted_tp = min(adjusted_tp, ma - (0.25 * atr))
-                                logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
+                                candidate_tp = ma - (0.25 * atr)
+                                # Ensure TP is still at least 0.5 * ATR above entry
+                                if candidate_tp > self.entry_price + (0.5 * atr):
+                                    adjusted_tp = min(adjusted_tp, candidate_tp)
+                                    logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
+                                else:
+                                    logger.info(f"[VTM] 🛡️ MA Front-run skipped: MA ${ma:,.2f} too close to entry.")
                         else: # short
                             if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
-                                adjusted_tp = max(adjusted_tp, ma + (0.25 * atr))
-                                logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
+                                candidate_tp = ma + (0.25 * atr)
+                                # Ensure TP is still at least 0.5 * ATR below entry
+                                if candidate_tp < self.entry_price - (0.5 * atr):
+                                    adjusted_tp = max(adjusted_tp, candidate_tp)
+                                    logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
+                                else:
+                                    logger.info(f"[VTM] 🛡️ MA Front-run skipped: MA ${ma:,.2f} too close to entry.")
                 self.take_profit_levels.append(adjusted_tp)
 
             # Fallback targets if structure calculation failed
