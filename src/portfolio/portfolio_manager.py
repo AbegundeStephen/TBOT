@@ -82,6 +82,7 @@ class Position:
 
         self.db_trade_id = None
         self.db_manager = None
+        self.last_close_attempt = None
 
         # ✅ CRITICAL FIX: Initialize VTM with intelligent context
         self.trade_manager = None
@@ -338,16 +339,23 @@ class Position:
             
             next_target = levels.get("take_profit")
 
-            # Calculate absolute P&L
-            pnl_abs = (current_price - self.entry_price) * self.quantity if self.side == "long" else \
-                      (self.entry_price - current_price) * self.quantity
+            # Calculate absolute P&L (Prioritize exchange-reported profit)
+            exchange_pnl = self.get_exchange_pnl()
+            if exchange_pnl != 0.0:
+                pnl_abs = exchange_pnl
+            else:
+                pnl_abs = (current_price - self.entry_price) * self.quantity if self.side == "long" else \
+                          (self.entry_price - current_price) * self.quantity
+            
+            # P&L Percentage should always represent the price move percentage for better visibility
+            pnl_pct = levels["pnl_pct"]
 
             return {
                 "side": self.side,
                 "entry_price": levels["entry_price"],
                 "current_price": levels["current_price"],
-                "pnl_pct": levels["pnl_pct"],
-                "pnl_abs": pnl_abs, # NEW: Absolute P&L
+                "pnl_pct": pnl_pct,
+                "pnl_abs": pnl_abs, # Absolute P&L (Exchange-synced)
                 "stop_loss": levels["stop_loss"],
                 "take_profit": (
                     next_target
@@ -455,6 +463,9 @@ class Position:
         # Re-initialize the db_manager attribute after unpickling.
         # It will need to be re-assigned by the PortfolioManager after loading.
         self.db_manager = None
+        # Always reset closing flags on reload to prevent stuck positions
+        self.closing = False
+        self.last_close_attempt = None
 
 
 
@@ -595,10 +606,9 @@ class PortfolioManager:
                 logger.info(f"[STATE] Reloading position: {position_id} ({position.asset} {position.side})")
                 
                 # Critical step: Re-initialize the VTM with fresh OHLC data
-                if position.trade_manager:
-                    logger.info("[STATE] VTM found. Fetching fresh OHLC data to re-initialize...")
-                    try:
-                        asset_config = self.config['assets'][position.asset]
+                try:
+                    asset_config = self.config['assets'].get(position.asset)
+                    if asset_config:
                         symbol = asset_config['symbol']
                         interval = asset_config.get('interval', '1h')
                         exchange = asset_config.get('exchange', 'binance')
@@ -606,6 +616,7 @@ class PortfolioManager:
                         end_time = datetime.now(timezone.utc)
                         start_time = end_time - timedelta(days=10) # Fetch enough data
 
+                        logger.info(f"[STATE] Fetching fresh OHLC data for {position.asset} ({symbol})...")
                         if exchange == 'binance':
                             df = data_manager.fetch_binance_data(
                                 symbol=symbol, interval=interval,
@@ -620,18 +631,40 @@ class PortfolioManager:
                             )
                         
                         if len(df) > 50:
-                            position.trade_manager.high = df['high'].values
-                            position.trade_manager.low = df['low'].values
-                            position.trade_manager.close = df['close'].values
-                            position.trade_manager.volume = df['volume'].values if 'volume' in df else None
-                            logger.info(f"[STATE] VTM for {position_id} successfully re-initialized with {len(df)} candles.")
+                            if position.trade_manager:
+                                # Re-sync existing trade manager
+                                position.trade_manager.high = df['high'].values
+                                position.trade_manager.low = df['low'].values
+                                position.trade_manager.close = df['close'].values
+                                position.trade_manager.volume = df['volume'].values if 'volume' in df else None
+                                logger.info(f"[STATE] VTM for {position_id} successfully re-synced with {len(df)} candles.")
+                            else:
+                                # Create NEW trade manager if it was missing
+                                logger.info(f"[STATE] VTM missing for {position_id}. Creating new manager...")
+                                risk_config = getattr(position, 'risk_config', asset_config.get('risk', {}))
+                                signal_details = getattr(position, 'signal_details', {})
+                                
+                                position.trade_manager = VeteranTradeManager(
+                                    entry_price=position.entry_price,
+                                    side=position.side,
+                                    asset=position.asset,
+                                    risk_config=risk_config,
+                                    high=df['high'].values,
+                                    low=df['low'].values,
+                                    close=df['close'].values,
+                                    volume=df['volume'].values if 'volume' in df else None,
+                                    quantity=position.quantity,
+                                    signal_details=signal_details,
+                                    trade_type=signal_details.get("trade_type", "TREND"),
+                                )
+                                logger.info(f"[STATE] VTM for {position_id} successfully created.")
                         else:
                             logger.warning(f"[STATE] Could not fetch enough OHLC data for {position_id}. VTM may be impaired.")
-                            position.trade_manager = None # Disable VTM if data is bad
+                    else:
+                        logger.warning(f"[STATE] Asset config not found for {position.asset}. Cannot initialize VTM.")
 
-                    except Exception as e:
-                        logger.error(f"[STATE] Failed to re-initialize VTM for {position_id}: {e}", exc_info=True)
-                        position.trade_manager = None # Disable VTM on failure
+                except Exception as e:
+                    logger.error(f"[STATE] Failed to re-initialize VTM for {position_id}: {e}", exc_info=True)
                 
                 # Re-link the db_manager
                 if self.db_manager:
@@ -801,6 +834,19 @@ class PortfolioManager:
                     f"  Risk capped from {risk_pct:.3%} to {remaining_risk_budget:.3%}"
                 )
                 risk_pct = max(0, remaining_risk_budget)
+            
+            # ================================================================
+            # STEP 5.5: Risk Floor (Enforce Minimum Risk USD)
+            # ================================================================
+            min_risk_usd = asset_cfg.get("min_risk_usd")
+            if min_risk_usd and self.current_capital > 0:
+                min_risk_pct = min_risk_usd / self.current_capital
+                if risk_pct < min_risk_pct:
+                    logger.info(
+                        f"  🛡️ Risk Floor Applied: {risk_pct:.3%} → {min_risk_pct:.3%} "
+                        f"(${min_risk_usd:.2f} minimum)"
+                    )
+                    risk_pct = min_risk_pct
             
             # ================================================================
             # STEP 6: Final Validation
@@ -1921,14 +1967,6 @@ class PortfolioManager:
             if not position:
                 logger.warning(f"Position {position_id} not found in portfolio")
                 return None
-            
-            # Check if position is already being closed
-            if position.closing:
-                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
-                return None
-            
-            # Mark the position as closing to prevent race conditions
-            position.closing = True
         elif asset:
             positions = self.get_asset_positions(asset)
             if not positions:
@@ -1939,6 +1977,27 @@ class PortfolioManager:
         else:
             logger.error("Must provide either asset or position_id")
             return None
+
+        # Check if position is already being closed
+        now = datetime.now()
+        if position.closing:
+            # If it's been "closing" for more than 60 seconds, assume it's stuck and allow retry
+            if position.last_close_attempt and (now - position.last_close_attempt).total_seconds() > 60:
+                logger.warning(f"Position {position_id} stuck in 'closing' for >60s. Overriding to allow retry.")
+            else:
+                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
+                return None
+        
+        if position.last_close_attempt:
+            # Add a 30-second cooldown to prevent hammer on failing close attempts
+            # (Unless we just overrode the "stuck" status above)
+            if not position.closing and (now - position.last_close_attempt).total_seconds() < 30:
+                logger.debug(f"Position {position_id} close attempt on cooldown. Skipping.")
+                return None
+            
+        # Mark the position as closing and record attempt time
+        position.closing = True
+        position.last_close_attempt = now
 
         # ================================================================
         # ✅ STEP 1: CLOSE ON EXCHANGE FIRST (MT5 or Binance)
@@ -1981,8 +2040,10 @@ class PortfolioManager:
                 f"  Position ID: {position_id}\n"
                 f"  Asset:       {position.asset}\n"
                 f"  Error:       {close_error_msg}\n"
-                f"  ⚠️  NOT removing from portfolio to prevent data mismatch."
+                f"  ⚠️  Resetting 'closing' flag to allow future attempts."
             )
+            # RESET THE FLAG so we can try again later
+            position.closing = False
             return None
 
         # ================================================================

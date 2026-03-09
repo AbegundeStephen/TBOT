@@ -2385,26 +2385,71 @@ class TradingBot:
     def _check_VTM_positions(self):
         """
         ✅ FIXED: Iterate through all open positions to ensure every VTM is updated.
+        Now attempts to re-initialize missing VTMs for synced/imported trades.
         """
         try:
-            # Iterate over a copy of the dictionary's items to prevent issues if it's modified during iteration.
+            # Iterate over a copy of the dictionary's items
             for position_id, position in list(self.portfolio_manager.positions.items()):
-                if not position.trade_manager:
+                asset_name = position.asset
+                
+                if not self.config["assets"].get(asset_name, {}).get("enabled", False):
                     continue
 
-                asset_name = position.asset
-                if not self.config["assets"][asset_name].get("enabled", False):
-                    continue
+                # --------------------------------------------------------
+                # ✅ NEW: Attempt to re-initialize VTM if missing
+                # (Common for synced/imported positions or reloads)
+                # --------------------------------------------------------
+                if not position.trade_manager:
+                    # Get 4H data from cache (or try to fetch if not present)
+                    df_4h = self._df_4h_cache.get(asset_name)
+                    
+                    if df_4h is not None and not df_4h.empty:
+                        logger.info(f"[VTM LOOP] Attempting to re-initialize missing VTM for {position_id}...")
+                        try:
+                            # Use Position object's logic via PortfolioManager helper (if it existed)
+                            # For now, we manually re-initialize if we have OHLC data
+                            asset_cfg = self.config["assets"].get(asset_name, {})
+                            risk_cfg = asset_cfg.get("risk", {})
+                            
+                            # Prepare ohlc_data for the Position class logic
+                            ohlc_data = {
+                                "high": df_4h["high"].values,
+                                "low": df_4h["low"].values,
+                                "close": df_4h["close"].values,
+                                "volume": df_4h["volume"].values if "volume" in df_4h else None
+                            }
+                            
+                            # We can re-call the initialization logic or just create the VTM here
+                            from src.execution.veteran_trade_manager import VeteranTradeManager
+                            
+                            position.trade_manager = VeteranTradeManager(
+                                entry_price=position.entry_price,
+                                side=position.side,
+                                asset=position.asset,
+                                risk_config=risk_cfg,
+                                high=ohlc_data["high"],
+                                low=ohlc_data["low"],
+                                close=ohlc_data["close"],
+                                volume=ohlc_data["volume"],
+                                quantity=position.quantity,
+                                signal_details=getattr(position, 'signal_details', {}),
+                                trade_type=getattr(position, 'signal_details', {}).get("trade_type", "TREND"),
+                            )
+                            logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
+                        except Exception as e:
+                            logger.error(f"[VTM LOOP] Failed to auto-initialize VTM for {position_id}: {e}")
+                    else:
+                        # VTM is missing and we don't have data in cache yet
+                        continue
 
                 # Get the appropriate handler for the asset
                 exchange = self.config["assets"][asset_name].get("exchange", "binance")
                 handler = self.binance_handler if exchange == "binance" else self.mt5_handler
 
                 if not handler:
-                    logger.warning(f"[VTM LOOP] No handler found for asset {asset_name}")
                     continue
 
-                # Get 4H data from the cache populated by the main trading cycle
+                # Get 4H data from the cache
                 df_4h = self._df_4h_cache.get(asset_name)
 
                 # Check VTM with real-time updates

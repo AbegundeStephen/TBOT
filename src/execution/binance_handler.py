@@ -1148,12 +1148,6 @@ class BinanceExecutionHandler:
                         logger.info(
                             f"[FUTURES] ✓ Close order for {side.upper()} position succeeded."
                         )
-                        # Explicitly call portfolio_manager to remove position
-                        self.portfolio_manager.close_position(
-                            position_id=position.position_id,
-                            exit_price=current_price,
-                            reason=reason,
-                        )
                         return True
                     else:
                         logger.error(f"[FUTURES] ❌ Failed to close {side.upper()}")

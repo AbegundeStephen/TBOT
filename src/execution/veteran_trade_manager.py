@@ -293,7 +293,6 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
-        self.profit_locked = False
         self.entry_time = datetime.now()
         
         # Calculate levels

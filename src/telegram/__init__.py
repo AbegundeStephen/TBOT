@@ -862,6 +862,14 @@ class TradingTelegramBot:
 
             msg = "🎯 <b>VETERAN TRADE MANAGER STATUS</b>\n\n"
 
+            # Update exchange profits first to ensure real-time accuracy
+            if not self.trading_bot.portfolio_manager.is_paper_mode:
+                try:
+                    self.trading_bot.portfolio_manager.update_mt5_positions_profit()
+                    self.trading_bot.portfolio_manager.update_binance_positions_profit()
+                except Exception as e:
+                    logger.debug(f"Failed to update exchange profits for VTM status: {e}")
+
             for position_id, position in positions.items():
                 # 1. Get the correct handler for the asset
                 asset_cfg = self.trading_bot.config['assets'].get(position.asset, {})
@@ -888,14 +896,14 @@ class TradingTelegramBot:
                     # Format P&L string to include absolute and percentage
                     pnl_abs_val = vtm_status.get('pnl_abs', 0.0)
                     pnl_sign = "+" if pnl_abs_val >= 0 else ""
-                    pnl_string = f"<b>{pnl_sign}${pnl_abs_val:,.2f} ({vtm_status['pnl_pct']:+.2f}%)</b>"
+                    pnl_string = f"<b>{pnl_sign}${pnl_abs_val:,.2f} ({vtm_status['pnl_pct']:+.3f}%)</b>"
 
                     msg += f"{side_emoji} <b>{position.asset} {vtm_status['side'].upper()}</b>\n"
                     msg += f"{pnl_emoji} P&L: {pnl_string}\n"
                     msg += f"💵 Entry: ${vtm_status['entry_price']:,.2f}\n"
                     msg += f"📍 Current: ${vtm_status['current_price']:,.2f}\n"
-                    msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.1f}%)\n"
-                    msg += f"🎯 TP: ${vtm_status.get('take_profit', 0):,.2f} ({vtm_status['distance_to_tp_pct']:+.1f}%)\n"
+                    msg += f"🛑 SL: ${vtm_status['stop_loss']:,.2f} ({vtm_status['distance_to_sl_pct']:+.2f}%)\n"
+                    msg += f"🎯 TP: ${vtm_status.get('take_profit', 0):,.2f} ({vtm_status['distance_to_tp_pct']:+.2f}%)\n"
                     msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
                     
                     # Display dynamic VTM parameters
