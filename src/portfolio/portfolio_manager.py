@@ -2353,7 +2353,11 @@ class PortfolioManager:
                 "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
                 "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price)) / getattr(pos, 'leverage', 1),
                 
-                "pnl": pos.get_pnl(current_prices.get(pos.asset, pos.entry_price)),
+                "pnl": (
+                    pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
+                    else pos.binance_profit if (pos.binance_order_id and pos.binance_profit != 0.0)
+                    else pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
+                ),
                 "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
                 "stop_loss": pos.stop_loss,
                 "take_profit": pos.take_profit,
