@@ -435,7 +435,7 @@ class VeteranTradeManager:
                             final_sl = buffered_ma_sl
 
                 # 3. Apply global clamps
-                self.initial_stop_loss = max(
+                final_sl = max(
                     self.entry_price - max_stop_dist,
                     min(self.entry_price - min_stop_dist, final_sl)
                 )
@@ -454,10 +454,23 @@ class VeteranTradeManager:
                             final_sl = buffered_ma_sl
 
                 # 3. Apply global clamps
-                self.initial_stop_loss = min(
+                final_sl = min(
                     self.entry_price + max_stop_dist,
                     max(self.entry_price + min_stop_dist, final_sl)
                 )
+
+            # Spread-Aware SL Floor
+            # Prevent stop loss from being too close due to spread manipulation
+            min_spread_floor = min(0.15 * atr, 1.0 * atr)
+
+            if abs(self.entry_price - final_sl) < min_spread_floor:
+                final_sl = (
+                    self.entry_price - min_spread_floor
+                    if self.side == "long"
+                    else self.entry_price + min_spread_floor
+                )
+
+            self.initial_stop_loss = final_sl
 
             # ATR-based adaptive tolerance for structure identification
             tolerance = 0.5 * atr
@@ -557,6 +570,24 @@ class VeteranTradeManager:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
+
+        # Greed Mode Accelerator
+        # Detect rapid ATR expansion indicating parabolic trend
+        baseline_atr = self._calculate_atr()
+        is_greed_mode = atr_value > (2.0 * baseline_atr)
+
+        if is_greed_mode and len(self.take_profit_levels) > 1:
+
+            logger.info(
+                "[VTM] GREED MODE ACTIVATED: Parabolic move detected, delaying early TP."
+            )
+
+            # Keep only final target
+            self.take_profit_levels = [self.take_profit_levels[-1]]
+
+            # Exit full size at final target
+            self.partial_sizes = [1.0]
+
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
 

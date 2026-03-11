@@ -406,7 +406,22 @@ class HybridSignalValidator:
             if signal == 1 and not is_bullish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
             if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
             
-            if confidence < min_confidence: return {"pattern_confirmed": False, "reason": "low_confidence", "confidence": confidence}
+            # Volume-Weighted Confidence
+            vol_ratio = 1.0
+
+            if 'volume' in df.columns and len(df) > 20:
+                avg_vol = df['volume'].iloc[-21:-1].mean()
+                vol_ratio = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+
+            # Reduce confidence requirement slightly when volume is extreme
+            dynamic_min_confidence = max(0.45, min_confidence - (vol_ratio * 0.05))
+
+            if confidence < dynamic_min_confidence:
+                return {
+                    "pattern_confirmed": False,
+                    "reason": "low_confidence",
+                    "confidence": confidence
+                }
             
             return {"pattern_confirmed": True, "pattern_name": pattern_name, "confidence": confidence}
         except Exception as e:

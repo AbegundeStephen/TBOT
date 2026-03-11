@@ -137,6 +137,7 @@ class InstitutionalCouncilAggregator:
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.60,
                 'macd_confirmation': True,
+                'trend_safety_threshold': 0.50, # ✨ NEW: Blocks Council if TF disagrees > 50%
             }
         else:  # GOLD
             return {
@@ -147,6 +148,7 @@ class InstitutionalCouncilAggregator:
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
+                'trend_safety_threshold': 0.50, # ✨ NEW: Blocks Council if TF disagrees > 50%
             }
     
     def _log_initialization(self):
@@ -254,9 +256,22 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[GOV] Error processing Governor data: {e}", exc_info=True)
             return False, "NEUTRAL"
 
-    def _check_volatility_gate_adaptive(self, atr_fast: float, atr_slow: float) -> bool:
+    def _check_volatility_gate_adaptive(self, df: pd.DataFrame, atr_fast: float, atr_slow: float) -> bool:
         """Blocks trades in dead markets (atr_fast < 0.5 * atr_slow)."""
         try:
+            # Coiled Spring Tracker
+            if len(df) >= 30:
+                high, low, close = df['high'].values, df['low'].values, df['close'].values
+                atr_f_series = ta.ATR(high, low, close, timeperiod=14)
+                atr_s_series = ta.ATR(high, low, close, timeperiod=100)
+                
+                atr_ratio_series = atr_f_series / atr_s_series
+                
+                # Check last 20 bars for extreme compression
+                if np.max(atr_ratio_series[-20:]) < 0.60:
+                    logger.info("[VOLATILITY] Coiled Spring Detected - Breakout readiness high")
+                    return True
+
             if atr_fast < (0.5 * atr_slow):
                 logger.info(f"[VOLATILITY] ❌ BLOCKED - Dead Market (ATR Fast: {atr_fast:.4f} < 0.5 * ATR Slow: {atr_slow:.4f})")
                 return False
@@ -281,35 +296,52 @@ class InstitutionalCouncilAggregator:
             body = abs(latest['close'] - latest['open'])
             high, low, close_vals = df['high'].values, df['low'].values, df['close'].values
             atr_fast = ta.ATR(high, low, close_vals, timeperiod=14)[-1]
-            
+            volume_rolling_avg = df['volume'].iloc[-21:-1].mean() if 'volume' in df.columns else 0
+
             displacement_passed = False
             displacement_reason = ""
-            
+
             if 'BTC' in self.asset_type:
                 # BINANCE: Real volume is reliable.
-                volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
                 if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
                     displacement_passed = True
                 else:
                     displacement_ratio = latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0
                     displacement_reason = f"BTC Volume Surge < 1.5x ({displacement_ratio:.2f}x)"
             else:
-                # EXNESS/FOREX: ATR Displacement is King (Ignore tick volume)
+                # EXNESS/FOREX: ATR Displacement is King
                 candle_range = latest['high'] - latest['low']
-                
-                # Exhaustion veto (prevents buying news spikes)
+
+                vol_ratio = latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0
+
+                # Staircase breakout detection (3-bar displacement)
+                net_3bar_displacement = (
+                    abs(latest['close'] - df['open'].iloc[-3])
+                    if len(df) >= 3
+                    else 0
+                )
+
+                # Volume-Adjusted News Exception
                 if body > (2.5 * atr_fast) or candle_range > (3.5 * atr_fast):
-                    displacement_passed = False
-                    displacement_reason = f"Exhaustion Veto: Candle too large. Body ({body:.4f} > 2.5 ATR) or Range ({candle_range:.4f} > 3.5 ATR)"
-                
-                # Valid institutional displacement
-                elif body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
+
+                    vol_threshold = 3.0 if 'BTC' in self.asset_type else 4.5
+
+                    if vol_ratio >= vol_threshold:
+                        displacement_passed = True
+                    else:
+                        displacement_passed = False
+                        displacement_reason = "Exhaustion Veto: Huge candle without institutional volume."
+
+                # Standard momentum or staircase breakout
+                elif (
+                    body > (0.5 * atr_fast)
+                    or candle_range > (1.0 * atr_fast)
+                    or net_3bar_displacement > (1.2 * atr_fast)
+                ):
                     displacement_passed = True
-                
-                # Otherwise reject
+
                 else:
-                    displacement_reason = f"Forex Displacement < 0.5*ATR ({body:.4f} < {0.5 * atr_fast:.4f}) AND Range < 1.0*ATR ({candle_range:.4f} < {1.0 * atr_fast:.4f})"
-            
+                    displacement_reason = "Forex Displacement < 0.5 ATR and Staircase < 1.2 ATR"            
             if not displacement_passed:
                 logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
                 return False, {'trigger_type': None, 'reason': displacement_reason}
@@ -589,6 +621,54 @@ class InstitutionalCouncilAggregator:
             # 🛡️ THE INTERCEPTOR: ABSOLUTE VETO (Phase 4)
             # ====================================================================
             if signal != 0:
+                # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
+                # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
+                safety_threshold = self.config.get('trend_safety_threshold', 0.50)
+                if signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold:
+                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong SELL ({tf_conf:.2f} >= {safety_threshold}) while Council says BUY.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "BLOCKED (Opposite Trend)",
+                        'reasoning': "blocked_by_opposite_trend",
+                        'final_signal': 0,
+                        'signal_quality': 0.0,
+                        'total_score': total_score,
+                        'scores': chosen_scores,
+                        'buy_total': buy_total,
+                        'sell_total': sell_total,
+                        'regime': regime_name,
+                        'mr_signal': mr_signal,
+                        'mr_confidence': mr_conf,
+                        'tf_signal': tf_signal,
+                        'tf_confidence': tf_conf,
+                        'ema_signal': ema_signal,
+                        'ema_confidence': ema_conf,
+                    }
+                elif signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold:
+                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong BUY ({tf_conf:.2f} >= {safety_threshold}) while Council says SELL.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "BLOCKED (Opposite Trend)",
+                        'reasoning': "blocked_by_opposite_trend",
+                        'final_signal': 0,
+                        'signal_quality': 0.0,
+                        'total_score': total_score,
+                        'scores': chosen_scores,
+                        'buy_total': buy_total,
+                        'sell_total': sell_total,
+                        'regime': regime_name,
+                        'mr_signal': mr_signal,
+                        'mr_confidence': mr_conf,
+                        'tf_signal': tf_signal,
+                        'tf_confidence': tf_conf,
+                        'ema_signal': ema_signal,
+                        'ema_confidence': ema_conf,
+                    }
+
                 # 1. MACRO GOVERNOR (ABSOLUTE VETO)
                 # Reason: Proves macro alignment (1D 200 EMA). Sacrosanct macro rule.
                 gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data, trade_type)
@@ -607,6 +687,12 @@ class InstitutionalCouncilAggregator:
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
+                        'mr_signal': mr_signal,
+                        'mr_confidence': mr_conf,
+                        'tf_signal': tf_signal,
+                        'tf_confidence': tf_conf,
+                        'ema_signal': ema_signal,
+                        'ema_confidence': ema_conf,
                     }
 
                 # 2. ATR WICK TRAP (ABSOLUTE VETO)
@@ -625,10 +711,16 @@ class InstitutionalCouncilAggregator:
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
+                        'mr_signal': mr_signal,
+                        'mr_confidence': mr_conf,
+                        'tf_signal': tf_signal,
+                        'tf_confidence': tf_conf,
+                        'ema_signal': ema_signal,
+                        'ema_confidence': ema_conf,
                     }
 
                 # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
-                if not self._check_volatility_gate_adaptive(atr_fast, atr_slow):
+                if not self._check_volatility_gate_adaptive(df, atr_fast, atr_slow):
                     logger.info(f"[VETO] ❌ BLOCKED - Dead Market Volatility.")
                     return 0, {
                         'timestamp': timestamp,
@@ -643,6 +735,12 @@ class InstitutionalCouncilAggregator:
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
+                        'mr_signal': mr_signal,
+                        'mr_confidence': mr_conf,
+                        'tf_signal': tf_signal,
+                        'tf_confidence': tf_conf,
+                        'ema_signal': ema_signal,
+                        'ema_confidence': ema_conf,
                     }
 
             # ====================================================================
