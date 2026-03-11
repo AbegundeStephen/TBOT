@@ -1547,7 +1547,7 @@ class TradingBot:
             # Fallback: Use direct AI validation
             if ai_validation is None:
                 logger.info(f"[HYBRID] Using direct AI validation fallback")
-                ai_validation = self._format_ai_validation_direct(signal, df)
+                ai_validation = self._format_ai_validation_direct(asset_name, signal, df)
 
             # Store in details
             details["ai_validation"] = ai_validation
@@ -2816,16 +2816,14 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                 )
             else:
-                if isinstance(aggregator, InstitutionalCouncilAggregator):
-                    signal, details = aggregator.get_aggregated_signal(
-                        df,
-                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                        is_bull_market=mtf_regime.get("is_bull", False),
-                        governor_data=mtf_regime,
-                    )
-                else:
-                    # Performance Aggregator handles its own context internally
-                    signal, details = aggregator.get_aggregated_signal(df)
+                # SINGLE AGGREGATOR MODE:
+                # Both Council and Performance aggregators now accept full context
+                signal, details = aggregator.get_aggregated_signal(
+                    df,
+                    current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                    is_bull_market=mtf_regime.get("is_bull", False),
+                    governor_data=mtf_regime,
+                )
 
             # Get current price
             try:

@@ -1182,139 +1182,154 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if regime_score == 0.0:
                 if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
                     logger.warning(f"[GATEKEEPER] ❌ BLOCKED ALL: Regime score is 0.0 ({self.asset_type}).")
-                mr_signal = 0
-                tf_signal = 0
-                ema_signal = 0
+                mr_signal = 0; mr_conf = 0.0
+                tf_signal = 0; tf_conf = 0.0
+                ema_signal = 0; ema_conf = 0.0
             # If regime is bullish (score > 0) and a signal is bearish (short), block short signals
             elif regime_is_bullish and (mr_signal < 0 or tf_signal < 0 or ema_signal < 0):
                 if mr_signal < 0:
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    mr_signal = 0
+                    mr_signal = 0; mr_conf = 0.0
                 if tf_signal < 0:
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    tf_signal = 0
+                    tf_signal = 0; tf_conf = 0.0
                 if ema_signal < 0: # Assuming EMA signal can also be filtered
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    ema_signal = 0
+                    ema_signal = 0; ema_conf = 0.0
             # If regime is bearish (score < 0) and a signal is bullish (long), block long signals
             elif regime_is_bearish and (mr_signal > 0 or tf_signal > 0 or ema_signal > 0):
                 if mr_signal > 0:
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    mr_signal = 0
+                    mr_signal = 0; mr_conf = 0.0
                 if tf_signal > 0:
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    tf_signal = 0
+                    tf_signal = 0; tf_conf = 0.0
                 if ema_signal > 0: # Assuming EMA signal can also be filtered
                     logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
-                    ema_signal = 0
+                    ema_signal = 0; ema_conf = 0.0
             # --- End Gatekeeper Filtering ---
             
-            # Strict Trend Enforcement & Ranging Logic
-            is_ranging = regime_conf <= 0.50
-            max_trades_override = None
-            filter_reason = ""
-            if is_ranging:
-                max_trades_override = 1
-                filter_reason = "Ranging Mode (Max 1 Trade)"
-            else:
-                if is_bull:
-                    if tf_signal == -1: tf_signal = 0; filter_reason += "TF Short Blocked; "
-                    if mr_signal == -1: mr_signal = 0; filter_reason += "MR Short Blocked; "
-                else:
-                    if tf_signal == 1: tf_signal = 0; filter_reason += "TF Long Blocked; "
-                    if mr_signal == 1: mr_signal = 0; filter_reason += "MR Long Blocked; "
-
-            signal_quality = max(mr_conf, tf_conf)
-
-            # --- Directional Trap Filter Veto (Computational Efficiency) ---
-            if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
-                # Determine likely direction for structure check
-                test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
-                if not validate_candle_structure(df, self.asset_type, direction=test_direction):
-                    logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
-                    return 0, {
-                        "timestamp": timestamp,
-                        "regime": regime_name,
-                        "reasoning": "blocked_by_trap_filter",
-                        "final_signal": 0,
-                        "signal_quality": 0.0,
-                        "mr_signal": 0,
-                        "tf_signal": 0,
-                        "ema_signal": 0
-                    }
-
-            # STEP 3: AI VALIDATION (with circuit breaker)
-            ai_bypass = False
+            # Initialize core variables for details building (prevents UnboundLocalError if we skip)
+            buy_score = 0.0
+            sell_score = 0.0
+            signal_quality = 0.0
             ai_validation_details = {}
-            if self.ai_enabled and self.ai_validator is not None:
-                ai_bypass = self._check_ai_circuit_breaker()
-                if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
-                    self.ai_bypass_cooldown -= 1
-
-                if not ai_bypass:
-                    if mr_signal != 0:
-                        self.ai_stats["mr_signals_checked"] += 1
-                        validated_mr, mr_details = self.ai_validator.validate_signal(mr_signal, {"strategy": "mean_reversion", "confidence": mr_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
-                        if validated_mr == 0:
-                            self.ai_stats["mr_rejected"] += 1; self.ai_rejection_window.append(True); mr_signal = 0; mr_conf = 0.0
-                        else:
-                            self.ai_stats["mr_approved"] += 1; self.ai_rejection_window.append(False)
-                        ai_validation_details = mr_details.get('ai_validation', {})
-
-                    if tf_signal != 0:
-                        self.ai_stats["tf_signals_checked"] += 1
-                        validated_tf, tf_details = self.ai_validator.validate_signal(tf_signal, {"strategy": "trend_following", "confidence": tf_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
-                        if validated_tf == 0:
-                            self.ai_stats["tf_rejected"] += 1; self.ai_rejection_window.append(True); tf_signal = 0; tf_conf = 0.0
-                        else:
-                            self.ai_stats["tf_approved"] += 1; self.ai_rejection_window.append(False)
-                        ai_validation_details = tf_details.get('ai_validation', {})
-
-            # STEP 4: Calculate scores
-            buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
-            sell_score, sell_explanation, sell_agreement = self._calculate_score(-1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
-
-            # STEP 5: Dynamic thresholds
-            adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
-
-            # STEP 6: Make decision
+            original_signal = 0
             final_signal = 0
-            if buy_score >= adj_buy_thresh and buy_score > sell_score:
-                final_signal = 1
-            elif sell_score >= adj_sell_thresh and sell_score > buy_score:
-                final_signal = -1
-
-            reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})" if final_signal == 1 else f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})" if final_signal == -1 else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
-            original_signal = final_signal
-
-            raw_quality = max(min(buy_score, 0.7), min(sell_score, 0.7))
-            if buy_agreement < 2 and sell_agreement < 2: raw_quality *= 0.7
-            if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull): raw_quality *= 1.15
-            signal_quality = min(raw_quality, 1.0)
-
-            if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
-                final_signal = 0
-                reasoning = f"hold_lowquality (original:{reasoning}, quality:{signal_quality:.2f})"
-
-            # World-Class Filters
+            reasoning = "hold (no strategy agreement)"
             trade_type = "TREND"
-            if final_signal != 0 and self.enable_filters:
-                gov_passed, trade_type = self._check_governor_filter(final_signal)
-                if not gov_passed: final_signal = 0; reasoning = "blocked_by_governor"
+
+            # COMPUTATIONAL OPTIMIZATION: If all signals are zero, skip heavy validation
+            if mr_signal == 0 and tf_signal == 0 and ema_signal == 0:
+                logger.debug(f"[AGGREGATOR] {self.asset_type}: No signals to validate, skipping to end.")
+                # We can skip to building the details dictionary
+            else:
+                # Strict Trend Enforcement & Ranging Logic
+                is_ranging = regime_conf <= 0.50
+                max_trades_override = None
+                filter_reason = ""
+                if is_ranging:
+                    max_trades_override = 1
+                    filter_reason = "Ranging Mode (Max 1 Trade)"
                 else:
-                    vol_passed, _ = self._check_volatility_filter(df)
-                    if not vol_passed: final_signal = 0; reasoning = "low_volatility"
+                    if is_bull:
+                        if tf_signal == -1: tf_signal = 0; filter_reason += "TF Short Blocked; "
+                        if mr_signal == -1: mr_signal = 0; filter_reason += "MR Short Blocked; "
                     else:
-                        sniper_passed, _ = self._check_sniper_filter(df, final_signal)
-                        if not sniper_passed: final_signal = 0; reasoning = "no_sniper_confirmation"
-                        else:
-                            atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
-                            if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_candle_expansion"
+                        if tf_signal == 1: tf_signal = 0; filter_reason += "TF Long Blocked; "
+                        if mr_signal == 1: mr_signal = 0; filter_reason += "MR Long Blocked; "
+
+                signal_quality = max(mr_conf, tf_conf)
+
+                # --- Directional Trap Filter Veto (Computational Efficiency) ---
+                if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
+                    # Determine likely direction for structure check
+                    test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
+                    if not validate_candle_structure(df, self.asset_type, direction=test_direction):
+                        logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
+                        return 0, {
+                            "timestamp": timestamp,
+                            "regime": regime_name,
+                            "reasoning": "blocked_by_trap_filter",
+                            "final_signal": 0,
+                            "signal_quality": 0.0,
+                            "mr_signal": 0,
+                            "mr_confidence": 0.0,
+                            "tf_signal": 0,
+                            "tf_confidence": 0.0,
+                            "ema_signal": 0,
+                            "ema_confidence": 0.0
+                        }
+
+                # STEP 3: AI VALIDATION (with circuit breaker)
+                ai_bypass = False
+                if self.ai_enabled and self.ai_validator is not None:
+                    ai_bypass = self._check_ai_circuit_breaker()
+                    if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
+                        self.ai_bypass_cooldown -= 1
+
+                    if not ai_bypass:
+                        if mr_signal != 0:
+                            self.ai_stats["mr_signals_checked"] += 1
+                            validated_mr, mr_details = self.ai_validator.validate_signal(mr_signal, {"strategy": "mean_reversion", "confidence": mr_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
+                            if validated_mr == 0:
+                                self.ai_stats["mr_rejected"] += 1; self.ai_rejection_window.append(True); mr_signal = 0; mr_conf = 0.0
                             else:
-                                profit_passed, _ = self._check_profit_filter(df)
-                                if not profit_passed: final_signal = 0; reasoning = "insufficient_profit_potential"
+                                self.ai_stats["mr_approved"] += 1; self.ai_rejection_window.append(False)
+                            ai_validation_details = mr_details.get('ai_validation', {})
+
+                        if tf_signal != 0:
+                            self.ai_stats["tf_signals_checked"] += 1
+                            validated_tf, tf_details = self.ai_validator.validate_signal(tf_signal, {"strategy": "trend_following", "confidence": tf_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
+                            if validated_tf == 0:
+                                self.ai_stats["tf_rejected"] += 1; self.ai_rejection_window.append(True); tf_signal = 0; tf_conf = 0.0
+                            else:
+                                self.ai_stats["tf_approved"] += 1; self.ai_rejection_window.append(False)
+                            ai_validation_details = tf_details.get('ai_validation', {})
+
+                # STEP 4: Calculate scores
+                buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
+                sell_score, sell_explanation, sell_agreement = self._calculate_score(-1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
+
+                # STEP 5: Dynamic thresholds
+                adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+
+                # STEP 6: Make decision
+                if buy_score >= adj_buy_thresh and buy_score > sell_score:
+                    final_signal = 1
+                elif sell_score >= adj_sell_thresh and sell_score > buy_score:
+                    final_signal = -1
+
+                reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})" if final_signal == 1 else f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})" if final_signal == -1 else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
+                original_signal = final_signal
+
+                raw_quality = max(min(buy_score, 0.7), min(sell_score, 0.7))
+                if buy_agreement < 2 and sell_agreement < 2: raw_quality *= 0.7
+                if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull): raw_quality *= 1.15
+                signal_quality = min(raw_quality, 1.0)
+
+                if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
+                    final_signal = 0
+                    reasoning = f"hold_lowquality (original:{reasoning}, quality:{signal_quality:.2f})"
+
+                # World-Class Filters
+                if final_signal != 0 and self.enable_filters:
+                    gov_passed, trade_type = self._check_governor_filter(final_signal)
+                    if not gov_passed: final_signal = 0; reasoning = "blocked_by_governor"
+                    else:
+                        vol_passed, _ = self._check_volatility_filter(df)
+                        if not vol_passed: final_signal = 0; reasoning = "low_volatility"
+                        else:
+                            sniper_passed, _ = self._check_sniper_filter(df, final_signal)
+                            if not sniper_passed: final_signal = 0; reasoning = "no_sniper_confirmation"
+                            else:
+                                atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
+                                if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_candle_expansion"
+                                else:
+                                    profit_passed, _ = self._check_profit_filter(df)
+                                    if not profit_passed: final_signal = 0; reasoning = "insufficient_profit_potential"
             
-            # STEP 7: Build response
+            # STEP 7: Build base response
             details = {
                 "timestamp": timestamp,
                 "regime": regime_name,
@@ -1326,12 +1341,34 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "buy_score": buy_score,
                 "sell_score": sell_score,
                 "mr_signal": mr_signal,
+                "mr_confidence": mr_conf,
                 "tf_signal": tf_signal,
+                "tf_confidence": tf_conf,
                 "ema_signal": ema_signal,
+                "ema_confidence": ema_conf,
                 "governor_data": governor_data, # Pass governor data through
                 "ai_validation": ai_validation_details,
                 "trade_type": trade_type,
             }
+
+            # STEP 8: Format AI validation for visualization
+            if self.ai_validator:
+                try:
+                    # Pass copies to avoid accidental modification
+                    ai_validation_details = self._format_ai_validation_for_viz(
+                        final_signal=final_signal,
+                        details={**details},
+                        df=df
+                    )
+                except Exception as e:
+                    logger.error(f"[AGGREGATOR] AI formatting failed: {e}")
+
+            # STEP 9: Final Response update
+            details.update({
+                "ai_validation": ai_validation_details,
+                "mr_signal_raw": mr_original,  # Ensure originals are present
+                "tf_signal_raw": tf_original,
+            })
 
             return final_signal, details
         
@@ -1344,6 +1381,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "reasoning": f"error: {str(e)[:50]}",
                 "signal_quality": 0.0,
                 "final_signal": 0,
+                "mr_signal": 0,
+                "mr_confidence": 0.0,
+                "tf_signal": 0,
+                "tf_confidence": 0.0,
+                "ema_signal": 0,
+                "ema_confidence": 0.0,
             }
 
     def _calculate_ai_impact(self, ai_stats: dict) -> dict:
