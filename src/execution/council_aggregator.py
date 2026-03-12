@@ -300,48 +300,52 @@ class InstitutionalCouncilAggregator:
 
             displacement_passed = False
             displacement_reason = ""
+            
+            # --- Staircase Bypass ---
+            # Compute cumulative displacement across last three candles
+            bodies = [
+                abs(df['close'].iloc[-i] - df['open'].iloc[-i])
+                for i in range(1, 4)
+            ]
+            if sum(bodies) > (1.2 * atr_fast):
+                displacement_passed = True
+                displacement_reason = "Staircase Bypass: 3-bar displacement > 1.2 ATR"
 
-            if 'BTC' in self.asset_type:
-                # BINANCE: Real volume is reliable.
-                if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
+            # --- News Exception ---
+            # If candle size is extreme, reject unless institutional volume confirms
+            if body > (2.5 * atr_fast):
+                volume_average = volume_rolling_avg
+                volume = latest['volume']
+                if volume > (4.5 * volume_average):
                     displacement_passed = True
+                    displacement_reason = "News Exception: Institutional volume confirmed huge candle."
                 else:
-                    displacement_ratio = latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0
-                    displacement_reason = f"BTC Volume Surge < 1.5x ({displacement_ratio:.2f}x)"
-            else:
-                # EXNESS/FOREX: ATR Displacement is King
+                    displacement_passed = False
+                    displacement_reason = "News Exception: Huge candle without institutional volume."
+
+            # --- Coiled Spring Detection ---
+            # Measure volatility compression
+            high_arr, low_arr, close_arr = df['high'].values, df['low'].values, df['close'].values
+            atr_fast_series = ta.ATR(high_arr, low_arr, close_arr, timeperiod=14)
+            atr_slow_series = ta.ATR(high_arr, low_arr, close_arr, timeperiod=100)
+            atr_ratio_series = pd.Series(atr_fast_series / atr_slow_series)
+
+            conviction_score = 0.0
+            if atr_ratio_series.iloc[-20:].max() < 0.60:
+                conviction_score += 1.0
+                logger.info(f"[SNIPER] 🌀 Coiled Spring detected: Compression < 0.60. Conviction +1.0")
+
+            if conviction_score >= 1.0:
+                displacement_passed = True # Override for coiled spring breakout
+
+            # If none of the new institutional rules passed, fallback to standard momentum
+            if not displacement_passed:
                 candle_range = latest['high'] - latest['low']
-
-                vol_ratio = latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0
-
-                # Staircase breakout detection (3-bar displacement)
-                net_3bar_displacement = (
-                    abs(latest['close'] - df['open'].iloc[-3])
-                    if len(df) >= 3
-                    else 0
-                )
-
-                # Volume-Adjusted News Exception
-                if body > (2.5 * atr_fast) or candle_range > (3.5 * atr_fast):
-
-                    vol_threshold = 3.0 if 'BTC' in self.asset_type else 4.5
-
-                    if vol_ratio >= vol_threshold:
-                        displacement_passed = True
-                    else:
-                        displacement_passed = False
-                        displacement_reason = "Exhaustion Veto: Huge candle without institutional volume."
-
-                # Standard momentum or staircase breakout
-                elif (
-                    body > (0.5 * atr_fast)
-                    or candle_range > (1.0 * atr_fast)
-                    or net_3bar_displacement > (1.2 * atr_fast)
-                ):
+                if body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
                     displacement_passed = True
-
                 else:
-                    displacement_reason = "Forex Displacement < 0.5 ATR and Staircase < 1.2 ATR"            
+                    displacement_reason = "Standard: Displacement < 0.5 ATR and range < 1.0 ATR"
+
             if not displacement_passed:
                 logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
                 return False, {'trigger_type': None, 'reason': displacement_reason}
@@ -457,6 +461,20 @@ class InstitutionalCouncilAggregator:
             return True
 
     
+    def _check_macro_regime(self, asset: str) -> str:
+        """
+        Extract macro regime from MTF integration or current state.
+        Returns: "BULLISH", "BEARISH", or "NEUTRAL"
+        """
+        if self.mtf_integration and hasattr(self.mtf_integration, "_current_regime_data"):
+            regime_data = self.mtf_integration._current_regime_data.get(asset.upper())
+            if regime_data:
+                governor = regime_data.get('governor') or regime_data.get('full_regime_status')
+                if governor:
+                    if getattr(governor, 'is_bullish', False): return "BULLISH"
+                    if getattr(governor, 'is_bearish', False): return "BEARISH"
+        return "NEUTRAL"
+
     def get_aggregated_signal(
         self, 
         df: pd.DataFrame,
@@ -471,6 +489,28 @@ class InstitutionalCouncilAggregator:
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
         
+        # ====================================================================
+        # STEP 1 — Governor-First Protocol
+        # ====================================================================
+        # Move macro regime check to the very first step.
+        macro_regime = self._check_macro_regime(self.asset_type)
+        
+        # Determine preliminary signal from Trend Following to enable immediate veto
+        # Reason: Must check veto BEFORE computing RSI, ATR, or AI validation.
+        try:
+            # We use a fast, low-compute check of the Trend Following strategy
+            prelim_signal, _ = self.s_trend_following.generate_signal(df, silent=True)
+            
+            if macro_regime == "BEARISH" and prelim_signal == 1:
+                logger.info("[COUNCIL] Governor VETO: Bearish regime blocks LONG.")
+                return 0, {'timestamp': timestamp, 'reasoning': "governor_veto_bearish", 'signal': 0}
+
+            if macro_regime == "BULLISH" and prelim_signal == -1:
+                logger.info("[COUNCIL] Governor VETO: Bullish regime blocks SHORT.")
+                return 0, {'timestamp': timestamp, 'reasoning': "governor_veto_bullish", 'signal': 0}
+        except Exception as e:
+            logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
+
         try:
             # ================================================================
             # VOLATILITY & REGIME CONTEXT
@@ -742,6 +782,61 @@ class InstitutionalCouncilAggregator:
                         'ema_signal': ema_signal,
                         'ema_confidence': ema_conf,
                     }
+
+                # 4. RISK/REWARD GATE (ECONOMIC VETO)
+                # Reason: Ensures trade has sufficient economic potential before execution.
+                try:
+                    entry_price = float(df['close'].iloc[-1])
+                    risk_cfg = self.config.get('risk', {})
+                    sl_mult = risk_cfg.get('atr_multiplier', 1.5)
+                    
+                    # Simulate Stop Loss
+                    sl_dist = atr_fast * sl_mult
+                    stop_loss = entry_price - sl_dist if signal == 1 else entry_price + sl_dist
+                    
+                    # Simulate Take Profit (Using first partial target or default)
+                    tp_mult_raw = risk_cfg.get('partial_targets', [2.0])[0]
+                    tp_dist = atr_fast * tp_mult_raw
+                    take_profit = entry_price + tp_dist if signal == 1 else entry_price - tp_dist
+                    
+                    # Compute R/R
+                    distance_to_tp = abs(take_profit - entry_price)
+                    distance_to_sl = abs(entry_price - stop_loss)
+                    rr_ratio = distance_to_tp / distance_to_sl if distance_to_sl > 0 else 0
+                    
+                    # Strategy Rules
+                    if trade_type == "TREND" and rr_ratio < 1.0:
+                        logger.info(f"[COUNCIL] R/R Gate: Trend trade rejected (R/R: {rr_ratio:.2f} < 1.0)")
+                        return 0, {
+                            'timestamp': timestamp, 
+                            'reasoning': "rr_gate_rejected_trend", 
+                            'signal': 0, 
+                            'rr_ratio': rr_ratio,
+                            'mr_signal': mr_signal,
+                            'mr_confidence': mr_conf,
+                            'tf_signal': tf_signal,
+                            'tf_confidence': tf_conf,
+                            'ema_signal': ema_signal,
+                            'ema_confidence': ema_conf,
+                        }
+                    
+                    if trade_type == "REVERSION" and rr_ratio < 0.6:
+                        logger.info(f"[COUNCIL] R/R Gate: Reversion trade rejected (R/R: {rr_ratio:.2f} < 0.6)")
+                        return 0, {
+                            'timestamp': timestamp, 
+                            'reasoning': "rr_gate_rejected_reversion", 
+                            'signal': 0, 
+                            'rr_ratio': rr_ratio,
+                            'mr_signal': mr_signal,
+                            'mr_confidence': mr_conf,
+                            'tf_signal': tf_signal,
+                            'tf_confidence': tf_conf,
+                            'ema_signal': ema_signal,
+                            'ema_confidence': ema_conf,
+                        }
+                        
+                except Exception as e:
+                    logger.warning(f"[COUNCIL] Risk/Reward Gate simulation failed: {e}")
 
             # ====================================================================
             # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)

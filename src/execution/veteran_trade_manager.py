@@ -253,6 +253,9 @@ class VeteranTradeManager:
         account_risk: float = 0.015,
         atr_period: int = 14,
         trade_type: str = "TREND",
+        local_free_margin: float = 0.0, # ✨ NEW: For leverage ceiling
+        current_ask: float = 0.0,       # ✨ NEW: For spread floor
+        current_bid: float = 0.0        # ✨ NEW: For spread floor
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -267,7 +270,16 @@ class VeteranTradeManager:
         self.trade_type = trade_type
         
         self.position_size = quantity
+        self.local_free_margin = local_free_margin
+        self.current_ask = current_ask
+        self.current_bid = current_bid
         
+        # Determine asset type for leverage ceiling
+        self.asset_category = "FOREX"
+        crypto_keywords = ["BTC", "ETH", "SOL", "BNB", "XRP", "USDT"]
+        if any(k in self.asset for k in crypto_keywords):
+            self.asset_category = "CRYPTO"
+
         # Macro MAs from signal_details (for MA Shield/Front-run)
         gov_data = self.signal_details.get("governor_data", {})
         self.ema_1d_200 = gov_data.get("ema_1d_200")
@@ -323,9 +335,6 @@ class VeteranTradeManager:
                 pct_str = ""
             logger.info(f"  {i}. {target_str} {pct_str} → Exit {size_str}")
         logger.info("=" * 80)
-    
-    # ... Rest of the file is the same ...
-    # ... I will omit it for brevity but the logic remains ...
 
     @property
     def profit_locked(self) -> bool:
@@ -397,6 +406,21 @@ class VeteranTradeManager:
         try:
             atr = self._calculate_atr()
 
+            # STEP 1 — Venue Adaptive Leverage Ceiling
+            # Reason: Prevents over-exposure based on venue-specific risk rules.
+            if self.local_free_margin > 0:
+                notional_value = self.position_size * self.entry_price
+                max_notional = 0.0
+                
+                if self.asset_category == "CRYPTO":
+                    max_notional = self.local_free_margin * 3.0
+                elif self.asset_category == "FOREX":
+                    max_notional = self.local_free_margin * 20.0
+                
+                if notional_value > max_notional and max_notional > 0:
+                    logger.info(f"[VTM] ⚠️ Leverage Ceiling: Notional ${notional_value:,.2f} > Max ${max_notional:,.2f}. Scaling down.")
+                    self.position_size = max_notional / self.entry_price
+
             if self.trade_type == "REVERSION":
                 wick_buffer = 0.5 * atr
 
@@ -414,109 +438,110 @@ class VeteranTradeManager:
 
                 logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
 
-                return
+            else:
+                # ATR-based adaptive floors and caps
+                min_stop_dist = atr * 0.5
+                max_stop_dist = atr * 5.0
 
-            # ATR-based adaptive floors and caps
-            min_stop_dist = atr * 0.5
-            max_stop_dist = atr * 5.0
+                if self.side == "long":
+                    # 1. Standard ATR Baseline
+                    target_stop_dist = atr * self.atr_multiplier
+                    standard_sl = self.entry_price - target_stop_dist
+                    final_sl = standard_sl
 
-            if self.side == "long":
-                # 1. Standard ATR Baseline
-                target_stop_dist = atr * self.atr_multiplier
-                standard_sl = self.entry_price - target_stop_dist
-                final_sl = standard_sl
+                    # 2. Joint Synergy: MA Shield
+                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                        if ma and standard_sl < ma < self.entry_price:
+                            buffered_ma_sl = ma - (0.5 * atr)
+                            if buffered_ma_sl > final_sl:
+                                logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                                final_sl = buffered_ma_sl
 
-                # 2. Joint Synergy: MA Shield
-                for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and standard_sl < ma < self.entry_price:
-                        buffered_ma_sl = ma - (0.5 * atr)
-                        if buffered_ma_sl > final_sl:
-                            logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
-                            final_sl = buffered_ma_sl
+                    # 3. Apply global clamps
+                    final_sl = max(
+                        self.entry_price - max_stop_dist,
+                        min(self.entry_price - min_stop_dist, final_sl)
+                    )
+                else: # short
+                    # 1. Standard ATR Baseline
+                    target_stop_dist = atr * self.atr_multiplier
+                    standard_sl = self.entry_price + target_stop_dist
+                    final_sl = standard_sl
 
-                # 3. Apply global clamps
-                final_sl = max(
-                    self.entry_price - max_stop_dist,
-                    min(self.entry_price - min_stop_dist, final_sl)
+                    # 2. Joint Synergy: MA Shield
+                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                        if ma and standard_sl > ma > self.entry_price:
+                            buffered_ma_sl = ma + (0.5 * atr)
+                            if buffered_ma_sl < final_sl:
+                                logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                                final_sl = buffered_ma_sl
+
+                    # 3. Apply global clamps
+                    final_sl = min(
+                        self.entry_price + max_stop_dist,
+                        max(self.entry_price + min_stop_dist, final_sl)
+                    )
+                
+                # STEP 2 — Spread-Aware SL Floor
+                # Reason: Prevents stops from being too tight relative to broker spread.
+                if self.current_ask > 0 and self.current_bid > 0:
+                    spread = abs(self.current_ask - self.current_bid)
+                    calculated_sl_dist = abs(self.entry_price - final_sl)
+                    final_sl_distance = max(calculated_sl_dist, 3.0 * spread)
+                    
+                    if final_sl_distance > calculated_sl_dist:
+                        logger.info(f"[VTM] ↔️ Spread Floor: SL distance expanded to {final_sl_distance:.4f} (3x spread)")
+                        final_sl = self.entry_price - final_sl_distance if self.side == "long" else self.entry_price + final_sl_distance
+
+                # Global clamped final_sl assignment
+                self.initial_stop_loss = final_sl
+
+                # ATR-based adaptive tolerance for structure identification
+                tolerance = 0.5 * atr
+                structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
+                
+                raw_targets, self.partial_sizes = calculate_hybrid_targets(
+                    self.entry_price, self.initial_stop_loss, self.side, structure_levels,
+                    self.partial_targets, self.partial_sizes,
+                    min_rr=2.0 # Standard TREND requirement
                 )
-            else: # short
-                # 1. Standard ATR Baseline
-                target_stop_dist = atr * self.atr_multiplier
-                standard_sl = self.entry_price + target_stop_dist
-                final_sl = standard_sl
+                
+                # ✅ PHASE 5: MA FRONT-RUN (Take Profit)
+                self.take_profit_levels = []
+                for tp in raw_targets:
+                    adjusted_tp = tp
+                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                        if ma:
+                            if self.side == "long":
+                                if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
+                                    candidate_tp = ma - (0.25 * atr)
+                                    if candidate_tp > self.entry_price + (0.5 * atr):
+                                        adjusted_tp = min(adjusted_tp, candidate_tp)
+                            else: # short
+                                if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
+                                    candidate_tp = ma + (0.25 * atr)
+                                    if candidate_tp < self.entry_price - (0.5 * atr):
+                                        adjusted_tp = max(adjusted_tp, candidate_tp)
+                    self.take_profit_levels.append(adjusted_tp)
 
-                # 2. Joint Synergy: MA Shield
-                for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma and standard_sl > ma > self.entry_price:
-                        buffered_ma_sl = ma + (0.5 * atr)
-                        if buffered_ma_sl < final_sl:
-                            logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
-                            final_sl = buffered_ma_sl
+                # Fallback targets
+                if not self.take_profit_levels:
+                    self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
+                    self.partial_sizes = [0.45, 0.30, 0.25]
 
-                # 3. Apply global clamps
-                final_sl = min(
-                    self.entry_price + max_stop_dist,
-                    max(self.entry_price + min_stop_dist, final_sl)
-                )
-
-            # Spread-Aware SL Floor
-            # Prevent stop loss from being too close due to spread manipulation
-            min_spread_floor = min(0.15 * atr, 1.0 * atr)
-
-            if abs(self.entry_price - final_sl) < min_spread_floor:
-                final_sl = (
-                    self.entry_price - min_spread_floor
-                    if self.side == "long"
-                    else self.entry_price + min_spread_floor
-                )
-
-            self.initial_stop_loss = final_sl
-
-            # ATR-based adaptive tolerance for structure identification
-            tolerance = 0.5 * atr
-            structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
+            # STEP 3 — Lot Sanitizer
+            # Reason: Ensures position size is valid for broker submission.
+            final_size = round(self.position_size, 2)
+            if final_size < 0.01:
+                logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot 0.01.")
+                # We raise an exception here to signal the manager to abort trade creation
+                raise ValueError("Position size below minimum lot.")
             
-            raw_targets, self.partial_sizes = calculate_hybrid_targets(
-                self.entry_price, self.initial_stop_loss, self.side, structure_levels,
-                self.partial_targets, self.partial_sizes,
-                min_rr=2.0 # Standard TREND requirement
-            )
-            
-            # ✅ PHASE 5: MA FRONT-RUN (Take Profit)
-            # If macro MA ceiling near TP, adjust TP to front-run it
-            self.take_profit_levels = []
-            for tp in raw_targets:
-                adjusted_tp = tp
-                for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                    if ma:
-                        # "Near" defined as within 0.5 * ATR
-                        if self.side == "long":
-                            if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
-                                candidate_tp = ma - (0.25 * atr)
-                                # Ensure TP is still at least 0.5 * ATR above entry
-                                if candidate_tp > self.entry_price + (0.5 * atr):
-                                    adjusted_tp = min(adjusted_tp, candidate_tp)
-                                    logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
-                                else:
-                                    logger.info(f"[VTM] 🛡️ MA Front-run skipped: MA ${ma:,.2f} too close to entry.")
-                        else: # short
-                            if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
-                                candidate_tp = ma + (0.25 * atr)
-                                # Ensure TP is still at least 0.5 * ATR below entry
-                                if candidate_tp < self.entry_price - (0.5 * atr):
-                                    adjusted_tp = max(adjusted_tp, candidate_tp)
-                                    logger.info(f"[VTM] 🏃 MA Front-run: TP ${tp:,.2f} → ${adjusted_tp:,.2f} (MA: ${ma:,.2f})")
-                                else:
-                                    logger.info(f"[VTM] 🛡️ MA Front-run skipped: MA ${ma:,.2f} too close to entry.")
-                self.take_profit_levels.append(adjusted_tp)
-
-            # Fallback targets if structure calculation failed
-            if not self.take_profit_levels:
-                logger.warning("[VTM] No take profit levels calculated, using ATR-based fallback.")
-                self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
-                self.partial_sizes = [0.45, 0.30, 0.25] # Default partial sizes
-
+            self.position_size = final_size
             self.current_stop_loss = self.initial_stop_loss
+
+        except ValueError as ve:
+            raise # Re-raise lot size error to abort
         except Exception as e:
             logger.error(f"[VTM] Level calculation error: {e}", exc_info=True)
             raise
@@ -566,27 +591,47 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Price update error: {e}")
             return None
 
+    def _calculate_adx(self) -> float:
+        try:
+            adx = talib.ADX(self.high, self.low, self.close, timeperiod=self.atr_period)
+            return adx[-1]
+        except Exception as e:
+            logger.error(f"[VTM] ADX error: {e}")
+            return 0.0
+
+    def _calculate_atr_slow(self) -> float:
+        try:
+            atr = talib.ATR(self.high, self.low, self.close, timeperiod=100)
+            return atr[-1]
+        except Exception as e:
+            logger.error(f"[VTM] ATR Slow error: {e}")
+            return self.entry_price * 0.02
+
     def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
 
-        # Greed Mode Accelerator
-        # Detect rapid ATR expansion indicating parabolic trend
-        baseline_atr = self._calculate_atr()
-        is_greed_mode = atr_value > (2.0 * baseline_atr)
+        # --- STEP 1: Volatility Break-Even Lock ---
+        # Reason: Locks risk to zero once trade proves itself by moving 1.0 * ATR in profit.
+        current_profit = abs(current_price - self.entry_price)
+        if current_profit > atr_value:
+            if self.current_stop_loss != self.entry_price:
+                logger.info(f"[VTM] 🛡️ Break-even lock activated for {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
+                self.current_stop_loss = self.entry_price
 
-        if is_greed_mode and len(self.take_profit_levels) > 1:
-
-            logger.info(
-                "[VTM] GREED MODE ACTIVATED: Parabolic move detected, delaying early TP."
-            )
-
-            # Keep only final target
-            self.take_profit_levels = [self.take_profit_levels[-1]]
-
-            # Exit full size at final target
-            self.partial_sizes = [1.0]
+        # --- STEP 2: Greed Mode Accelerator ---
+        # Reason: During extreme trends/volatility, remove early targets to ride the move with trailing stops.
+        adx_value = self._calculate_adx()
+        atr_slow = self._calculate_atr_slow()
+        
+        if adx_value > 40 and atr_value > (1.5 * atr_slow):
+            if len(self.take_profit_levels) > 1:
+                logger.info(f"[VTM] 🔥 GREED MODE: Strong trend (ADX:{adx_value:.1f}) & Volatility Expansion detected. Removing early targets.")
+                # Keep only final target
+                self.take_profit_levels = [self.take_profit_levels[-1]]
+                # Exit full size at final target (managed by runner trail)
+                self.partial_sizes = [1.0]
 
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
@@ -660,16 +705,47 @@ class VeteranTradeManager:
         }
 
     def to_dict(self) -> Dict:
-        return {"entry_price": self.entry_price, "side": self.side, "asset": self.asset, "position_size": self.position_size, "initial_stop_loss": self.initial_stop_loss, "current_stop_loss": self.current_stop_loss, "take_profit_levels": self.take_profit_levels, "partial_sizes": self.partial_sizes, "remaining_position": self.remaining_position, "partials_hit": self.partials_hit, "bars_in_trade": self.bars_in_trade, "highest_price_reached": self.highest_price_reached, "lowest_price_reached": self.lowest_price_reached, "runner_activated": self.runner_activated, "trade_type": self.trade_type, "entry_time": self.entry_time.isoformat()}
+        return {
+            "entry_price": self.entry_price, 
+            "side": self.side, 
+            "asset": self.asset, 
+            "position_size": self.position_size, 
+            "initial_stop_loss": self.initial_stop_loss, 
+            "current_stop_loss": self.current_stop_loss, 
+            "take_profit_levels": self.take_profit_levels, 
+            "partial_sizes": self.partial_sizes, 
+            "remaining_position": self.remaining_position, 
+            "partials_hit": self.partials_hit, 
+            "bars_in_trade": self.bars_in_trade, 
+            "highest_price_reached": self.highest_price_reached, 
+            "lowest_price_reached": self.lowest_price_reached, 
+            "runner_activated": self.runner_activated, 
+            "trade_type": self.trade_type, 
+            "entry_time": self.entry_time.isoformat(),
+            "local_free_margin": self.local_free_margin,
+            "current_ask": self.current_ask,
+            "current_bid": self.current_bid
+        }
 
     @classmethod
     def from_dict(cls, state: Dict, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> 'VeteranTradeManager':
-        vtm = cls(entry_price=state["entry_price"], side=state["side"], asset=state["asset"], high=high, low=low, close=close, quantity=state["position_size"], trade_type=state.get("trade_type", "TREND"), risk_config={})
+        vtm = cls(
+            entry_price=state["entry_price"], 
+            side=state["side"], 
+            asset=state["asset"], 
+            high=high, 
+            low=low, 
+            close=close, 
+            quantity=state["position_size"], 
+            trade_type=state.get("trade_type", "TREND"), 
+            risk_config={},
+            local_free_margin=state.get("local_free_margin", 0.0),
+            current_ask=state.get("current_ask", 0.0),
+            current_bid=state.get("current_bid", 0.0)
+        )
         vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"]
         return vtm
 
     def __repr__(self):
         levels = self.get_current_levels()
         return f"VTM({self.asset} {self.side.upper()}: Entry=${levels['entry_price']:.2f}, Current=${levels['current_price']:.2f}, SL=${levels['stop_loss']:.2f}, P&L={levels['pnl_pct']:+.2f}%)"
-
-    

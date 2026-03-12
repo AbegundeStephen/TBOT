@@ -1277,43 +1277,90 @@ class PortfolioManager:
             logger.error(f"Error updating Binance positions profit: {e}", exc_info=True)
 
     def calculate_position_size(
-        self, asset: str, current_price: float, volatility: float = None
+        self, asset: str, entry_price: float, stop_loss: float, venue: str
     ) -> float:
         """
-        HARDENED: Calculate position size based STRICTLY on the single exchange's RAW equity.
-        Ignores leverage buying power.
+        STEP 1 — Venue Isolation Dam
+        Calculate position size based STRICTLY on venue-specific free margin.
         """
-        # Get RAW capital for THIS asset's specific exchange
-        exchange = self.config["assets"][asset]["exchange"].lower()
-        if exchange == "binance":
-            # Force Binance to return actual cash, not leveraged buying power
-            asset_capital = self.get_binance_balance()
-        else:
-            asset_capital = self._fetch_mt5_balance()
+        local_free_margin = 0.0
 
-        if asset_capital <= 0:
-            logger.error(
-                f"Cannot calculate position size for {asset}: exchange capital is 0!"
-            )
+        if self.is_paper_mode:
+            # Use asset balance estimate for paper mode
+            local_free_margin = self.get_asset_balance(asset)
+        else:
+            try:
+                if venue.upper() == "MT5":
+                    import MetaTrader5 as mt5
+                    if not mt5.initialize():
+                        logger.error("[PORTFOLIO] Failed to initialize MT5 for margin check")
+                        return 0.0
+                    account_info = mt5.account_info()
+                    if account_info:
+                        local_free_margin = account_info.margin_free
+                    else:
+                        logger.error("[PORTFOLIO] Could not fetch MT5 account info")
+                        return 0.0
+
+                elif venue.upper() == "BINANCE":
+                    if not self.binance_client:
+                        logger.error("[PORTFOLIO] Binance client not initialized")
+                        return 0.0
+                    
+                    # Check if futures enabled for this asset
+                    is_futures = self.config.get("assets", {}).get(asset, {}).get("enable_futures", False)
+                    
+                    if is_futures:
+                        account = self.binance_client.futures_account()
+                        local_free_margin = float(account.get("availableBalance", 0))
+                    else:
+                        # For spot, available USDT
+                        asset_balance = self.binance_client.get_asset_balance(asset="USDT")
+                        if asset_balance:
+                            local_free_margin = float(asset_balance.get("free", 0))
+                
+                else:
+                    logger.error(f"[PORTFOLIO] Unknown venue: {venue}")
+                    return 0.0
+
+            except Exception as e:
+                logger.error(f"[PORTFOLIO] Error fetching venue margin for {venue}: {e}")
+                return 0.0
+
+        if local_free_margin <= 0:
+            logger.error(f"[PORTFOLIO] Cannot calculate size for {asset}: {venue} free margin is 0!")
             return 0.0
 
-        # Base position size as percentage of the RAW CASH
-        base_size_pct = self.portfolio_config["base_position_size"]
-        base_size_usd = asset_capital * base_size_pct
+        # Risk calculation based on local free margin
+        risk_percentage = self.portfolio_config.get("target_risk_per_trade", 0.015)
+        risk_per_trade = risk_percentage * local_free_margin
+        
+        # Stop loss distance
+        sl_distance = abs(entry_price - stop_loss)
+        if sl_distance == 0:
+            logger.error(f"[PORTFOLIO] SL distance is 0 for {asset}")
+            return 0.0
 
-        # Apply asset weight
-        asset_weight = self.config["assets"][asset].get("weight", 1.0)
-        position_size = base_size_usd * asset_weight
+        position_size = risk_per_trade / sl_distance
+        
+        # Apply notional position size from risk amount / distance %
+        # Re-calculating to ensure we return USD value if that's what's expected for add_position
+        stop_distance_pct = sl_distance / entry_price
+        position_size_usd = risk_per_trade / stop_distance_pct
 
-        # Hard Cap Check: Never allow a single trade to exceed 50% of the account cash
-        absolute_max = asset_capital * 0.50
-        position_size = min(position_size, absolute_max)
+        # Apply asset weight and limits from config
+        asset_weight = self.config["assets"].get(asset, {}).get("weight", 1.0)
+        position_size_usd *= asset_weight
+
+        # Hard Cap Check: Never allow a single trade to exceed 50% of the local free margin
+        absolute_max = local_free_margin * 0.50
+        position_size_usd = min(position_size_usd, absolute_max)
 
         logger.info(
-            f"{asset} isolated position size: ${position_size:,.2f} "
-            f"(Based strictly on {exchange.upper()} balance: ${asset_capital:,.2f})"
+            f"[PORTFOLIO] {asset} isolation size: ${position_size_usd:,.2f} "
+            f"(Based on {venue} free margin: ${local_free_margin:,.2f}, Risk: {risk_percentage:.2%})"
         )
-        return position_size
+        return position_size_usd
 
     def validate_balance_before_trade(self) -> Tuple[bool, str]:
         """
@@ -1542,6 +1589,15 @@ class PortfolioManager:
 
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """Check both long and short separately"""
+        # STEP 2 — Binary Correlation Lock
+        # Strict asset inventory check: Only ONE open trade per asset is allowed.
+        # Prevents pyramiding or averaging down.
+        open_positions = self.get_asset_positions(asset)
+
+        if len(open_positions) >= 1:
+            logger.info(f"[PORTFOLIO] Correlation Lock: Active trade exists for {asset}")
+            return False, f"Correlation Lock: Active trade exists for {asset}"
+
         current_count = self.get_asset_position_count(asset, side)
 
         if current_count >= self.max_positions_per_asset:
