@@ -396,6 +396,14 @@ class HybridSignalValidator:
             predicted_id, confidence = self.sniper.predict_single(snippet_input)
             pattern_name = self.reverse_pattern_map.get(predicted_id, "Unknown")
             
+            # --- Noise Filter ---
+            if "noise" in pattern_name.lower():
+                return {
+                    "pattern_confirmed": False,
+                    "confidence": 0,
+                    "reason": "noise_detected"
+                }
+
             if predicted_id == 0:
                 return {"pattern_confirmed": confidence < 0.70, "reason": "no_pattern_detected", "pattern_name": "Noise", "confidence": confidence}
 
@@ -406,17 +414,14 @@ class HybridSignalValidator:
             if signal == 1 and not is_bullish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
             if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
             
-            # Volume-Weighted Confidence
-            vol_ratio = 1.0
-
+            # --- Volume Weighting ---
             if 'volume' in df.columns and len(df) > 20:
                 avg_vol = df['volume'].iloc[-21:-1].mean()
-                vol_ratio = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+                volume = df['volume'].iloc[-1]
+                if volume > (2.0 * avg_vol):
+                    min_confidence = max(0.45, min_confidence - 0.20)
 
-            # Reduce confidence requirement slightly when volume is extreme
-            dynamic_min_confidence = max(0.45, min_confidence - (vol_ratio * 0.05))
-
-            if confidence < dynamic_min_confidence:
+            if confidence < min_confidence:
                 return {
                     "pattern_confirmed": False,
                     "reason": "low_confidence",

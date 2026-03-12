@@ -462,7 +462,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return labels
 
-    def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple[int, float]:
+    def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, silent: bool = False) -> tuple[int, float]:
         """
         Generate a live trading signal based on the latest data.
         NO LOOKAHEAD is used.
@@ -473,6 +473,8 @@ class TrendFollowingStrategy(BaseStrategy):
             Primary timeframe data (1H) with features, must contain at least 2 rows.
         df_4h : pd.DataFrame, optional
             Higher timeframe data (4H) with features
+        silent : bool, optional
+            If True, suppresses informational logging. Defaults to False.
 
         Returns:
         --------
@@ -481,9 +483,10 @@ class TrendFollowingStrategy(BaseStrategy):
             Confidence: 0.0 to 1.0
         """
         if len(df) < self.get_warmup_period():
-            logger.warning(
-                f"[{self.name}] Dataframe too short for live signal generation. Need {self.get_warmup_period()}, have {len(df)}"
-            )
+            if not silent:
+                logger.warning(
+                    f"[{self.name}] Dataframe too short for live signal generation. Need {self.get_warmup_period()}, have {len(df)}"
+                )
             return 0, 0.0  # Not enough data
 
         # Get the latest data point
@@ -568,7 +571,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 h4_penalty = self.h4_counter_penalty
                 if latest["adx"] > 30 and is_higher_low:
                     h4_penalty = 0.0
-                    logger.info(f"[{self.name}] 🌊 Super-cycle HL: Waiving {self.h4_counter_penalty} counter-trend penalty.")
+                    if not silent: logger.info(f"[{self.name}] 🌊 Super-cycle HL: Waiving {self.h4_counter_penalty} counter-trend penalty.")
 
                 if h4_trend == 1:
                     bullish_score += self.h4_trend_weight
@@ -599,7 +602,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return signal, confidence
 
-    def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None):
+    def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None, silent: bool = False):
         """
         Generates signals for either training or live trading.
 
@@ -611,6 +614,8 @@ class TrendFollowingStrategy(BaseStrategy):
             'train' for training labels (with lookahead), 'live' for live signals. Defaults to 'live'.
         df_4h : pd.DataFrame, optional
             Higher timeframe data (4H) with features.
+        silent : bool, optional
+            If True, suppresses informational logging. Defaults to False.
 
         Returns:
         --------
@@ -621,10 +626,12 @@ class TrendFollowingStrategy(BaseStrategy):
         df = self.generate_features(df)
         
         if mode == "train":
-            logger.info(f"[{self.name}] Generating training labels...")
+            if not silent: logger.info(f"[{self.name}] Generating training labels...")
             return self._generate_training_labels(df, df_4h)
         elif mode == "live":
-            logger.info(f"[{self.name}] Generating live signal...")
-            return self._generate_live_signal(df, df_4h)
+            if not silent: 
+                # Note: We don't log here because _generate_live_signal handles it with its own silent flag
+                pass
+            return self._generate_live_signal(df, df_4h, silent=silent)
         else:
             raise ValueError(f"Invalid mode '{mode}'. Must be 'train' or 'live'.")
