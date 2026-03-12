@@ -488,6 +488,42 @@ class InstitutionalCouncilAggregator:
         """
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
+
+        # ====================================================================
+        # ⚡ THE FLASH VETO: Volatility Circuit Breaker
+        # ====================================================================
+        # Reason: Detects Black Swan crashes in real-time before EMAs flip.
+        try:
+            if len(df) >= 20:
+                latest = df.iloc[-1]
+                high, low, close = df['high'].values, df['low'].values, df['close'].values
+                atr_20 = ta.ATR(high, low, close, timeperiod=20)[-1]
+                vol_avg = df['volume'].iloc[-21:-1].mean()
+                
+                candle_body = latest['close'] - latest['open'] # Positive for bull, negative for bear
+                candle_size = abs(candle_body)
+                vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
+
+                # CRASH DETECTOR: High velocity drop + High institutional sell volume
+                if candle_body < 0 and candle_size > (2.5 * atr_20) and vol_ratio > 3.0:
+                    logger.warning(f"[FLASH VETO] 🚨 BLACK SWAN DETECTED: Velocity {candle_size/atr_20:.1f}x ATR + Volume {vol_ratio:.1f}x AVG. Blocking all trades.")
+                    return 0, {
+                        'timestamp': timestamp,
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "BLOCKED (Flash Veto)",
+                        'reasoning': "black_swan_circuit_breaker",
+                        'final_signal': 0,
+                        'signal_quality': 0.0,
+                        'mr_signal': 0,
+                        'mr_confidence': 0.0,
+                        'tf_signal': 0,
+                        'tf_confidence': 0.0,
+                        'ema_signal': 0,
+                        'ema_confidence': 0.0,
+                    }
+        except Exception as e:
+            logger.debug(f"[COUNCIL] Flash Veto check skipped: {e}")
         
         # ====================================================================
         # STEP 1 — Governor-First Protocol
