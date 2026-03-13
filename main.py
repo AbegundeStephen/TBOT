@@ -140,7 +140,7 @@ class TradingBot:
         self.params = SimpleNamespace(
             use_ai_validation=True,
             ai_sr_threshold=0.020,
-            ai_pattern_confidence=0.45,
+            ai_pattern_confidence=0.50,
             ai_enable_adaptive=True,
             ai_strong_signal_bypass=0.70,
         )
@@ -3691,7 +3691,7 @@ class TradingBot:
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
 
-            schedule.every(4).hours.do(self.run_mtf_regime_analysis)
+            schedule.every(30).minutes.do(self.run_mtf_regime_analysis)
 
             # Schedule trading cycles
             check_interval = self.config["trading"].get("check_interval_seconds", 300)
