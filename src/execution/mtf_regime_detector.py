@@ -76,7 +76,7 @@ class MultiTimeFrameRegimeDetector:
 
         # Cache
         self.cache = {}
-        self.cache_duration = 300  # 5 minutes
+        self.cache_duration = 60  # 1 minute
 
         logger.info(f"[MTF REGIME] Initialized for {asset_type} (Strict Option 2)")
         logger.info(f"  EMAs: FAST={FAST_EMA}, SLOW={SLOW_EMA}, BASELINE={BASELINE_EMA}")
@@ -119,12 +119,13 @@ class MultiTimeFrameRegimeDetector:
                 if df.index.tz is None:
                     df.index = df.index.tz_localize('UTC')
 
-                # Check data freshness (should be within last 24 hours)
+                # Check data freshness (should be within last 4 hours)
                 latest_date = df.index[-1]
                 hours_old = (pd.Timestamp.now(tz='UTC') - latest_date).total_seconds() / 3600
 
-                if hours_old > 24:
-                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old - consider updating")
+                if hours_old > 4:
+                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old - FALLING BACK TO API")
+                    return self._fetch_data(symbol, timeframe_str, exchange)
 
                 logger.info(f"[CSV] ✓ Loaded {len(df)} bars from CSV")
                 logger.info(f"[CSV]   Range: {df.index[0]} to {df.index[-1]}")
