@@ -112,6 +112,44 @@ class DynamicPresetSelector:
                 logger.warning(f"[REGIME] {asset_name}: Failed to calculate metrics")
                 return None
 
+            # ================================================================
+            # DIRTY RANGE OVERRIDE: Persistent Sideways Chop
+            # ================================================================
+            adx_series = metrics['adx_series']
+            volatility_ratio = metrics['volatility_ratio']
+            volume_trend = metrics.get('volume_trend', 0)
+            
+            if (
+                adx_series.iloc[-1] < 20 and
+                adx_series.iloc[-2] < 20 and
+                adx_series.iloc[-3] < 20 and
+                0.45 <= volatility_ratio <= 1.0 and
+                volume_trend <= 5.0
+            ):
+                logger.info(f"[PRESET] {asset_name} Dirty Range Override: Mean Reversion forced.")
+                
+                # Update state to ensure the override is persistent
+                old_preset = self.current_presets.get(asset_name)
+                if old_preset != "mr":
+                    self._record_preset_change(
+                        asset=asset_name,
+                        old_preset=old_preset,
+                        new_preset="mr",
+                        reason="Dirty Range Override: Persistent Sideways Chop (ADX < 20 for 3 bars)",
+                        metrics=metrics
+                    )
+                    # Send notification for forced change
+                    self._send_preset_change_notification(
+                        asset=asset_name,
+                        old_preset=old_preset,
+                        new_preset="mr",
+                        reason="Dirty Range Override Triggered",
+                        metrics=metrics,
+                        score=0
+                    )
+                
+                return "mr"
+
             # Extract MTF Regime Context for Gating
             regime_name = "NEUTRAL"
             if regime_data:
@@ -433,7 +471,8 @@ class DynamicPresetSelector:
             low = df['low'].values
             
             # 1. ADX (Trend Strength)
-            adx = self._calculate_adx(df, period=14)
+            adx_series = self._calculate_adx_series(df, period=14)
+            adx = adx_series.iloc[-1]
             
             # 2. ATR Ratio (Current volatility vs average)
             atr_current = self._calculate_atr(df, period=14)
@@ -459,6 +498,7 @@ class DynamicPresetSelector:
             
             return {
                 'adx': adx,
+                'adx_series': adx_series,
                 'volatility_ratio': volatility_ratio,
                 'atr_current': atr_current,
                 'atr_avg': atr_avg,
@@ -474,8 +514,8 @@ class DynamicPresetSelector:
             logger.error(f"Metrics calculation error: {e}")
             return None
     
-    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate Average Directional Index"""
+    def _calculate_adx_series(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate Average Directional Index Series"""
         try:
             high = df['high'].values
             low = df['low'].values
@@ -502,13 +542,17 @@ class DynamicPresetSelector:
             
             # DX and ADX
             dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-            adx = dx.ewm(span=period, adjust=False).mean().iloc[-1]
+            adx_series = dx.ewm(span=period, adjust=False).mean()
             
-            return adx if not np.isnan(adx) else 25.0
+            return adx_series.fillna(25.0)
         
         except Exception as e:
             logger.debug(f"ADX calculation error: {e}")
-            return 25.0
+            return pd.Series([25.0] * len(df))
+    
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average Directional Index (legacy wrapper)"""
+        return self._calculate_adx_series(df, period).iloc[-1]
     
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """Calculate Average True Range"""

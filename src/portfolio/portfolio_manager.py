@@ -19,6 +19,9 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
+# Portfolio Exposure Control
+USD_INVERSE_BUCKET = ["GOLD", "EURUSD", "BTC"]
+
 
 class Position:
     """Represents a single trading position"""
@@ -1347,6 +1350,17 @@ class PortfolioManager:
         # Re-calculating to ensure we return USD value if that's what's expected for add_position
         stop_distance_pct = sl_distance / entry_price
         position_size_usd = risk_per_trade / stop_distance_pct
+
+        # Apply USD Correlation Shield
+        active_bucket_trades = 0
+        if asset in USD_INVERSE_BUCKET:
+            for trade in self.positions.values():
+                if trade.asset in USD_INVERSE_BUCKET:
+                    active_bucket_trades += 1
+
+        if active_bucket_trades >= 1:
+            logger.info(f"[PORTFOLIO] USD Correlation Shield Activated for {asset}.")
+            position_size_usd *= 0.5
 
         # Apply asset weight and limits from config
         asset_weight = self.config["assets"].get(asset, {}).get("weight", 1.0)

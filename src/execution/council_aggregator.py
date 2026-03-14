@@ -642,7 +642,11 @@ class InstitutionalCouncilAggregator:
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
-            buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode, w_momentum, adx)
+            if is_breakout_mode:
+                buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode, w_momentum, adx)
+            else:
+                buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_reversion_bidirectional(df, w_momentum)
+            
             buy_explanations.append(momentum_exp['buy'])
             sell_explanations.append(momentum_exp['sell'])
             
@@ -829,15 +833,21 @@ class InstitutionalCouncilAggregator:
                     # Simulate Stop Loss
                     sl_dist = atr_fast * sl_mult
                     stop_loss = entry_price - sl_dist if signal == 1 else entry_price + sl_dist
+                    distance_to_sl = abs(entry_price - stop_loss)
                     
-                    # Simulate Take Profit (Using first partial target or default)
-                    tp_mult_raw = risk_cfg.get('partial_targets', [2.0])[0]
-                    tp_dist = atr_fast * tp_mult_raw
-                    take_profit = entry_price + tp_dist if signal == 1 else entry_price - tp_dist
+                    if trade_type == "REVERSION":
+                        # ⚡ EMA 20 as Take-Profit Magnet
+                        ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                        distance_to_tp = abs(entry_price - ema_20)
+                        take_profit = ema_20
+                    else:
+                        # Simulate Take Profit for TREND (Using first partial target or default)
+                        tp_mult_raw = risk_cfg.get('partial_targets', [2.0])[0]
+                        tp_dist = atr_fast * tp_mult_raw
+                        take_profit = entry_price + tp_dist if signal == 1 else entry_price - tp_dist
+                        distance_to_tp = abs(take_profit - entry_price)
                     
                     # Compute R/R
-                    distance_to_tp = abs(take_profit - entry_price)
-                    distance_to_sl = abs(entry_price - stop_loss)
                     rr_ratio = distance_to_tp / distance_to_sl if distance_to_sl > 0 else 0
                     
                     # Strategy Rules
@@ -848,6 +858,8 @@ class InstitutionalCouncilAggregator:
                             'reasoning': "rr_gate_rejected_trend", 
                             'signal': 0, 
                             'rr_ratio': rr_ratio,
+                            'total_score': total_score,
+                            'scores': chosen_scores,
                             'mr_signal': mr_signal,
                             'mr_confidence': mr_conf,
                             'tf_signal': tf_signal,
@@ -857,12 +869,14 @@ class InstitutionalCouncilAggregator:
                         }
                     
                     if trade_type == "REVERSION" and rr_ratio < 0.6:
-                        logger.info(f"[COUNCIL] R/R Gate: Reversion trade rejected (R/R: {rr_ratio:.2f} < 0.6)")
+                        logger.info(f"[COUNCIL] MR Trade rejected due to poor R/R (Magnet: {ema_20:.2f}, R/R: {rr_ratio:.2f} < 0.6).")
                         return 0, {
                             'timestamp': timestamp, 
                             'reasoning': "rr_gate_rejected_reversion", 
                             'signal': 0, 
                             'rr_ratio': rr_ratio,
+                            'total_score': total_score,
+                            'scores': chosen_scores,
                             'mr_signal': mr_signal,
                             'mr_confidence': mr_conf,
                             'tf_signal': tf_signal,
@@ -1036,6 +1050,36 @@ class InstitutionalCouncilAggregator:
                         "error": str(e),
                     }
             
+            # ====================================================================
+            # SESSION-BASED TRADE WEIGHTING: Asian Session Override
+            # ====================================================================
+            if signal != 0:
+                current_hour = datetime.now().hour
+                is_asian_session = current_hour >= 0 and current_hour < 7
+                
+                if is_asian_session:
+                    latest_volume = df["volume"].iloc[-1]
+                    avg_volume_50 = df["volume"].rolling(50).mean().iloc[-1]
+                    volume_spike = latest_volume > (3.0 * avg_volume_50)
+                    
+                    if volume_spike:
+                        multiplier = 1.0
+                        logger.info("[COUNCIL] Asian Session Bypass: Institutional volume detected.")
+                    else:
+                        multiplier = 0.5
+                        logger.info("[COUNCIL] Asian Session Penalty applied (multiplier: 0.5)")
+                    
+                    total_score *= multiplier
+                    details['total_score'] = total_score
+                    details['session_multiplier'] = multiplier
+                    
+                    # Re-check threshold after session penalty
+                    if total_score < required_score:
+                        logger.info(f"[SIGNAL] ❌ REJECTED - Score after Asian Session penalty ({total_score:.2f}) < {required_score:.2f}")
+                        signal = 0
+                        details['signal'] = 0
+                        details['decision_type'] = f"REJECTED (Asian Session Penalty)"
+
             return signal, details
             
         except Exception as e:
@@ -1347,6 +1391,58 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.error(f"[VOLUME] Error: {e}")
             return 0.0, 0.0, {'buy': "VOL: Error", 'sell': "VOL: Error"}
+
+    def _judge_reversion_bidirectional(self, df: pd.DataFrame, weight: float) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 6: REVERSION (Structural Mean Reversion)
+        Objective: Prevents catching falling knives by requiring RSI reversal + price break.
+        """
+        try:
+            if len(df) < 5:
+                return 0.0, 0.0, {'buy': "REV: No data", 'sell': "REV: No data"}
+            
+            # Calculate RSI
+            close = df['close'].values
+            high = df['high'].values
+            low = df['low'].values
+            
+            rsi_series = ta.RSI(close, timeperiod=14)
+            current_rsi = rsi_series[-1]
+            previous_rsi = rsi_series[-2]
+            
+            current_close = close[-1]
+            previous_high = high[-2]
+            previous_low = low[-2]
+            
+            buy_score = 0.0
+            sell_score = 0.0
+            buy_exp = "REV BUY: ❌ No structural reversal"
+            sell_exp = "REV SELL: ❌ No structural reversal"
+            
+            # LONG ENTRY CONDITIONS
+            if (
+                previous_rsi < 30 and
+                current_rsi >= 30 and
+                current_close > previous_high
+            ):
+                buy_score = weight
+                buy_exp = f"REV BUY: ✅ Structural Reversal ({weight:.1f}) - RSI {previous_rsi:.1f}->{current_rsi:.1f} + Price > Prev High"
+            
+            # SHORT ENTRY CONDITIONS
+            if (
+                previous_rsi > 70 and
+                current_rsi <= 70 and
+                current_close < previous_low
+            ):
+                sell_score = weight
+                sell_exp = f"REV SELL: ✅ Structural Reversal ({weight:.1f}) - RSI {previous_rsi:.1f}->{current_rsi:.1f} + Price < Prev Low"
+                
+            return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
+            
+        except Exception as e:
+            logger.error(f"[REVERSION] Error: {e}")
+            return 0.0, 0.0, {'buy': "REV: Error", 'sell': "REV: Error"}
+
     
     # ========================================================================
     # HELPER METHODS

@@ -205,7 +205,7 @@ class HybridSignalValidator:
 
         # Layer 4: Pattern Confirmation
         pattern_result = self._check_pattern(
-            df, signal, min_confidence=self.current_pattern_threshold
+            df, signal, min_confidence=self.current_pattern_threshold, strategy=strategy
         )
 
         if not pattern_result["pattern_confirmed"]:
@@ -387,9 +387,30 @@ class HybridSignalValidator:
             logger.error(f"[AVWAP] Error: {e}")
             return {}
 
-    def _check_pattern(self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60) -> dict:
+    def _check_pattern(self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60, strategy: str = "UNKNOWN") -> dict:
         try:
             if len(df) < 15: return {"pattern_confirmed": False, "reason": "insufficient_data"}
+            
+            # ================================================================
+            # FLASH CRASH BREAKER: Extreme Volatility Circuit Breaker
+            # ================================================================
+            current_price = df["close"].iloc[-1]
+            ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+            price_deviation = abs(current_price - ema_20)
+            
+            # Calculate ATR for scaling
+            import talib as ta
+            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            
+            if price_deviation > (4.0 * atr_fast):
+                if strategy == "mean_reversion":
+                    logger.info(f"[AI] Flash Crash Breaker triggered (Deviation: {price_deviation:.2f} > 4xATR: {4.0*atr_fast:.2f}). Blocking MR trade.")
+                    return {
+                        "pattern_confirmed": False,
+                        "confidence": 0.0,
+                        "reason": "flash_crash_breaker"
+                    }
+
             snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
             if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
             snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
@@ -413,6 +434,31 @@ class HybridSignalValidator:
             
             if signal == 1 and not is_bullish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
             if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
+
+            # ================================================================
+            # MR PATTERN CONFIRMATION: Strict Institutional Entry Rules
+            # ================================================================
+            if strategy == "mean_reversion":
+                allowed_long = ["hammer", "morning star", "bullish engulfing"]
+                allowed_short = ["shooting star", "evening star", "bearish engulfing"]
+                
+                pattern_lower = pattern_name.lower()
+                
+                if signal == 1 and pattern_lower not in allowed_long:
+                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for LONG.")
+                    return {
+                        "pattern_confirmed": False, 
+                        "confidence": 0.0,
+                        "reason": f"unsupported_mr_pattern_{pattern_lower}"
+                    }
+                
+                if signal == -1 and pattern_lower not in allowed_short:
+                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for SHORT.")
+                    return {
+                        "pattern_confirmed": False, 
+                        "confidence": 0.0,
+                        "reason": f"unsupported_mr_pattern_{pattern_lower}"
+                    }
             
             # --- Volume Weighting ---
             if 'volume' in df.columns and len(df) > 20:
