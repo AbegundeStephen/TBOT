@@ -305,6 +305,7 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
+        self.pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
         
         # Calculate levels
@@ -607,6 +608,17 @@ class VeteranTradeManager:
             logger.error(f"[VTM] ATR Slow error: {e}")
             return self.entry_price * 0.02
 
+    def cancel_take_profit(self):
+        """Cancel all remaining take profit targets."""
+        self.take_profit_levels = []
+        self.partial_sizes = []
+        logger.debug(f"[VTM] All take profit orders cancelled for {self.asset}.")
+
+    def enable_trailing_stop(self):
+        """Activate the trailing stop mechanism (Runner Mode)."""
+        self.runner_activated = True
+        logger.debug(f"[VTM] Trailing stop (Greed Mode) enabled for {self.asset}.")
+
     def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
@@ -632,6 +644,54 @@ class VeteranTradeManager:
                 self.take_profit_levels = [self.take_profit_levels[-1]]
                 # Exit full size at final target (managed by runner trail)
                 self.partial_sizes = [1.0]
+
+        # --- STEP 3: Trend Pyramiding ---
+        # Objective: Scale into strong breakout trends.
+        if self.trade_type == "TREND" and not self.pyramided:
+            if current_profit >= (1.0 * atr_value) and adx_value > 25:
+                logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
+                
+                # Action 1: Move SL of position 1 to entry
+                self.current_stop_loss = self.entry_price
+                
+                # Action 2: Signal for second trade (new_size = original_size * 0.5)
+                # Note: We set the flag here; the return dict signals the caller (PortfolioManager) to execute.
+                self.pyramided = True
+                
+                return {
+                    "action": "pyramid",
+                    "asset": self.asset,
+                    "side": self.side,
+                    "new_size": self.position_size * 0.5,
+                    "reason": "Trend Pyramiding Triggered"
+                }
+
+        # --- STEP 4: Trade State Mutation ---
+        # Objective: Allow profitable Mean Reversion trades to convert into trend trades.
+        if self.trade_type == "REVERSION":
+            if adx_value > 30 and current_profit > 0:
+                # Check actual direction of profit
+                is_actually_profitable = (self.side == "long" and current_price > self.entry_price) or \
+                                         (self.side == "short" and current_price < self.entry_price)
+                
+                if is_actually_profitable:
+                    logger.info("[VTM] 🧬 Trade mutated from REVERSION to TREND. Ride the move.")
+                    
+                    # 1. Cancel existing take profit orders
+                    self.cancel_take_profit()
+                    
+                    # 2. Switch trade tag
+                    self.trade_type = "TREND"
+                    
+                    # 3. Activate greed mode trailing stop
+                    self.enable_trailing_stop()
+
+        # --- STEP 5: Time Decay Protection ---
+        # Objective: Prevent Mean Reversion trades from turning into long-term losses.
+        if self.trade_type == "REVERSION":
+            if self.bars_in_trade >= 8:
+                logger.info(f"[VTM] ⏳ Stale MR trade closed for {self.asset} (Bars: {self.bars_in_trade} >= 8)")
+                return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
@@ -720,6 +780,7 @@ class VeteranTradeManager:
             "highest_price_reached": self.highest_price_reached, 
             "lowest_price_reached": self.lowest_price_reached, 
             "runner_activated": self.runner_activated, 
+            "pyramided": self.pyramided, # ✨ NEW
             "trade_type": self.trade_type, 
             "entry_time": self.entry_time.isoformat(),
             "local_free_margin": self.local_free_margin,
@@ -743,7 +804,7 @@ class VeteranTradeManager:
             current_ask=state.get("current_ask", 0.0),
             current_bid=state.get("current_bid", 0.0)
         )
-        vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"]
+        vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated, vtm.pyramided = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"], state.get("pyramided", False)
         return vtm
 
     def __repr__(self):
