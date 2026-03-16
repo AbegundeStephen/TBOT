@@ -1001,6 +1001,7 @@ class InstitutionalCouncilAggregator:
             # AI validation
             if self.ai_validator and signal != 0:
                 original_signal = signal
+                details['original_signal'] = original_signal
                 
                 validated_signal, ai_details = self.ai_validator.validate_signal(
                     signal=signal,

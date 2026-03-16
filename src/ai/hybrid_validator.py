@@ -184,6 +184,20 @@ class HybridSignalValidator:
                 self.strategy_stats[strategy]["approved"] += 1
                 return result
 
+        # Layer 1.5: Strong Signal Bypass
+        signal_quality = signal_details.get("signal_quality", 0.0)
+        if signal_quality >= self.strong_signal_bypass:
+            result = self._bypass_validation(
+                signal,
+                signal_details,
+                reason="strong_signal",
+                quality=signal_quality,
+                threshold=self.strong_signal_bypass,
+            )
+            self.stats["bypassed_strong_signal"] += 1
+            self.strategy_stats[strategy]["approved"] += 1
+            return result
+
         # Layer 2: Adaptive Thresholds
         if self.enable_adaptive:
             self._update_adaptive_thresholds_fixed(df, signal_details, strategy)
