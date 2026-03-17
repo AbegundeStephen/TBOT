@@ -626,7 +626,11 @@ class VeteranTradeManager:
 
         # --- STEP 1: Volatility Break-Even Lock ---
         # Reason: Locks risk to zero once trade proves itself by moving 1.0 * ATR in profit.
-        current_profit = abs(current_price - self.entry_price)
+        if self.side == "long":
+            current_profit = current_price - self.entry_price
+        else:
+            current_profit = self.entry_price - current_price
+
         if current_profit > atr_value:
             if self.current_stop_loss != self.entry_price:
                 logger.info(f"[VTM] 🛡️ Break-even lock activated for {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")

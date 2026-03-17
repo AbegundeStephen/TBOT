@@ -221,25 +221,31 @@ class Position:
                         )
 
                 if exit_info:
+                    # ✅ Check if it's an action (like pyramid) or an exit (reason)
+                    if "action" in exit_info:
+                        action = exit_info["action"]
+                        logger.info(f"[VTM] {self.asset} action triggered: {action}")
+                        return exit_info # Return the whole dict to the caller
 
-                    # ✅ Extract exit reason from ExitReason enum
-                    reason = exit_info["reason"]
+                    # ✅ Handle standard exits
+                    reason = exit_info.get("reason")
                     self.db_manager.update_trade_vtm_event(
                         trade_id=self.db_trade_id,
-                        event_type=exit_info["reason"].value,
-                        current_price=exit_info["price"],
-                        metadata={"size": exit_info["size"]},
+                        event_type=reason.value if hasattr(reason, "value") else str(reason),
+                        current_price=exit_info.get("price", close),
+                        metadata={"size": exit_info.get("size", 0)},
                     )
 
                     # Convert enum to string for compatibility
-                    if isinstance(reason, reason):
+                    from src.execution.veteran_trade_manager import ExitReason
+                    if isinstance(reason, ExitReason):
                         exit_signal = reason.value
                     else:
                         exit_signal = str(reason)
 
                     logger.info(
                         f"[VTM] {self.asset} exit triggered: {exit_signal} "
-                        f"@ ${exit_info['price']:,.2f}"
+                        f"@ ${exit_info.get('price', close):,.2f}"
                     )
                     return exit_signal
 

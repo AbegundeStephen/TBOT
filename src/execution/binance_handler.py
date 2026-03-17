@@ -1217,6 +1217,7 @@ class BinanceExecutionHandler:
                 return False
 
             positions_closed = False
+            pyramid_requests = []
 
             for position in positions:
                 if position.trade_manager:
@@ -1225,7 +1226,23 @@ class BinanceExecutionHandler:
                     )
 
                     if exit_signal:
-                        exit_reason = exit_signal.get("reason", "unknown")
+                        # ✅ Check if it's an action (like pyramid) or an exit (reason)
+                        if isinstance(exit_signal, dict) and "action" in exit_signal:
+                            action = exit_signal["action"]
+                            logger.info(f"[VTM] {position.position_id} triggered action: {action.upper()}")
+                            
+                            # Add to pyramid requests
+                            pyramid_requests.append({
+                                "asset": asset_name,
+                                "side": position.side,
+                                "action": action,
+                                "original_position_id": position.position_id,
+                                "signal_details": getattr(position, 'signal_details', {})
+                            })
+                            continue
+
+                        # ✅ Handle standard exits
+                        exit_reason = exit_signal.get("reason", "unknown") if isinstance(exit_signal, dict) else exit_signal
                         if hasattr(exit_reason, "value"):
                             exit_reason_str = exit_reason.value
                         else:
@@ -1253,7 +1270,7 @@ class BinanceExecutionHandler:
                     )
                     positions_closed = True
 
-            return positions_closed
+            return {"closed": positions_closed, "pyramid_requests": pyramid_requests}
 
         except Exception as e:
             logger.error(f"[VTM] Error: {e}", exc_info=True)
