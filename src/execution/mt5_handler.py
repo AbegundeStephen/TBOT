@@ -1200,6 +1200,8 @@ class MT5ExecutionHandler:
                 return False
 
             positions_closed = False
+            pyramid_requests = []
+
             for position in positions:
                 # Update P&L from exchange if possible
                 if position.mt5_ticket:
@@ -1218,19 +1220,35 @@ class MT5ExecutionHandler:
                     )
 
                     if exit_signal:
-                        exit_reason = exit_signal.get("reason", "unknown")
+                        # ✅ Check if it's an action (like pyramid) or an exit (reason)
+                        if isinstance(exit_signal, dict) and "action" in exit_signal:
+                            action = exit_signal["action"]
+                            logger.info(f"[VTM LOOP] {position.position_id} triggered action: {action.upper()}")
+                            
+                            # Add to pyramid requests to be returned to main loop
+                            pyramid_requests.append({
+                                "asset": asset_name,
+                                "side": position.side,
+                                "action": action,
+                                "original_position_id": position.position_id,
+                                "signal_details": getattr(position, 'signal_details', {})
+                            })
+                            continue
+
+                        # ✅ Handle standard exits
+                        exit_reason = exit_signal.get("reason", "unknown") if isinstance(exit_signal, dict) else exit_signal
                         exit_reason_str = exit_reason.value if hasattr(exit_reason, "value") else str(exit_reason)
 
                         logger.info(f"[VTM LOOP] {position.position_id} triggered {exit_reason_str.upper()}")
-                        
+
                         self.portfolio_manager.close_position(
                             position_id=position.position_id,
-                            exit_price=exit_signal.get("price", current_price),
+                            exit_price=exit_signal.get("price", current_price) if isinstance(exit_signal, dict) else current_price,
                             reason=f"VTM_{exit_reason_str}",
                         )
                         positions_closed = True
-
-            return positions_closed
+            
+            return {"closed": positions_closed, "pyramid_requests": pyramid_requests}
 
         except Exception as e:
             logger.error(f"[VTM LOOP] Error in MT5 VTM update: {e}", exc_info=True)

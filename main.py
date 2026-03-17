@@ -2454,14 +2454,31 @@ class TradingBot:
 
                 # Check VTM with real-time updates
                 try:
-                    # The handler's check method should ideally handle a specific position,
-                    # but for now, we continue to call the asset-wide check. The handler's
-                    # internal logic will loop through positions for that asset.
+                    vtm_result = None
                     if exchange == "binance":
-                        handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
+                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
                     else:
-                        # Use the new high-frequency VTM update for MT5 as well
-                        handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
+                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
+
+                    # ✅ Handle Pyramid Requests
+                    if isinstance(vtm_result, dict) and "pyramid_requests" in vtm_result:
+                        for req in vtm_result["pyramid_requests"]:
+                            logger.info(f"[VTM LOOP] 🗼 Executing PYRAMID for {asset_name} ({req['side'].upper()})")
+                            
+                            # Convert side to signal
+                            pyramid_signal = 1 if req["side"] == "long" else -1
+                            
+                            # Add pyramiding flag to signal details
+                            sig_details = req["signal_details"].copy()
+                            sig_details["is_pyramid_scale_in"] = True
+                            sig_details["parent_position_id"] = req["original_position_id"]
+                            
+                            # Execute the new trade
+                            handler.execute_signal(
+                                signal=pyramid_signal,
+                                asset_name=asset_name,
+                                signal_details=sig_details
+                            )
 
                 except Exception as e:
                     logger.error(f"[VTM LOOP] Error checking {asset_name} (Position: {position_id}): {e}")
