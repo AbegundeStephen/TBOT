@@ -13,6 +13,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.veteran_trade_manager import VeteranTradeManager
+from src.utils.trade_logger import log_trade_event
 from src.market.price_cache import price_cache
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,9 @@ class MT5ExecutionHandler:
         self.risk_config = config.get("risk_management", {})
         self.trading_config = config.get("trading", {})
         self.mode = self.trading_config.get("mode", "paper")
+        self.execution_lock = {}  # ✨ NEW: Prevent duplicate trades
+        self.last_trade_time = {}  # ✨ NEW: Rapid-fire cooldown
+        self.trade_timestamps_hourly = []  # ✨ NEW: Hourly trade limit
 
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
@@ -221,6 +225,23 @@ class MT5ExecutionHandler:
                     symbol = self.config["assets"][asset]["symbol"]
                     self.sync_positions_with_mt5(asset, symbol)
 
+    def _check_connection(self) -> bool:
+        """Check if MT5 terminal is responsive and connected"""
+        try:
+            terminal_info = mt5.terminal_info()
+            if terminal_info is None:
+                logger.error("[MT5] Terminal not responsive")
+                return False
+            
+            if not terminal_info.connected:
+                logger.warning("[MT5] Terminal disconnected")
+                return False
+                
+            return True
+        except Exception as e:
+            logger.error(f"[MT5] Connection check failed: {e}")
+            return False
+
     def get_current_price(
         self, symbol: str = None, force_live: bool = False
     ) -> Optional[float]:
@@ -238,6 +259,9 @@ class MT5ExecutionHandler:
             return cached_price
 
         # 2. If cache is stale or a live price is forced, fetch from MT5
+        if not self._check_connection():
+            return price_cache.get_last_known(symbol)
+
         try:
             if self.mode.lower() == "paper" and (cached_price is None or force_live):
                 # Simple mock prices for common assets
@@ -528,11 +552,22 @@ class MT5ExecutionHandler:
 
             # Execute order
             side = "long" if signal == 1 else "short"
+            requested_price = current_price
+            
             mt5_ticket, execution_price = self._execute_mt5_order(
                 symbol, side, volume_lots, asset, trade_type, symbol_info
             )
             if not mt5_ticket:
                 return False
+
+            # ✅ TRACK SLIPPAGE
+            slippage = abs(execution_price - requested_price)
+            slippage_pct = (slippage / requested_price) * 100 if requested_price > 0 else 0
+            logger.info(
+                f"[SLIPPAGE] {asset} {side.upper()} | "
+                f"Req: ${requested_price:,.2f}, Fill: ${execution_price:,.2f}, "
+                f"Diff: ${slippage:,.2f} ({slippage_pct:.4f}%)"
+            )
 
             # Add to Portfolio
             if signal_details is None:
@@ -554,7 +589,38 @@ class MT5ExecutionHandler:
                 vtm_overrides=vtm_overrides,
             )
 
-            if not success:
+            if success:
+                # ✅ Standardized Log
+                log_trade_event("ENTRY", {
+                    "symbol": symbol,
+                    "asset": asset,
+                    "side": side,
+                    "price": execution_price,
+                    "size": volume_lots,
+                    "trade_type": trade_type,
+                    "position_id": str(mt5_ticket)
+                })
+
+                # ✅ Update last trade time for cooldown
+                self.last_trade_time[asset] = time.time()
+                self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
+                
+                # ✅ Update last trade time for cooldown
+                self.last_trade_time[asset] = time.time()
+                self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
+                
+                logger.info(
+                    f"\n{'='*80}\n"
+                    f"✅ {asset} {side.upper()} POSITION OPENED\n"
+                    f"{'='*80}\n"
+                    f"Trade Type:     {trade_type}\n"
+                    f"Position Size:  ${actual_usd:,.2f}\n"
+                    f"Lots:           {volume_lots:.2f}\n"
+                    f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
+                    f"{'='*80}"
+                )
+                return True
+            else:
                 if self.mode.lower() != "paper" and mt5_ticket:
                     logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
                     self._emergency_close_mt5_position(
@@ -563,18 +629,6 @@ class MT5ExecutionHandler:
                         mt5.ORDER_TYPE_SELL if side == "long" else mt5.ORDER_TYPE_BUY,
                     )
                 return False
-
-            logger.info(
-                f"\n{'='*80}\n"
-                f"✅ {asset} {side.upper()} POSITION OPENED\n"
-                f"{'='*80}\n"
-                f"Trade Type:     {trade_type}\n"
-                f"Position Size:  ${actual_usd:,.2f}\n"
-                f"Lots:           {volume_lots:.2f}\n"
-                f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
-                f"{'='*80}"
-            )
-            return True
         except Exception as e:
             logger.error(
                 f"[MT5] ❌ Critical Error in _open_mt5_position for {asset}: {e}", exc_info=True
@@ -692,15 +746,31 @@ class MT5ExecutionHandler:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,
         }
-        result = mt5.order_send(request)
+        MAX_RETRIES = 2
+        result = None
+        
+        for attempt in range(MAX_RETRIES):
+            result = mt5.order_send(request)
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                break
+                
+            if attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    f"[RETRY] MT5 Order failed (Attempt {attempt+1}/{MAX_RETRIES}): "
+                    f"{result.comment if result else 'No result'}. Retrying in 1s..."
+                )
+                time.sleep(1)
 
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"[MT5] ✓ {side.upper()} order placed for {asset}: #{result.order}")
-            return result.order, execution_price
+            actual_fill_price = result.price if result.price > 0 else execution_price
+            logger.info(f"[MT5] ✓ {side.upper()} order placed for {asset}: #{result.order} @ ${actual_fill_price:,.2f}")
+            return result.order, actual_fill_price
         else:
             last_error = mt5.last_error() or "Unknown error"
             logger.error(
-                f"[MT5] ❌ Order Failed for {asset}: {result.comment if result else last_error}"
+                f"[MT5] ❌ Order Failed for {asset} after {MAX_RETRIES} attempts: "
+                f"{result.comment if result else last_error}"
             )
             return None, None
 
@@ -773,6 +843,30 @@ class MT5ExecutionHandler:
         if not asset_name:
             logger.error("[MT5 HANDLER] ❌ No asset_name provided for execution")
             return False
+
+        # ============================================================
+        # RAPID-FIRE COOLDOWN (30s)
+        # ============================================================
+        now = time.time()
+        last_time = self.last_trade_time.get(asset_name, 0)
+        if now - last_time < 30:
+            logger.warning(f"[COOLDOWN] Rapid-fire blocked for {asset_name} ({30 - (now - last_time):.1f}s remaining)")
+            return False
+
+        # ============================================================
+        # DUPLICATE EXECUTION LOCK
+        # ============================================================
+        trade_type = "TREND"
+        if signal_details:
+            trade_type = signal_details.get("trade_type", "TREND")
+            
+        trade_key = f"{asset_name}_{trade_type}_{signal}"
+        
+        if self.execution_lock.get(trade_key, False):
+            logger.warning(f"[LOCK] Duplicate execution blocked for {trade_key}")
+            return False
+            
+        self.execution_lock[trade_key] = True
 
         try:
             # ============================================================
@@ -904,6 +998,8 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
             return False
+        finally:
+            self.execution_lock[trade_key] = False
 
     # ============================================================================
     # HELPER METHOD - Position sync verification (already in your code)
@@ -1198,6 +1294,17 @@ class MT5ExecutionHandler:
             current_price = self.get_current_price(symbol=symbol, force_live=True)
             if not current_price:
                 return False
+
+            # ✅ RECONCILIATION: Fetch live positions from broker
+            try:
+                broker_positions = mt5.positions_get(symbol=symbol)
+                if broker_positions is not None:
+                    # Convert to simple dicts for PortfolioManager
+                    # Match by ticket ID for MT5
+                    broker_data = [{'id': str(p.ticket), 'side': 'long' if p.type == mt5.POSITION_TYPE_BUY else 'short', 'quantity': p.volume} for p in broker_positions]
+                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+            except Exception as e:
+                logger.debug(f"[RECONCILE] MT5 fetch failed: {e}")
 
             positions_closed = False
             pyramid_requests = []

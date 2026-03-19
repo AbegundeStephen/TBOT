@@ -163,6 +163,9 @@ def get_history(asset):
         "BTC": "BTCUSDT_1h.csv",
         "GOLD": "XAUUSDm_1h.csv",
         "XAU": "XAUUSDm_1h.csv",
+        "USTEC": "USTEC_1h.csv",
+        "EURJPY": "EURJPY_1h.csv",
+        "EURUSD": "EURUSD_1h.csv",
     }
 
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -270,11 +273,27 @@ def get_stats():
 
         # Get performance stats
         trades = supabase.table("trades").select("*").eq("status", "closed").execute()
+        
+        # Calculate strategy stats
+        strategy_stats = {}
+        if trades.data:
+            for t in trades.data:
+                strat = t.get("strategy", "UNKNOWN") or "UNKNOWN"
+                if strat not in strategy_stats:
+                    strategy_stats[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+                
+                pnl = t.get("pnl", 0)
+                if pnl > 0:
+                    strategy_stats[strat]["wins"] += 1
+                else:
+                    strategy_stats[strat]["losses"] += 1
+                strategy_stats[strat]["pnl"] += pnl
 
         stats = {
             "portfolio": snapshot.data[0] if snapshot.data else None,
             "trade_count": len(trades.data) if trades.data else 0,
             "win_rate": calculate_win_rate(trades.data) if trades.data else 0,
+            "strategy_performance": strategy_stats,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -598,11 +617,17 @@ def serve_template(filename):
 def get_logs():
     """Read the last N lines of the log file"""
     try:
-        log_file = os.path.join(project_root, "logs", "trading_bot.log")
+        log_type = request.args.get("type", "bot")
+        
+        if log_type == "audit":
+            log_file = os.path.join(project_root, "logs", "trade_audit.log")
+        else:
+            log_file = os.path.join(project_root, "logs", "trading_bot.log")
+            
         if not os.path.exists(log_file):
-            return jsonify({"logs": "Log file not found."})
+            return jsonify({"logs": f"Log file {os.path.basename(log_file)} not found."})
 
-        # Read last 500 lines
+        # Read last lines
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             # Efficiently read last lines
             lines = f.readlines()

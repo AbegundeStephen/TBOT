@@ -60,7 +60,8 @@ class InstitutionalCouncilAggregator:
         
         # Asset-specific tuning
         config: Optional[Dict] = None,
-        mtf_integration=None # ✨ INJECTED: The Governor
+        mtf_integration=None, # ✨ INJECTED: The Governor
+        performance_tracker=None # ✨ INJECTED: Performance Analytics
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -69,7 +70,7 @@ class InstitutionalCouncilAggregator:
         self.ai_validator = ai_validator
         self.detailed_logging = enable_detailed_logging
         self.mtf_integration = mtf_integration 
-        
+        self.performance_tracker = performance_tracker        
         # Configuration merge
         self.config = self._get_default_config()
         if config:
@@ -907,12 +908,101 @@ class InstitutionalCouncilAggregator:
 
                 # Apply penalties
                 total_score -= penalty
-                
+
+                # C. SESSION LIQUIDITY PENALTY
+                # Reason: Suppress weak Asian breakouts unless supported by extreme institutional volume.
+                try:
+                    current_time = df.index[-1]
+                    # Ensure current_time is a datetime object
+                    if hasattr(current_time, "hour"):
+                        current_hour = current_time.hour
+                    else:
+                        # Fallback if index is string
+                        current_hour = pd.to_datetime(current_time).hour
+
+                    is_asian_session = current_hour >= 0 and current_hour < 7
+
+                    if is_asian_session:
+                        latest_volume = df["volume"].iloc[-1]
+                        avg_volume_50 = df["volume"].rolling(50).mean().iloc[-1]
+
+                        if latest_volume > 3.0 * avg_volume_50:
+                            session_multiplier = 1.0
+                            logger.info(
+                                f"[SESSION] Institutional move detected in Asian session (Vol: {latest_volume/avg_volume_50:.1f}x avg). No penalty."
+                            )
+                        else:
+                            session_multiplier = 0.5
+                            logger.info(
+                                f"[SESSION] ⚠️ Low liquidity Asian session: Multiplier 0.5x applied to score {total_score:.2f}"
+                            )
+                    else:
+                        session_multiplier = 1.0
+
+                    total_score *= session_multiplier
+
+                except Exception as e:
+                    logger.warning(f"[SESSION] Penalty calculation failed: {e}")
+
+                # ✨ NEW: Dynamic Strategy Confidence Weighting
+                # Reason: Boost high-performing strategies and penalize failing ones based on live history.
+                if self.performance_tracker:
+                    try:
+                        winrate = self.performance_tracker.get_winrate(trade_type)
+                        
+                        # A. PERFORMANCE CIRCUIT BREAKER (HARD VETO)
+                        # Reason: Pause strategies that are statistically proven to be losing.
+                        stats = self.performance_tracker.get_all_stats().get(trade_type, {})
+                        total_trades = stats.get("wins", 0) + stats.get("losses", 0)
+                        
+                        if total_trades >= 10 and winrate < 0.35:
+                            logger.warning(
+                                f"[VETO] 🛑 Strategy Circuit Breaker: {trade_type} winrate {winrate:.1%} "
+                                f"after {total_trades} trades is below 35% threshold. Blocking trade."
+                            )
+                            return 0, {
+                                'timestamp': timestamp,
+                                'signal': 0,
+                                'asset': self.asset_type,
+                                'decision_type': f"BLOCKED (Strategy Circuit Breaker: {winrate:.1%})",
+                                'reasoning': "strategy_circuit_breaker",
+                                'final_signal': 0,
+                                'signal_quality': 0.0,
+                                'mr_signal': mr_signal,
+                                'mr_confidence': mr_conf,
+                                'tf_signal': tf_signal,
+                                'tf_confidence': tf_conf,
+                                'ema_signal': ema_signal,
+                                'ema_confidence': ema_conf,
+                            }
+
+                        # B. DYNAMIC WEIGHTING (SOFT ADJUSTMENT)
+                        # Adjustment: Winrate 50% -> 1.0x, Winrate 80% -> 1.3x, Winrate 20% -> 0.7x
+                        weight_multiplier = 0.5 + winrate
+                        
+                        old_score = total_score
+                        total_score *= weight_multiplier
+                        
+                        if abs(weight_multiplier - 1.0) > 0.05:
+                            logger.info(
+                                f"[DYNAMIC WEIGHT] {trade_type} winrate {winrate:.1%} -> "
+                                f"Multiplier {weight_multiplier:.2f}x | Score: {old_score:.2f} -> {total_score:.2f}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[DYNAMIC WEIGHT] Failed: {e}")
+
                 # Final execution check
+                min_quality_threshold = 0.65  # ✨ NEW: High-confidence filter
+                signal_quality = total_score / 5.0
+
                 if total_score < required_score:
                     logger.info(f"[SIGNAL] ❌ REJECTED - Score after penalties ({total_score:.2f}) < {required_score:.2f}")
                     signal = 0
                     decision_type = f"REJECTED (Score: {total_score:.2f})"
+                elif signal_quality < min_quality_threshold:
+                    logger.info(f"[SIGNAL] ❌ REJECTED - Low Quality: {signal_quality:.2f} < {min_quality_threshold:.2f}")
+                    signal = 0
+                    decision_type = f"REJECTED (Quality: {signal_quality:.2f})"
                 else:
                     decision_type = f"{'BUY' if signal == 1 else 'SELL'} (Confirmed)"
 
@@ -957,7 +1047,8 @@ class InstitutionalCouncilAggregator:
                 'timestamp': timestamp,
                 'signal': signal,
                 'asset': self.asset_type,
-                'trade_type': trade_type, 
+                'trade_type': trade_type,
+                'strategy': trade_type, 
                 'decision_type': decision_type,
                 'total_score': total_score,
                 'required_score': required_score,
@@ -1051,36 +1142,6 @@ class InstitutionalCouncilAggregator:
                         "error": str(e),
                     }
             
-            # ====================================================================
-            # SESSION-BASED TRADE WEIGHTING: Asian Session Override
-            # ====================================================================
-            if signal != 0:
-                current_hour = datetime.now().hour
-                is_asian_session = current_hour >= 0 and current_hour < 7
-                
-                if is_asian_session:
-                    latest_volume = df["volume"].iloc[-1]
-                    avg_volume_50 = df["volume"].rolling(50).mean().iloc[-1]
-                    volume_spike = latest_volume > (3.0 * avg_volume_50)
-                    
-                    if volume_spike:
-                        multiplier = 1.0
-                        logger.info("[COUNCIL] Asian Session Bypass: Institutional volume detected.")
-                    else:
-                        multiplier = 0.5
-                        logger.info("[COUNCIL] Asian Session Penalty applied (multiplier: 0.5)")
-                    
-                    total_score *= multiplier
-                    details['total_score'] = total_score
-                    details['session_multiplier'] = multiplier
-                    
-                    # Re-check threshold after session penalty
-                    if total_score < required_score:
-                        logger.info(f"[SIGNAL] ❌ REJECTED - Score after Asian Session penalty ({total_score:.2f}) < {required_score:.2f}")
-                        signal = 0
-                        details['signal'] = 0
-                        details['decision_type'] = f"REJECTED (Asian Session Penalty)"
-
             return signal, details
             
         except Exception as e:
@@ -1268,23 +1329,15 @@ class InstitutionalCouncilAggregator:
                     buy_exp = f"MOM BUY: ✅ Breakout ({weight:.1f}) - RSI {rsi:.1f} shows upside momentum"
 
             else:
-                # --- NORMAL LOGIC (Mean Reversion) ---
-                # Check for Super-Cycle Override (ADX > 35)
-                # If ADX is high, we don't penalize mean-reversion entries for being "overextended"
-                # RSI points are granted normally.
+                # --- NORMAL LOGIC (Trend Alignment) ---
+                # Award points for price being in the 'value' zone relative to RSI
                 if bullish_min <= rsi <= bullish_max:
                     buy_score = weight
                     buy_exp = f"MOM BUY: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bullish zone"
-                elif rsi < oversold:
-                    buy_score = weight
-                    buy_exp = f"MOM BUY: ✅ Oversold ({weight:.1f}) - RSI {rsi:.1f}"
 
                 if bearish_min <= rsi <= bearish_max:
                     sell_score = weight
                     sell_exp = f"MOM SELL: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bearish zone"
-                elif rsi > overbought:
-                    sell_score = weight
-                    sell_exp = f"MOM SELL: ✅ Overbought ({weight:.1f}) - RSI {rsi:.1f}"
             
             # MACD confirmation
             if self.config['macd_confirmation']:

@@ -17,9 +17,14 @@ import logging
 import sys
 import time
 import argparse
+import os
+from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
 from binance.client import Client
+
+# Load environment variables
+load_dotenv()
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
@@ -46,7 +51,22 @@ def load_config():
         config_path = Path("config/config.template.json")
 
     with open(config_path, "r") as f:
-        return json.load(f)
+        config = json.load(f)
+    
+    # ✨  Override config with environment variables for security
+    if os.getenv("SUPABASE_URL"):
+        config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")
+    if os.getenv("SUPABASE_KEY"):
+        config.setdefault("database", {})["supabase_key"] = os.getenv("SUPABASE_KEY")
+    
+    if os.getenv("BINANCE_API_KEY"):
+        config.setdefault("api", {}).setdefault("binance", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+        config.setdefault("api", {}).setdefault("binance_futures", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+    if os.getenv("BINANCE_API_SECRET"):
+        config.setdefault("api", {}).setdefault("binance", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+        config.setdefault("api", {}).setdefault("binance_futures", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+        
+    return config
 
 
 def create_signal_details(signal_type: str, confidence: float = 0.85):

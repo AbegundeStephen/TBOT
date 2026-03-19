@@ -557,6 +557,10 @@
                         💻 Terminal Logs
                     </button>
 
+                    <button class="nav-btn" id="audit-btn" style="background: linear-gradient(135deg, #065f46 0%, #064e3b 100%);">
+                        📋 Trade Audit
+                    </button>
+
                     <div class="docs-dropdown">
                         <button class="docs-btn" id="docs-btn">
                             📚 Docs
@@ -593,6 +597,21 @@
                 <div class="stat-label">Win Rate</div>
                 <div class="stat-value" id="win-rate">0%</div>
                 <div class="stat-change" id="total-trades">0 trades</div>
+            </div>
+        </div>
+
+        <h3 style="color: white; margin-bottom: 15px; font-size: 18px;">🎯 Strategy Performance</h3>
+        <div class="stats-grid" id="strategy-grid">
+            <!-- Will be populated by JS -->
+            <div class="stat-card">
+                <div class="stat-label">Trend Strategy</div>
+                <div class="stat-value" id="trend-winrate">0%</div>
+                <div class="stat-change" id="trend-pnl">$0.00 P&L</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Reversion Strategy</div>
+                <div class="stat-value" id="reversion-winrate">0%</div>
+                <div class="stat-change" id="reversion-pnl">$0.00 P&L</div>
             </div>
         </div>
 
@@ -682,22 +701,30 @@
 
         function setupLogs() {
             const logsBtn = document.getElementById('logs-btn');
+            const auditBtn = document.getElementById('audit-btn');
+            
             if (logsBtn) {
-                logsBtn.addEventListener('click', showLogs);
+                logsBtn.addEventListener('click', () => showLogs('bot'));
+            }
+            if (auditBtn) {
+                auditBtn.addEventListener('click', () => showLogs('audit'));
             }
         }
 
-        async function showLogs() {
+        async function showLogs(logType = 'bot') {
             const modal = document.getElementById('signal-modal');
             const modalBody = document.getElementById('modal-body');
             const modalTitle = document.querySelector('.modal-header h2');
             
-            modalTitle.innerHTML = '💻 Terminal Logs <span style="font-size: 12px; font-weight: normal; opacity: 0.8;">(Last 2000 lines)</span>';
-            modalBody.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching terminal output...</div>';
+            const title = logType === 'audit' ? '📋 Trade Audit Log' : '💻 Terminal Logs';
+            const logFile = logType === 'audit' ? 'trade_audit.log' : 'trading_bot.log';
+            
+            modalTitle.innerHTML = `${title} <span style="font-size: 12px; font-weight: normal; opacity: 0.8;">(Last 2000 lines)</span>`;
+            modalBody.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching log output...</div>';
             modal.classList.add('show');
             
             try {
-                const response = await fetch(`${API_BASE_URL}/api/logs`);
+                const response = await fetch(`${API_BASE_URL}/api/logs?type=${logType}`);
                 const data = await response.json();
                 
                 if (data.error) {
@@ -706,29 +733,48 @@
                 
                 let logContent = data.logs || 'No logs found.';
                 
-                // Colorize logs
+                // Colorize and format logs
                 const colorizedLogs = logContent.split('\n').map(line => {
                     if (!line.trim()) return '';
                     
                     let className = 'log-info';
-                    if (line.includes('WARNING')) className = 'log-warning';
-                    if (line.includes('ERROR') || line.includes('CRITICAL')) className = 'log-error';
-                    
-                    // Try to separate timestamp if it exists (assuming YYYY-MM-DD HH:MM:SS format)
-                    const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})/);
-                    if (timestampMatch) {
-                        const ts = timestampMatch[1];
-                        const rest = line.substring(ts.length);
-                        return `<div class="terminal-line"><span class="log-timestamp">${ts}</span><span class="${className}">${htmlEscape(rest)}</span></div>`;
+                    let content = line;
+                    let ts = '';
+
+                    // Detect JSON (Audit Log format)
+                    if (line.trim().startsWith('{') && line.trim().endsWith('}')) {
+                        try {
+                            const data = JSON.parse(line);
+                            ts = data.datetime || '';
+                            // Remove datetime from object for display if we have it separately
+                            const { datetime, timestamp, ...rest } = data;
+                            content = `[${data.event}] ${JSON.stringify(rest)}`;
+                            if (data.event === 'ERROR') className = 'log-error';
+                        } catch (e) {
+                            // Fallback to normal string if JSON parse fails
+                        }
+                    } else {
+                        // Standard log format
+                        if (line.includes('WARNING')) className = 'log-warning';
+                        if (line.includes('ERROR') || line.includes('CRITICAL')) className = 'log-error';
+                        
+                        const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+                        if (timestampMatch) {
+                            ts = timestampMatch[1];
+                            content = line.substring(ts.length);
+                        }
                     }
                     
+                    if (ts) {
+                        return `<div class="terminal-line"><span class="log-timestamp">${ts}</span><span class="${className}">${htmlEscape(content)}</span></div>`;
+                    }
                     return `<div class="terminal-line ${className}">${htmlEscape(line)}</div>`;
                 }).join('');
                 
                 modalBody.innerHTML = `
                     <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
-                        <span style="color: #64748b; font-size: 13px;">Real-time feed from <code>logs/trading_bot.log</code></span>
-                        <button onclick="showLogs()" class="nav-btn" style="padding: 5px 15px; font-size: 12px; background: #667eea;">🔄 Refresh</button>
+                        <span style="color: #64748b; font-size: 13px;">Real-time feed from <code>logs/${logFile}</code></span>
+                        <button onclick="showLogs('${logType}')" class="nav-btn" style="padding: 5px 15px; font-size: 12px; background: #667eea;">🔄 Refresh</button>
                     </div>
                     <div class="terminal-box" id="terminal-output">${colorizedLogs}</div>
                 `;
@@ -831,6 +877,27 @@
             
             document.getElementById('win-rate').textContent = `${data.win_rate.toFixed(1)}%`;
             document.getElementById('total-trades').textContent = `${data.trade_count} trades`;
+
+            // Populate Strategy Performance
+            if (data.strategy_performance) {
+                const sp = data.strategy_performance;
+                
+                // Trend
+                const trend = sp.TREND || {wins: 0, losses: 0, pnl: 0};
+                const trendTotal = trend.wins + trend.losses;
+                const trendWinrate = trendTotal > 0 ? (trend.wins / trendTotal * 100) : 0;
+                document.getElementById('trend-winrate').textContent = `${trendWinrate.toFixed(1)}%`;
+                document.getElementById('trend-pnl').textContent = `${trend.pnl >= 0 ? '+' : ''}$${trend.pnl.toLocaleString('en-US', {minimumFractionDigits: 2})} P&L`;
+                document.getElementById('trend-pnl').className = `stat-change ${trend.pnl >= 0 ? 'positive' : 'negative'}`;
+
+                // Reversion
+                const reversion = sp.REVERSION || {wins: 0, losses: 0, pnl: 0};
+                const reversionTotal = reversion.wins + reversion.losses;
+                const reversionWinrate = reversionTotal > 0 ? (reversion.wins / reversionTotal * 100) : 0;
+                document.getElementById('reversion-winrate').textContent = `${reversionWinrate.toFixed(1)}%`;
+                document.getElementById('reversion-pnl').textContent = `${reversion.pnl >= 0 ? '+' : ''}$${reversion.pnl.toLocaleString('en-US', {minimumFractionDigits: 2})} P&L`;
+                document.getElementById('reversion-pnl').className = `stat-change ${reversion.pnl >= 0 ? 'positive' : 'negative'}`;
+            }
         }
 
         async function loadPortfolioChart() {

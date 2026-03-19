@@ -122,6 +122,9 @@ class MTFRegimeIntegration:
             bullish_score = max(0.0, regime_status.score)
             bearish_score = max(0.0, -regime_status.score)
 
+            # Extract timeframe data for cleaner mapping
+            tf = regime_status.timeframe_data
+
             # Insert into mtf_regime_analysis table
             result = (
                 self.db_manager.supabase.table("mtf_regime_analysis")
@@ -141,13 +144,24 @@ class MTFRegimeIntegration:
                         # Scores
                         "bullish_score": bullish_score,
                         "bearish_score": bearish_score,
-                        # Timeframe fallbacks (using consensus as proxy)
-                        "h1_regime": regime_status.consensus_regime,
-                        "h1_confidence": confidence,
-                        "h4_regime": regime_status.consensus_regime,
-                        "h4_confidence": confidence,
-                        "d1_regime": regime_status.consensus_regime,
-                        "d1_confidence": confidence,
+                        # Timeframe data (Using real calculated indicators)
+                        "h1_regime": tf.get("1h", {}).get("regime", "NEUTRAL"),
+                        "h1_confidence": tf.get("1h", {}).get("confidence", 0.0),
+                        "h1_adx": tf.get("1h", {}).get("adx"),
+                        "h1_rsi": tf.get("1h", {}).get("rsi"),
+                        "h1_trend_direction": tf.get("1h", {}).get("trend_direction"),
+                        
+                        "h4_regime": tf.get("4h", {}).get("regime", "NEUTRAL"),
+                        "h4_confidence": tf.get("4h", {}).get("confidence", 0.0),
+                        "h4_adx": tf.get("4h", {}).get("adx"),
+                        "h4_rsi": tf.get("4h", {}).get("rsi"),
+                        "h4_trend_direction": tf.get("4h", {}).get("trend_direction"),
+                        
+                        "d1_regime": tf.get("1d", {}).get("regime", "NEUTRAL"),
+                        "d1_confidence": tf.get("1d", {}).get("confidence", 0.0),
+                        "d1_adx": tf.get("1d", {}).get("adx"),
+                        "d1_rsi": tf.get("1d", {}).get("rsi"),
+                        "d1_trend_direction": tf.get("1d", {}).get("trend_direction"),
                     }
                 )
                 .execute()

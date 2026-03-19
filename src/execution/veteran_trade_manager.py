@@ -305,7 +305,7 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
-        self.pyramided = False # ✨ NEW: Trend Pyramiding Flag
+        self.has_pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
         
         # Calculate levels
@@ -532,11 +532,31 @@ class VeteranTradeManager:
 
             # STEP 3 — Lot Sanitizer
             # Reason: Ensures position size is valid for broker submission.
-            final_size = round(self.position_size, 2)
-            if final_size < 0.01:
-                logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot 0.01.")
+            LOT_PRECISION = {
+                'BTC': 4,
+                'GOLD': 2,
+                'USTEC': 1,
+                'EURJPY': 2,
+                'EURUSD': 2,
+            }
+
+            precision = LOT_PRECISION.get(self.asset.upper(), 2)
+            final_size = round(self.position_size, precision)
+
+            MIN_LOT = {
+                'BTC': 0.0001,
+                'GOLD': 0.01,
+                'USTEC': 0.1,
+                'EURJPY': 0.01,
+                'EURUSD': 0.01
+            }
+
+            min_lot = MIN_LOT.get(self.asset.upper(), 0.01)
+
+            if final_size < min_lot:
+                logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot {min_lot} for {self.asset}.")
                 # We raise an exception here to signal the manager to abort trade creation
-                raise ValueError("Position size below minimum lot.")
+                raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
             
             self.position_size = final_size
             self.current_stop_loss = self.initial_stop_loss
@@ -550,7 +570,10 @@ class VeteranTradeManager:
     def on_new_bar(self, new_high: float, new_low: float, new_close: float) -> Optional[Dict]:
         try:
             self.high, self.low, self.close = np.append(self.high, new_high), np.append(self.low, new_low), np.append(self.close, new_close)
-            if len(self.close) > 200: self.high, self.low, self.close = self.high[-200:], self.low[-200:], self.close[-200:]
+            # ✨ MEMORY MANAGEMENT: Limit to 500 candles (Safe for 200 EMA + buffer)
+            if len(self.close) > 500: 
+                self.high, self.low, self.close = self.high[-500:], self.low[-500:], self.close[-500:]
+            
             self.bars_in_trade += 1
             if self.side == "long": self.highest_price_reached = max(self.highest_price_reached, new_high)
             else: self.lowest_price_reached = min(self.lowest_price_reached, new_low)
@@ -651,7 +674,7 @@ class VeteranTradeManager:
 
         # --- STEP 3: Trend Pyramiding ---
         # Objective: Scale into strong breakout trends.
-        if self.trade_type == "TREND" and not self.pyramided:
+        if self.trade_type == "TREND" and not self.has_pyramided:
             if current_profit >= (1.0 * atr_value) and adx_value > 25:
                 logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
                 
@@ -660,7 +683,7 @@ class VeteranTradeManager:
                 
                 # Action 2: Signal for second trade (new_size = original_size * 0.5)
                 # Note: We set the flag here; the return dict signals the caller (PortfolioManager) to execute.
-                self.pyramided = True
+                self.has_pyramided = True
                 
                 return {
                     "action": "pyramid",
@@ -784,7 +807,7 @@ class VeteranTradeManager:
             "highest_price_reached": self.highest_price_reached, 
             "lowest_price_reached": self.lowest_price_reached, 
             "runner_activated": self.runner_activated, 
-            "pyramided": self.pyramided, # ✨ NEW
+            "has_pyramided": self.has_pyramided, # ✨ NEW
             "trade_type": self.trade_type, 
             "entry_time": self.entry_time.isoformat(),
             "local_free_margin": self.local_free_margin,
@@ -808,7 +831,7 @@ class VeteranTradeManager:
             current_ask=state.get("current_ask", 0.0),
             current_bid=state.get("current_bid", 0.0)
         )
-        vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated, vtm.pyramided = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"], state.get("pyramided", False)
+        vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated, vtm.has_pyramided = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"], state.get("has_pyramided", False)
         return vtm
 
     def __repr__(self):

@@ -297,7 +297,35 @@ class BinanceFuturesHandler:
                 return None
 
             order_id = order.get("orderId")
+            
+            # ✅ ENHANCED: Extract average fill price for MARKET orders
+            # Market orders often return avgPrice=0 initially in some API versions
             avg_price = float(order.get("avgPrice", 0))
+            
+            if avg_price == 0:
+                # Try cumulative quote quantity / executed quantity
+                cum_quote = float(order.get("cumQuote", 0))
+                exec_qty = float(order.get("executedQty", 0))
+                if exec_qty > 0:
+                    avg_price = cum_quote / exec_qty
+                
+                # If still 0, check fills list
+                if avg_price == 0 and "fills" in order:
+                    fills = order["fills"]
+                    if fills:
+                        total_quote = sum(float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills)
+                        total_qty = sum(float(f.get("qty", 0)) for f in fills)
+                        if total_qty > 0:
+                            avg_price = total_quote / total_qty
+            
+            # If we calculated a better price, update the order object for the handler
+            if avg_price > 0:
+                order["avgPrice"] = str(avg_price)
+            
+            # Ensure status is helpful for the caller
+            # If it's a MARKET order, it's effectively FILLED if we have an ID
+            if order.get("type") == FUTURE_ORDER_TYPE_MARKET and order.get("status") == "NEW":
+                order["status"] = "FILLED"
 
             logger.info(
                 f"[FUTURES] ✓ {side_label} opened\n"

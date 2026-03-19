@@ -106,7 +106,14 @@ class PositionRebalancer:
             # ================================================================
             # STEP 3: Calculate P&L on closed portion
             # ================================================================
-            exit_price = float(order.get('avgPrice', current_price))
+            raw_price = order.get('avgPrice', None)
+            
+            try:
+                parsed = float(raw_price) if raw_price is not None else 0.0
+            except (ValueError, TypeError):
+                parsed = 0.0
+                
+            exit_price = parsed if parsed > 0 else current_price
             
             if position.side == "long":
                 partial_pnl = (exit_price - position.entry_price) * reduction

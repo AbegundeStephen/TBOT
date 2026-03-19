@@ -22,6 +22,12 @@ from typing import Optional, Tuple, Dict
 from types import SimpleNamespace
 
 
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file at startup
+load_dotenv()
+
 # Windows encoding fix
 if sys.platform == "win32":
     try:
@@ -64,6 +70,9 @@ from src.ai.visualization import (
 )
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 from src.update.historical_updater import HistoricalDataUpdater
+from src.utils.trade_logger import log_trade_event
+from src.logs.audit_logger import log_trade
+from src.monitoring.health_monitor import HealthMonitor
 from src.portfolio.hedging_support import (
     enable_hedging_for_portfolio,
     log_hedging_status,
@@ -125,6 +134,97 @@ class TradingBot:
 
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
+
+        # Override config with environment variables for security
+        if os.getenv("SUPABASE_URL"):
+            self.config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")
+        if os.getenv("SUPABASE_KEY"):
+            self.config.setdefault("database", {})["supabase_key"] = os.getenv("SUPABASE_KEY")
+        
+        # Override Trading Mode
+        if os.getenv("TRADING_MODE"):
+            self.config.setdefault("trading", {})["mode"] = os.getenv("TRADING_MODE").lower()
+            logger.info(f"[CONFIG] Overriding trading mode from .env: {os.getenv('TRADING_MODE')}")
+
+        # Override Telegram config
+        if os.getenv("TELEGRAM_BOT_TOKEN"):
+            self.config.setdefault("telegram", {})["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
+            # If token is provided in env, assume enabled unless explicitly disabled
+            self.config.setdefault("telegram", {})["enabled"] = True
+            
+        if os.getenv("TELEGRAM_ENABLED"):
+            enabled_str = os.getenv("TELEGRAM_ENABLED").lower()
+            self.config.setdefault("telegram", {})["enabled"] = enabled_str in ("true", "1", "yes")
+
+        if os.getenv("TELEGRAM_ADMIN_IDS"):
+            # Convert comma-separated string to list of ints
+            try:
+                ids_str = os.getenv("TELEGRAM_ADMIN_IDS")
+                admin_ids = [int(i.strip()) for i in ids_str.split(",") if i.strip()]
+                self.config.setdefault("telegram", {})["admin_ids"] = admin_ids
+            except Exception as e:
+                logger.error(f"Failed to parse TELEGRAM_ADMIN_IDS: {e}")
+
+        # Override Exchange Credentials in DataManager config
+        if os.getenv("BINANCE_API_KEY"):
+            self.config.setdefault("api", {}).setdefault("binance_futures", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+            self.config.setdefault("api", {}).setdefault("binance", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+        if os.getenv("BINANCE_API_SECRET"):
+            self.config.setdefault("api", {}).setdefault("binance_futures", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+            self.config.setdefault("api", {}).setdefault("binance", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+            
+        # Determine if we should use testnet
+        is_testnet = self.config.get("api", {}).get("binance_futures", {}).get("testnet", False)
+        if os.getenv("BINANCE_TESTNET"):
+            is_testnet = os.getenv("BINANCE_TESTNET").lower() in ("true", "1", "yes")
+        elif self.config.get("trading", {}).get("mode") == "paper":
+            is_testnet = True # Default to testnet in paper mode
+            
+        self.config.setdefault("api", {}).setdefault("binance_futures", {})["testnet"] = is_testnet
+        self.config.setdefault("api", {}).setdefault("binance", {})["testnet"] = is_testnet
+        
+        if is_testnet:
+            logger.info("[CONFIG] Binance API will use TESTNET endpoints")
+        else:
+            logger.info("[CONFIG] Binance API will use LIVE endpoints")
+            
+        if os.getenv("MT5_LOGIN"):
+            self.config.setdefault("api", {}).setdefault("mt5", {})["login"] = int(os.getenv("MT5_LOGIN"))
+        if os.getenv("MT5_PASSWORD"):
+            self.config.setdefault("api", {}).setdefault("mt5", {})["password"] = os.getenv("MT5_PASSWORD")
+        if os.getenv("MT5_SERVER"):
+            self.config.setdefault("api", {}).setdefault("mt5", {})["server"] = os.getenv("MT5_SERVER")
+
+        # ============================================================================
+        # ✨ NEW: CONFIGURATION VALIDATION
+        # ============================================================================
+        try:
+            portfolio_cfg = self.config.get("portfolio", {})
+            risk_per_trade = portfolio_cfg.get("target_risk_per_trade", 0.015)
+            max_drawdown = portfolio_cfg.get("max_drawdown", 0.20)
+            
+            # 1. Validate Base Risk
+            if not (0 < risk_per_trade < 0.10):
+                raise ValueError(f"Invalid target_risk_per_trade: {risk_per_trade}. Must be between 0 and 0.10 (10%)")
+            
+            # 2. Validate Max Drawdown
+            if not (0 < max_drawdown < 1.0):
+                raise ValueError(f"Invalid max_drawdown: {max_drawdown}. Must be between 0 and 1.0 (100%)")
+            
+            # 3. Validate Fixed Risk USD for each asset
+            assets_cfg = self.config.get("assets", {})
+            for asset, cfg in assets_cfg.items():
+                fixed_risk = cfg.get("fixed_risk_usd", {})
+                if isinstance(fixed_risk, dict):
+                    for r_type, val in fixed_risk.items():
+                        if val <= 0:
+                            raise ValueError(f"Invalid fixed_risk_usd for {asset} ({r_type}): {val}. Must be > 0.")
+            
+            logger.info("[CONFIG] ✓ All risk parameters validated and safe.")
+            
+        except Exception as e:
+            logger.error(f"[CONFIG] ❌ FATAL: Invalid configuration detected: {e}")
+            raise RuntimeError(f"Startup aborted due to unsafe configuration: {e}")
 
         setup_logging(self.config)
 
@@ -200,9 +300,13 @@ class TradingBot:
         self.dynamic_selector = None
         self.hybrid_selector = None
 
+        # ✨ NEW: System Health Tracking
+        self.health_monitor = HealthMonitor()
+
         self.error_handler = GlobalErrorHandler(
             telegram_bot=self.telegram_bot,
             db_manager=self.db_manager,
+            health_monitor=self.health_monitor,
             config={
                 "error_window_seconds": 300,  # 5 minutes
                 "max_duplicate_notifications": 3,
@@ -465,16 +569,21 @@ class TradingBot:
 
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
+        if hasattr(self, 'telegram_bot') and self.telegram_bot:
+            logger.warning("[TELEGRAM] Bot already initialized, skipping.")
+            return
+
         try:
-            if not TELEGRAM_CONFIG.get("enabled", False):
+            tg_config = self.config.get("telegram", {})
+            if not tg_config.get("enabled", False):
                 logger.info("[TELEGRAM] Disabled in config")
                 return
 
-            token = TELEGRAM_CONFIG.get("bot_token")
-            admin_ids = TELEGRAM_CONFIG.get("admin_ids", [])
+            token = tg_config.get("bot_token")
+            admin_ids = tg_config.get("admin_ids", [])
 
-            if not token or not admin_ids:
-                logger.warning("[TELEGRAM] Missing config")
+            if not token or not admin_ids or token == "your_token_here":
+                logger.warning("[TELEGRAM] Missing or placeholder config")
                 return
 
             self.telegram_bot = TradingTelegramBot(
@@ -975,6 +1084,7 @@ class TradingBot:
                         config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
                         trend_aligned_threshold=3.5,  # Defaults (will be overridden by config)
                         counter_trend_threshold=4.0,
+                        performance_tracker=self.portfolio_manager.performance_tracker,
                     )
 
                     logger.info(f"  Type:       Council Aggregator")
@@ -2116,6 +2226,26 @@ class TradingBot:
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
+            # ✨ Record heartbeat and check health
+            if hasattr(self, 'health_monitor') and self.health_monitor:
+                logger.info("[HEARTBEAT] System running...")
+                self.health_monitor.heartbeat()
+                if not self.health_monitor.is_healthy():
+                    logger.critical("[HEALTH] ⚠️ System is UNHEALTHY! Triggering emergency shutdown.")
+                    
+                    # 🚨 EMERGENCY: Close all trades
+                    self.portfolio_manager.emergency_close_all()
+                    
+                    # Optionally notify via Telegram
+                    if self.telegram_bot:
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_error("🚨 *EMERGENCY HALT*\nSystem is UNHEALTHY. All positions have been closed for safety!")
+                        )
+                    
+                    # Stop the bot
+                    self.stop()
+                    return
+
             logger.info("\n" + "=" * 70)
             logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info("=" * 70)
@@ -2465,6 +2595,15 @@ class TradingBot:
                         for req in vtm_result["pyramid_requests"]:
                             logger.info(f"[VTM LOOP] 🗼 Executing PYRAMID for {asset_name} ({req['side'].upper()})")
                             
+                            # ✅ Standardized Log
+                            log_trade_event("PYRAMID", {
+                                "symbol": self.config["assets"].get(asset_name, {}).get("symbol"),
+                                "asset": asset_name,
+                                "side": req["side"],
+                                "trade_type": "TREND_PYRAMID",
+                                "position_id": f"PYR_{req['original_position_id']}"
+                            })
+
                             # Convert side to signal
                             pyramid_signal = 1 if req["side"] == "long" else -1
                             
@@ -2772,6 +2911,14 @@ class TradingBot:
             logger.info(f"{'-' * 70}")
 
             # ============================================================
+            # 0. Emergency Trading Halt (Circuit Breaker)
+            # ============================================================
+            halted, reason = self.portfolio_manager.check_circuit_breaker()
+            if halted:
+                logger.warning(f"[CIRCUIT BREAKER] Halted: {reason}")
+                return
+
+            # ============================================================
             # 1. Fetch FRESH Data & Signal
             # ============================================================
             end_time = datetime.now(timezone.utc)
@@ -2989,7 +3136,30 @@ class TradingBot:
             position_ids_before = {p.position_id for p in positions_before}
 
             # ============================================================
-            # 5. Execute Trade
+            # 5. Final Pre-Flight Validation Checkpoint
+            # ============================================================
+            # A. System Health Check
+            if hasattr(self, 'health_monitor') and not self.health_monitor.is_healthy():
+                logger.error(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: System is unhealthy.")
+                return
+
+            # B. Circuit Breaker Check (Last Second)
+            halted, reason = self.portfolio_manager.check_circuit_breaker()
+            if halted:
+                logger.error(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: Circuit breaker triggered: {reason}")
+                return
+
+            # C. Confidence/Quality Check
+            min_quality = self.config.get("trading", {}).get("min_signal_quality", 0.40)
+            signal_quality = details.get("signal_quality", 0)
+            if signal_quality < min_quality:
+                logger.warning(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: Quality {signal_quality:.2f} < {min_quality:.2f}")
+                return
+
+            logger.info(f"[SAFETY] ✓ Final validation passed for {asset_name}. Executing...")
+
+            # ============================================================
+            # 6. Execute Trade
             # ============================================================
             success = False
             try:
@@ -3022,8 +3192,8 @@ class TradingBot:
                 return
 
             # ============================================================
-            # 6. Handle Success & DB Logging
-            # ============================================================
+            # 7. Handle Success & DB Logging
+            # ============================================
             if success:
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
                 position_ids_after = {p.position_id for p in positions_after}
@@ -3700,14 +3870,7 @@ class TradingBot:
             self.vtm_thread.start()
             logger.info("[VTM] ✅ VTM management thread started.")
             
-            # Setup signal handlers
-            def signal_handler(signum, frame):
-                            logger.info(f"\n[!] Signal {signum} received, shutting down...")
-                            self.stop()
-                            sys.exit(0)
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
-
+            # Setup periodic tasks
             schedule.every(30).minutes.do(self.run_mtf_regime_analysis)
 
             # Schedule trading cycles
@@ -3737,8 +3900,10 @@ class TradingBot:
                     raise
 
                 except Exception as e:
-                    logger.error(f"[ERROR] Main loop error: {e}", exc_info=True)
-                    time.sleep(10)
+                    logger.error(f"[CRITICAL ERROR] Main loop failure: {e}", exc_info=True)
+                    if hasattr(self, 'health_monitor') and self.health_monitor:
+                        self.health_monitor.record_error()
+                    time.sleep(10) # Safety pause before retry
 
             logger.info("[STOP] Main loop ended")
 
@@ -4038,6 +4203,18 @@ def main():
             server_thread = start_dashboard_server_threaded()
     
     bot = None
+
+    def shutdown_handler(sig, frame):
+        """Handle shutdown signals safely"""
+        logger.warning(f"\n[!] Signal {sig} received. Shutting down safely...")
+        if bot:
+            bot.stop()
+        sys.exit(0)
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
     try:
         # Initialize and start the main bot.
         # The bot's constructor and start() method handle the entire lifecycle,

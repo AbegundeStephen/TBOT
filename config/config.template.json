@@ -27,8 +27,8 @@
   },
   "database": {
     "enabled": true,
-    "supabase_url": "https://gpzrdpnfurztclznlnan.supabase.co",
-    "supabase_key": "***REMOVED-SUPABASE-SERVICE-ROLE-KEY***",
+    "supabase_url": "your_url_here",
+    "supabase_key": "your_key_here",
     "snapshot_interval_seconds": 300,
     "log_all_signals": true,
     "log_system_events": true
@@ -73,8 +73,8 @@
       "lookback_days": 730,
       "weight": 0.5,
       "fixed_risk_usd": {
-        "TREND": 15,
-        "SCALP": 3
+        "TREND": 25,
+        "SCALP": 20
       },
       "min_position_usd": 100,
       "max_position_usd": 75000,
@@ -861,7 +861,7 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "***REMOVED-TELEGRAM-TOKEN***",
+    "bot_token": "your_token_here",
     "admin_ids": [
       1733929110
     ],

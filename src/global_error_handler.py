@@ -14,6 +14,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
+from src.utils.alert_manager import send_alert
 
 
 logger = logging.getLogger(__name__)
@@ -144,9 +145,10 @@ class GlobalErrorHandler:
     Global error handler that catches all errors and sends Telegram notifications
     """
 
-    def __init__(self, telegram_bot=None, db_manager=None, config: Dict = None):
+    def __init__(self, telegram_bot=None, db_manager=None, health_monitor=None, config: Dict = None):
         self.telegram_bot = telegram_bot
         self.db_manager = db_manager
+        self.health_monitor = health_monitor
         self.config = config or {}
 
         # Error aggregation
@@ -200,8 +202,16 @@ class GlobalErrorHandler:
             self.component_errors[component].append(error_ctx)
             self.component_error_counts[component] += 1
 
+            # ✨ NEW: Record error in health monitor
+            if self.health_monitor:
+                self.health_monitor.record_error()
+
             # Log error
             self._log_error(error_ctx)
+
+            # ✨ NEW: Emergency Alert for CRITICAL errors
+            if severity == ErrorSeverity.CRITICAL:
+                send_alert(f"CRITICAL ERROR in {component}: {str(exception)[:100]}")
 
             # Log to database if available
             if self.db_manager:
