@@ -16,7 +16,7 @@ from src.execution.veteran_trade_manager import VeteranTradeManager, ExitReason
 from src.utils.trade_logger import log_trade_event
 from src.utils.state_manager import save_system_state, load_system_state
 from src.analytics.performance_tracker import PerformanceTracker
-from src.logs.audit_logger import log_trade
+from src.audit_logger.audit_logger import log_trade
 from src.utils.alert_manager import send_alert
 from src.global_error_handler import handle_errors, ErrorSeverity
 from datetime import datetime, timedelta, timezone
