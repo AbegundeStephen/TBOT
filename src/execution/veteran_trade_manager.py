@@ -390,7 +390,7 @@ class VeteranTradeManager:
                 selected_atr = atr_mid
                 reason = "Normal Vol"
                 
-            logger.info(f"[VTM] Dynamic ATR Selection: {selected_atr:.4f} ({reason}, Ratio: {ratio:.2f})")
+            logger.debug(f"[VTM] Dynamic ATR Selection: {selected_atr:.4f} ({reason}, Ratio: {ratio:.2f})")
             return selected_atr
             
         except Exception as e:

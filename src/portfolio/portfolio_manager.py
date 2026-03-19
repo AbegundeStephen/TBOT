@@ -1860,6 +1860,11 @@ class PortfolioManager:
         # 6. Database Logging
         if self.db_manager:
             try:
+                # ✅ TASK 25: Extract granular regime fields for trade record
+                regime = signal_details.get("regime", "UNKNOWN") if signal_details else "UNKNOWN"
+                quality = signal_details.get("signal_quality", 0.0) if signal_details else 0.0
+                confidence = signal_details.get("mode_confidence", 0.0) if signal_details else 0.0
+
                 trade_id, is_new = self.db_manager.insert_trade_entry(
                     asset=asset,
                     symbol=symbol,
@@ -1872,6 +1877,9 @@ class PortfolioManager:
                     position_id=position.position_id,
                     exchange=self.config["assets"][asset].get("exchange", "binance"),
                     strategy=signal_details.get("trade_type", "TREND") if signal_details else "TREND",
+                    regime=regime,
+                    signal_quality=quality,
+                    confidence_score=confidence,
                     mt5_ticket=mt5_ticket,
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
