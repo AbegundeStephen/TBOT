@@ -2,9 +2,10 @@ import logging
 import time
 from typing import Dict, Any
 import json
-from src.logs.audit_logger import log_trade
+from src.audit_logger.audit_logger import log_trade
 
 logger = logging.getLogger("TRADE_EVENT")
+
 
 def log_trade_event(event_type: str, data: Dict[str, Any]):
     """
@@ -23,13 +24,13 @@ def log_trade_event(event_type: str, data: Dict[str, Any]):
         "pnl": data.get("pnl"),
         "pnl_pct": data.get("pnl_pct"),
         "timestamp": time.time(),
-        "datetime": time.strftime('%Y-%m-%d %H:%M:%S'),
-        "position_id": data.get("position_id")
+        "datetime": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "position_id": data.get("position_id"),
     }
-    
+
     # 1. Log to main bot log (structured text)
     logger.info(f"[TRADE_EVENT] {json.dumps(event_payload)}")
-    
+
     # 2. Log to machine-readable audit log (JSON lines)
     try:
         log_trade(event_payload)

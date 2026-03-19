@@ -71,7 +71,7 @@ from src.ai.visualization import (
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 from src.update.historical_updater import HistoricalDataUpdater
 from src.utils.trade_logger import log_trade_event
-from src.logs.audit_logger import log_trade
+from src.audit_logger.audit_logger import log_trade
 from src.monitoring.health_monitor import HealthMonitor
 from src.portfolio.hedging_support import (
     enable_hedging_for_portfolio,
