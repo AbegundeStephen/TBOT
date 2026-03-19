@@ -33,6 +33,8 @@ logs/
 *.swp
 *.swo
 
+temp_docx/*
+
 # Backtest results
 backtest_results/
 
