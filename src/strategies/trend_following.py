@@ -590,8 +590,8 @@ class TrendFollowingStrategy(BaseStrategy):
         signal = 0
         confidence = 0.0
         
-        # Using a normalization factor of 7.0 based on the potential max score.
-        normalization_factor = 7.0
+        # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
+        normalization_factor = 8.0
 
         if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
             signal = 1

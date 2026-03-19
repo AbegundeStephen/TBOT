@@ -159,17 +159,19 @@ class EMAStrategy(BaseStrategy):
         # Death Cross (Fast crosses below Slow)
         df.loc[(df["ema_diff"] < 0) & (ema_diff_shift >= 0), "ema_cross"] = -1
 
-        # Bars since last crossover
-        df["bars_since_cross"] = 0
-        cross_mask = df["ema_cross"] != 0
-        if cross_mask.any():
-            cross_indices = np.where(cross_mask)[0]
-            for i in range(len(df)):
-                recent_crosses = cross_indices[cross_indices <= i]
-                if len(recent_crosses) > 0:
-                    df.iloc[i, df.columns.get_loc("bars_since_cross")] = (
-                        i - recent_crosses[-1]
-                    )
+        # Bars since last crossover (Vectorized cummax approach)
+        cross_indices = np.where(df["ema_cross"] != 0)[0]
+        if len(cross_indices) > 0:
+            # Create an array of indices where crossovers occurred, otherwise 0
+            event_indices = np.zeros(len(df))
+            event_indices[cross_indices] = cross_indices
+            # Use cumulative maximum to propagate the last crossover index forward
+            last_event_index = pd.Series(event_indices).cummax().values
+            df["bars_since_cross"] = np.arange(len(df)) - last_event_index
+            # Set values before the first crossover to 0 (or a large number if preferred)
+            df.loc[np.arange(len(df)) < cross_indices[0], "bars_since_cross"] = 0
+        else:
+            df["bars_since_cross"] = 0
 
         # === TREND STRENGTH ===
         df["ema_trend"] = np.where(df["ema_fast"] > df["ema_slow"], 1, -1)
@@ -368,7 +370,9 @@ class EMAStrategy(BaseStrategy):
             high_volume = latest["high_volume"]
 
             # Calculate confidence score
-            confidence = min(1.0, trend_strength / 5.0)
+            # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
+            normalization_factor = 8.0
+            confidence = min(1.0, trend_strength / normalization_factor)
             if macd_aligned == 1:
                 confidence += 0.15
             if (ema_cross == 1 and 40 < rsi < 70) or (ema_cross == -1 and 30 < rsi < 60):

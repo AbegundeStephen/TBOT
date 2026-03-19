@@ -238,7 +238,21 @@ class MarketHours:
         
         # Map common asset names to types
         if asset_type in ["btc", "bitcoin", "crypto", "eth", "ethereum"]:
-            return True  # Crypto is 24/7
+            # ✅ TASK 23: Session Quality Gate (Institutional Grade)
+            # Reason: Avoid low-liquidity "wash trading" and erratic weekend moves.
+            now = MarketHours.get_gmt_time()
+            day = now.weekday()
+            hour = now.hour
+            
+            # Block Friday 22:00 UTC to Sunday 22:00 UTC
+            if day == 4 and hour >= 22: # Friday Night
+                return False
+            if day == 5: # Saturday
+                return False
+            if day == 6 and hour < 22: # Sunday before open
+                return False
+                
+            return True
         
         if asset_type in ["gold", "xauusd", "forex", "eur", "gbp", "usd"]:
             return MarketHours.is_forex_market_open()
@@ -265,8 +279,8 @@ class MarketHours:
 
 # Convenience functions
 def should_trade_btc() -> bool:
-    """Check if BTC trading is allowed (always True - 24/7)"""
-    return MarketHours.should_trade("crypto")
+    """Check if BTC trading is allowed (Weekend Gate applied)"""
+    return MarketHours.should_trade("btc")
 
 
 def should_trade_gold() -> bool:

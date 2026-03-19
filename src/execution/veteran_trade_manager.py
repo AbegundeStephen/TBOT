@@ -286,8 +286,24 @@ class VeteranTradeManager:
         self.ema_4h_200 = gov_data.get("ema_4h_200")
         self.ema_4h_50 = gov_data.get("ema_4h_50")
 
-        # TREND ENFORCEMENT
+        # ✅ TASK 18: Regime-Adaptive ATR Multipliers
         self.atr_multiplier = self.risk_config.get("atr_multiplier", 1.8)
+        
+        # Override with dynamic multipliers based on regime/type
+        if self.trade_type == "REVERSION":
+            self.atr_multiplier = 1.5 # Tighter for mean reversion
+        elif self.trade_type == "TREND":
+            # Check for high volatility or bearish regimes via signal_details
+            regime = self.signal_details.get("regime", "NEUTRAL")
+            volatility = self.signal_details.get("volatility_regime", "normal")
+            
+            if "BEAR" in regime or volatility == "high":
+                self.atr_multiplier = 2.5 # Wide for safety in bears/volatility
+            else:
+                self.atr_multiplier = 2.0 # Standard trend breathing room
+
+        logger.info(f"[VTM] Dynamic ATR Multiplier set to {self.atr_multiplier}x ({self.trade_type})")
+
         self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
         self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
 

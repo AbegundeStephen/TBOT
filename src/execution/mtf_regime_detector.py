@@ -206,12 +206,13 @@ class MultiTimeFrameRegimeDetector:
         try:
             df_daily = self._fetch_data_from_csv(symbol, "1d", exchange)
 
-            min_bars = self.governor_thresholds["min_required_bars_1d"]
+            # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
+            min_bars = 400
 
             if len(df_daily) < min_bars:
                 logger.warning(
-                    f"[CONSTITUTION] Insufficient daily data: {len(df_daily)} bars (need {min_bars}+). "
-                    "Cannot establish macro trend. Defaulting to neutral."
+                    f"[CONSTITUTION] Insufficient daily data: {len(df_daily)} bars (need 400+). "
+                    "Cannot establish reliable macro trend. Defaulting to neutral."
                 )
                 return GovernorStatus(
                     is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data", ema_200=None
@@ -307,26 +308,39 @@ class MultiTimeFrameRegimeDetector:
         ema_4h_slow = latest_4h[f"ema_{SLOW_EMA}"]
         ema_4h_baseline = latest_4h[f"ema_{BASELINE_EMA}"]
 
+        # ✅ TASK 21: Rolling Quantile Thresholds (Phase 3)
+        # Calculate distance from price to baseline EMA as a percentage
+        ema_dist_4h = abs(price_4h - ema_4h_baseline) / ema_4h_baseline
+        
+        # Compute 0.65 quantile of recent distances (last 100 bars)
+        recent_dists = (abs(df_4h_with_ema["close"] - df_4h_with_ema[f"ema_{BASELINE_EMA}"]) / df_4h_with_ema[f"ema_{BASELINE_EMA}"]).tail(100)
+        dynamic_threshold = recent_dists.quantile(0.65)
+        
+        # Ensure threshold is within reasonable bounds (0.5% to 3.0%)
+        dynamic_threshold = max(0.005, min(0.03, dynamic_threshold))
+
         # Macro Trend from Governor (1D 200 EMA)
         macro_bullish = governor_status.is_bullish
         macro_bearish = governor_status.is_bearish
 
-        # Intermediate & Short-term alignment
+        # Intermediate & Short-term alignment (Dynamic)
+        # Consensus requires price to be beyond the dynamic threshold for a 'Strong' regime
+        is_extended_4h = ema_dist_4h > dynamic_threshold
         above_4h_200 = price_4h > ema_4h_baseline
         above_4h_50 = price_4h > ema_4h_slow
         above_1h_50 = price_1h > ema_1h_slow
 
-        # 5-TIER LOGIC
+        # 5-TIER LOGIC (Regime-Adaptive)
         if macro_bullish:
             # BLOCK BEARISH STATES
-            if above_4h_50 and above_1h_50:
+            if above_4h_50 and above_1h_50 and is_extended_4h:
                 consensus_regime = "BULLISH"
                 score = 1.0
-                reasons.append("Macro BULLISH: Price above all EMAs.")
-            elif above_4h_200 and (not above_4h_50 or not above_1h_50):
+                reasons.append(f"Macro BULLISH: Strong alignment (dist {ema_dist_4h:.2%} > threshold {dynamic_threshold:.2%})")
+            elif above_4h_200:
                 consensus_regime = "SLIGHTLY_BULLISH"
                 score = 0.5
-                reasons.append("Macro BULLISH: Above 4H 200 but mixed fast EMAs.")
+                reasons.append("Macro BULLISH: Above 4H 200 but not yet extended.")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
@@ -334,14 +348,14 @@ class MultiTimeFrameRegimeDetector:
         
         elif macro_bearish:
             # BLOCK BULLISH STATES
-            if not above_4h_50 and not above_1h_50:
+            if not above_4h_50 and not above_1h_50 and is_extended_4h:
                 consensus_regime = "BEARISH"
                 score = -1.0
-                reasons.append("Macro BEARISH: Price below all EMAs.")
-            elif not above_4h_200 and (above_4h_50 or above_1h_50):
+                reasons.append(f"Macro BEARISH: Strong alignment (dist {ema_dist_4h:.2%} > threshold {dynamic_threshold:.2%})")
+            elif not above_4h_200:
                 consensus_regime = "SLIGHTLY_BEARISH"
                 score = -0.5
-                reasons.append("Macro BEARISH: Below 4H 200 but mixed fast EMAs.")
+                reasons.append("Macro BEARISH: Below 4H 200 but not yet extended.")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
@@ -440,8 +454,9 @@ class MultiTimeFrameRegimeDetector:
 
         try:
             df_4h = self._fetch_data_from_csv(symbol, "4h", exchange)
-            if df_4h.empty or len(df_4h) < BASELINE_EMA + 1:
-                raise ValueError("Insufficient 4H data for EMA calculation.")
+            # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
+            if df_4h.empty or len(df_4h) < 400:
+                raise ValueError(f"Insufficient 4H data for reliable EMA-200 burn-in ({len(df_4h)}/400 bars)")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 4H data: {e}", exc_info=True)
             return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL")
