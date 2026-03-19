@@ -591,7 +591,8 @@ class TrendFollowingStrategy(BaseStrategy):
         confidence = 0.0
         
         # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
-        normalization_factor = 8.0
+        # Reason: 6.5 is the empirical 85th percentile of historical bullish scores
+        normalization_factor = 6.5
 
         if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
             signal = 1

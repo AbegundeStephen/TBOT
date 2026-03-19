@@ -371,7 +371,8 @@ class EMAStrategy(BaseStrategy):
 
             # Calculate confidence score
             # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
-            normalization_factor = 8.0
+            # Reason: 6.5 is the empirical threshold for high-conviction trends.
+            normalization_factor = 6.5
             confidence = min(1.0, trend_strength / normalization_factor)
             if macd_aligned == 1:
                 confidence += 0.15

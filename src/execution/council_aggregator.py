@@ -514,8 +514,9 @@ class InstitutionalCouncilAggregator:
                 candle_size = abs(candle_body)
                 vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
 
-                # CRASH DETECTOR: High velocity drop + High institutional sell volume
-                if candle_body < 0 and candle_size > (2.5 * atr_20) and vol_ratio > 3.0:
+                # ✅ TASK 19: Calibrated Flash Veto (Phase 3)
+                # Reason: 2.5x ATR was too tight for CPI/FOMC; 3.0x Volume missed real institutional moves.
+                if candle_body < 0 and candle_size > (2.8 * atr_20) and vol_ratio > 2.5:
                     logger.warning(f"[FLASH VETO] 🚨 BLACK SWAN DETECTED: Velocity {candle_size/atr_20:.1f}x ATR + Volume {vol_ratio:.1f}x AVG. Blocking all trades.")
                     return 0, {
                         'timestamp': timestamp,
@@ -1309,14 +1310,13 @@ class InstitutionalCouncilAggregator:
             if weight == 0:
                 return 0.0, 0.0, {'buy': "MOM: Disabled", 'sell': "MOM: Disabled"}
 
-            # ✅ SUPER-CYCLE OVERRIDE (ADX > 35)
-            # In a super-trend, we award full weight to the trend-aligned direction
-            # and bypass oscillator (RSI) noise entirely.
-            if adx > 35:
+            # ✅ TASK 19: Super-Cycle Recalibration (Phase 3)
+            # Reason: Real BTC super-trends start at ADX 30-32. 35 is too late.
+            if adx > 32:
                 buy_score = weight if is_bull else 0.0
                 sell_score = weight if not is_bull else 0.0
-                buy_exp = f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {adx:.1f} > 35" if is_bull else "MOM BUY: ❌ Dead in Bear Super-Cycle"
-                sell_exp = f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {adx:.1f} > 35" if not is_bull else "MOM SELL: ❌ Dead in Bull Super-Cycle"
+                buy_exp = f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {adx:.1f} > 32" if is_bull else "MOM BUY: ❌ Dead in Bear Super-Cycle"
+                sell_exp = f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {adx:.1f} > 32" if not is_bull else "MOM SELL: ❌ Dead in Bull Super-Cycle"
                 return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
 
             features_mr = self.s_mean_reversion.generate_features(df.tail(100))
