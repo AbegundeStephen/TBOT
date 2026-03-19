@@ -6,7 +6,8 @@ class PerformanceTracker:
     def __init__(self):
         self.stats = {
             "TREND": {"wins": 0, "losses": 0},
-            "REVERSION": {"wins": 0, "losses": 0}
+            "REVERSION": {"wins": 0, "losses": 0},
+            "EMA": {"wins": 0, "losses": 0}
         }
 
     def record_trade(self, trade_type: str, pnl: float):

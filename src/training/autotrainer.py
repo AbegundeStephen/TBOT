@@ -178,7 +178,10 @@ class ContinuousLearningPipeline:
     def _train_strategy(
         self, strategy_class, asset: str, df: pd.DataFrame, strategy_name: str
     ) -> Dict[str, Any]:
-        """Train a single strategy in isolation (Shadow Mode)."""
+        """
+        Train a single strategy in isolation (Shadow Mode).
+        ✅ TASK 16: Strict Walk-Forward Holdout (90 Days)
+        """
         logger.info(f"[AUTO-TRAIN] Training {strategy_name} for {asset}...")
 
         # Get the specific configuration for this strategy and asset
@@ -188,20 +191,44 @@ class ContinuousLearningPipeline:
             logger.error(f"[AUTO-TRAIN] Missing config for {strategy_name} on {asset}")
             return {"success": False, "error": "Missing configuration"}
 
-        # Instantiate fresh strategy for training (won't affect live bot)
+        # 1. SPLIT DATA (Strict 90-day Holdout)
+        # Assuming 1H candles (~24 per day)
+        holdout_bars = 90 * 24
+        if len(df) < (holdout_bars * 2):
+            logger.warning(f"[AUTO-TRAIN] {asset} dataset too small for strict 90-day holdout. Using 20% fallback.")
+            holdout_bars = int(len(df) * 0.2)
+
+        train_df = df.iloc[:-holdout_bars].copy()
+        test_df = df.iloc[-holdout_bars:].copy()
+
+        logger.info(f"[AUTO-TRAIN] Data Split: {len(train_df)} train, {len(test_df)} holdout bars")
+
+        # 2. Instantiate fresh strategy for training
         temp_strategy = strategy_class(strategy_config)
 
         # Define model path
         model_path = os.path.join(self.models_dir, f"{strategy_name}_{asset.lower()}.pkl")
 
-        # Train and save the model
-        results = temp_strategy.train_model(df, model_path)
+        # 3. Train on training set
+        train_results = temp_strategy.train_model(train_df, model_path)
+        
+        # 4. Validate on unseen holdout set (Honest performance)
+        logger.info(f"[AUTO-TRAIN] Validating on 90-day holdout...")
+        # Note: We use the same model_path to evaluate the newly saved model
+        test_results = temp_strategy.evaluate_on_test_data(test_df)
+        
+        # Merge results for reporting
+        final_results = train_results.copy()
+        final_results["holdout_accuracy"] = test_results.get("accuracy", 0)
+        final_results["holdout_f1"] = test_results.get("f1", 0)
+        
+        logger.info(f"[AUTO-TRAIN] {asset} {strategy_name} Holdout Acc: {final_results['holdout_accuracy']:.1%}")
 
         # Free memory aggressively
         del temp_strategy
         gc.collect()
 
-        return results
+        return final_results
 
     def _run_training_pipeline(self):
         """Execute the full retrain and hot-swap procedure."""
@@ -236,18 +263,19 @@ class ContinuousLearningPipeline:
                 for strat_class, strat_name in strategies:
                     results = self._train_strategy(strat_class, asset, df, strat_name)
 
-                    accuracy = results.get("cv_mean_accuracy", 0)
+                    # ✅ TASK 16: Use Holdout Accuracy for shadow test (Honest validation)
+                    accuracy = results.get("holdout_accuracy", 0)
                     summary[asset][strat_name] = accuracy
 
                     # SHADOW TEST: Check if the new model meets minimum standards
                     if accuracy < self.min_accuracy_threshold:
                         logger.warning(
-                            f"[AUTO-TRAIN] ❌ {asset} {strat_name} failed shadow test (Acc: {accuracy:.1%}). Aborting swap."
+                            f"[AUTO-TRAIN] ❌ {asset} {strat_name} failed shadow test (Holdout Acc: {accuracy:.1%}). Aborting swap."
                         )
                         all_successful = False
                     else:
                         logger.info(
-                            f"[AUTO-TRAIN] ✅ {asset} {strat_name} passed shadow test (Acc: {accuracy:.1%})"
+                            f"[AUTO-TRAIN] ✅ {asset} {strat_name} passed shadow test (Holdout Acc: {accuracy:.1%})"
                         )
 
             # 3. Hot-Swap (Only if all models improved or maintained stability)

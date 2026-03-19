@@ -307,9 +307,10 @@ class Position:
         if self.trade_manager:
             exit_info = self.trade_manager.check_exit(current_price)
             if exit_info:
+                from src.execution.veteran_trade_manager import ExitReason
                 reason = exit_info["reason"]
                 exit_signal = (
-                    reason.value if isinstance(reason, reason) else str(reason)
+                    reason.value if isinstance(reason, ExitReason) else str(reason)
                 )
                 return True, f"vtm_{exit_signal}"
 
@@ -2331,6 +2332,12 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "position_id": position_id
         })
+
+        # ✨ NEW: Record performance for Council weighting (Phase 2 Task 10)
+        if hasattr(self, 'performance_tracker') and self.performance_tracker:
+            t_type = getattr(position, 'trade_type', 'UNKNOWN')
+            if t_type != 'UNKNOWN':
+                self.performance_tracker.record_trade(t_type, pnl)
 
         logger.info(
             f"✓ Position closed successfully:\n"

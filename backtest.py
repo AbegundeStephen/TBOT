@@ -431,15 +431,27 @@ class MLStrategy(bt.Strategy):
                     f"Size: {order.executed.size:.8f}"
                 )
             elif order.issell():
+                self.entry_price = order.executed.price
                 logger.info(
                     f"✅ SELL EXECUTED - Price: ${order.executed.price:.2f}, "
                     f"Size: {order.executed.size:.8f}"
                 )
+            
+            if order.status == order.Completed and self.position:
+                # Reset tracking on position opening
+                if abs(self.position.size) > 0:
+                    self.trailing_stop_price = None
+                    self.highest_price_since_entry = self.entry_price
+                    self.lowest_price_since_entry = self.entry_price
+            
+            if not self.position:
+                # Reset tracking on full close
                 self.entry_price = None
                 self.stop_loss = None
                 self.take_profit = None
                 self.trailing_stop_price = None
                 self.highest_price_since_entry = None
+                self.lowest_price_since_entry = None
 
             self.order = None
 
@@ -465,25 +477,33 @@ class MLStrategy(bt.Strategy):
             current_price = self.data.close[0]
 
             # Check stops ONLY if position exists
-            if self.position and self.position.size > 0:
+            if self.position:
                 # Update trailing stop
                 if self.params.use_trailing_stop:
                     self.update_trailing_stop()
 
+                is_long = self.position.size > 0
+                is_short = self.position.size < 0
+                
                 # Check all exit conditions
-                hit_stop_loss = self.stop_loss and current_price <= self.stop_loss
-                hit_take_profit = self.take_profit and current_price >= self.take_profit
-                hit_trailing_stop = (
-                    self.params.use_trailing_stop
-                    and self.trailing_stop_price
-                    and current_price <= self.trailing_stop_price
-                )
+                hit_stop_loss = False
+                if self.stop_loss:
+                    if is_long and current_price <= self.stop_loss: hit_stop_loss = True
+                    elif is_short and current_price >= self.stop_loss: hit_stop_loss = True
+                
+                hit_take_profit = False
+                if self.take_profit:
+                    if is_long and current_price >= self.take_profit: hit_take_profit = True
+                    elif is_short and current_price <= self.take_profit: hit_take_profit = True
+                
+                hit_trailing_stop = False
+                if self.params.use_trailing_stop and self.trailing_stop_price:
+                    if is_long and current_price <= self.trailing_stop_price: hit_trailing_stop = True
+                    elif is_short and current_price >= self.trailing_stop_price: hit_trailing_stop = True
 
                 if hit_stop_loss:
                     self.order = self.close()
-                    pct_loss = (
-                        (current_price - self.entry_price) / self.entry_price
-                    ) * 100
+                    pct_loss = ((current_price - self.entry_price) / self.entry_price) * 100
                     logger.info(
                         f"🛑 STOP-LOSS at ${current_price:.2f} "
                         f"({pct_loss:+.2f}%) | Entry: ${self.entry_price:.2f}"
@@ -491,9 +511,7 @@ class MLStrategy(bt.Strategy):
                     return
                 elif hit_take_profit:
                     self.order = self.close()
-                    pct_gain = (
-                        (current_price - self.entry_price) / self.entry_price
-                    ) * 100
+                    pct_gain = ((current_price - self.entry_price) / self.entry_price) * 100
                     logger.info(
                         f"🎯 TAKE-PROFIT at ${current_price:.2f} "
                         f"({pct_gain:+.2f}%) | Entry: ${self.entry_price:.2f}"
@@ -501,12 +519,10 @@ class MLStrategy(bt.Strategy):
                     return
                 elif hit_trailing_stop:
                     self.order = self.close()
-                    pct_change = (
-                        (current_price - self.entry_price) / self.entry_price
-                    ) * 100
+                    pct_change = ((current_price - self.entry_price) / self.entry_price) * 100
                     logger.info(
                         f"📉 TRAILING STOP at ${current_price:.2f} "
-                        f"({pct_change:+.2f}%) | High: ${self.highest_price_since_entry:.2f}"
+                        f"({pct_change:+.2f}%) | Entry: ${self.entry_price:.2f}"
                     )
                     return
 
@@ -538,7 +554,6 @@ class MLStrategy(bt.Strategy):
                         "date": self.data.datetime.date(0),
                         "price": current_price,
                         "signal": signal,
-                        # "original_signal": original_signal,
                         "details": details,
                     }
                 )
@@ -572,32 +587,56 @@ class MLStrategy(bt.Strategy):
                             self.stop_loss = current_price - stop_distance
                             self.take_profit = current_price + (stop_distance * 2)
                         else:
-                            self.stop_loss = current_price * (
-                                1 - self.params.stop_loss_pct
-                            )
-                            self.take_profit = current_price * (
-                                1 + self.params.take_profit_pct
-                            )
-
-                        self.trailing_stop_price = None
-                        self.highest_price_since_entry = None
+                            self.stop_loss = current_price * (1 - self.params.stop_loss_pct)
+                            self.take_profit = current_price * (1 + self.params.take_profit_pct)
 
                         # Enhanced logging with AI info
                         log_msg = (
                             f"🟢 BUY at ${current_price:.2f} | Size: {size:.8f} | "
                             f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}"
                         )
-
                         if self.ai_validator and "ai_pattern_check" in details:
                             pattern_info = details["ai_pattern_check"]
                             if pattern_info.get("pattern_confirmed"):
                                 log_msg += f" | AI: {pattern_info['pattern_name']} ({pattern_info['confidence']:.0%})"
+                        log_msg += f" | Reason: {details.get('reasoning', 'N/A')}"
+                        logger.info(log_msg)
+                
+                elif signal == -1:  # SELL
+                    size = self.calculate_position_size(signal)
+                    if size > 0:
+                        self.order = self.sell(size=size)
 
+                        # Set stops based on ATR if enabled
+                        if self.params.use_atr_sizing:
+                            atr_value = self.atr[0]
+                            stop_distance = atr_value * self.params.atr_multiplier
+                            self.stop_loss = current_price + stop_distance
+                            self.take_profit = current_price - (stop_distance * 2)
+                        else:
+                            self.stop_loss = current_price * (1 + self.params.stop_loss_pct)
+                            self.take_profit = current_price * (1 - self.params.take_profit_pct)
+
+                        # Enhanced logging with AI info
+                        log_msg = (
+                            f"🔴 SELL at ${current_price:.2f} | Size: {size:.8f} | "
+                            f"SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}"
+                        )
+                        if self.ai_validator and "ai_pattern_check" in details:
+                            pattern_info = details["ai_pattern_check"]
+                            if pattern_info.get("pattern_confirmed"):
+                                log_msg += f" | AI: {pattern_info['pattern_name']} ({pattern_info['confidence']:.0%})"
                         log_msg += f" | Reason: {details.get('reasoning', 'N/A')}"
                         logger.info(log_msg)
             else:
                 # Exit on opposite signal
-                if self.params.exit_on_opposite_signal and signal == -1:
+                if self.params.exit_on_opposite_signal:
+                    if (self.position.size > 0 and signal == -1) or (self.position.size < 0 and signal == 1):
+                        self.order = self.close()
+                        logger.info(
+                            f"🔵 EXIT on opposite signal at ${current_price:.2f} | "
+                            f"Reason: {details.get('reasoning', 'N/A')}"
+                        )
                     self.order = self.close()
                     logger.info(
                         f"🔵 EXIT on opposite signal at ${current_price:.2f} | "
@@ -746,25 +785,15 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
 
     cerebro = bt.Cerebro()
 
-    # Load test dataset
-    test_path = f"data/test_data_{asset_key.lower()}.csv"
+    # ✅ TASK 15: Strict Data Isolation (No Leakage)
+    # We ONLY use test data. We do NOT concat with training data.
     try:
-        test_df = pd.read_csv(test_path, index_col=0, parse_dates=True)
-        test_df.columns = test_df.columns.str.lower()
+        df = pd.read_csv(test_path, index_col=0, parse_dates=True)
+        df.columns = df.columns.str.lower()
+        logger.info(f"✅ Loaded TEST dataset: {len(df)} bars")
     except FileNotFoundError:
         logger.error(f"❌ Test data not found: {test_path}")
         sys.exit(1)
-
-    # Try to load training data for more context
-    train_path = f"data/train_data_{asset_key.lower()}.csv"
-    try:
-        train_df = pd.read_csv(train_path, index_col=0, parse_dates=True)
-        train_df.columns = train_df.columns.str.lower()
-        df = pd.concat([train_df, test_df]).drop_duplicates().sort_index()
-        logger.info(f"✅ Combined train + test data: {len(df)} bars")
-    except FileNotFoundError:
-        logger.warning(f"⚠️ Train data not found, using only test data")
-        df = test_df
 
     logger.info(f"📊 Backtest Data Summary:")
     logger.info(f"  Total bars: {len(df)}")

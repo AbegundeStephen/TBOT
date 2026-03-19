@@ -446,17 +446,26 @@ class InstitutionalCouncilAggregator:
             # Fail-open: If the filter fails, we allow the trade to avoid blocking valid signals due to code errors.
             return True, {'trigger_type': 'ERROR_FALLBACK', 'reason': str(e)}
 
-    def _check_profit_economics_adaptive(self, atr_fast: float) -> bool:
-        """The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling."""
+    def _check_profit_economics_adaptive(self, entry: float, stop_loss: float, atr_fast: float, first_tp_mult: float = 1.5) -> bool:
+        """
+        The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling.
+        ✅ FIXED: Corrected mathematical impossibility (1.5 < 0.5)
+        """
         try:
-            # Using 1.5 ATR as a proxy for the expected first target distance
-            expected_tp_distance = atr_fast * 1.5
-            
-            # BLOCK trade IF: expected_tp_distance < (0.5 * atr_fast)
-            if expected_tp_distance < (0.5 * atr_fast):
-                logger.info(f"[PROFIT] ❌ BLOCKED - Low Reward (Expected TP Distance: {expected_tp_distance:.4f} < 0.5 * ATR Fast: {0.5 * atr_fast:.4f})")
+            risk = abs(entry - stop_loss)
+            if risk <= 0:
+                return True
+
+            expected_reward = risk * first_tp_mult
+            min_required = 0.5 * atr_fast
+
+            if expected_reward < min_required:
+                logger.info(f"[PROFIT GATE] ❌ Blocked - Low Reward (reward {expected_reward:.4f} < {min_required:.4f})")
                 return False
-            return True
+
+            # Minimum 1.2:1 R:R check
+            return (expected_reward / risk) >= 1.2
+
         except Exception as e:
             logger.error(f"[PROFIT] Error: {e}")
             return True
@@ -701,7 +710,20 @@ class InstitutionalCouncilAggregator:
             # ====================================================================
             # 🛡️ THE INTERCEPTOR: ABSOLUTE VETO (Phase 4)
             # ====================================================================
+            entry_price = 0.0
+            stop_loss = 0.0
+
             if signal != 0:
+                # Pre-calculate entry and stop loss for gates and penalties
+                try:
+                    entry_price = float(df['close'].iloc[-1])
+                    risk_cfg = self.config.get('risk', {})
+                    sl_mult = risk_cfg.get('atr_multiplier', 1.5)
+                    sl_dist = atr_fast * sl_mult
+                    stop_loss = entry_price - sl_dist if signal == 1 else entry_price + sl_dist
+                except Exception as e:
+                    logger.warning(f"[COUNCIL] Initial price calculation failed: {e}")
+
                 # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
                 # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
                 safety_threshold = self.config.get('trend_safety_threshold', 0.50)
@@ -787,8 +809,8 @@ class InstitutionalCouncilAggregator:
                         'reasoning': "blocked_by_trap_filter",
                         'final_signal': 0,
                         'signal_quality': 0.0,
-                        'total_score': total_score, # ✨ ADDED
-                        'scores': chosen_scores,     # ✨ ADDED
+                        'total_score': total_score, 
+                        'scores': chosen_scores,     
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
@@ -811,8 +833,8 @@ class InstitutionalCouncilAggregator:
                         'reasoning': "low_volatility_veto",
                         'final_signal': 0,
                         'signal_quality': 0.0,
-                        'total_score': total_score, # ✨ ADDED
-                        'scores': chosen_scores,     # ✨ ADDED
+                        'total_score': total_score, 
+                        'scores': chosen_scores,     
                         'buy_total': buy_total,
                         'sell_total': sell_total,
                         'regime': regime_name,
@@ -827,13 +849,6 @@ class InstitutionalCouncilAggregator:
                 # 4. RISK/REWARD GATE (ECONOMIC VETO)
                 # Reason: Ensures trade has sufficient economic potential before execution.
                 try:
-                    entry_price = float(df['close'].iloc[-1])
-                    risk_cfg = self.config.get('risk', {})
-                    sl_mult = risk_cfg.get('atr_multiplier', 1.5)
-                    
-                    # Simulate Stop Loss
-                    sl_dist = atr_fast * sl_mult
-                    stop_loss = entry_price - sl_dist if signal == 1 else entry_price + sl_dist
                     distance_to_sl = abs(entry_price - stop_loss)
                     
                     if trade_type == "REVERSION":
@@ -843,6 +858,7 @@ class InstitutionalCouncilAggregator:
                         take_profit = ema_20
                     else:
                         # Simulate Take Profit for TREND (Using first partial target or default)
+                        risk_cfg = self.config.get('risk', {})
                         tp_mult_raw = risk_cfg.get('partial_targets', [2.0])[0]
                         tp_dist = atr_fast * tp_mult_raw
                         take_profit = entry_price + tp_dist if signal == 1 else entry_price - tp_dist
@@ -902,7 +918,8 @@ class InstitutionalCouncilAggregator:
                     logger.info(f"[PENALTY] ⚠️ Sniper confirmation failure: -1.0")
 
                 # B. PROFIT ECONOMICS
-                if not self._check_profit_economics_adaptive(atr_fast):
+                # ✅ FIXED: Using corrected method from Task 10
+                if not self._check_profit_economics_adaptive(entry_price, stop_loss, atr_fast):
                     penalty += 1.0
                     logger.info(f"[PENALTY] ⚠️ Low profit economics: -1.0")
 
