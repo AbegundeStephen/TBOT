@@ -126,6 +126,12 @@ class TradingDatabaseManager:
         mt5_ticket: Optional[int] = None,
         binance_order_id: Optional[int] = None,
         vtm_enabled: bool = False,
+        # ✅ TASK 25: Institutional Regime Fields
+        regime_at_entry: Optional[str] = None,
+        session_quality: Optional[str] = None,
+        aggregator_mode: Optional[str] = None,
+        council_score: Optional[float] = None,
+        trade_type_label: Optional[str] = None,
         metadata: Optional[Dict] = None,
         update_if_exists: bool = True,
     ) -> Tuple[Optional[int], bool]:
@@ -158,6 +164,12 @@ class TradingDatabaseManager:
                             float(confidence_score) if confidence_score else None
                         ),
                         "vtm_enabled": vtm_enabled,
+                        # Update institutional fields if present
+                        "regime_at_entry": regime_at_entry,
+                        "session_quality": session_quality,
+                        "aggregator_mode": aggregator_mode,
+                        "council_score": council_score,
+                        "trade_type_label": trade_type_label,
                     }
 
                     if metadata:
@@ -207,6 +219,12 @@ class TradingDatabaseManager:
                 "mt5_ticket": mt5_ticket,
                 "binance_order_id": binance_order_id,
                 "vtm_enabled": vtm_enabled,
+                # ✅ TASK 25 Fields
+                "regime_at_entry": regime_at_entry,
+                "session_quality": session_quality,
+                "aggregator_mode": aggregator_mode,
+                "council_score": council_score,
+                "trade_type_label": trade_type_label,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "status": "open",
                 "metadata": self._serialize_safely(metadata) if metadata else None,

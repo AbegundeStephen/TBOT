@@ -273,48 +273,72 @@ class MeanReversionStrategy(BaseStrategy):
 
         return context
 
+    def _find_swing_pivot(self, values: np.ndarray, direction: str, lookback: int = 60, n_bars: int = 5) -> int:
+        """
+        ✅ TASK 12: Find a significant swing high/low using an N-bar window.
+        """
+        if len(values) < lookback:
+            lookback = len(values)
+            
+        for j in range(n_bars, lookback - n_bars):
+            idx = len(values) - j - 1
+            if idx < n_bars or idx + n_bars >= len(values):
+                continue
+            
+            window = values[idx - n_bars : idx + n_bars + 1]
+            
+            if direction == 'low' and values[idx] == np.min(window):
+                return idx
+            if direction == 'high' and values[idx] == np.max(window):
+                return idx
+                
+        return -1
+
     def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 60) -> bool:
         """
         Dynamic Divergence Engine (Institutional Grade)
         - 60-bar lookback window
-        - price structure divergence
-        - RSI confirmation
+        - n_bars=5 swing pivot detection
         """
-        if len(df) < period:
+        try:
+            if len(df) < period:
+                return False
+                
+            close = df['close'].values
+            rsi = df['rsi'].values
+            
+            # Bullish Divergence (for Long)
+            if signal == 1:
+                # Current pivot low (recent)
+                curr_idx = self._find_swing_pivot(close, 'low', lookback=15, n_bars=5)
+                if curr_idx == -1: return False
+                
+                # Previous significant swing low
+                prev_idx = self._find_swing_pivot(close, 'low', lookback=period, n_bars=5)
+                if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
+                
+                # Bullish: Price Lower Low, RSI Higher Low
+                if close[curr_idx] < close[prev_idx] and rsi[curr_idx] > rsi[prev_idx]:
+                    return True
+                        
+            # Bearish Divergence (for Short)
+            elif signal == -1:
+                # Current pivot high (recent)
+                curr_idx = self._find_swing_pivot(close, 'high', lookback=15, n_bars=5)
+                if curr_idx == -1: return False
+                
+                # Previous significant swing high
+                prev_idx = self._find_swing_pivot(close, 'high', lookback=period, n_bars=5)
+                if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
+                
+                # Bearish: Price Higher High, RSI Lower High
+                if close[curr_idx] > close[prev_idx] and rsi[curr_idx] < rsi[prev_idx]:
+                    return True
+                        
             return False
-            
-        close = df['close'].values
-        rsi = df['rsi'].values
-        
-        # Bullish Divergence (for Long)
-        if signal == 1:
-            # Current low vs Previous low in 60-bar window
-            current_low_idx = -1
-            # Find previous significant low
-            prev_low_idx = -1
-            for j in range(5, period):
-                if close[-j] < close[-j-1] and close[-j] < close[-j+1]:
-                    prev_low_idx = -j
-                    break
-            
-            if prev_low_idx != -1:
-                if close[current_low_idx] < close[prev_low_idx] and rsi[current_low_idx] > rsi[prev_low_idx]:
-                    return True
-                    
-        # Bearish Divergence (for Short)
-        elif signal == -1:
-            current_high_idx = -1
-            prev_high_idx = -1
-            for j in range(5, period):
-                if close[-j] > close[-j-1] and close[-j] > close[-j+1]:
-                    prev_high_idx = -j
-                    break
-            
-            if prev_high_idx != -1:
-                if close[current_high_idx] > close[prev_high_idx] and rsi[current_high_idx] < rsi[prev_high_idx]:
-                    return True
-                    
-        return False
+        except Exception as e:
+            logger.debug(f"Divergence error: {e}")
+            return False
 
     def generate_labels(
         self, df: pd.DataFrame, df_4h: pd.DataFrame = None, pattern_miner = None

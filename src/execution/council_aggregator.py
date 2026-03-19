@@ -301,6 +301,7 @@ class InstitutionalCouncilAggregator:
 
             displacement_passed = False
             displacement_reason = ""
+            hard_blocked = False
             
             # --- Staircase Bypass ---
             # Compute cumulative displacement across last three candles
@@ -312,15 +313,16 @@ class InstitutionalCouncilAggregator:
                 displacement_passed = True
                 displacement_reason = "Staircase Bypass: 3-bar displacement > 1.2 ATR"
 
-            # --- News Exception ---
+            # --- ✅ News Exception FIX (T11) ---
             # If candle size is extreme, reject unless institutional volume confirms
             if body > (2.5 * atr_fast):
                 volume_average = volume_rolling_avg
-                volume = latest['volume']
-                if volume > (4.5 * volume_average):
+                volume = latest.get('volume', 0)
+                if volume > (4.5 * volume_average) and volume_average > 0:
                     displacement_passed = True
                     displacement_reason = "News Exception: Institutional volume confirmed huge candle."
                 else:
+                    hard_blocked = True # 🚨 SET HARD BLOCK
                     displacement_passed = False
                     displacement_reason = "News Exception: Huge candle without institutional volume."
 
@@ -339,17 +341,18 @@ class InstitutionalCouncilAggregator:
             if conviction_score >= 1.0:
                 displacement_passed = True # Override for coiled spring breakout
 
-            # If none of the new institutional rules passed, fallback to standard momentum
-            if not displacement_passed:
-                candle_range = latest['high'] - latest['low']
+            # If none of the institutional rules passed, fallback to standard momentum
+            # ✅ FIX: Added 'not hard_blocked' guard
+            if not displacement_passed and not hard_blocked:
+                candle_range = latest.get('high', 0) - latest.get('low', 0)
                 if body > (0.5 * atr_fast) or candle_range > (1.0 * atr_fast):
                     displacement_passed = True
                 else:
                     displacement_reason = "Standard: Displacement < 0.5 ATR and range < 1.0 ATR"
 
             if not displacement_passed:
-                logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
-                return False, {'trigger_type': None, 'reason': displacement_reason}
+                if self.detailed_logging: logger.info(f"[SNIPER] ❌ BLOCKED - {displacement_reason}")
+                return False, {'trigger_type': "DISPLACEMENT", 'reason': displacement_reason}
 
             # ================================================================
             # 1. AI Pattern Confidence
@@ -927,40 +930,25 @@ class InstitutionalCouncilAggregator:
                 # Apply penalties
                 total_score -= penalty
 
-                # C. SESSION LIQUIDITY PENALTY
-                # Reason: Suppress weak Asian breakouts unless supported by extreme institutional volume.
+                # C. SESSION LIQUIDITY PENALTY (Phase 4)
+                # ✅ TASK 23: Refactored Session Gate
+                # Reason: Use institutional-grade session quality check.
                 try:
-                    current_time = df.index[-1]
-                    # Ensure current_time is a datetime object
-                    if hasattr(current_time, "hour"):
-                        current_hour = current_time.hour
-                    else:
-                        # Fallback if index is string
-                        current_hour = pd.to_datetime(current_time).hour
-
-                    is_asian_session = current_hour >= 0 and current_hour < 7
-
-                    if is_asian_session:
-                        latest_volume = df["volume"].iloc[-1]
-                        avg_volume_50 = df["volume"].rolling(50).mean().iloc[-1]
-
-                        if latest_volume > 3.0 * avg_volume_50:
-                            session_multiplier = 1.0
+                    from src.utils.market_hours import MarketHours
+                    
+                    if "BTC" in self.asset_type:
+                        session_quality = MarketHours.get_btc_session_quality()
+                        
+                        if session_quality == "LOW":
+                            # Apply +0.5 to required score (Harder to pass)
+                            required_score += 0.5
                             logger.info(
-                                f"[SESSION] Institutional move detected in Asian session (Vol: {latest_volume/avg_volume_50:.1f}x avg). No penalty."
+                                f"[SESSION] ⚠️ Low liquidity session: Required score increased to {required_score:.1f}"
                             )
                         else:
-                            session_multiplier = 0.5
-                            logger.info(
-                                f"[SESSION] ⚠️ Low liquidity Asian session: Multiplier 0.5x applied to score {total_score:.2f}"
-                            )
-                    else:
-                        session_multiplier = 1.0
-
-                    total_score *= session_multiplier
-
+                            if self.detailed_logging: logger.info(f"[SESSION] ✅ High liquidity session (No penalty)")
                 except Exception as e:
-                    logger.warning(f"[SESSION] Penalty calculation failed: {e}")
+                    logger.warning(f"[SESSION] Gate calculation failed: {e}")
 
                 # ✨ NEW: Dynamic Strategy Confidence Weighting
                 # Reason: Boost high-performing strategies and penalize failing ones based on live history.
