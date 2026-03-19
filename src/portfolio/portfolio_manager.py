@@ -789,6 +789,7 @@ class PortfolioManager:
             
             # ================================================================
             # STEP 3: Correlation Malus (Institutional Upgrade)
+            # ✅ TASK 24: Rolling Pearson Correlation
             # ================================================================
             correlation_threshold = self.portfolio_config.get(
                 "correlation_threshold", 0.70
@@ -797,26 +798,28 @@ class PortfolioManager:
             
             # Check if we hold correlated positions
             if len(self.positions) > 0:
-                asset_group = self._get_asset_group(asset)
+                max_corr = 0.0
+                correlated_asset = None
                 
                 for pos_asset, position in self.positions.items():
-                    # 1. Group-based check (Categorical)
-                    other_group = self._get_asset_group(pos_asset)
-                    same_group = (asset_group == other_group and asset_group != "other")
+                    if pos_asset == asset: continue # Skip self
                     
-                    # 2. Numerical Correlation check
-                    # Uses price_history to calculate actual Pearson correlation
-                    num_corr = self.check_correlation(asset, pos_asset)
+                    # Numerical Correlation check (Pearson)
+                    num_corr = abs(self.check_correlation(asset, pos_asset))
+                    if num_corr > max_corr:
+                        max_corr = num_corr
+                        correlated_asset = pos_asset
+                
+                # Apply dynamic malus if threshold breached
+                if max_corr > correlation_threshold:
+                    # Dynamic reduction: e.g., 0.8 corr -> 0.2 multiplier (80% reduction)
+                    # Clamped at 0.3 minimum multiplier (70% max reduction)
+                    correlation_malus = max(0.3, 1.0 - max_corr)
                     
-                    # If either condition is met, apply malus
-                    if same_group or abs(num_corr) > correlation_threshold:
-                        correlation_malus = 0.5
-                        reason = f"same group: {asset_group}" if same_group else f"high correlation: {num_corr:.2f}"
-                        logger.warning(
-                            f"  ⚠️ Correlation Malus: Holding {pos_asset} ({reason})"
-                        )
-                        logger.info(f"  Risk reduced by {1 - correlation_malus:.0%}")
-                        break
+                    logger.warning(
+                        f"  ⚠️ Correlation Malus: High linkage with {correlated_asset} ({max_corr:.2f})"
+                    )
+                    logger.info(f"  Risk reduced to {correlation_malus:.0%} of original budget")
             
             risk_pct *= correlation_malus
             

@@ -365,12 +365,34 @@ class VeteranTradeManager:
         return abs(price1 - price2) / price1 * 100
 
     def _calculate_atr(self) -> float:
+        """
+        ✅ TASK 18: Regime-adaptive ATR: fast in expanding vol, slow in compressed vol.
+        """
         try:
-            atr = talib.ATR(self.high, self.low, self.close, timeperiod=self.atr_period)
-            current_atr = atr[-1]
-            if np.isnan(current_atr) or current_atr <= 0:
-                return self.entry_price * 0.02
-            return current_atr
+            atr_fast = talib.ATR(self.high, self.low, self.close, timeperiod=7)[-1]
+            atr_mid  = talib.ATR(self.high, self.low, self.close, timeperiod=14)[-1]
+            atr_slow = talib.ATR(self.high, self.low, self.close, timeperiod=28)[-1]
+            
+            if np.isnan(atr_mid) or atr_slow == 0:
+                return self.entry_price * 0.015
+                
+            ratio = atr_fast / atr_slow
+            
+            if ratio > 1.35:
+                # Expanding vol — tighten fast
+                selected_atr = atr_fast
+                reason = "Expanding Vol (Tighten)"
+            elif ratio < 0.75:
+                # Compressed vol — breathe wide
+                selected_atr = atr_slow
+                reason = "Compressed Vol (Wide)"
+            else:
+                selected_atr = atr_mid
+                reason = "Normal Vol"
+                
+            logger.info(f"[VTM] Dynamic ATR Selection: {selected_atr:.4f} ({reason}, Ratio: {ratio:.2f})")
+            return selected_atr
+            
         except Exception as e:
             logger.error(f"[VTM] ATR error: {e}")
             return self.entry_price * 0.02

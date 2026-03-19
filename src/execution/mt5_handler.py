@@ -331,10 +331,13 @@ class MT5ExecutionHandler:
             account_info = mt5.account_info()
             if account_info:
                 margin_free = account_info.margin_free
-                margin_required = 50.0 # Standard safety buffer
+                
+                # ✅ NEW: Use dynamic safety buffer based on protocol
+                is_small_account = self.trading_config.get("small_account_protocol", False)
+                margin_required = 10.0 if is_small_account else 50.0
 
                 if margin_free < margin_required:
-                    return False, f"Insufficient margin: ${margin_free:.2f} free"
+                    return False, f"Insufficient margin: ${margin_free:.2f} free (need ${margin_required:.2f})"
 
         except Exception as e:
             logger.debug(f"[MT5] Margin check warning: {e}")
@@ -547,7 +550,8 @@ class MT5ExecutionHandler:
             ohlc_data, df = self._fetch_ohlc_for_vtm(symbol, asset)
 
             # Margin validation
-            if not self._validate_margin(volume_lots, current_price, symbol_info):
+            small_account_active = signal_details.get("small_account_protocol_active", False) if signal_details else False
+            if not self._validate_margin(volume_lots, current_price, symbol_info, small_account_active=small_account_active):
                 return False
 
             # Execute order
@@ -664,10 +668,16 @@ class MT5ExecutionHandler:
                 logger.error(f"[VTM] ❌ OHLC fetch failed for {asset}: {e}")
         return ohlc_data, df
 
-    def _validate_margin(self, volume_lots, current_price, symbol_info):
+    def _validate_margin(self, volume_lots, current_price, symbol_info, small_account_active: bool = False):
         """Helper to perform pre-flight margin check."""
         if self.mode.lower() == "paper":
             return True
+            
+        # ✅ NEW: Bypass margin check for Small Account Protocol
+        if small_account_active:
+            logger.info("[MARGIN] 🛡️ Small Account Protocol active: Bypassing margin validation for MIN LOT.")
+            return True
+            
         try:
             account_info = mt5.account_info()
             if not account_info:
