@@ -436,29 +436,6 @@ class Position:
                 self.lowest_price = current_price
             return self.lowest_price * (1 + self.trailing_stop_pct)
 
-    def should_close(self, current_price: float) -> Tuple[bool, str]:
-        """Check if position should be closed based on stop loss/take profit"""
-        if self.stop_loss:
-            if self.side == "long" and current_price <= self.stop_loss:
-                return True, "stop_loss"
-            elif self.side == "short" and current_price >= self.stop_loss:
-                return True, "stop_loss"
-
-        if self.take_profit:
-            if self.side == "long" and current_price >= self.take_profit:
-                return True, "take_profit"
-            elif self.side == "short" and current_price <= self.take_profit:
-                return True, "take_profit"
-
-        trail_stop = self.update_trailing_stop(current_price)
-        if trail_stop:
-            if self.side == "long" and current_price <= trail_stop:
-                return True, "trailing_stop"
-            elif self.side == "short" and current_price >= trail_stop:
-                return True, "trailing_stop"
-
-        return False, ""
-
     def __getstate__(self):
         """
         Custom method for pickling. Excludes non-serializable attributes.

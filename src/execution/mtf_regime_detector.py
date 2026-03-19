@@ -99,9 +99,14 @@ class MultiTimeFrameRegimeDetector:
         df_copy[f"ema_{FAST_EMA}"] = ta.EMA(df_copy["close"], timeperiod=FAST_EMA)
         df_copy[f"ema_{SLOW_EMA}"] = ta.EMA(df_copy["close"], timeperiod=SLOW_EMA)
         
-        # Use fallback span if not enough data for BASELINE
-        baseline_span = min(BASELINE_EMA, len(df_copy))
-        df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=baseline_span)
+        # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
+        if len(df_copy) < 400:
+            # We don't raise here to prevent crashing during startup downloads, 
+            # but we return an empty DF so the calling method knows burn-in failed.
+            logger.warning(f"[REGIME] ⚠️ Insufficient bars for EMA-200 burn-in ({len(df_copy)}/400).")
+            return pd.DataFrame()
+
+        df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=BASELINE_EMA)
         
         # Trend strength and momentum
         df_copy["adx"] = ta.ADX(df_copy["high"], df_copy["low"], df_copy["close"], timeperiod=14)
@@ -300,32 +305,34 @@ class MultiTimeFrameRegimeDetector:
         latest_1h = df_1h_with_ema.iloc[-1]
         latest_4h = df_4h_with_ema.iloc[-1]
 
-        # Get current prices and EMAs
         price_1h = latest_1h["close"]
+        price_4h = latest_4h["close"]
+        ema_4h_baseline = latest_4h[f"ema_{BASELINE_EMA}"]
+        ema_4h_slow = latest_4h[f"ema_{SLOW_EMA}"]
         ema_1h_slow = latest_1h[f"ema_{SLOW_EMA}"]
 
-        price_4h = latest_4h["close"]
-        ema_4h_slow = latest_4h[f"ema_{SLOW_EMA}"]
-        ema_4h_baseline = latest_4h[f"ema_{BASELINE_EMA}"]
-
         # ✅ TASK 21: Rolling Quantile Thresholds (Phase 3)
-        # Calculate distance from price to baseline EMA as a percentage
-        ema_dist_4h = abs(price_4h - ema_4h_baseline) / ema_4h_baseline
+        # Reason: Fixed thresholds are blind to vol cycles.
+        all_dists = (abs(df_4h_with_ema["close"] - df_4h_with_ema[f"ema_{BASELINE_EMA}"]) / df_4h_with_ema[f"ema_{BASELINE_EMA}"]).tail(100)
         
-        # Compute 0.65 quantile of recent distances (last 100 bars)
-        recent_dists = (abs(df_4h_with_ema["close"] - df_4h_with_ema[f"ema_{BASELINE_EMA}"]) / df_4h_with_ema[f"ema_{BASELINE_EMA}"]).tail(100)
-        dynamic_threshold = recent_dists.quantile(0.65)
+        # Bullish needs more extension (0.65), Bearish slightly less (0.35)
+        thresh_bull = all_dists.quantile(0.65)
+        thresh_bear = all_dists.quantile(0.35)
         
-        # Ensure threshold is within reasonable bounds (0.5% to 3.0%)
-        dynamic_threshold = max(0.005, min(0.03, dynamic_threshold))
+        # Clamp to realistic institutional bounds [0.05% to 0.40%]
+        thresh_bull = max(0.0005, min(0.0040, thresh_bull))
+        thresh_bear = max(0.0005, min(0.0040, thresh_bear))
+
+        ema_dist_4h = (price_4h - ema_4h_baseline) / ema_4h_baseline
 
         # Macro Trend from Governor (1D 200 EMA)
         macro_bullish = governor_status.is_bullish
         macro_bearish = governor_status.is_bearish
 
-        # Intermediate & Short-term alignment (Dynamic)
-        # Consensus requires price to be beyond the dynamic threshold for a 'Strong' regime
-        is_extended_4h = ema_dist_4h > dynamic_threshold
+        # Intermediate & Short-term alignment
+        is_extended_bull = ema_dist_4h > thresh_bull
+        is_extended_bear = ema_dist_4h < -thresh_bear
+        
         above_4h_200 = price_4h > ema_4h_baseline
         above_4h_50 = price_4h > ema_4h_slow
         above_1h_50 = price_1h > ema_1h_slow
@@ -333,33 +340,33 @@ class MultiTimeFrameRegimeDetector:
         # 5-TIER LOGIC (Regime-Adaptive)
         if macro_bullish:
             # BLOCK BEARISH STATES
-            if above_4h_50 and above_1h_50 and is_extended_4h:
+            if above_4h_50 and above_1h_50 and is_extended_bull:
                 consensus_regime = "BULLISH"
                 score = 1.0
-                reasons.append(f"Macro BULLISH: Strong alignment (dist {ema_dist_4h:.2%} > threshold {dynamic_threshold:.2%})")
+                reasons.append(f"Macro BULLISH: Strong extension ({ema_dist_4h:.4%} > {thresh_bull:.4%})")
             elif above_4h_200:
                 consensus_regime = "SLIGHTLY_BULLISH"
                 score = 0.5
-                reasons.append("Macro BULLISH: Above 4H 200 but not yet extended.")
+                reasons.append("Macro BULLISH: Above 4H 200 (Not yet extended)")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
-                reasons.append("Macro BULLISH but below 4H 200 or conflicting signals.")
+                reasons.append("Macro BULLISH but below 4H 200 or mixed EMAs.")
         
         elif macro_bearish:
             # BLOCK BULLISH STATES
-            if not above_4h_50 and not above_1h_50 and is_extended_4h:
+            if not above_4h_50 and not above_1h_50 and is_extended_bear:
                 consensus_regime = "BEARISH"
                 score = -1.0
-                reasons.append(f"Macro BEARISH: Strong alignment (dist {ema_dist_4h:.2%} > threshold {dynamic_threshold:.2%})")
+                reasons.append(f"Macro BEARISH: Strong extension ({ema_dist_4h:.4%} < -{thresh_bear:.4%})")
             elif not above_4h_200:
                 consensus_regime = "SLIGHTLY_BEARISH"
                 score = -0.5
-                reasons.append("Macro BEARISH: Below 4H 200 but not yet extended.")
+                reasons.append("Macro BEARISH: Below 4H 200 (Not yet extended)")
             else:
                 consensus_regime = "NEUTRAL"
                 score = 0.0
-                reasons.append("Macro BEARISH but above 4H 200 or conflicting signals.")
+                reasons.append("Macro BEARISH but above 4H 200 or mixed EMAs.")
         
         else:
             consensus_regime = "NEUTRAL"

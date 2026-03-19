@@ -227,6 +227,26 @@ class MarketHours:
         return 0
 
     @staticmethod
+    def get_btc_session_quality() -> str:
+        """
+        ✅ TASK 23: Evaluates current session liquidity for BTC.
+        Returns: "HIGH" or "LOW"
+        """
+        now = MarketHours.get_gmt_time()
+        hour = now.hour
+        day = now.weekday()
+
+        # Weekend Gate (already implemented in should_trade, but here for safety)
+        if day == 5 or (day == 4 and hour >= 22) or (day == 6 and hour < 22):
+            return "LOW"
+
+        # Asian Session (00:00 - 07:00 UTC) is generally lower liquidity for BTC institutional moves
+        if 0 <= hour < 7:
+            return "LOW"
+            
+        return "HIGH"
+
+    @staticmethod
     def should_trade(asset_type: str = "forex") -> bool:
         """
         Simple check: should we be actively trading this asset right now?

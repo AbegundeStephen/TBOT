@@ -1447,8 +1447,25 @@ class TradingBot:
             # FALLBACK: Your existing single-timeframe detection
             logger.debug(f"[REGIME] {asset_name}: Using fallback detection")
 
-            # ... YOUR EXISTING _detect_regime CODE HERE ...
-            # (Keep all your existing logic as fallback)
+            # 1. Get strategy for indicators
+            from src.strategies.ema_strategy import EMAStrategy
+            ema_cfg = self.config.get("strategy_configs", {}).get("exponential_moving_averages", {}).get(asset_name, {})
+            ema_strat = EMAStrategy(ema_cfg)
+            
+            # 2. Generate features
+            features_df = ema_strat.generate_features(df)
+            if features_df.empty:
+                return False, 0.5
+                
+            latest = features_df.iloc[-1]
+            ema_diff = latest.get("ema_diff_pct", 0.0)
+            
+            # 3. Decision (Hysteresis)
+            is_bull = ema_diff > 0
+            confidence = min(1.0, 0.5 + abs(ema_diff) / 10.0)
+            
+            self.previous_regime = is_bull
+            return is_bull, confidence
 
         except Exception as e:
             logger.error(f"[REGIME] Detection failed: {e}", exc_info=True)
