@@ -13,6 +13,7 @@ Key fixes:
 import pandas as pd
 import numpy as np
 import logging
+import talib as ta
 from typing import Tuple, Dict, Optional
 from collections import deque, defaultdict
 from datetime import datetime, timedelta
@@ -201,6 +202,27 @@ class HybridSignalValidator:
         # Layer 2: Adaptive Thresholds
         if self.enable_adaptive:
             self._update_adaptive_thresholds_fixed(df, signal_details, strategy)
+
+        # Layer 2.5: Flash Crash Breaker (Extreme Dislocation)
+        # Reason: Prevents mean reversion during vertical moves or liquidity voids.
+        try:
+            current_price = float(df["close"].iloc[-1])
+            ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+            distance = abs(current_price - ema_20)
+            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            
+            if distance > (4.0 * atr_fast):
+                if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
+                    logger.warning(f"[AI] Flash Crash VETO: Distance {distance:.2f} > 4xATR. Blocking REVERSION.")
+                    return self._reject_signal(
+                        signal_details, 
+                        {"near_level": False, "reason": "flash_crash"}, 
+                        None, 
+                        reason="flash_crash_breaker", 
+                        strategy=strategy
+                    )
+        except Exception as e:
+            logger.error(f"[AI] Flash crash check failed: {e}")
 
         # Layer 3: Support/Resistance Check
         current_price = float(df["close"].iloc[-1])
@@ -405,26 +427,6 @@ class HybridSignalValidator:
         try:
             if len(df) < 15: return {"pattern_confirmed": False, "reason": "insufficient_data"}
             
-            # ================================================================
-            # FLASH CRASH BREAKER: Extreme Volatility Circuit Breaker
-            # ================================================================
-            current_price = df["close"].iloc[-1]
-            ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
-            price_deviation = abs(current_price - ema_20)
-            
-            # Calculate ATR for scaling
-            import talib as ta
-            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
-            
-            if price_deviation > (4.0 * atr_fast):
-                if strategy == "mean_reversion":
-                    logger.info(f"[AI] Flash Crash Breaker triggered (Deviation: {price_deviation:.2f} > 4xATR: {4.0*atr_fast:.2f}). Blocking MR trade.")
-                    return {
-                        "pattern_confirmed": False,
-                        "confidence": 0.0,
-                        "reason": "flash_crash_breaker"
-                    }
-
             snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
             if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
             snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
@@ -452,26 +454,27 @@ class HybridSignalValidator:
             # ================================================================
             # MR PATTERN CONFIRMATION: Strict Institutional Entry Rules
             # ================================================================
-            if strategy == "mean_reversion":
-                allowed_long = ["hammer", "morning star", "bullish engulfing"]
-                allowed_short = ["shooting star", "evening star", "bearish engulfing"]
+            if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
+                allowed_long = ["hammer", "morning_star", "bullish_engulfing"]
+                allowed_short = ["shooting_star", "evening_star", "bearish_engulfing"]
                 
-                pattern_lower = pattern_name.lower()
+                # Normalize for matching
+                norm_pattern = pattern_name.lower().replace(" ", "_")
                 
-                if signal == 1 and pattern_lower not in allowed_long:
+                if signal == 1 and norm_pattern not in allowed_long:
                     logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for LONG.")
                     return {
                         "pattern_confirmed": False, 
                         "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{pattern_lower}"
+                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
                     }
                 
-                if signal == -1 and pattern_lower not in allowed_short:
+                if signal == -1 and norm_pattern not in allowed_short:
                     logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for SHORT.")
                     return {
                         "pattern_confirmed": False, 
                         "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{pattern_lower}"
+                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
                     }
             
             # --- Volume Weighting ---

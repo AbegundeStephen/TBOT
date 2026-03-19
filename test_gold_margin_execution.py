@@ -15,8 +15,14 @@ import logging
 import sys
 import time
 import argparse
+import os
+from dotenv import load_dotenv
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Load environment variables
+load_dotenv()
+
 import MetaTrader5 as mt5
 
 # Add src to path
@@ -44,7 +50,22 @@ def load_config():
         config_path = Path("config/config.template.json")
 
     with open(config_path, "r") as f:
-        return json.load(f)
+        config = json.load(f)
+    
+    # ✨  Override config with environment variables for security
+    if os.getenv("SUPABASE_URL"):
+        config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")
+    if os.getenv("SUPABASE_KEY"):
+        config.setdefault("database", {})["supabase_key"] = os.getenv("SUPABASE_KEY")
+    
+    if os.getenv("MT5_LOGIN"):
+        config.setdefault("api", {}).setdefault("mt5", {})["login"] = int(os.getenv("MT5_LOGIN"))
+    if os.getenv("MT5_PASSWORD"):
+        config.setdefault("api", {}).setdefault("mt5", {})["password"] = os.getenv("MT5_PASSWORD")
+    if os.getenv("MT5_SERVER"):
+        config.setdefault("api", {}).setdefault("mt5", {})["server"] = os.getenv("MT5_SERVER")
+        
+    return config
 
 
 def initialize_mt5(config):

@@ -21,6 +21,7 @@ from src.execution.binance_futures import BinanceFuturesHandler
 from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.position_rebalancer import PositionRebalancer
 from src.execution.veteran_trade_manager import VeteranTradeManager
+from src.utils.trade_logger import log_trade_event
 from src.data.data_manager import CLOUDFRONT_HEADERS
 from src.market.price_cache import price_cache
 
@@ -359,6 +360,9 @@ class BinanceExecutionHandler:
             "max_positions_per_asset", 3
         )
         self.is_paper_mode = self.mode.lower() == "paper"
+        self.execution_lock = {}  # ✨ NEW: Prevent duplicate trades
+        self.last_trade_time = {}  # ✨ NEW: Rapid-fire cooldown
+        self.trade_timestamps_hourly = []  # ✨ NEW: Hourly trade limit
 
         # ✨ NEW: Standardized Hedging Config
         self.allow_hedging = self.trading_config.get(
@@ -539,6 +543,40 @@ class BinanceExecutionHandler:
             logger.error(f"[BINANCE HANDLER] Wrong Asset: {asset_name}")
             return False
 
+        # ================================================================
+        # RAPID-FIRE COOLDOWN (30s)
+        # ================================================================
+        now = time.time()
+        
+        # 1. Rapid-fire check (30s)
+        last_time = self.last_trade_time.get(asset_name, 0)
+        if now - last_time < 30:
+            logger.warning(f"[COOLDOWN] Rapid-fire blocked for {asset_name} ({30 - (now - last_time):.1f}s remaining)")
+            return False
+
+        # 2. Hourly trade limit (Max 5 trades per hour)
+        self.trade_timestamps_hourly = [
+            t for t in self.trade_timestamps_hourly if now - t < 3600
+        ]
+        if len(self.trade_timestamps_hourly) >= 5:
+            logger.warning(f"[THROTTLE] Hourly trade limit reached ({len(self.trade_timestamps_hourly)}/5). Blocking {asset_name}.")
+            return False
+
+        # ================================================================
+        # DUPLICATE EXECUTION LOCK
+        # ================================================================
+        trade_type = "TREND"
+        if signal_details:
+            trade_type = signal_details.get("trade_type", "TREND")
+            
+        trade_key = f"{asset_name}_{trade_type}_{signal}"
+        
+        if self.execution_lock.get(trade_key, False):
+            logger.warning(f"[LOCK] Duplicate execution blocked for {trade_key}")
+            return False
+            
+        self.execution_lock[trade_key] = True
+        
         try:
             if current_price is None:
                 current_price = self.get_current_price(symbol=self.symbol, force_live=True)
@@ -546,10 +584,6 @@ class BinanceExecutionHandler:
             if current_price is None or current_price <= 0:
                 logger.error(f"{asset_name}: Invalid price: {current_price}")
                 return False
-
-            trade_type = "TREND"
-            if signal_details:
-                trade_type = signal_details.get("trade_type", "TREND")
 
             existing_positions = self.portfolio_manager.get_asset_positions(asset_name)
             long_positions = [p for p in existing_positions if p.side == "long"]
@@ -698,6 +732,8 @@ class BinanceExecutionHandler:
         except Exception as e:
             logger.error(f"Error executing {asset_name} signal: {e}", exc_info=True)
             return False
+        finally:
+            self.execution_lock[trade_key] = False
 
     def _calculate_asymmetric_risk(
         self, trade_type: str, base_risk: float = 0.015
@@ -978,53 +1014,112 @@ class BinanceExecutionHandler:
                 return False
 
             # ================================================================
-            # STEP 5: Execute order on exchange
+            # STEP 5: Execute order on exchange (with SAFE RETRY)
             # ================================================================
             order_id = None
+            requested_price = current_price
+            executed_price = current_price
+            order = None
+            MAX_RETRIES = 2
 
-            if is_futures:
+            for attempt in range(MAX_RETRIES):
                 try:
-                    if side == "long":
-                        order = self.futures_handler.open_long_position(
-                            quantity=quantity,
-                            stop_loss=initial_stop,
-                            take_profit=None,
-                        )
-                    else:
-                        order = self.futures_handler.open_short_position(
-                            quantity=quantity,
-                            stop_loss=initial_stop,
-                            take_profit=None,
-                        )
-
-                    if order:
-                        order_id = order.get("orderId")
-                        logger.info(
-                            f"[FUTURES] ✓ {side.upper()} opened (Order: {order_id})"
-                        )
-                    else:
-                        logger.error(f"[FUTURES] ❌ Failed to open {side.upper()}")
-                        return False
-
-                except Exception as e:
-                    logger.error(f"[FUTURES] ❌ Error: {e}")
-                    return False
-            else:
-                if not self.is_paper_mode:
-                    try:
+                    if is_futures:
                         if side == "long":
-                            order = self.client.order_market_buy(
-                                symbol=self.symbol, quantity=quantity
+                            order = self.futures_handler.open_long_position(
+                                quantity=quantity,
+                                stop_loss=initial_stop,
+                                take_profit=None,
                             )
-                            order_id = order.get("orderId")
                         else:
-                            logger.error("[SPOT] ❌ SHORT requires Futures API")
-                            return False
-                    except Exception as e:
-                        logger.error(f"[SPOT] ❌ Error: {e}")
+                            order = self.futures_handler.open_short_position(
+                                quantity=quantity,
+                                stop_loss=initial_stop,
+                                take_profit=None,
+                            )
+                    else:
+                        if not self.is_paper_mode:
+                            if side == "long":
+                                order = self.client.order_market_buy(
+                                    symbol=self.symbol, quantity=quantity
+                                )
+                            else:
+                                logger.error("[SPOT] ❌ SHORT requires Futures API")
+                                return False
+                        else:
+                            # Paper Mode Simulation
+                            order = {
+                                "status": "FILLED",
+                                "orderId": f"PAPER_{side.upper()}_{int(time.time())}",
+                                "avgPrice": current_price
+                            }
+
+                    # Validate response
+                    # ✅ ENHANCED: If we have an orderId, the order was accepted by the exchange
+                    if order and order.get("orderId"):
+                        # For MARKET orders, NEW often means it was accepted and is being filled
+                        if order.get("status") in ["FILLED", "PARTIALLY_FILLED", "NEW"]:
+                            break
+                    
+                    if attempt < MAX_RETRIES - 1:
+                        logger.warning(f"[RETRY] Order failed or not filled (Attempt {attempt+1}/{MAX_RETRIES}). Retrying in 1s...")
+                        time.sleep(1)
+                except Exception as e:
+                    if attempt < MAX_RETRIES - 1:
+                        logger.warning(f"[RETRY] Exception during execution: {e}. Retrying in 1s...")
+                        time.sleep(1)
+                    else:
+                        logger.error(f"[EXECUTION] ❌ Critical failure after {MAX_RETRIES} attempts: {e}")
                         return False
-                else:
-                    order_id = f"PAPER_{side.upper()}_{int(time.time())}"
+
+            # ✅ FINAL VALIDATION (Step 1)
+            # If we have an orderId, we proceed. We'll fetch the price/status if NEW.
+            if not order or not order.get("orderId"):
+                logger.error(f"[EXECUTION] ❌ Order not filled properly after retries.")
+                return False
+
+            order_id = order.get("orderId")
+            
+            # ✅ EXTRACT EXECUTED PRICE (Step 2 & 3)
+            # If status is NEW or price is 0, fetch the latest order status from the exchange
+            raw_price = order.get("avgPrice", 0)
+            executed_price = float(raw_price) if raw_price else 0
+            
+            if executed_price == 0 and is_futures and not self.is_paper_mode:
+                try:
+                    logger.info(f"[EXECUTION] Fetching actual fill price for order {order_id}...")
+                    time.sleep(0.5) # Tiny wait for exchange to process fills
+                    updated_order = self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
+                    raw_price = updated_order.get("avgPrice", 0)
+                    executed_price = float(raw_price) if raw_price else 0
+                    
+                    if executed_price == 0:
+                        # Try cumulative quote quantity
+                        cum_quote = float(updated_order.get("cumQuote", 0))
+                        exec_qty = float(updated_order.get("executedQty", 0))
+                        if exec_qty > 0:
+                            executed_price = cum_quote / exec_qty
+                except Exception as e:
+                    logger.warning(f"[EXECUTION] Failed to fetch updated order status: {e}")
+                
+            if executed_price <= 0:
+                executed_price = current_price
+                logger.warning(f"[EXECUTION] Using current_price fallback: ${executed_price:,.2f}")
+
+            # ✅ TRACK SLIPPAGE
+            slippage = abs(executed_price - requested_price)
+            slippage_pct = (slippage / requested_price) * 100 if requested_price > 0 else 0
+            logger.info(
+                f"[SLIPPAGE] {asset_name} {side.upper()} | "
+                f"Req: ${requested_price:,.2f}, Fill: ${executed_price:,.2f}, "
+                f"Diff: ${slippage:,.2f} ({slippage_pct:.4f}%)"
+            )
+
+            logger.info(
+                f"[EXECUTION] ✓ {side.upper()} opened & filled\n"
+                f"  Order ID: {order_id}\n"
+                f"  Fill Price: ${executed_price:,.2f}"
+            )
 
             # ================================================================
             # STEP 6: Fetch OHLC for VTM
@@ -1086,6 +1181,21 @@ class BinanceExecutionHandler:
             )
 
             if success:
+                # ✅ Standardized Log
+                log_trade_event("ENTRY", {
+                    "symbol": self.symbol,
+                    "asset": asset_name,
+                    "side": side,
+                    "price": current_price,
+                    "size": quantity,
+                    "trade_type": trade_type,
+                    "position_id": order_id
+                })
+
+                # ✅ Update last trade time for cooldown
+                self.last_trade_time[asset_name] = time.time()
+                self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
+                
                 logger.info(
                     f"\n{'='*80}\n"
                     f"✅ {asset_name} {side.upper()} POSITION OPENED\n"
@@ -1215,6 +1325,18 @@ class BinanceExecutionHandler:
             current_price = self.get_current_price(symbol=symbol, force_live=True)
             if not current_price:
                 return False
+
+            # ✅ RECONCILIATION: Fetch live positions from Binance
+            is_futures = self.config.get("assets", {}).get(asset_name, {}).get("enable_futures", False)
+            if is_futures and self.futures_handler:
+                try:
+                    active_positions = self.futures_handler.get_all_positions_info()
+                    # Convert to simple format for PortfolioManager reconciliation
+                    # Note: We match by 'side' for Binance as it aggregates positions
+                    broker_data = [{'side': p['side'], 'quantity': abs(float(p['positionAmt']))} for p in active_positions]
+                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                except Exception as e:
+                    logger.debug(f"[RECONCILE] Binance fetch failed: {e}")
 
             positions_closed = False
             pyramid_requests = []

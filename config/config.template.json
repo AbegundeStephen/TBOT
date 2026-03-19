@@ -27,8 +27,8 @@
   },
   "database": {
     "enabled": true,
-    "supabase_url": "https://gpzrdpnfurztclznlnan.supabase.co",
-    "supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwenJkcG5mdXJ6dGNsem5sbmFuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDM5NjAyNSwiZXhwIjoyMDc1OTcyMDI1fQ.GP3osW7aCAO0hOG3EZOZA_YgaX61vFVTd48xUmwTXgE",
+    "supabase_url": "your_url_here",
+    "supabase_key": "your_key_here",
     "snapshot_interval_seconds": 300,
     "log_all_signals": true,
     "log_system_events": true
@@ -73,8 +73,8 @@
       "lookback_days": 730,
       "weight": 0.5,
       "fixed_risk_usd": {
-        "TREND": 15,
-        "SCALP": 3
+        "TREND": 25,
+        "SCALP": 20
       },
       "min_position_usd": 100,
       "max_position_usd": 75000,
@@ -861,7 +861,7 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "8363934797:AAGlppCaYhutDSMhIWZZMRABB7Kv2BofTCQ",
+    "bot_token": "your_token_here",
     "admin_ids": [
       1733929110
     ],

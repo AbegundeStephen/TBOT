@@ -66,7 +66,7 @@ class DataManager:
             logger.info("   Endpoint: https://api.binance.com (LIVE - Public API)")
 
             # Always create a live client for data (no keys needed = public access)
-            self.live_data_client = Client("", "")
+            self.live_data_client = Client("", "", requests_params={'timeout': 10})
             self.live_data_client.session.headers.update(CLOUDFRONT_HEADERS)
             logger.info(
                 f"   [User-Agent] Live Data Client: {self.live_data_client.session.headers.get('User-Agent')}"
@@ -103,7 +103,7 @@ class DataManager:
             logger.info("   Purpose: Trade execution and account management")
 
             if is_testnet:
-                self.binance_client = Client(api_key, api_secret, testnet=True)
+                self.binance_client = Client(api_key, api_secret, testnet=True, requests_params={'timeout': 10})
                 self.binance_client.session.headers.update(CLOUDFRONT_HEADERS)
                 logger.info(
                     f"   [User-Agent] Primary Client (Testnet): {self.binance_client.session.headers.get('User-Agent')}"
@@ -113,7 +113,7 @@ class DataManager:
                 logger.warning("   ⚠️  Testnet has LIMITED historical data (~2 days)")
                 logger.info("   💡 Historical analysis will use live API automatically")
             else:
-                self.binance_client = Client(api_key, api_secret)
+                self.binance_client = Client(api_key, api_secret, requests_params={'timeout': 10})
                 self.binance_client.session.headers.update(CLOUDFRONT_HEADERS)
                 logger.info(
                     f"   [User-Agent] Primary Client (Live): {self.binance_client.session.headers.get('User-Agent')}"
@@ -139,7 +139,7 @@ class DataManager:
                 if futures_key and futures_secret:
                     if futures_config.get("testnet", True):
                         self.futures_client = Client(
-                            futures_key, futures_secret, testnet=True
+                            futures_key, futures_secret, testnet=True, requests_params={'timeout': 10}
                         )
                         self.futures_client.session.headers.update(CLOUDFRONT_HEADERS)
                         logger.info(
@@ -152,7 +152,7 @@ class DataManager:
                             "   Endpoint: https://testnet.binancefuture.com (testnet)"
                         )
                     else:
-                        self.futures_client = Client(futures_key, futures_secret)
+                        self.futures_client = Client(futures_key, futures_secret, requests_params={'timeout': 10})
                         self.futures_client.session.headers.update(CLOUDFRONT_HEADERS)
                         logger.info(
                             f"   [User-Agent] Futures Client (Live): {self.futures_client.session.headers.get('User-Agent')}"
@@ -448,7 +448,7 @@ class DataManager:
                 price_cache.set(symbol, last_close)
                 logger.info(f"[CACHE] Price cache updated with last kline close: {last_close}")
 
-            return df
+            return self.clean_data(df)
 
         except Exception as e:
             logger.error(f"Error fetching Binance data: {e}", exc_info=True)
@@ -593,7 +593,7 @@ class DataManager:
                 price_cache.set(symbol, last_close)
                 logger.info(f"[CACHE] Price cache updated with last kline close from MT5: {last_close}")
 
-            return df
+            return self.clean_data(df)
 
         except ImportError:
             logger.error("MetaTrader5 module not installed")
@@ -616,18 +616,25 @@ class DataManager:
         if df.isnull().any().any():
             df = df.ffill().dropna()
 
+        # ✨ ENHANCED VALIDATION: Ensure no corrupted inputs
+        # 1. Price must be > 0
+        # 2. Volume must be >= 0
+        # 3. Structure must be logical (high >= low, etc.)
         invalid_bars = (
-            (df["high"] < df["low"])
+            (df["open"] <= 0)
+            | (df["high"] <= 0)
+            | (df["low"] <= 0)
+            | (df["close"] <= 0)
+            | (df["volume"] < 0)
+            | (df["high"] < df["low"])
             | (df["high"] < df["open"])
             | (df["high"] < df["close"])
             | (df["low"] > df["open"])
             | (df["low"] > df["close"])
-            | (df["close"] <= 0)
-            | (df["volume"] < 0)
         )
 
         if invalid_bars.any():
-            logger.warning(f"Removing {invalid_bars.sum()} invalid bars")
+            logger.warning(f"Removing {invalid_bars.sum()} invalid bars (corrupted data detected)")
             df = df[~invalid_bars]
 
         final_len = len(df)

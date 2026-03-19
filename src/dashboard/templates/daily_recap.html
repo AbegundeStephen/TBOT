@@ -193,6 +193,9 @@
                 <select id="asset-selector" style="margin-right: 10px;">
                     <option value="BTC">BTC</option>
                     <option value="GOLD">Gold</option>
+                    <option value="USTEC">USTEC</option>
+                    <option value="EURJPY">EURJPY</option>
+                    <option value="EURUSD">EURUSD</option>
                 </select>
                 <select id="mode-selector">
                     <option value="daily">Daily</option>
@@ -735,9 +738,11 @@
             // Emoji mapping for regime types
             var regimeEmoji = {
                 'strong_bull': '🚀',
-                'bull': '📈',
+                'bullish': '📈',
+                'slightly_bullish': '↗️',
                 'neutral': '➡️',
-                'bear': '📉',
+                'slightly_bearish': '↘️',
+                'bearish': '📉',
                 'strong_bear': '⚠️'
             };
 
@@ -745,14 +750,18 @@
             var formatTimeframe = function(tf) {
                 if (!tf || !tf.regime) return '<div class="empty-state" style="font-size: 12px;">No data</div>';
 
-                var emoji = regimeEmoji[tf.regime] || '❓';
+                var emoji = regimeEmoji[tf.regime.toLowerCase()] || '❓';
+                var trendDir = tf.trend_direction || 'N/A';
+                var adx = tf.adx ? tf.adx.toFixed(1) : 'N/A';
+                var rsi = tf.rsi ? tf.rsi.toFixed(1) : 'N/A';
+
                 return `
                     <div style="margin-bottom: 8px;">
                         <div><strong>${emoji} ${tf.regime.toUpperCase()}</strong> (${(tf.confidence * 100).toFixed(0)}%)</div>
                         <div style="font-size: 12px; color: #888;">
-                            Trend: ${tf.trend_direction || 'N/A'} |
-                            ADX: ${tf.adx || 'N/A'} |
-                            RSI: ${tf.rsi || 'N/A'}
+                            Trend: ${trendDir} |
+                            ADX: ${adx} |
+                            RSI: ${rsi}
                         </div>
                     </div>
                 `;
@@ -763,7 +772,7 @@
                 <div style="margin-bottom: 10px;">
                     <div style="font-size: 12px; color: #888;">Updated: ${timestamp}</div>
                     <div style="font-size: 16px; margin: 5px 0;">
-                        <strong>${regimeEmoji[regime.consensus.regime] || '❓'} ${regime.consensus.regime.toUpperCase()}</strong>
+                        <strong>${regimeEmoji[regime.consensus.regime.toLowerCase()] || '❓'} ${regime.consensus.regime.toUpperCase()}</strong>
                         <span style="float: right; font-size: 14px;">${(regime.consensus.confidence * 100).toFixed(0)}%</span>
                     </div>
                     <div style="font-size: 12px; color: #888; margin-bottom: 10px;">

@@ -8,9 +8,10 @@ Focuses on 1H and 4H timeframes, guided by explicit EMA relationships.
 import pandas as pd
 import numpy as np
 import logging
+import talib as ta
 from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -43,19 +44,22 @@ class GovernorStatus:
 
 @dataclass
 class RegimeStatus:
-    """Simplified aggregated regime status."""
+    """Simplified aggregated regime status with granular details."""
     asset: str
     score: float
     is_bullish: bool
     is_bearish: bool
     reasoning: str
     timestamp: datetime
-    consensus_regime: str # NEW: Add human-readable regime string
+    consensus_regime: str 
     # Macro EMAs for VTM anchoring
     ema_1d_200: Optional[float] = None
     ema_4h_200: Optional[float] = None
     ema_4h_50: Optional[float] = None
     trade_type: TradeType = TradeType.TREND
+    
+    # Granular Timeframe Data
+    timeframe_data: Dict[str, Dict] = field(default_factory=dict)
 
 
 class MultiTimeFrameRegimeDetector:
@@ -84,18 +88,31 @@ class MultiTimeFrameRegimeDetector:
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate essential EMA indicators for trend following.
+        Calculate essential indicators for trend following (EMA, ADX, RSI).
         """
         if df.empty:
             return pd.DataFrame()
 
         df_copy = df.copy()
-        df_copy[f"ema_{FAST_EMA}"] = df_copy["close"].ewm(span=FAST_EMA, adjust=False).mean()
-        df_copy[f"ema_{SLOW_EMA}"] = df_copy["close"].ewm(span=SLOW_EMA, adjust=False).mean()
+        
+        # EMA Calculations
+        df_copy[f"ema_{FAST_EMA}"] = ta.EMA(df_copy["close"], timeperiod=FAST_EMA)
+        df_copy[f"ema_{SLOW_EMA}"] = ta.EMA(df_copy["close"], timeperiod=SLOW_EMA)
         
         # Use fallback span if not enough data for BASELINE
         baseline_span = min(BASELINE_EMA, len(df_copy))
-        df_copy[f"ema_{BASELINE_EMA}"] = df_copy["close"].ewm(span=baseline_span, adjust=False).mean()
+        df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=baseline_span)
+        
+        # Trend strength and momentum
+        df_copy["adx"] = ta.ADX(df_copy["high"], df_copy["low"], df_copy["close"], timeperiod=14)
+        df_copy["rsi"] = ta.RSI(df_copy["close"], timeperiod=14)
+        
+        # Support for directional indicators (Trend)
+        plus_di = ta.PLUS_DI(df_copy["high"], df_copy["low"], df_copy["close"], timeperiod=14)
+        minus_di = ta.MINUS_DI(df_copy["high"], df_copy["low"], df_copy["close"], timeperiod=14)
+        
+        df_copy["trend_dir"] = np.where(plus_di > minus_di, "UP", "DOWN")
+        
         return df_copy
 
     def _fetch_data_from_csv(
@@ -344,6 +361,31 @@ class MultiTimeFrameRegimeDetector:
 
         final_reasoning = f"Institutional {consensus_regime} regime. " + ", ".join(reasons)
 
+        # ✨ NEW: Populate granular timeframe data for database/dashboard
+        timeframe_data = {
+            "1h": {
+                "regime": consensus_regime if above_1h_50 == is_bullish else "NEUTRAL",
+                "confidence": abs(score),
+                "adx": float(latest_1h["adx"]) if "adx" in latest_1h else None,
+                "rsi": float(latest_1h["rsi"]) if "rsi" in latest_1h else None,
+                "trend_direction": latest_1h["trend_dir"] if "trend_dir" in latest_1h else "N/A"
+            },
+            "4h": {
+                "regime": consensus_regime if above_4h_200 == is_bullish else "NEUTRAL",
+                "confidence": abs(score),
+                "adx": float(latest_4h["adx"]) if "adx" in latest_4h else None,
+                "rsi": float(latest_4h["rsi"]) if "rsi" in latest_4h else None,
+                "trend_direction": latest_4h["trend_dir"] if "trend_dir" in latest_4h else "N/A"
+            },
+            "1d": {
+                "regime": "BULLISH" if macro_bullish else "BEARISH" if macro_bearish else "NEUTRAL",
+                "confidence": 1.0 if (macro_bullish or macro_bearish) else 0.0,
+                "adx": None, # Will be filled if we calculate 1D indicators
+                "rsi": None,
+                "trend_direction": "UP" if macro_bullish else "DOWN" if macro_bearish else "SIDEWAYS"
+            }
+        }
+
         return RegimeStatus(
             asset=asset_type,
             score=score,
@@ -355,7 +397,8 @@ class MultiTimeFrameRegimeDetector:
             ema_1d_200=governor_status.ema_200,
             ema_4h_200=ema_4h_baseline,
             ema_4h_50=ema_4h_slow,
-            trade_type=trade_type
+            trade_type=trade_type,
+            timeframe_data=timeframe_data
         )
 
     def analyze_regime(

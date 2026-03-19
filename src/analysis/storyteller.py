@@ -167,7 +167,29 @@ class TradeStoryteller:
             strategy_logic += f" [Ranging Mode: Forced Max 1 Trade]"
 
         # --- D. Market Structure Context ---
-        market_context = f"Regime: {signal_data.get('regime', 'Unknown')} (Conf: {float(signal_data.get('regime_confidence') or 0):.2f})"
+        regime = signal_data.get('regime')
+        conf = signal_data.get('regime_confidence')
+        
+        if not regime or not conf:
+            # Fallback: Fetch from MTF table if signal linkage is missing
+            try:
+                entry_time = datetime.fromisoformat(trade["entry_time"].replace("Z", "+00:00"))
+                reg_response = (
+                    self.db.supabase.table("mtf_regime_analysis")
+                    .select("consensus_regime, consensus_confidence")
+                    .eq("asset", asset)
+                    .lte("timestamp", entry_time.isoformat())
+                    .order("timestamp", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if reg_response.data:
+                    regime = reg_response.data[0]["consensus_regime"]
+                    conf = reg_response.data[0]["consensus_confidence"]
+            except:
+                pass
+
+        market_context = f"Regime: {regime or 'Unknown'} (Conf: {float(conf or 0):.2f})"
 
         # --- E. VTM Events (The "Journey") ---
         vtm_events = self.db.get_vtm_events_for_trade(trade_id)

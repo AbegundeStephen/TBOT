@@ -114,19 +114,24 @@ class DynamicPresetSelector:
 
             # ================================================================
             # DIRTY RANGE OVERRIDE: Persistent Sideways Chop
+            # Force Mean Reversion preset during low-quality sideways markets.
             # ================================================================
-            adx_series = metrics['adx_series']
+            adx_current = metrics['adx_series'].iloc[-1]
+            adx_prev1 = metrics['adx_series'].iloc[-2]
+            adx_prev2 = metrics['adx_series'].iloc[-3]
+            adx_prev3 = metrics['adx_series'].iloc[-4]
             volatility_ratio = metrics['volatility_ratio']
             volume_trend = metrics.get('volume_trend', 0)
             
             if (
-                adx_series.iloc[-1] < 20 and
-                adx_series.iloc[-2] < 20 and
-                adx_series.iloc[-3] < 20 and
+                adx_current < 20 and
+                adx_prev1 < 20 and
+                adx_prev2 < 20 and
+                adx_prev3 < 20 and
                 0.45 <= volatility_ratio <= 1.0 and
                 volume_trend <= 5.0
             ):
-                logger.info(f"[PRESET] {asset_name} Dirty Range Override: Mean Reversion forced.")
+                logger.info(f"[PRESET] {asset_name} Persistent Sideways Chop: Mean Reversion forced.")
                 
                 # Update state to ensure the override is persistent
                 old_preset = self.current_presets.get(asset_name)
@@ -135,7 +140,7 @@ class DynamicPresetSelector:
                         asset=asset_name,
                         old_preset=old_preset,
                         new_preset="mr",
-                        reason="Dirty Range Override: Persistent Sideways Chop (ADX < 20 for 3 bars)",
+                        reason="Dirty Range Override: Persistent Sideways Chop (ADX < 20 for 4 bars)",
                         metrics=metrics
                     )
                     # Send notification for forced change
@@ -143,7 +148,7 @@ class DynamicPresetSelector:
                         asset=asset_name,
                         old_preset=old_preset,
                         new_preset="mr",
-                        reason="Dirty Range Override Triggered",
+                        reason="Forced Mean Reversion: Low-quality sideways market",
                         metrics=metrics,
                         score=0
                     )
@@ -280,6 +285,25 @@ class DynamicPresetSelector:
             else:
                 new_preset = 'mr'
                 preset_reason = "MR - Neutral/Mean Reversion conditions (Low score)"
+            
+            # ================================================================
+            # 🛡️ REGIME ALIGNMENT VETO
+            # Reason: Ensure strategy matches the dominant market regime (Physics check).
+            # ================================================================
+            adx = metrics['adx']
+            market_regime_type = "NEUTRAL"
+            if adx > 25: market_regime_type = "TREND"
+            elif adx < 20: market_regime_type = "RANGE"
+            
+            # A. Trend Veto: No MR in a trending market
+            if market_regime_type == "TREND" and new_preset == "mr":
+                logger.warning(f"[SELECTOR] 🛡️ ALIGNMENT VETO: Blocking MR preset in TREND regime (ADX: {adx:.1f})")
+                return None
+                
+            # B. Range Veto: No high-conviction trend presets in a ranging market
+            if market_regime_type == "RANGE" and new_preset in ["balanced", "aggressive"]:
+                logger.warning(f"[SELECTOR] 🛡️ ALIGNMENT VETO: Blocking Trend preset ({new_preset}) in RANGE regime (ADX: {adx:.1f})")
+                return None
             
             # ================================================================
             # 🛡️ ASSET-DNA HARD LOCKS (Gating)

@@ -4,7 +4,12 @@ Run this BEFORE starting your bot to confirm everything is set up correctly
 """
 
 import json
+import os
+from dotenv import load_dotenv
 from binance.client import Client
+
+# Load environment variables from .env
+load_dotenv()
 
 
 def test_binance_futures_keys():
@@ -20,7 +25,16 @@ def test_binance_futures_keys():
     try:
         with open("config/config.json", "r") as f:
             config = json.load(f)
-        print("✅ Config loaded successfully\n")
+        
+        # ✨  Override config with environment variables for security
+        if os.getenv("BINANCE_API_KEY"):
+            config.setdefault("api", {}).setdefault("binance", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+            config.setdefault("api", {}).setdefault("binance_futures", {})["api_key"] = os.getenv("BINANCE_API_KEY")
+        if os.getenv("BINANCE_API_SECRET"):
+            config.setdefault("api", {}).setdefault("binance", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+            config.setdefault("api", {}).setdefault("binance_futures", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
+            
+        print("✅ Config loaded and environment variables applied\n")
     except Exception as e:
         print(f"❌ Error loading config.json: {e}")
         return False
