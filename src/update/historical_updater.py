@@ -87,6 +87,12 @@ class HistoricalDataUpdater:
             True if successful
         """
         try:
+            # ✅ Check Market Hours
+            from src.utils.market_hours import MarketHours
+            if not MarketHours.should_trade(asset_name):
+                logger.debug(f"[UPDATE] Skipping {asset_name} {timeframe.upper()} - Market is CLOSED")
+                return True
+
             # Get timeframe config
             tf_config = self.timeframes.get(timeframe)
             if not tf_config:
