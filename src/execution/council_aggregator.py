@@ -384,8 +384,8 @@ class InstitutionalCouncilAggregator:
                 reasons.append({
                     'passed': True,
                     'trigger_type': 'VOLUME_SURGE_INSTITUTIONAL',
-                    'volume': latest['volume'],
-                    'surge_factor': latest['volume'] / volume_rolling_avg,
+                    'volume': latest.get('volume', 0),
+                    'surge_factor': latest.get('volume', 0) / volume_rolling_avg,
                 })
             else:
                 reasons.append({
@@ -515,7 +515,7 @@ class InstitutionalCouncilAggregator:
                 
                 candle_body = latest['close'] - latest['open'] # Positive for bull, negative for bear
                 candle_size = abs(candle_body)
-                vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
+                vol_ratio = latest.get('volume', 0) / vol_avg if vol_avg > 0 else 1.0
 
                 # ✅ TASK 19: Calibrated Flash Veto (Phase 3)
                 # Reason: 2.5x ATR was too tight for CPI/FOMC; 3.0x Volume missed real institutional moves.

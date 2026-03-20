@@ -946,8 +946,8 @@ class PortfolioManager:
                 return True, f'CRITICAL: Hard Drawdown {drawdown:.1%} > max {max_dd:.1%}'
             
             # Layer 2: Profit Lock (5%) - Protects recent gains from peak
-            # Triggered when equity drops 5% from its highest ever point
-            profit_lock_threshold = 0.05 
+            # Triggered when equity drops from its highest ever point based on config
+            profit_lock_threshold = self.portfolio_config.get('profit_lock_threshold', 0.05)
             if drawdown > profit_lock_threshold:
                 reason = f'PROFIT LOCK: Equity dropped {drawdown:.1%} from peak. Protecting gains.'
                 send_alert(reason)

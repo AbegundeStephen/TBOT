@@ -350,14 +350,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 return fallback_regime, 0.3
 
             # ===============================
-            # 3️⃣ Thresholds (asset-specific)
+            # 3️⃣ Thresholds (Rolling Quantile)
             # ===============================
-            if self.asset_type == "BTC":
-                BULLISH_THRESHOLD = 0.15
-                BEARISH_THRESHOLD = -0.15
-            else:  # GOLD
-                BULLISH_THRESHOLD = 0.10
-                BEARISH_THRESHOLD = -0.10
+            ema_diff_series = features_df["ema_diff_pct"].dropna()
+            if len(ema_diff_series) >= 30:
+                BULLISH_THRESHOLD = ema_diff_series.quantile(0.65)
+                BEARISH_THRESHOLD = ema_diff_series.quantile(0.35)
+            else:
+                BULLISH_THRESHOLD = 0.15 if self.asset_type == "BTC" else 0.10
+                BEARISH_THRESHOLD = -0.15 if self.asset_type == "BTC" else -0.10
 
             close_prices = features_df["close"].values
 
