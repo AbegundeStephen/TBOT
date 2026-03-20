@@ -255,7 +255,9 @@ class VeteranTradeManager:
         trade_type: str = "TREND",
         local_free_margin: float = 0.0, # ✨ NEW: For leverage ceiling
         current_ask: float = 0.0,       # ✨ NEW: For spread floor
-        current_bid: float = 0.0        # ✨ NEW: For spread floor
+        current_bid: float = 0.0,       # ✨ NEW: For spread floor
+        min_lot_override: Optional[float] = None,      # ✨ NEW: Exness compatibility
+        lot_precision_override: Optional[int] = None   # ✨ NEW: Exness compatibility
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -273,6 +275,8 @@ class VeteranTradeManager:
         self.local_free_margin = local_free_margin
         self.current_ask = current_ask
         self.current_bid = current_bid
+        self.min_lot_override = min_lot_override
+        self.lot_precision_override = lot_precision_override
         
         # Determine asset type for leverage ceiling
         self.asset_category = "FOREX"
@@ -573,23 +577,23 @@ class VeteranTradeManager:
             LOT_PRECISION = {
                 'BTC': 4,
                 'GOLD': 2,
-                'USTEC': 1,
+                'USTEC': 2,
                 'EURJPY': 2,
                 'EURUSD': 2,
             }
 
-            precision = LOT_PRECISION.get(self.asset.upper(), 2)
+            precision = self.lot_precision_override if self.lot_precision_override is not None else LOT_PRECISION.get(self.asset.upper(), 2)
             final_size = round(self.position_size, precision)
 
             MIN_LOT = {
                 'BTC': 0.0001,
                 'GOLD': 0.01,
-                'USTEC': 0.1,
+                'USTEC': 0.01,
                 'EURJPY': 0.01,
                 'EURUSD': 0.01
             }
 
-            min_lot = MIN_LOT.get(self.asset.upper(), 0.01)
+            min_lot = self.min_lot_override if self.min_lot_override is not None else MIN_LOT.get(self.asset.upper(), 0.01)
 
             if final_size < min_lot:
                 logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot {min_lot} for {self.asset}.")
