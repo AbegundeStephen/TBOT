@@ -99,12 +99,14 @@ class MultiTimeFrameRegimeDetector:
         df_copy[f"ema_{FAST_EMA}"] = ta.EMA(df_copy["close"], timeperiod=FAST_EMA)
         df_copy[f"ema_{SLOW_EMA}"] = ta.EMA(df_copy["close"], timeperiod=SLOW_EMA)
         
-        # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
-        if len(df_copy) < 400:
-            # We don't raise here to prevent crashing during startup downloads, 
-            # but we return an empty DF so the calling method knows burn-in failed.
-            logger.warning(f"[REGIME] ⚠️ Insufficient bars for EMA-200 burn-in ({len(df_copy)}/400).")
+        # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
+        if len(df_copy) < 250:
+            # Absolute floor for EMA-200 stability
+            logger.warning(f"[REGIME] ⚠️ CRITICAL: Insufficient bars for EMA-200 burn-in ({len(df_copy)}/250).")
             return pd.DataFrame()
+        
+        if len(df_copy) < 400:
+            logger.warning(f"[REGIME] ⚠️ Sub-optimal bars for EMA-200 burn-in ({len(df_copy)}/400). Indicators may have slight drift.")
 
         df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=BASELINE_EMA)
         
@@ -176,11 +178,11 @@ class MultiTimeFrameRegimeDetector:
 
         # Determine lookback based on timeframe string
         if timeframe_str == "1h":
-            lookback_days = 30
+            lookback_days = 60  # ~1440 bars
         elif timeframe_str == "4h":
-            lookback_days = 60
+            lookback_days = 120 # ~720 bars
         elif timeframe_str == "1d":
-            lookback_days = 180
+            lookback_days = 500 # ~500 bars
         else:
             logger.error(f"Unsupported timeframe_str: {timeframe_str}")
             return pd.DataFrame() # Return empty for unsupported
@@ -211,16 +213,20 @@ class MultiTimeFrameRegimeDetector:
         try:
             df_daily = self._fetch_data_from_csv(symbol, "1d", exchange)
 
-            # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
-            min_bars = 400
-
-            if len(df_daily) < min_bars:
+            # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
+            if len(df_daily) < 250:
                 logger.warning(
-                    f"[CONSTITUTION] Insufficient daily data: {len(df_daily)} bars (need 400+). "
+                    f"[CONSTITUTION] CRITICAL: Insufficient daily data: {len(df_daily)} bars (need 250+). "
                     "Cannot establish reliable macro trend. Defaulting to neutral."
                 )
                 return GovernorStatus(
-                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data", ema_200=None
+                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data (<250 bars)", ema_200=None
+                )
+
+            if len(df_daily) < 400:
+                logger.warning(
+                    f"[CONSTITUTION] ⚠️ Sub-optimal daily data: {len(df_daily)} bars (recommended 400+). "
+                    "Macro trend established but EMA-200 may have slight drift."
                 )
 
             df_daily = self._calculate_indicators(df_daily)
@@ -461,9 +467,12 @@ class MultiTimeFrameRegimeDetector:
 
         try:
             df_4h = self._fetch_data_from_csv(symbol, "4h", exchange)
-            # ✅ TASK 17: EMA-200 Burn-in (400 bars minimum)
-            if df_4h.empty or len(df_4h) < 400:
-                raise ValueError(f"Insufficient 4H data for reliable EMA-200 burn-in ({len(df_4h)}/400 bars)")
+            # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
+            if df_4h.empty or len(df_4h) < 250:
+                raise ValueError(f"CRITICAL: Insufficient 4H data for EMA-200 burn-in ({len(df_4h)}/250 bars)")
+            
+            if len(df_4h) < 400:
+                logger.warning(f"[MTF] ⚠️ Sub-optimal 4H data: {len(df_4h)} bars (recommended 400+). SLOW EMA may have slight drift.")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 4H data: {e}", exc_info=True)
             return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL")

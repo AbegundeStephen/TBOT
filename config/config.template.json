@@ -809,7 +809,7 @@
     "check_interval_seconds": 300,
     "max_positions_per_asset": 3,
     "allow_hedging": true,
-    "small_account_protocol": false
+    "small_account_protocol": true
   },
   "risk_management": {
     "max_daily_trades": 10,
