@@ -137,22 +137,38 @@ class MultiTimeFrameRegimeDetector:
         if csv_file.exists():
             try:
                 logger.info(f"[CSV] Reading {self.asset_type} {timeframe_str} from {csv_file}")
-                df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
-
-                # Ensure timezone-aware
-                if df.index.tz is None:
-                    df.index = df.index.tz_localize('UTC')
+                # ✅ FIX: Explicitly load and then set index to handle different CSV structures
+                df = pd.read_csv(csv_file)
+                
+                # Find timestamp column
+                date_col = None
+                for col in ['date', 'timestamp', 'time', 'datetime']:
+                    if col in df.columns:
+                        date_col = col
+                        break
+                
+                if date_col:
+                    df[date_col] = pd.to_datetime(df[date_col], utc=True, errors='coerce')
+                    df = df.dropna(subset=[date_col])
+                    df.set_index(date_col, inplace=True)
+                else:
+                    logger.warning(f"[CSV] No timestamp column found in {csv_file}")
+                    return self._fetch_data(symbol, timeframe_str, exchange)
 
                 # Check data freshness (should be within last 4 hours)
+                if df.empty:
+                    return self._fetch_data(symbol, timeframe_str, exchange)
+                    
                 latest_date = df.index[-1]
-                hours_old = (pd.Timestamp.now(tz='UTC') - latest_date).total_seconds() / 3600
+                now = pd.Timestamp.now(tz='UTC')
+                hours_old = (now - latest_date).total_seconds() / 3600
 
-                if hours_old > 4:
-                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old - FALLING BACK TO API")
+                if hours_old > 4 or pd.isna(hours_old):
+                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old (Stale) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)
 
                 logger.info(f"[CSV] ✓ Loaded {len(df)} bars from CSV")
-                logger.info(f"[CSV]   Range: {df.index[0]} to {df.index[-1]}")
+                logger.info(f"[CSV]   Range: {df.index[0].strftime('%Y-%m-%d %H:%M')} to {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
                 logger.info(f"[CSV]   Age: {hours_old:.1f} hours old")
 
                 return df
