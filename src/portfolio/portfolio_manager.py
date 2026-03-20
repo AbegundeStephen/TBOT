@@ -55,6 +55,8 @@ class Position:
         leverage: int = 1,
         margin_type: str = "SPOT",
         is_futures: bool = False,
+        min_lot: Optional[float] = None,      # ✨ NEW: Exness compatibility
+        lot_precision: Optional[int] = None   # ✨ NEW: Exness compatibility
     ):
         self.asset = asset
         self.symbol = symbol
@@ -69,6 +71,8 @@ class Position:
         self.margin_type = margin_type
         self.is_futures = is_futures
         self.closing = False
+        self.min_lot = min_lot
+        self.lot_precision = lot_precision
 
         self.stop_loss = None
         self.take_profit = None
@@ -170,6 +174,8 @@ class Position:
                     account_risk=account_risk,
                     signal_details=signal_details,
                     trade_type=signal_details.get("trade_type", "TREND"),
+                    min_lot_override=self.min_lot,
+                    lot_precision_override=self.lot_precision
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -953,7 +959,7 @@ class PortfolioManager:
                 send_alert(reason)
                 return True, reason
 
-        # ✨ NEW: Consecutive Loss Shield
+        # Consecutive Loss Shield
         if self.loss_streak >= 3:
             reason = f'Consecutive loss streak of {self.loss_streak} trades'
             send_alert(reason)
@@ -1731,6 +1737,8 @@ class PortfolioManager:
         margin_type: str = "CROSSED",
         is_futures: bool = True,
         disable_partials: bool = False,
+        min_lot: Optional[float] = None,      # ✨ NEW: Exness compatibility
+        lot_precision: Optional[int] = None   # ✨ NEW: Exness compatibility
     ) -> bool:
         """
         Add a new position with hybrid aware VTM support
@@ -1817,10 +1825,12 @@ class PortfolioManager:
             use_dynamic_management=use_dynamic_management,  # ← This triggers VTM init in Position.__init__()
             vtm_overrides=vtm_overrides,
             leverage=leverage,
-                            margin_type=margin_type,
-                            is_futures=is_futures,
-                            disable_partials=disable_partials,
-                        )
+            margin_type=margin_type,
+            is_futures=is_futures,
+            disable_partials=disable_partials,
+            min_lot=min_lot,
+            lot_precision=lot_precision
+        )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
                 logger.info(

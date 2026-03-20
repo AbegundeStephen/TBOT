@@ -542,6 +542,13 @@ class MT5ExecutionHandler:
 
                 if volume_lots < symbol_info.volume_min:
                     volume_lots = symbol_info.volume_min
+                
+                # ✅ NEW: Enable protocol safety bypasses if we are at min lot
+                if is_small_account_mode and volume_lots <= symbol_info.volume_min:
+                    if signal_details is None:
+                        signal_details = {}
+                    signal_details["small_account_protocol_active"] = True
+                    logger.info("[MARGIN] 🛡️ Small Account Protocol: Min-lot trade detected, enabling safety bypasses.")
 
                 volume_lots = min(symbol_info.volume_max, volume_lots)
                 actual_usd = volume_lots * current_price * contract_size
@@ -580,6 +587,12 @@ class MT5ExecutionHandler:
                 {"trade_type": trade_type, "strategic_risk_pct": risk_pct}
             )
 
+            # ✅ Get lot precision from volume step
+            import math
+            lot_precision = 0
+            if symbol_info.volume_step > 0:
+                lot_precision = max(0, int(round(-math.log10(symbol_info.volume_step))))
+
             success = self.portfolio_manager.add_position(
                 asset=asset,
                 symbol=symbol,
@@ -591,6 +604,8 @@ class MT5ExecutionHandler:
                 use_dynamic_management=True,
                 signal_details=signal_details,
                 vtm_overrides=vtm_overrides,
+                min_lot=symbol_info.volume_min,
+                lot_precision=lot_precision
             )
 
             if success:
@@ -1487,6 +1502,12 @@ class MT5ExecutionHandler:
                     for pos in mt5_positions:
                         pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
                         
+                        # ✅ Get lot precision from volume step
+                        import math
+                        lot_precision = 0
+                        if symbol_info.volume_step > 0:
+                            lot_precision = max(0, int(round(-math.log10(symbol_info.volume_step))))
+
                         success = self.portfolio_manager.add_position(
                             asset=asset,
                             symbol=symbol,
@@ -1500,6 +1521,8 @@ class MT5ExecutionHandler:
                             use_dynamic_management=True,
                             entry_time=datetime.fromtimestamp(pos.time),
                             signal_details={"imported": True},
+                            min_lot=symbol_info.volume_min,
+                            lot_precision=lot_precision
                         )
                         if success: imported_count += 1
 
