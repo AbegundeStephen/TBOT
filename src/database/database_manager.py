@@ -181,12 +181,28 @@ class TradingDatabaseManager:
                         existing_meta.update(metadata)
                         update_data["metadata"] = self._serialize_safely(existing_meta)
 
-                    result = (
-                        self.supabase.table("trades")
-                        .update(update_data)
-                        .eq("id", trade_id)
-                        .execute()
-                    )
+                    try:
+                        result = (
+                            self.supabase.table("trades")
+                            .update(update_data)
+                            .eq("id", trade_id)
+                            .execute()
+                        )
+                    except Exception as e:
+                        error_str = str(e)
+                        if "PGRST204" in error_str or "column" in error_str.lower():
+                            logger.warning("[DB] Schema mismatch on update. Stripping new fields and retrying...")
+                            new_fields = ["regime_at_entry", "session_quality", "aggregator_mode", "council_score", "trade_type_label"]
+                            for field in new_fields:
+                                update_data.pop(field, None)
+                            result = (
+                                self.supabase.table("trades")
+                                .update(update_data)
+                                .eq("id", trade_id)
+                                .execute()
+                            )
+                        else:
+                            raise e
 
                     if result.data:
                         logger.info(
@@ -230,7 +246,19 @@ class TradingDatabaseManager:
                 "metadata": self._serialize_safely(metadata) if metadata else None,
             }
 
-            result = self.supabase.table("trades").insert(trade_data).execute()
+            try:
+                result = self.supabase.table("trades").insert(trade_data).execute()
+            except Exception as e:
+                error_str = str(e)
+                if "PGRST204" in error_str or "column" in error_str.lower():
+                    logger.warning("[DB] Schema mismatch detected. Stripping new fields and retrying...")
+                    # Strip fields that might not exist in older schemas
+                    new_fields = ["regime_at_entry", "session_quality", "aggregator_mode", "council_score", "trade_type_label"]
+                    for field in new_fields:
+                        trade_data.pop(field, None)
+                    result = self.supabase.table("trades").insert(trade_data).execute()
+                else:
+                    raise e
 
             if result.data and len(result.data) > 0:
                 trade_id = result.data[0]["id"]

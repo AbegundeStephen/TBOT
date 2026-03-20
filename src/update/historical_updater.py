@@ -143,6 +143,11 @@ class HistoricalDataUpdater:
                                 start_time = last_date + timedelta(hours=4)
                             else:  # 1d
                                 start_time = last_date + timedelta(days=1)
+                            
+                            # ✅ FIX: Ensure start_time is not in the future
+                            if start_time > end_time:
+                                logger.info(f"[UPDATE] Last date {last_date} is current. No update needed.")
+                                return True
                         else:
                             logger.warning(f"[UPDATE] No valid dates in existing file")
                             existing_df = None
