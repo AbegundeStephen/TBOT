@@ -519,6 +519,32 @@
             color: #1e293b;
         }
 
+        .audit-row {
+            border-bottom: 1px solid #334155;
+            padding: 8px 0;
+        }
+        .audit-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-right: 10px;
+            text-transform: uppercase;
+        }
+        .audit-ENTRY { background: #10b981; color: white; }
+        .audit-EXIT { background: #ef4444; color: white; }
+        .audit-SL_HIT { background: #ef4444; color: white; }
+        .audit-TP_HIT { background: #10b981; color: white; }
+        .audit-REJECTION { background: #f59e0b; color: white; }
+        
+        .audit-details {
+            display: inline-block;
+            color: #e2e8f0;
+        }
+        .audit-asset { color: #60a5fa; font-weight: bold; }
+        .audit-price { color: #facc15; }
+        .audit-pnl { font-weight: bold; }
+
         @media (max-width: 768px) {
             .stats-grid {
                 grid-template-columns: 1fr;
@@ -741,34 +767,41 @@
                     let content = line;
                     let ts = '';
 
-                    // Detect JSON (Audit Log format)
-                    if (line.trim().startsWith('{') && line.trim().endsWith('}')) {
-                        try {
-                            const data = JSON.parse(line);
-                            ts = data.datetime || '';
-                            // Remove datetime from object for display if we have it separately
-                            const { datetime, timestamp, ...rest } = data;
-                            content = `[${data.event}] ${JSON.stringify(rest)}`;
-                            if (data.event === 'ERROR') className = 'log-error';
-                        } catch (e) {
-                            // Fallback to normal string if JSON parse fails
-                        }
-                    } else {
-                        // Standard log format
-                        if (line.includes('WARNING')) className = 'log-warning';
-                        if (line.includes('ERROR') || line.includes('CRITICAL')) className = 'log-error';
-                        
-                        const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-                        if (timestampMatch) {
-                            ts = timestampMatch[1];
-                            content = line.substring(ts.length);
-                        }
+                    // Check for standard log format timestamp
+                    const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+                    if (timestampMatch) {
+                        ts = timestampMatch[1];
+                        content = line.substring(ts.length).trim();
                     }
+
+                    // Detect and format Trade Events (JSON)
+                    let auditHtml = '';
+                    let isAudit = false;
                     
-                    if (ts) {
-                        return `<div class="terminal-line"><span class="log-timestamp">${ts}</span><span class="${className}">${htmlEscape(content)}</span></div>`;
+                    if (content.includes('[TRADE_EVENT]')) {
+                        const jsonPart = content.split('[TRADE_EVENT]')[1].trim();
+                        try {
+                            const data = JSON.parse(jsonPart);
+                            auditHtml = formatAuditEvent(data);
+                            isAudit = true;
+                        } catch(e) {}
+                    } else if (content.trim().startsWith('{') && content.trim().endsWith('}')) {
+                        try {
+                            const data = JSON.parse(content);
+                            auditHtml = formatAuditEvent(data);
+                            isAudit = true;
+                        } catch(e) {}
                     }
-                    return `<div class="terminal-line ${className}">${htmlEscape(line)}</div>`;
+
+                    if (isAudit) {
+                        return `<div class="terminal-line audit-row"><span class="log-timestamp">${ts || ''}</span>${auditHtml}</div>`;
+                    }
+
+                    // Standard log colorization
+                    if (line.includes('WARNING')) className = 'log-warning';
+                    if (line.includes('ERROR') || line.includes('CRITICAL')) className = 'log-error';
+                    
+                    return `<div class="terminal-line"><span class="log-timestamp">${ts || ''}</span><span class="${className}">${htmlEscape(content)}</span></div>`;
                 }).join('');
                 
                 modalBody.innerHTML = `
@@ -787,6 +820,27 @@
                 console.error('Error loading logs:', error);
                 modalBody.innerHTML = `<div class="error">Failed to load logs: ${error.message}</div>`;
             }
+        }
+
+        function formatAuditEvent(data) {
+            const event = data.event || 'EVENT';
+            const asset = data.asset || data.symbol || 'N/A';
+            const side = data.side || '';
+            const price = data.price ? `$${data.price.toLocaleString(undefined, {minimumFractionDigits: 2})}` : '';
+            const pnl = data.pnl !== null && data.pnl !== undefined ? 
+                `<span class="audit-pnl ${data.pnl >= 0 ? 'positive' : 'negative'}"> P&L: ${data.pnl >= 0 ? '+' : ''}$${data.pnl.toFixed(2)} (${data.pnl_pct.toFixed(2)}%)</span>` : '';
+            
+            return `
+                <span class="audit-badge audit-${event}">${event}</span>
+                <div class="audit-details">
+                    <span class="audit-asset">${asset}</span> 
+                    ${side ? `<span class="badge badge-${side.toLowerCase()}">${side}</span>` : ''}
+                    ${price ? `at <span class="audit-price">${price}</span>` : ''}
+                    ${data.type ? `<span style="color: #94a3b8; font-size: 11px;">[${data.type}]</span>` : ''}
+                    ${pnl}
+                    ${data.reason ? `<div style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Reason: ${data.reason}</div>` : ''}
+                </div>
+            `;
         }
 
         function htmlEscape(str) {
