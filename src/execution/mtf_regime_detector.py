@@ -99,14 +99,11 @@ class MultiTimeFrameRegimeDetector:
         df_copy[f"ema_{FAST_EMA}"] = ta.EMA(df_copy["close"], timeperiod=FAST_EMA)
         df_copy[f"ema_{SLOW_EMA}"] = ta.EMA(df_copy["close"], timeperiod=SLOW_EMA)
         
-        # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
-        if len(df_copy) < 250:
-            # Absolute floor for EMA-200 stability
-            logger.warning(f"[REGIME] ⚠️ CRITICAL: Insufficient bars for EMA-200 burn-in ({len(df_copy)}/250).")
-            return pd.DataFrame()
-        
+        # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
         if len(df_copy) < 400:
-            logger.warning(f"[REGIME] ⚠️ Sub-optimal bars for EMA-200 burn-in ({len(df_copy)}/400). Indicators may have slight drift.")
+            # We enforce strict burn-in to ensure indicator stability.
+            logger.warning(f"[REGIME] ⚠️ CRITICAL: Insufficient bars for EMA-200 burn-in ({len(df_copy)}/400).")
+            return pd.DataFrame()
 
         df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=BASELINE_EMA)
         
@@ -229,20 +226,14 @@ class MultiTimeFrameRegimeDetector:
         try:
             df_daily = self._fetch_data_from_csv(symbol, "1d", exchange)
 
-            # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
-            if len(df_daily) < 250:
+            # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
+            if len(df_daily) < 400:
                 logger.warning(
-                    f"[CONSTITUTION] CRITICAL: Insufficient daily data: {len(df_daily)} bars (need 250+). "
+                    f"[CONSTITUTION] CRITICAL: Insufficient daily data: {len(df_daily)} bars (need 400+). "
                     "Cannot establish reliable macro trend. Defaulting to neutral."
                 )
                 return GovernorStatus(
-                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data (<250 bars)", ema_200=None
-                )
-
-            if len(df_daily) < 400:
-                logger.warning(
-                    f"[CONSTITUTION] ⚠️ Sub-optimal daily data: {len(df_daily)} bars (recommended 400+). "
-                    "Macro trend established but EMA-200 may have slight drift."
+                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data (<400 bars)", ema_200=None
                 )
 
             df_daily = self._calculate_indicators(df_daily)
@@ -483,12 +474,9 @@ class MultiTimeFrameRegimeDetector:
 
         try:
             df_4h = self._fetch_data_from_csv(symbol, "4h", exchange)
-            # ✅ TASK 17: EMA-200 Burn-in (Adaptive safety limit)
-            if df_4h.empty or len(df_4h) < 250:
-                raise ValueError(f"CRITICAL: Insufficient 4H data for EMA-200 burn-in ({len(df_4h)}/250 bars)")
-            
-            if len(df_4h) < 400:
-                logger.warning(f"[MTF] ⚠️ Sub-optimal 4H data: {len(df_4h)} bars (recommended 400+). SLOW EMA may have slight drift.")
+            # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
+            if df_4h.empty or len(df_4h) < 400:
+                raise ValueError(f"CRITICAL: Insufficient 4H data for EMA-200 burn-in ({len(df_4h)}/400 bars)")
         except Exception as e:
             logger.error(f"[MTF] Failed to get 4H data: {e}", exc_info=True)
             return RegimeStatus(asset=self.asset_type, score=0.0, is_bullish=False, is_bearish=False, reasoning=f"Insufficient 4H data: {str(e)}", timestamp=datetime.now(timezone.utc), consensus_regime="NEUTRAL")

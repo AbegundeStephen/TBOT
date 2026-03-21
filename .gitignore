@@ -36,6 +36,11 @@ logs/
 temp_docx/*
 TBOT_Quant_Audit_Final.docx
 TBOT_Validation_v4.docx
+TBOT_Clean_Audit (1).docx
+extract_table.py
+extract_tasks.py
+parse_docx.py
+simple_extract.py
 
 # Backtest results
 backtest_results/

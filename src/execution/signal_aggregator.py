@@ -349,14 +349,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 )
                 return fallback_regime, 0.3
 
-            # ===============================
-            # 3️⃣ Thresholds (Rolling Quantile)
-            # ===============================
-            ema_diff_series = features_df["ema_diff_pct"].dropna()
-            if len(ema_diff_series) >= 30:
+            # ====================================================================
+            # 3️⃣ Thresholds (Rolling Quantile) - ✅ TASK 21 (Phase 3)
+            # ====================================================================
+            # Reason: Fixed thresholds fail in different volatility regimes.
+            # We use the last 100 bars to find the 65th/35th percentiles.
+            ema_diff_series = features_df["ema_diff_pct"].tail(100).dropna()
+            
+            if len(ema_diff_series) >= 50: # Minimum bars for meaningful quantile
+                # Calculate percentiles
                 BULLISH_THRESHOLD = ema_diff_series.quantile(0.65)
                 BEARISH_THRESHOLD = ema_diff_series.quantile(0.35)
+                
+                # Clamp to institutional bounds [0.05, 0.40]
+                BULLISH_THRESHOLD = max(0.05, min(0.40, BULLISH_THRESHOLD))
+                BEARISH_THRESHOLD = min(-0.05, max(-0.40, BEARISH_THRESHOLD))
             else:
+                # Fallback to defaults
                 BULLISH_THRESHOLD = 0.15 if self.asset_type == "BTC" else 0.10
                 BEARISH_THRESHOLD = -0.15 if self.asset_type == "BTC" else -0.10
 

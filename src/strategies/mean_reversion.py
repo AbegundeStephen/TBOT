@@ -230,9 +230,9 @@ class MeanReversionStrategy(BaseStrategy):
         elif bb_pos < 0.25:
             oversold_count += 1
 
-        if rsi < 30:
+        if rsi < self.rsi_oversold:
             oversold_count += 2
-        elif rsi < 35:
+        elif rsi < self.rsi_oversold + 5:
             oversold_count += 1
 
         if stoch < 20:
@@ -249,9 +249,9 @@ class MeanReversionStrategy(BaseStrategy):
         elif bb_pos > 0.75:
             overbought_count += 1
 
-        if rsi > 70:
+        if rsi > self.rsi_overbought:
             overbought_count += 2
-        elif rsi > 65:
+        elif rsi > self.rsi_overbought - 5:
             overbought_count += 1
 
         if stoch > 80:
