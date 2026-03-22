@@ -559,12 +559,12 @@ class VeteranTradeManager:
                                 if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
                                     candidate_tp = ma - (0.25 * atr)
                                     if candidate_tp > self.entry_price + (0.5 * atr):
-                                        adjusted_tp = min(adjusted_tp, candidate_tp)
+                                        adjusted_tp = max(adjusted_tp, candidate_tp)
                             else: # short
                                 if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
                                     candidate_tp = ma + (0.25 * atr)
                                     if candidate_tp < self.entry_price - (0.5 * atr):
-                                        adjusted_tp = max(adjusted_tp, candidate_tp)
+                                        adjusted_tp = min(adjusted_tp, candidate_tp)
                     self.take_profit_levels.append(adjusted_tp)
 
                 # Fallback targets
@@ -795,7 +795,11 @@ class VeteranTradeManager:
                         self.runner_activated = True
                         logger.info(f"[VTM TACTICAL] 🏃 Runner Activated: Trailing stop will now follow price.")
                     
-                    return {"reason": [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3][i], "price": current_price, "size": size}
+                    # ✅ T34: Safe TP Exit Reason Lookup
+                    tp_reasons = [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3]
+                    reason = tp_reasons[i] if i < len(tp_reasons) else ExitReason.TAKE_PROFIT_3
+                    
+                    return {"reason": reason, "price": current_price, "size": size}
 
             # if self.bars_in_trade >= self.time_stop_bars:
             #     return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}

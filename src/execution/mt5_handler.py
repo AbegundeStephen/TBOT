@@ -332,12 +332,12 @@ class MT5ExecutionHandler:
             if account_info:
                 margin_free = account_info.margin_free
                 
-                # ✅ NEW: Use dynamic safety buffer based on protocol
-                is_small_account = self.trading_config.get("small_account_protocol", False)
-                margin_required = 10.0 if is_small_account else 50.0
+                # ✅ T38: Lower sanity floor to $5.0
+                # Real margin check happens below in _validate_margin()
+                margin_required = 5.0
 
                 if margin_free < margin_required:
-                    return False, f"Insufficient margin: ${margin_free:.2f} free (need ${margin_required:.2f})"
+                    return False, f"Insufficient margin: ${margin_free:.2f} free (need ${margin_required:.2f} sanity floor)"
 
         except Exception as e:
             logger.debug(f"[MT5] Margin check warning: {e}")

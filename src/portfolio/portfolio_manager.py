@@ -1673,30 +1673,18 @@ class PortfolioManager:
 
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
         """Check both long and short separately"""
-        # STEP 2 — Binary Correlation Lock
-        # Strict asset inventory check: Only ONE open trade per asset is allowed.
-        # Prevents pyramiding or averaging down.
-        open_positions = self.get_asset_positions(asset)
+        # STEP 2 — Portfolio-Level Guard
+        # Check current open positions for this asset against the cap.
+        current_total = self.get_asset_position_count(asset)
 
-        if len(open_positions) >= 1:
-            logger.info(f"[PORTFOLIO] Correlation Lock: Active trade exists for {asset}")
-            return False, f"Correlation Lock: Active trade exists for {asset}"
+        if current_total >= self.max_positions_per_asset:
+            logger.info(f"[PORTFOLIO] Max positions reached for {asset}: {current_total}")
+            return False, f"Max positions reached for {asset}"
 
         current_count = self.get_asset_position_count(asset, side)
 
         if current_count >= self.max_positions_per_asset:
             return False, f"Max {side} positions reached"
-
-        # Bucket Mutual Exclusion (Institutional Upgrade Phase 4)
-        new_bucket = self._get_asset_bucket(asset)
-        if new_bucket:
-            for pos in self.positions.values():
-                # Check for active trades in same bucket (excluding the same asset)
-                if pos.asset != asset:
-                    pos_bucket = self._get_asset_bucket(pos.asset)
-                    if pos_bucket == new_bucket:
-                        logger.warning(f"Bucket conflict \u2014 trade rejected: {asset} conflicts with {pos.asset} (Bucket {new_bucket})")
-                        return False, f"Bucket conflict ({new_bucket})"
 
         # Check if opposite side exists (if simultaneous trading disabled)
         if not self.config.get("trading", {}).get(
@@ -1941,11 +1929,47 @@ class PortfolioManager:
                     high=ohlc["high"], low=ohlc["low"], close=ohlc["close"]
                 )
 
-                # If VTM signals exit, mark for closure
+                # If VTM signals exit or action, handle it
                 if exit_signal:
-                    positions_to_close.append((asset, ohlc["close"], exit_signal))
+                    # ✅ T29: Handle Pyramid routing
+                    if isinstance(exit_signal, dict) and exit_signal.get('action') == 'pyramid':
+                        logger.info(f"[PYRAMID] 🗼 Triggered for {asset} {position.side}")
+                        
+                        entry_price = ohlc['close']
+                        position_size_usd = exit_signal['new_size'] * entry_price
+                        
+                        # Inherit critical context from parent position
+                        parent_ohlc = {
+                            "high": position.trade_manager.high,
+                            "low": position.trade_manager.low,
+                            "close": position.trade_manager.close,
+                            "volume": position.trade_manager.volume
+                        }
+                        
+                        self.add_position(
+                            asset=asset,
+                            symbol=position.symbol,
+                            side=position.side,
+                            entry_price=entry_price,
+                            position_size_usd=position_size_usd,
+                            ohlc_data=parent_ohlc,
+                            signal_details={
+                                **(getattr(position, 'signal_details', {}) or {}),
+                                "source": "pyramid_trigger",
+                                "parent_id": position.position_id,
+                                "trade_type": "TREND" # Pyramiding is a trend behavior
+                            },
+                            leverage=getattr(position, 'leverage', 1),
+                            margin_type=getattr(position, 'margin_type', "CROSSED"),
+                            is_futures=getattr(position, 'is_futures', True)
+                        )
+                        continue # Do NOT close the current position
+
+                    # Standard exit logic
+                    signal_str = str(exit_signal)
+                    positions_to_close.append((asset, ohlc["close"], signal_str))
                     logger.info(
-                        f"[VTM] {asset} triggered {exit_signal.upper()} @ ${ohlc['close']:,.2f}"
+                        f"[VTM] {asset} triggered {signal_str.upper()} @ ${ohlc['close']:,.2f}"
                     )
 
             except Exception as e:
@@ -2117,13 +2141,6 @@ class PortfolioManager:
         )
         return results
 
-    @handle_errors(
-        component="portfolio_manager",
-        severity=ErrorSeverity.ERROR,
-        notify=True,
-        reraise=False,
-        default_return=None,
-    )
     @handle_errors(
         component="portfolio_manager",
         severity=ErrorSeverity.ERROR,
