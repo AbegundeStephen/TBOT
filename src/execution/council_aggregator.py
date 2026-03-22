@@ -304,14 +304,17 @@ class InstitutionalCouncilAggregator:
             hard_blocked = False
             
             # --- Staircase Bypass ---
-            # Compute cumulative displacement across last three candles
-            bodies = [
-                abs(df['close'].iloc[-i] - df['open'].iloc[-i])
-                for i in range(1, 4)
-            ]
-            if sum(bodies) > (1.2 * atr_fast):
+            # Compute NET displacement across last three candles (A -> C)
+            # Reason: Proves sustained directional move rather than choppy whipsaw.
+            net_displacement = df['close'].iloc[-1] - df['open'].iloc[-3]
+            
+            # Check if net move is in signal direction and size is significant
+            if signal == 1 and net_displacement > (1.2 * atr_fast):
                 displacement_passed = True
-                displacement_reason = "Staircase Bypass: 3-bar displacement > 1.2 ATR"
+                displacement_reason = f"Staircase Bypass: 3-bar net UP displacement {net_displacement:.2f} > 1.2 ATR"
+            elif signal == -1 and net_displacement < -(1.2 * atr_fast):
+                displacement_passed = True
+                displacement_reason = f"Staircase Bypass: 3-bar net DOWN displacement {abs(net_displacement):.2f} > 1.2 ATR"
 
             # --- ✅ News Exception FIX (T11) ---
             # If candle size is extreme, reject unless institutional volume confirms
@@ -511,11 +514,12 @@ class InstitutionalCouncilAggregator:
                 latest = df.iloc[-1]
                 high, low, close = df['high'].values, df['low'].values, df['close'].values
                 atr_20 = ta.ATR(high, low, close, timeperiod=20)[-1]
-                vol_avg = df['volume'].iloc[-21:-1].mean()
+                vol_avg = df['volume'].iloc[-21:-1].mean() if 'volume' in df.columns else 0
                 
                 candle_body = latest['close'] - latest['open'] # Positive for bull, negative for bear
                 candle_size = abs(candle_body)
-                vol_ratio = latest.get('volume', 0) / vol_avg if vol_avg > 0 else 1.0
+                vol_raw = latest.get('volume', 0)
+                vol_ratio = (vol_raw / vol_avg) if vol_avg > 0 and vol_raw > 0 else 1.0
 
                 # ✅ TASK 19: Calibrated Flash Veto (Phase 3)
                 # Reason: 2.5x ATR was too tight for CPI/FOMC; 3.0x Volume missed real institutional moves.
@@ -615,7 +619,9 @@ class InstitutionalCouncilAggregator:
             
             if self.s_ema:
                 try:
-                    ema_signal, ema_conf = self.s_ema.generate_signal(df)
+                    # Pass 4H context if available in governor_data
+                    df_4h = governor_data.get('df_4h') if governor_data else None
+                    ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h)
                 except Exception as e:
                     logger.error(f"[COUNCIL] EMA signal error: {e}")
             
@@ -858,6 +864,47 @@ class InstitutionalCouncilAggregator:
                     if trade_type == "REVERSION":
                         # ⚡ EMA 20 as Take-Profit Magnet
                         ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                        
+                        # Directional Guard: Ensure TP is in the right direction
+                        if signal == 1 and ema_20 <= entry_price:
+                            logger.info(f"[COUNCIL] ❌ BLOCKED - Inverted TP Magnet (Long): EMA-20 {ema_20:.2f} <= Entry {entry_price:.2f}")
+                            return 0, {
+                                'timestamp': timestamp,
+                                'signal': 0,
+                                'asset': self.asset_type,
+                                'decision_type': "BLOCKED (Inverted TP Magnet)",
+                                'reasoning': "inverted_mr_magnet_long",
+                                'final_signal': 0,
+                                'signal_quality': 0.0,
+                                'total_score': total_score,
+                                'scores': chosen_scores,
+                                'mr_signal': mr_signal,
+                                'mr_confidence': mr_conf,
+                                'tf_signal': tf_signal,
+                                'tf_confidence': tf_conf,
+                                'ema_signal': ema_signal,
+                                'ema_confidence': ema_conf,
+                            }
+                        if signal == -1 and ema_20 >= entry_price:
+                            logger.info(f"[COUNCIL] ❌ BLOCKED - Inverted TP Magnet (Short): EMA-20 {ema_20:.2f} >= Entry {entry_price:.2f}")
+                            return 0, {
+                                'timestamp': timestamp,
+                                'signal': 0,
+                                'asset': self.asset_type,
+                                'decision_type': "BLOCKED (Inverted TP Magnet)",
+                                'reasoning': "inverted_mr_magnet_short",
+                                'final_signal': 0,
+                                'signal_quality': 0.0,
+                                'total_score': total_score,
+                                'scores': chosen_scores,
+                                'mr_signal': mr_signal,
+                                'mr_confidence': mr_conf,
+                                'tf_signal': tf_signal,
+                                'tf_confidence': tf_conf,
+                                'ema_signal': ema_signal,
+                                'ema_confidence': ema_conf,
+                            }
+
                         distance_to_tp = abs(entry_price - ema_20)
                         take_profit = ema_20
                     else:

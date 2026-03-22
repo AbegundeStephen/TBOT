@@ -334,10 +334,11 @@ class EMAStrategy(BaseStrategy):
         
         return context
 
-    def generate_signal(self, df: pd.DataFrame) -> tuple:
+    def generate_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple:
         """
         Generate real-time signal based on current EMA conditions.
         Now detects uptrends/downtrends even without crossovers.
+        ✅ ENHANCED: Includes 4H trend alignment validation to prevent Train/Serve skew.
         """
         if len(df) < self.get_warmup_period():
             return 0, 0.0
@@ -371,7 +372,6 @@ class EMAStrategy(BaseStrategy):
 
             # Calculate confidence score
             # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
-            # Reason: 6.5 is the empirical threshold for high-conviction trends.
             normalization_factor = 6.5
             confidence = min(1.0, trend_strength / normalization_factor)
             if macd_aligned == 1:
@@ -380,26 +380,62 @@ class EMAStrategy(BaseStrategy):
                 confidence += 0.10
             if high_volume == 1:
                 confidence += 0.10
-            confidence = min(1.0, confidence)
-
-            # Golden Cross (strong BULL)
+            
+            # Determine preliminary signal
+            signal = 0
             if ema_cross == 1:
-                return 1, confidence
-
-            # Death Cross (strong BEAR)
+                signal = 1
             elif ema_cross == -1:
-                return -1, confidence
-
-            # Uptrend without crossover (new logic)
+                signal = -1
             elif (ema_fast_slope > 0) and (price_above_fast == 1):
-                return 1, confidence * 0.7  # Weaker but valid BULL signal
-
-            # Downtrend without crossover (new logic)
+                signal = 1
+                confidence *= 0.7
             elif (ema_fast_slope < 0) and (price_above_fast == 0):
-                return -1, confidence * 0.7  # Weaker but valid BEAR signal
+                signal = -1
+                confidence *= 0.7
 
-            else:
-                return 0, 0.0
+            # ================================================================
+            # ✅ T42: APPLY 4H CONTEXT (Prevent Train/Serve Skew)
+            # ================================================================
+            if signal != 0 and self.use_4h_context and df_4h is not None:
+                try:
+                    # Generate 4H features if missing
+                    if 'ema_fast' not in df_4h.columns:
+                        df_4h_feat = self.generate_features(df_4h)
+                    else:
+                        df_4h_feat = df_4h
+                    
+                    # Align and calculate context for the latest bar
+                    df_4h_aligned = self._align_4h_to_1h(df.tail(1), df_4h_feat)
+                    if df_4h_aligned is not None:
+                        h4_context = self._calculate_4h_trend_context(df_4h_aligned, -1)
+                        
+                        if h4_context['trend_direction'] != 0:
+                            # alignment_score is 0-3 points
+                            if h4_context['trend_direction'] == signal:
+                                # Boost confidence for alignment
+                                boost = self.h4_trend_weight * h4_context['alignment_score'] / 30.0 # Scale to 0.15 max
+                                confidence += boost
+                                logger.debug(f"[{self.name}] 4H Alignment Boost: +{boost:.2f}")
+                            else:
+                                # Penalize for counter-trend
+                                penalty = self.h4_counter_penalty * 0.5
+                                confidence -= penalty
+                                logger.info(f"[{self.name}] 4H Counter-Trend Penalty: -{penalty:.2f}")
+                                
+                                # Block if required or confidence falls too low
+                                if self.require_4h_alignment and h4_context['alignment_score'] > 2.0:
+                                    logger.info(f"[{self.name}] ❌ Signal blocked by strict 4H alignment rule.")
+                                    return 0, 0.0
+                                
+                                if confidence < self.min_confidence:
+                                    logger.info(f"[{self.name}] ❌ Signal confidence ({confidence:.2f}) below threshold after 4H penalty.")
+                                    return 0, 0.0
+                except Exception as e:
+                    logger.warning(f"[{self.name}] 4H context validation failed: {e}")
+
+            confidence = min(1.0, confidence)
+            return signal, confidence
 
         except Exception as e:
             logger.error(f"[{self.name}] Error in generate_signal: {e}")

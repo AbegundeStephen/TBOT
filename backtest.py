@@ -649,6 +649,7 @@ class MLStrategy(bt.Strategy):
     def calculate_position_size(self, signal_direction):
         """Calculate position size with ATR-based risk management"""
         current_price = self.data.close[0]
+        equity = self.broker.getvalue()
         cash = self.broker.getcash()
 
         if self.params.use_atr_sizing:
@@ -656,7 +657,7 @@ class MLStrategy(bt.Strategy):
             stop_distance = atr_value * self.params.atr_multiplier
             stop_distance_pct = stop_distance / current_price
 
-            risk_amount = cash * self.params.risk_per_trade
+            risk_amount = equity * self.params.risk_per_trade
             position_value = risk_amount / stop_distance_pct
             size = position_value / current_price
 
@@ -664,7 +665,7 @@ class MLStrategy(bt.Strategy):
             max_size = max_position_value / current_price
             size = min(size, max_size)
         else:
-            risk_amount = cash * self.params.risk_per_trade
+            risk_amount = equity * self.params.risk_per_trade
             position_value = risk_amount / self.params.stop_loss_pct
             size = position_value / current_price
 

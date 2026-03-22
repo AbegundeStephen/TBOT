@@ -60,6 +60,7 @@ class RegimeStatus:
     
     # Granular Timeframe Data
     timeframe_data: Dict[str, Dict] = field(default_factory=dict)
+    df_4h: Optional[pd.DataFrame] = None
 
 
 class MultiTimeFrameRegimeDetector:
@@ -432,7 +433,8 @@ class MultiTimeFrameRegimeDetector:
             ema_4h_200=ema_4h_baseline,
             ema_4h_50=ema_4h_slow,
             trade_type=trade_type,
-            timeframe_data=timeframe_data
+            timeframe_data=timeframe_data,
+            df_4h=df_4h_with_ema # ✨ Pass 4H data with features
         )
 
     def analyze_regime(

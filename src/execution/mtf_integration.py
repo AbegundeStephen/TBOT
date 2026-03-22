@@ -300,6 +300,7 @@ class MTFRegimeIntegration:
                 "volatility": volatility,
                 "allow_counter_trend": allow_counter_trend,
                 "max_positions": 3,
+                "df_4h": regime_status.df_4h, # ✨ ADDED: 4H context for strategies
                 "governor": regime_status, # ✨ ADDED: For Council & Performance Aggregators
                 "full_regime_status": regime_status,
             }
