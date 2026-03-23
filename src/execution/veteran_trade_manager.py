@@ -586,11 +586,11 @@ class VeteranTradeManager:
             final_size = round(self.position_size, precision)
 
             MIN_LOT = {
-                'BTC': 0.0001,
+                'BTC': 0.003,
                 'GOLD': 0.01,
-                'USTEC': 0.01,
-                'EURJPY': 0.01,
-                'EURUSD': 0.01
+                'USTEC': 0.02,
+                'EURJPY': 0.02,
+                'EURUSD': 0.02
             }
 
             min_lot = self.min_lot_override if self.min_lot_override is not None else MIN_LOT.get(self.asset.upper(), 0.01)

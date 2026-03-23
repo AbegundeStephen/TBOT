@@ -703,21 +703,27 @@ class PortfolioManager:
     def get_risk_budget(
         self, 
         asset: str, 
-        strategy_type: str = "TREND"
+        strategy_type: str = "TREND",
+        confidence_score: Optional[float] = None,
+        market_condition: Optional[str] = None
     ) -> float:
         """
         ✨ STRATEGIC RISK GOVERNOR
         
         Calculates risk budget for a new trade based on:
         1. Base risk (from config)
-        2. Strategy type (SCALP vs TREND asymmetric adjustment)
-        3. Correlation malus (reduce risk if holding correlated assets)
-        4. Drawdown shield (reduce risk in drawdown)
-        5. Total risk limit (cap aggregate open risk)
+        2. Signal confidence adjustment (from hybrid_position.py)
+        3. Market condition adjustment (from hybrid_position.py)
+        4. Strategy type (SCALP vs TREND asymmetric adjustment)
+        5. Correlation malus (reduce risk if holding correlated assets)
+        6. Drawdown shield (reduce risk in drawdown)
+        7. Total risk limit (cap aggregate open risk)
         
         Args:
             asset: Asset name (e.g., "BTC", "GOLD")
             strategy_type: "TREND" or "SCALP"
+            confidence_score: Optional signal confidence (0.0 to 1.0)
+            market_condition: Optional market regime description
             
         Returns:
             Risk percentage (e.g., 0.015 for 1.5%)
@@ -729,6 +735,32 @@ class PortfolioManager:
             # ================================================================
             fixed_risk_config = asset_cfg.get("fixed_risk_usd")
             base_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
+            
+            # ✅ T2.1: Apply logic ported from orphaned hybrid_position.py
+            if confidence_score is not None:
+                # Confidence-based scaling (0.3 to 1.5x)
+                # Maps [0,1] to [0.5,1.5], clamped at 0.3 min
+                confidence_scalar = 0.5 + (confidence_score * 1.0)
+                confidence_scalar = max(0.3, min(1.5, confidence_scalar))
+                base_risk *= confidence_scalar
+                logger.info(f"  Confidence Adjustment: {confidence_scalar:.2f}x (Conf: {confidence_score:.2f})")
+
+            if market_condition:
+                condition = market_condition.lower()
+                condition_scalars = {
+                    "bullish": 1.1,
+                    "neutral": 1.0,
+                    "bearish": 0.8,
+                    "uncertain": 0.6,
+                    "extreme_volatility": 0.5,
+                    "bear": 0.8, # Handle variants
+                    "bull": 1.1
+                }
+                condition_scalar = condition_scalars.get(condition, 1.0)
+                if condition_scalar != 1.0:
+                    base_risk *= condition_scalar
+                    logger.info(f"  Market Condition Adjustment: {condition_scalar:.2f}x (Regime: {market_condition})")
+
             strategy_multiplier = 1.0
             
             logger.info(f"\n[RISK BUDGET] Calculating for {asset} {strategy_type}")
