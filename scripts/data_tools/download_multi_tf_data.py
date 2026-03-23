@@ -12,6 +12,12 @@ import sys
 from datetime import datetime, timedelta
 import warnings
 
+# ✅ FIX: Add project root to sys.path (relative to this script)
+script_path = Path(__file__).resolve()
+project_root = script_path.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 warnings.filterwarnings("ignore")
 
 if sys.platform == "win32":
@@ -25,11 +31,13 @@ import pandas as pd
 from src.data.data_manager import DataManager
 
 # Setup logging
+log_dir = project_root / "logs"
+log_dir.mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("logs/download_multi_tf_data.log", encoding="utf-8"),
+        logging.FileHandler(log_dir / "download_multi_tf_data.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -124,14 +132,16 @@ def main():
     logger.info("INSTITUTIONAL DATA HARVEST - PHASE 5")
     logger.info("=" * 70)
 
-    config_path = Path("config/config.json")
+    # ✅ Use project_root for config loading
+    config_path = project_root / "config" / "config.json"
     if not config_path.exists():
-        config_path = Path("config/config.template.json") # Fallback
+        config_path = project_root / "config" / "config.template.json"
 
     with open(config_path) as f:
         config = json.load(f)
 
-    data_dir = Path("data/raw")
+    # ✅ Use project_root for data directory
+    data_dir = project_root / "data" / "raw"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     data_manager = DataManager(config)
@@ -166,26 +176,27 @@ def main():
     
     # BTC Tasks
     if binance_ok:
-        tasks.append({"asset": "BTC", "source": "Binance", "tf": "15m", "file": "data/raw/BTCUSDT_15m.csv"})
-        tasks.append({"asset": "BTC", "source": "Binance", "tf": "1h", "file": "data/raw/BTCUSDT_1h.csv"})
-        tasks.append({"asset": "BTC", "source": "Binance", "tf": "4h", "file": "data/raw/BTCUSDT_4h.csv"})
-        tasks.append({"asset": "BTC", "source": "Binance", "tf": "1d", "file": "data/raw/BTCUSDT_1d.csv"})
+        tasks.append({"asset": "BTC", "source": "Binance", "tf": "15m", "file": data_dir / "BTCUSDT_15m.csv"})
+        tasks.append({"asset": "BTC", "source": "Binance", "tf": "1h", "file": data_dir / "BTCUSDT_1h.csv"})
+        tasks.append({"asset": "BTC", "source": "Binance", "tf": "4h", "file": data_dir / "BTCUSDT_4h.csv"})
+        tasks.append({"asset": "BTC", "source": "Binance", "tf": "1d", "file": data_dir / "BTCUSDT_1d.csv"})
 
     # MT5 Tasks
     if mt5_ok:
         mt5_assets = ["XAUUSDm", "USTECm", "EURJPYm", "EURUSDm"]
         for asset in mt5_assets:
-            tasks.append({"asset": asset, "source": "MT5", "tf": "M15", "file": f"data/raw/{asset}_15m.csv"})
-            tasks.append({"asset": asset, "source": "MT5", "tf": "H1", "file": f"data/raw/{asset}_1h.csv"})
-            tasks.append({"asset": asset, "source": "MT5", "tf": "H4", "file": f"data/raw/{asset}_4h.csv"})
-            tasks.append({"asset": asset, "source": "MT5", "tf": "D1", "file": f"data/raw/{asset}_1d.csv"})
+            tasks.append({"asset": asset, "source": "MT5", "tf": "M15", "file": data_dir / f"{asset}_15m.csv"})
+            tasks.append({"asset": asset, "source": "MT5", "tf": "H1", "file": data_dir / f"{asset}_1h.csv"})
+            tasks.append({"asset": asset, "source": "MT5", "tf": "H4", "file": data_dir / f"{asset}_4h.csv"})
+            tasks.append({"asset": asset, "source": "MT5", "tf": "D1", "file": data_dir / f"{asset}_1d.csv"})
 
     results = {}
     for task in tasks:
+        output_file = str(task["file"])
         if task["source"] == "Binance":
-            results[task["file"]] = download_btc_data(data_manager, task["tf"], LOOKBACK, task["file"])
+            results[output_file] = download_btc_data(data_manager, task["tf"], LOOKBACK, output_file)
         else:
-            results[task["file"]] = download_mt5_asset_data(data_manager, task["asset"], task["tf"], LOOKBACK, task["file"])
+            results[output_file] = download_mt5_asset_data(data_manager, task["asset"], task["tf"], LOOKBACK, output_file)
 
     logger.info("\n" + "=" * 70)
     logger.info("HARVEST SUMMARY")

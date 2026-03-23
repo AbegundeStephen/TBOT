@@ -27,6 +27,13 @@ project_root = script_path.parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+if sys.platform == "win32":
+    try:
+        import sys
+        sys.stdout.reconfigure(encoding="utf-8")
+    except:
+        pass
+
 # Setup logging
 log_dir = project_root / "logs"
 log_dir.mkdir(exist_ok=True)
@@ -34,7 +41,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(log_dir / "dual_timeframe_training.log"),
+        logging.FileHandler(log_dir / "dual_timeframe_training.log", encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
@@ -89,28 +96,28 @@ def train_dual_timeframe_system(
 
     for asset in assets:
         # Check 15min (required for Sniper)
-        path_15m = Path(data_folder) / f"train_data_{asset}_15m.csv"
+        path_15m = data_folder / f"train_data_{asset}_15m.csv"
         if path_15m.exists():
             df = pd.read_csv(path_15m)
-            logger.info(f"  ✓ {asset} 15min: {len(df)} candles")
+            logger.info(f"  [OK] {asset} 15min: {len(df)} candles")
         else:
             missing_15m.append(asset)
-            logger.error(f"  ✗ {asset} 15min MISSING: {path_15m}")
+            logger.error(f"  [MISSING] {asset} 15min: {path_15m}")
 
         # Check 4H (required for Analyst)
-        path_4h = Path(data_folder) / f"train_data_{asset}_4h.csv"
+        path_4h = data_folder / f"train_data_{asset}_4h.csv"
         if path_4h.exists():
             df = pd.read_csv(path_4h)
-            logger.info(f"  ✓ {asset} 4H: {len(df)} candles")
+            logger.info(f"  [OK] {asset} 4H: {len(df)} candles")
         else:
             missing_4h.append(asset)
-            logger.error(f"  ✗ {asset} 4H MISSING: {path_4h}")
+            logger.error(f"  [MISSING] {asset} 4H: {path_4h}")
 
     if missing_15m:
-        raise FileNotFoundError(
-            f"Missing 15min data for: {', '.join(missing_15m)}\n"
-            f"Sniper REQUIRES 15min candles for training!"
-        )
+        logger.error("\nCRITICAL: Sniper REQUIRES 15min candles for training!")
+        logger.error(f"Missing data for: {', '.join(missing_15m)}")
+        logger.info("Please run scripts/data_tools/download_multi_tf_data.py first.")
+        raise FileNotFoundError(f"Missing 15min data for: {', '.join(missing_15m)}")
 
     if missing_4h:
         logger.warning(
