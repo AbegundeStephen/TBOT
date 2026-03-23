@@ -2,7 +2,6 @@
 """
 Backtesting Script - With AI Validation Layer Integration
 """
-from vtm_integration import MLStrategyWithVTM
 import json
 import logging
 import argparse

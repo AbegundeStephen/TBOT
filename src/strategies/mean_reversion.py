@@ -2,8 +2,9 @@
 MULTI-TIMEFRAME Mean Reversion Strategy with 4H Context
 Key improvements:
 - 4H timeframe context for trend filtering
-- Only takes mean reversion trades aligned with or counter to 4H extremes
-- Maximum robustness with adaptive thresholds
+- Scorecard-based label generation for higher signal frequency
+- Micro-Reversion path for trend-aligned pullbacks
+- Optimized BB thresholds and divergence windows
 """
 
 import pandas as pd
@@ -33,15 +34,17 @@ class MeanReversionStrategy(BaseStrategy):
         self.reversion_window = config.get("reversion_window", 3)
         self.asset = config.get("asset", "BTC")
 
-        # Thresholds - VERY conservative
+        # Thresholds - Optimized for Institutional Grade MR
         self.rsi_overbought = config.get("rsi_overbought", 64)
         self.rsi_oversold = config.get("rsi_oversold", 35)
-        self.bb_lower_threshold = config.get("bb_lower_threshold", 0.35)
-        self.bb_upper_threshold = config.get("bb_upper_threshold", 0.70)
+        # ✅ T1.1B: Lowered to 0.25 for genuine stretch
+        self.bb_lower_threshold = config.get("bb_lower_threshold", 0.25) 
+        # ✅ T1.1B: Adjusted to 0.75 for BTC/Standard
+        self.bb_upper_threshold = config.get("bb_upper_threshold", 0.75) 
 
         # Strict thresholds
-        self.min_return_threshold = config.get("min_return_threshold", 0.003)
-        self.min_score_threshold = config.get("min_conditions", 3.0)
+        self.min_return_threshold = config.get("min_return_threshold", 0.0025) # 0.25%
+        self.min_score_threshold = config.get("min_conditions", 3.0) # Scorecard threshold
 
         # 4H context parameters
         self.use_4h_context = config.get("use_4h_context", True)
@@ -65,18 +68,14 @@ class MeanReversionStrategy(BaseStrategy):
         logger.info(
             f"  4H Context: {self.use_4h_context} (Mode: {self.h4_reversion_mode})"
         )
-        if self.use_4h_context:
-            logger.info(
-                f"  4H Extreme Weight: {self.h4_extreme_weight}, Trend Penalty: {self.h4_trend_penalty}"
-            )
 
     def get_warmup_period(self) -> int:
         periods = [
             self.bb_period,
             self.rsi_period,
             self.stoch_k + self.stoch_d,
-            14,  # ATR
-            26 + 9 # MACD lookback
+            20,  # ✅ T1.1C: Lookback for current pivot
+            50 + 10 # EMA 50 burn-in
         ]
         return max(periods)
 
@@ -136,24 +135,24 @@ class MeanReversionStrategy(BaseStrategy):
 
         # ADX for trend strength
         df["adx"] = ta.ADX(high, low, close, timeperiod=14)
+        
+        # ✅ T1.1A: EMA-20 for Micro-Reversion path
+        df["ema_20"] = ta.EMA(close, timeperiod=20)
+        # EMA 50 for "The Stretch" scorecard
+        df["ema_50"] = ta.EMA(close, timeperiod=50)
 
         return df
 
     def _align_4h_to_1h(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
-        """
-        Align 4H data to 1H timeframe using forward-fill
-        Returns a DataFrame with same index as df_1h containing 4H context
-        """
+        """Align 4H data to 1H timeframe using forward-fill"""
         if df_4h is None or df_4h.empty:
             return None
 
-        # Ensure both have datetime index
         if not isinstance(df_1h.index, pd.DatetimeIndex):
             df_1h = df_1h.set_index("timestamp")
         if not isinstance(df_4h.index, pd.DatetimeIndex):
             df_4h = df_4h.set_index("timestamp")
 
-        # Select 4H features to align
         h4_features = [
             "bb_position",
             "rsi",
@@ -164,7 +163,6 @@ class MeanReversionStrategy(BaseStrategy):
             "close",
         ]
 
-        # Create aligned dataframe
         df_4h_aligned = pd.DataFrame(index=df_1h.index)
 
         for feature in h4_features:
@@ -180,13 +178,6 @@ class MeanReversionStrategy(BaseStrategy):
     ) -> dict:
         """
         Calculate 4H mean reversion context
-        Returns: {
-            'is_extreme_oversold': bool,
-            'is_extreme_overbought': bool,
-            'is_trending': bool,
-            'trend_direction': int (-1, 0, 1),
-            'reversion_score': float
-        }
         """
         if df_4h_aligned is None or idx >= len(df_4h_aligned):
             return {
@@ -199,7 +190,6 @@ class MeanReversionStrategy(BaseStrategy):
 
         row = df_4h_aligned.iloc[idx]
 
-        # Check if we have valid data
         if pd.isna(row.get("h4_bb_position")) or pd.isna(row.get("h4_rsi")):
             return {
                 "is_extreme_oversold": False,
@@ -217,66 +207,42 @@ class MeanReversionStrategy(BaseStrategy):
             "reversion_score": 0.0,
         }
 
-        # 1. Check for extreme conditions on 4H
         bb_pos = row["h4_bb_position"]
         rsi = row["h4_rsi"]
         stoch = row.get("h4_stoch_k", 50)
         adx = row.get("h4_adx", 0)
 
-        # Extreme oversold on 4H
         oversold_count = 0
-        if bb_pos < 0.15:
-            oversold_count += 2
-        elif bb_pos < 0.25:
-            oversold_count += 1
-
-        if rsi < self.rsi_oversold:
-            oversold_count += 2
-        elif rsi < self.rsi_oversold + 5:
-            oversold_count += 1
-
-        if stoch < 20:
-            oversold_count += 1
+        if bb_pos < 0.15: oversold_count += 2
+        elif bb_pos < 0.25: oversold_count += 1
+        if rsi < self.rsi_oversold: oversold_count += 2
+        elif rsi < self.rsi_oversold + 5: oversold_count += 1
+        if stoch < 20: oversold_count += 1
 
         if oversold_count >= 2:
             context["is_extreme_oversold"] = True
             context["reversion_score"] = oversold_count
 
-        # Extreme overbought on 4H
         overbought_count = 0
-        if bb_pos > 0.85:
-            overbought_count += 2
-        elif bb_pos > 0.75:
-            overbought_count += 1
-
-        if rsi > self.rsi_overbought:
-            overbought_count += 2
-        elif rsi > self.rsi_overbought - 5:
-            overbought_count += 1
-
-        if stoch > 80:
-            overbought_count += 1
+        if bb_pos > 0.85: overbought_count += 2
+        elif bb_pos > 0.75: overbought_count += 1
+        if rsi > self.rsi_overbought: overbought_count += 2
+        elif rsi > self.rsi_overbought - 5: overbought_count += 1
+        if stoch > 80: overbought_count += 1
 
         if overbought_count >= 2:
             context["is_extreme_overbought"] = True
             context["reversion_score"] = overbought_count
 
-        # 2. Check if 4H is trending (bad for mean reversion)
         if adx > 25:
             context["is_trending"] = True
-
-            # Determine trend direction
-            if bb_pos > 0.6 and rsi > 55:
-                context["trend_direction"] = 1  # Uptrend
-            elif bb_pos < 0.4 and rsi < 45:
-                context["trend_direction"] = -1  # Downtrend
+            if bb_pos > 0.6 and rsi > 55: context["trend_direction"] = 1  # Uptrend
+            elif bb_pos < 0.4 and rsi < 45: context["trend_direction"] = -1  # Downtrend
 
         return context
 
     def _find_swing_pivot(self, values: np.ndarray, direction: str, lookback: int = 60, n_bars: int = 5) -> int:
-        """
-        ✅ TASK 12: Find a significant swing high/low using an N-bar window.
-        """
+        """Find a significant swing high/low using an N-bar window."""
         if len(values) < lookback:
             lookback = len(values)
             
@@ -297,8 +263,8 @@ class MeanReversionStrategy(BaseStrategy):
     def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 60) -> bool:
         """
         Dynamic Divergence Engine (Institutional Grade)
-        - 60-bar lookback window
-        - n_bars=5 swing pivot detection
+        - 60-bar historical lookback window
+        - ✅ T1.1C: 20-bar current pivot search (Lookback window within period)
         """
         try:
             if len(df) < period:
@@ -307,13 +273,12 @@ class MeanReversionStrategy(BaseStrategy):
             close = df['close'].values
             rsi = df['rsi'].values
             
-            # Bullish Divergence (for Long)
             if signal == 1:
-                # Current pivot low (recent)
-                curr_idx = self._find_swing_pivot(close, 'low', lookback=15, n_bars=5)
+                # Current pivot low (recent 20 bars)
+                curr_idx = self._find_swing_pivot(close, 'low', lookback=20, n_bars=5)
                 if curr_idx == -1: return False
                 
-                # Previous significant swing low
+                # Previous significant swing low (up to 60 bars)
                 prev_idx = self._find_swing_pivot(close, 'low', lookback=period, n_bars=5)
                 if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
                 
@@ -321,13 +286,12 @@ class MeanReversionStrategy(BaseStrategy):
                 if close[curr_idx] < close[prev_idx] and rsi[curr_idx] > rsi[prev_idx]:
                     return True
                         
-            # Bearish Divergence (for Short)
             elif signal == -1:
-                # Current pivot high (recent)
-                curr_idx = self._find_swing_pivot(close, 'high', lookback=15, n_bars=5)
+                # Current pivot high (recent 20 bars)
+                curr_idx = self._find_swing_pivot(close, 'high', lookback=20, n_bars=5)
                 if curr_idx == -1: return False
                 
-                # Previous significant swing high
+                # Previous significant swing high (up to 60 bars)
                 prev_idx = self._find_swing_pivot(close, 'high', lookback=period, n_bars=5)
                 if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
                 
@@ -344,7 +308,7 @@ class MeanReversionStrategy(BaseStrategy):
         self, df: pd.DataFrame, df_4h: pd.DataFrame = None, pattern_miner = None
     ) -> pd.Series:
         """
-        INSTITUTIONAL Mean Reversion with 3 pillars (Phase 4)
+        INSTITUTIONAL Mean Reversion with Scorecard & Micro-Reversion (T1.1)
         """
         df = df.copy()
         labels = pd.Series(0, index=df.index)
@@ -357,11 +321,10 @@ class MeanReversionStrategy(BaseStrategy):
         low = df["low"].values
         bb_upper = df["bb_upper"].values
         bb_lower = df["bb_lower"].values
+        bb_pos = df["bb_position"].values
         rsi = df["rsi"].values
         atr = df["atr"].values
-        
-        # Calculate EMA 50 for "The Stretch"
-        df["ema_50"] = ta.EMA(close, timeperiod=50)
+        ema_20 = df["ema_20"].values
         ema_50 = df["ema_50"].values
 
         # Align 4H data if provided
@@ -379,73 +342,109 @@ class MeanReversionStrategy(BaseStrategy):
 
             current_close = close[i]
             
-            # ================================================================
-            # ATR Velocity Veto (Step 3)
-            # ================================================================
+            # ATR Velocity Veto
             velocity_drop = close[i-3] - current_close
             velocity_rise = current_close - close[i-3]
             atr_threshold = 4.0 * atr[i]
             
             # ================================================================
-            # PILLAR 1: THE STRETCH (Volatility Exhaustion)
+            # ✅ T1.1A: MACRO REVERSION SCORECARD (Threshold=3pts)
             # ================================================================
+            score_long = 0
+            score_short = 0
+            
+            # PILLAR 1: THE STRETCH (2pts)
             stretch_long = (ema_50[i] - current_close > 2.0 * atr[i]) or (current_close < bb_lower[i])
             stretch_short = (current_close - ema_50[i] > 2.0 * atr[i]) or (current_close > bb_upper[i])
+            if stretch_long: score_long += 2
+            if stretch_short: score_short += 2
 
-            # ================================================================
-            # PILLAR 2: THE DIVERGENCE (1H)
-            # ================================================================
+            # PILLAR 2: THE DIVERGENCE (1pt) - Using 20/60 windows
             div_long = self._check_divergence(df.iloc[:i+1], signal=1, period=60)
             div_short = self._check_divergence(df.iloc[:i+1], signal=-1, period=60)
+            if div_long: score_long += 1
+            if div_short: score_short += 1
             
-            # ================================================================
-            # Liquidity Sweep OR-Gate (Step 4)
-            # ================================================================
+            # PILLAR 3: LIQUIDITY SWEEP (1pt)
             lookback_100 = low[max(0, i-100):i]
             highback_100 = high[max(0, i-100):i]
             sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
             sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
+            if sweep_long: score_long += 1
+            if sweep_short: score_short += 1
+
+            # PILLAR 4: THE EXHAUSTION (1pt)
+            # ✅ T1.1D: Pattern only worth paying for extreme stretch (<0.15 or >0.85)
+            # This avoids late entries on minor pullbacks.
+            if bb_pos[i] < 0.15 or bb_pos[i] > 0.85:
+                patterns_to_check = {
+                    'Hammer': ta.CDLHAMMER,
+                    'Doji': ta.CDLDOJI,
+                    'Engulfing': ta.CDLENGULFING
+                }
+                o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
+                for name, func in patterns_to_check.items():
+                    res = func(o, h, l, c)
+                    if res[-1] != 0:
+                        if res[-1] > 0: score_long += 1
+                        if res[-1] < 0: score_short += 1
 
             # ================================================================
-            # PILLAR 3: THE EXHAUSTION (Pattern Recognition)
+            # ✅ T1.1A: MICRO-REVERSION PATH (Scorecard 1.5pt threshold)
             # ================================================================
-            exhaustion_long = False
-            exhaustion_short = False
+            micro_triggered_long = False
+            micro_triggered_short = False
             
-            # Pattern Detection (Must be Hammer, Doji, or Engulfing)
-            patterns_to_check = {
-                'Hammer': ta.CDLHAMMER,
-                'Doji': ta.CDLDOJI,
-                'Engulfing': ta.CDLENGULFING
-            }
-            o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
-            for name, func in patterns_to_check.items():
-                res = func(o, h, l, c)
-                if res[-1] != 0:
-                    if stretch_long and res[-1] > 0: exhaustion_long = True
-                    if stretch_short and res[-1] < 0: exhaustion_short = True
+            if df_4h_aligned is not None:
+                h4_context = self._calculate_4h_reversion_context(df_4h_aligned, i)
+                micro_score_long = 0
+                micro_score_short = 0
+                
+                # LONG: 4H BULLISH + 1H RSI < 40 + EMA-20 touch
+                if h4_context['trend_direction'] == 1: micro_score_long += 0.5
+                if rsi[i] < 40: micro_score_long += 0.5
+                if low[i] <= ema_20[i] <= high[i]: micro_score_long += 0.5
+                if micro_score_long >= 1.5: micro_triggered_long = True
+                
+                # SHORT: 4H BEARISH + 1H RSI > 60 + EMA-20 touch
+                if h4_context['trend_direction'] == -1: micro_score_short += 0.5
+                if rsi[i] > 60: micro_score_short += 0.5
+                if low[i] <= ema_20[i] <= high[i]: micro_score_short += 0.5
+                if micro_score_short >= 1.5: micro_triggered_short = True
 
             # ================================================================
-            # FINAL TRADE TRIGGER (Step 5)
+            # FINAL TRADE TRIGGER
             # ================================================================
+            
+            # ✅ T1.1 / Section 3A: ATR-Scaled Return Threshold
+            # Reason: Static thresholds mislabel high-ATR crypto vs low-ATR FX.
+            current_atr_pct = atr[i] / current_close
+            min_return = max(self.min_return_threshold, 0.30 * current_atr_pct)
             
             # BUY setup
-            if stretch_long and (div_long or sweep_long) and exhaustion_long:
+            if (score_long >= 3.0) or micro_triggered_long:
                 if velocity_drop > atr_threshold:
                     logger.debug(f"[{self.name}] VETO BUY: Velocity drop {velocity_drop:.2f} > {atr_threshold:.2f}")
                 else:
-                    labels.iloc[i] = 1
-                    signal_count["buy"] += 1
+                    # Validate with future returns (ATR-scaled)
+                    future_closes = close[i + 1 : i + 1 + 5]
+                    future_return = (np.mean(future_closes) - current_close) / current_close if len(future_closes) > 0 else 0
+                    if future_return > min_return:
+                        labels.iloc[i] = 1
+                        signal_count["buy"] += 1
             
             # SELL setup
-            elif stretch_short and (div_short or sweep_short) and exhaustion_short:
+            elif (score_short >= 3.0) or micro_triggered_short:
                 if velocity_rise > atr_threshold:
                     logger.debug(f"[{self.name}] VETO SELL: Velocity rise {velocity_rise:.2f} > {atr_threshold:.2f}")
                 else:
-                    labels.iloc[i] = -1
-                    signal_count["sell"] += 1
+                    future_closes = close[i + 1 : i + 1 + 5]
+                    future_return = (np.mean(future_closes) - current_close) / current_close if len(future_closes) > 0 else 0
+                    if future_return < -min_return:
+                        labels.iloc[i] = -1
+                        signal_count["sell"] += 1
 
-        # Remove labels from last N bars
+        # Remove labels from last bars
         labels.iloc[-self.reversion_window :] = 0
 
         # === Detailed logging ===
@@ -453,26 +452,51 @@ class MeanReversionStrategy(BaseStrategy):
         total = len(labels)
 
         logger.info(f"[{self.name}] Label distribution:")
-        logger.info(
-            f"  SELL: {signal_count['sell']:>5} ({signal_count['sell']/total*100:>5.2f}%)"
-        )
-        logger.info(
-            f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)"
-        )
-        logger.info(
-            f"  BUY:  {signal_count['buy']:>5} ({signal_count['buy']/total*100:>5.2f}%)"
-        )
+        logger.info(f"  SELL: {signal_count['sell']:>5} ({signal_count['sell']/total*100:>5.2f}%)")
+        logger.info(f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)")
+        logger.info(f"  BUY:  {signal_count['buy']:>5} ({signal_count['buy']/total*100:>5.2f}%)")
 
-        buy_pct = signal_count["buy"] / total * 100
-        sell_pct = signal_count["sell"] / total * 100
-        total_signals = buy_pct + sell_pct
-
-        if total_signals < 2:
-            logger.warning(
-                f"  ⚠ Very few signals ({total_signals:.1f}%) - Phase 3 is highly selective"
-            )
-        else:
-            logger.info(f"  ✓ Phase 3 signal rate: {total_signals:.1f}%")
+        total_signals = (signal_count["buy"] + signal_count["sell"]) / total * 100
+        logger.info(f"  ✓ MR Refactored signal rate: {total_signals:.1f}%")
 
         return labels
 
+    def generate_signal(self, df: pd.DataFrame) -> tuple:
+        """
+        Generate real-time signal based on scorecard logic.
+        """
+        if len(df) < self.get_warmup_period():
+            return 0, 0.0
+
+        try:
+            features_df = self.generate_features(df.tail(100))
+            latest = features_df.iloc[-1]
+            
+            # Simplified real-time signal logic mirroring the scorecard
+            bb_pos = latest["bb_position"]
+            rsi = latest["rsi"]
+            atr = latest["atr"]
+            close = latest["close"]
+            ema_50 = latest["ema_50"]
+            ema_20 = latest["ema_20"]
+            
+            # Check for stretch (Main component)
+            stretch_long = (ema_50 - close > 2.0 * atr) or (bb_pos < self.bb_lower_threshold)
+            stretch_short = (close - ema_50 > 2.0 * atr) or (bb_pos > self.bb_upper_threshold)
+            
+            # Confidence based on stretch and RSI
+            if stretch_long:
+                confidence = min(1.0, 0.5 + abs(bb_pos) if bb_pos < 0 else 0.6)
+                if rsi < 30: confidence += 0.1
+                return 1, min(1.0, confidence)
+            
+            if stretch_short:
+                confidence = min(1.0, 0.5 + (bb_pos - 1.0) if bb_pos > 1 else 0.6)
+                if rsi > 70: confidence += 0.1
+                return -1, min(1.0, confidence)
+                
+            return 0, 0.0
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Signal error: {e}")
+            return 0, 0.0

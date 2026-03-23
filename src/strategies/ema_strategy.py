@@ -387,12 +387,8 @@ class EMAStrategy(BaseStrategy):
                 signal = 1
             elif ema_cross == -1:
                 signal = -1
-            elif (ema_fast_slope > 0) and (price_above_fast == 1):
-                signal = 1
-                confidence *= 0.7
-            elif (ema_fast_slope < 0) and (price_above_fast == 0):
-                signal = -1
-                confidence *= 0.7
+            else:
+                return 0, 0.0
 
             # ================================================================
             # ✅ T42: APPLY 4H CONTEXT (Prevent Train/Serve Skew)

@@ -3,9 +3,9 @@
 MULTI-TIMEFRAME Trend Following Strategy with 4H Context
 Key improvements:
 - 4H timeframe context for trend filtering
-- Multi-tier signal strength (weak/medium/strong trends)
-- Adaptive thresholds based on volatility
-- Better balance between precision and signal generation
+- Fixed lookforward for training label consistency (T1.2B)
+- Volatility Squeeze Filter (T1.2C)
+- Calibrated min_conditions threshold (T1.2A)
 """
 
 import pandas as pd
@@ -54,7 +54,8 @@ class TrendFollowingStrategy(BaseStrategy):
         self.min_return_threshold = config.get("min_return_threshold", 0.001)
 
         # Score threshold
-        self.min_score_threshold = config.get("min_conditions", 1.5)
+        # ✅ T1.2A: Standardized to 2.5 to eliminate single-indicator noise
+        self.min_score_threshold = config.get("min_conditions", 2.5)
 
         logger.info(f"[{self.name}] Initialized with:")
         logger.info(f"  Fast MA: {self.fast_ma}, Slow MA: {self.slow_ma}")
@@ -63,30 +64,19 @@ class TrendFollowingStrategy(BaseStrategy):
         )
         logger.info(f"  Min Return: {self.min_return_threshold:.3%}")
         logger.info(f"  Min Score: {self.min_score_threshold}")
-        logger.info(
-            f"  4H Context: {self.use_4h_context} (Required: {self.require_4h_alignment})"
-        )
-        if self.use_4h_context:
-            logger.info(
-                f"  4H Trend Weight: {self.h4_trend_weight}, Counter Penalty: {self.h4_counter_penalty}"
-            )
 
     def get_warmup_period(self) -> int:
         periods = [
             self.slow_ma,
             self.macd_slow + self.macd_signal,
             self.adx_period,
+            100 # For bb_width_norm rolling quantile
         ]
         return max(periods)
 
     def generate_labels(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> pd.Series:
-        """
-        Generate training labels based on strategy logic.
-        This method satisfies the abstract base class requirement and delegates
-        to the training-specific signal generation.
-        """
+        """Satisfies BaseStrategy requirements"""
         return self.generate_signal(mode='train', df=df, df_4h=df_4h)
-
 
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate trend following features"""
@@ -156,39 +146,30 @@ class TrendFollowingStrategy(BaseStrategy):
         df["ma_fast_slope"] = df["sma_fast"].diff(5) / df["sma_fast"]
         df["ma_slow_slope"] = df["sma_slow"].diff(10) / df["sma_slow"]
 
+        # ✅ T1.2C: Bollinger Bands for Squeeze Filter
+        bb_upper, bb_middle, bb_lower = ta.BBANDS(close, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
+        df["bb_width_norm"] = (bb_upper - bb_lower) / bb_middle
+
         return df
 
     def _align_4h_to_1h(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
-        """
-        Align 4H data to 1H timeframe using forward-fill
-        Returns a DataFrame with same index as df_1h containing 4H context
-        """
+        """Align 4H data to 1H timeframe using forward-fill"""
         if df_4h is None or df_4h.empty:
             return None
 
-        # Ensure both have datetime index
         if not isinstance(df_1h.index, pd.DatetimeIndex):
             df_1h = df_1h.set_index("timestamp")
         if not isinstance(df_4h.index, pd.DatetimeIndex):
             df_4h = df_4h.set_index("timestamp")
 
-        # Select 4H features to align
         h4_features = [
-            "sma_fast",
-            "sma_slow",
-            "adx",
-            "macd_hist",
-            "plus_di",
-            "minus_di",
-            "close",
+            "sma_fast", "sma_slow", "adx", "macd_hist", "plus_di", "minus_di", "close"
         ]
 
-        # Create aligned dataframe
         df_4h_aligned = pd.DataFrame(index=df_1h.index)
 
         for feature in h4_features:
             if feature in df_4h.columns:
-                # Reindex with forward fill (each 4H value applies to next 4 hours)
                 df_4h_aligned[f"h4_{feature}"] = df_4h[feature].reindex(
                     df_1h.index, method="ffill"
                 )
@@ -196,10 +177,7 @@ class TrendFollowingStrategy(BaseStrategy):
         return df_4h_aligned
 
     def _calculate_4h_trend_score(self, df_4h_aligned: pd.DataFrame, idx: int) -> tuple:
-        """
-        Calculate 4H trend direction and strength
-        Returns: (bullish_score, bearish_score)
-        """
+        """Calculate 4H trend direction and strength"""
         if df_4h_aligned is None or idx >= len(df_4h_aligned):
             return 0.0, 0.0
 
@@ -208,7 +186,6 @@ class TrendFollowingStrategy(BaseStrategy):
 
         row = df_4h_aligned.iloc[idx]
 
-        # Check if we have valid data
         if pd.isna(row.get("h4_sma_fast")) or pd.isna(row.get("h4_sma_slow")):
             return 0.0, 0.0
 
@@ -222,26 +199,19 @@ class TrendFollowingStrategy(BaseStrategy):
 
         # 2. MACD (0-1 point)
         if not pd.isna(row.get("h4_macd_hist")):
-            if row["h4_macd_hist"] > 0:
-                bullish_4h += 1.0
-            elif row["h4_macd_hist"] < 0:
-                bearish_4h += 1.0
+            if row["h4_macd_hist"] > 0: bullish_4h += 1.0
+            elif row["h4_macd_hist"] < 0: bearish_4h += 1.0
 
         # 3. Directional Indicators (0-1 point)
         if not pd.isna(row.get("h4_plus_di")) and not pd.isna(row.get("h4_minus_di")):
-            if row["h4_plus_di"] > row["h4_minus_di"]:
-                bullish_4h += 1.0
-            elif row["h4_minus_di"] > row["h4_plus_di"]:
-                bearish_4h += 1.0
+            if row["h4_plus_di"] > row["h4_minus_di"]: bullish_4h += 1.0
+            elif row["h4_minus_di"] > row["h4_plus_di"]: bearish_4h += 1.0
 
         # 4. ADX Bonus (0-0.5 point)
         if not pd.isna(row.get("h4_adx")):
             if row["h4_adx"] > 25:
-                # Strong trend - boost the dominant direction
-                if bullish_4h > bearish_4h:
-                    bullish_4h += 0.5
-                elif bearish_4h > bullish_4h:
-                    bearish_4h += 0.5
+                if bullish_4h > bearish_4h: bullish_4h += 0.5
+                elif bearish_4h > bullish_4h: bearish_4h += 0.5
 
         return bullish_4h, bearish_4h
 
@@ -250,20 +220,6 @@ class TrendFollowingStrategy(BaseStrategy):
     ) -> pd.Series:
         """
         MULTI-TIMEFRAME label generation with 4H context for TRAINING.
-        This method uses lookahead to create labels for model training.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Primary timeframe data (1H) with features
-        df_4h : pd.DataFrame, optional
-            Higher timeframe data (4H) with features
-            If provided, will be used to filter/weight signals
-
-        Returns:
-        --------
-        pd.Series
-            Labels: -1 (SELL), 0 (HOLD), 1 (BUY)
         """
         labels = pd.Series(0, index=df.index)
         close = df["close"].values
@@ -273,37 +229,20 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_hist = df["macd_hist"].values
         plus_di = df["plus_di"].values
         minus_di = df["minus_di"].values
+        bb_width_norm = df["bb_width_norm"].values
 
         # Align 4H data if provided
         df_4h_aligned = None
         if self.use_4h_context and df_4h is not None:
-            # Generate features for 4H if not already done
             if "sma_fast" not in df_4h.columns:
                 df_4h = self.generate_features(df_4h)
             df_4h_aligned = self._align_4h_to_1h(df, df_4h)
-            logger.info(f"[{self.name}] 4H context aligned successfully")
 
-        # Calculate rolling volatility for adaptive thresholds
-        returns = pd.Series(close).pct_change()
-        rolling_vol = returns.rolling(20).std()
+        # ✅ T1.2B: Fixed lookforward period for homogeneous labels
+        fixed_lookforward = 8
 
-        # Multiple lookforward periods
-        short_term = 3
-        medium_term = 7
-        long_term = 12
-
-        # Track filtering statistics
-        filtered_by_4h = 0
-        boosted_by_4h = 0
-
-        for i in range(len(df) - long_term - 1):
-            # Skip if not enough data
-            if pd.isna(adx[i]) or pd.isna(rolling_vol.iloc[i]):
-                continue
-
-            # Adaptive return threshold
-            vol = rolling_vol.iloc[i]
-            min_return = max(self.min_return_threshold, 0.5 * vol)
+        for i in range(100, len(df) - fixed_lookforward - 1):
+            if pd.isna(adx[i]): continue
 
             # === CALCULATE 1H TIMEFRAME SCORES ===
             bullish_score = 0.0
@@ -319,280 +258,123 @@ class TrendFollowingStrategy(BaseStrategy):
 
             # 2. MACD (0-1.5 points)
             if macd_hist[i] > 0:
-                macd_strength = abs(macd_hist[i])
-                if macd_strength > macd_hist[max(0, i - 5) : i].std():
-                    bullish_score += 1.5
-                else:
-                    bullish_score += 1.0
+                bullish_score += 1.5 if abs(macd_hist[i]) > 0 else 1.0
             elif macd_hist[i] < 0:
-                macd_strength = abs(macd_hist[i])
-                if macd_strength > macd_hist[max(0, i - 5) : i].std():
-                    bearish_score += 1.5
-                else:
-                    bearish_score += 1.0
+                bearish_score += 1.5 if abs(macd_hist[i]) > 0 else 1.0
 
             # 3. Directional Indicators (0-1.5 points)
             if plus_di[i] > minus_di[i]:
-                di_diff = plus_di[i] - minus_di[i]
-                bullish_score += 1.5 if di_diff > 10 else 1.0
+                bullish_score += 1.5 if (plus_di[i] - minus_di[i]) > 10 else 1.0
             elif minus_di[i] > plus_di[i]:
-                di_diff = minus_di[i] - plus_di[i]
-                bearish_score += 1.5 if di_diff > 10 else 1.0
+                bearish_score += 1.5 if (minus_di[i] - plus_di[i]) > 10 else 1.0
 
             # 4. Price Position (0-1 point)
-            if close[i] > sma_fast[i]:
-                bullish_score += 1.0
-            elif close[i] < sma_fast[i]:
-                bearish_score += 1.0
+            if close[i] > sma_fast[i]: bullish_score += 1.0
+            elif close[i] < sma_fast[i]: bearish_score += 1.0
 
             # 5. ADX Bonus (0-1 point)
             if adx[i] > 25:
-                if bullish_score > bearish_score:
-                    bullish_score += 1.0
-                elif bearish_score > bullish_score:
-                    bearish_score += 1.0
-            elif adx[i] > self.adx_threshold:
-                if bullish_score > bearish_score:
-                    bullish_score += 0.5
-                elif bearish_score > bullish_score:
-                    bearish_score += 0.5
+                if bullish_score > bearish_score: bullish_score += 1.0
+                elif bearish_score > bullish_score: bearish_score += 1.0
+
+            # ✅ T1.2C: Squeeze Filter Logic (Bonus/Penalty)
+            recent_widths = bb_width_norm[max(0, i-100):i+1]
+            if len(recent_widths) >= 50:
+                lower_20 = np.percentile(recent_widths, 20)
+                upper_70 = np.percentile(recent_widths, 70) # Top 30%
+                
+                if bb_width_norm[i] <= lower_20:
+                    bullish_score += 1.0; bearish_score += 1.0
+                elif bb_width_norm[i] >= upper_70:
+                    bullish_score -= 0.5; bearish_score -= 0.5
 
             # === APPLY 4H CONTEXT ===
             if df_4h_aligned is not None:
-                h4_bullish, h4_bearish = self._calculate_4h_trend_score(
-                    df_4h_aligned, i
-                )
-
-                # Determine 4H trend direction
-                h4_trend = 0
-                if h4_bullish > h4_bearish + 0.5:
-                    h4_trend = 1  # Bullish
-                elif h4_bearish > h4_bullish + 0.5:
-                    h4_trend = -1  # Bearish
-
-                # Apply 4H context effects
-                if h4_trend == 1:  # 4H Bullish
-                    bullish_score += self.h4_trend_weight  # Boost aligned signals
-                    bearish_score -= self.h4_counter_penalty  # Penalize counter-trend
-                    if bullish_score > bearish_score:
-                        boosted_by_4h += 1
-                elif h4_trend == -1:  # 4H Bearish
+                h4_bullish, h4_bearish = self._calculate_4h_trend_score(df_4h_aligned, i)
+                if h4_bullish > h4_bearish:
+                    bullish_score += self.h4_trend_weight
+                    bearish_score -= self.h4_counter_penalty
+                elif h4_bearish > h4_bullish:
                     bearish_score += self.h4_trend_weight
                     bullish_score -= self.h4_counter_penalty
-                    if bearish_score > bullish_score:
-                        boosted_by_4h += 1
 
-                # Hard filter if required
-                if self.require_4h_alignment:
-                    if h4_trend == 1 and bearish_score > bullish_score:
-                        filtered_by_4h += 1
-                        continue  # Skip bearish signals in 4H uptrend
-                    elif h4_trend == -1 and bullish_score > bearish_score:
-                        filtered_by_4h += 1
-                        continue  # Skip bullish signals in 4H downtrend
-
-            # === DETERMINE LABEL BASED ON SCORE + FORWARD RETURNS ===
-
-            # Choose lookforward period based on trend strength
-            if adx[i] > 25:
-                lookforward = long_term
-            elif adx[i] > self.adx_threshold:
-                lookforward = medium_term
-            else:
-                lookforward = short_term
-
-            # Calculate future return
-            end_idx = min(i + lookforward + 1, len(close))
-            future_closes = close[i + 1 : end_idx]
-            if len(future_closes) == 0:
-                continue
-
+            # Calculate future return (Fixed horizon)
+            future_closes = close[i + 1 : i + 1 + fixed_lookforward]
             future_return = (np.mean(future_closes) - close[i]) / close[i]
 
-            # BUY Signal
+            # Adaptive threshold
+            vol = pd.Series(close).pct_change().iloc[max(0, i-20):i+1].std()
+            min_return = max(self.min_return_threshold, 0.5 * vol)
+
             if bullish_score >= self.min_score_threshold and future_return > min_return:
                 labels.iloc[i] = 1
-
-            # SELL Signal
-            elif (
-                bearish_score >= self.min_score_threshold
-                and future_return < -min_return
-            ):
+            elif bearish_score >= self.min_score_threshold and future_return < -min_return:
                 labels.iloc[i] = -1
-
-        # === LOG STATISTICS ===
-        unique, counts = np.unique(labels, return_counts=True)
-        label_distribution = dict(zip(unique, counts))
-        total_labels = len(labels)
-
-        sell_count = label_distribution.get(-1, 0)
-        hold_count = label_distribution.get(0, 0)
-        buy_count = label_distribution.get(1, 0)
-
-        sell_pct = (sell_count / total_labels) * 100
-        hold_pct = (hold_count / total_labels) * 100
-        buy_pct = (buy_count / total_labels) * 100
-        total_signals = buy_pct + sell_pct
-
-        logger.info(f"[{self.name}] Label Distribution:")
-        logger.info(f"  SELL: {sell_count:>5} ({sell_pct:>5.2f}%)")
-        logger.info(f"  HOLD: {hold_count:>5} ({hold_pct:>5.2f}%)")
-        logger.info(f"  BUY:  {buy_count:>5} ({buy_pct:>5.2f}%)")
-
-        if df_4h_aligned is not None:
-            logger.info(f"[{self.name}] 4H Context Impact:")
-            logger.info(f"  Filtered: {filtered_by_4h} signals")
-            logger.info(f"  Boosted: {boosted_by_4h} signals")
-
-        if total_signals > 60:
-            logger.warning(
-                f"  ⚠ Too many signals ({total_signals:.1f}%) - tighten thresholds"
-            )
-        else:
-            logger.info(f"  ✓ Good signal rate: {total_signals:.1f}%")
-
-        if sell_pct < 5 or buy_pct < 5:
-            logger.warning(
-                f"  ⚠ Severe class imbalance! Consider lowering min_score_threshold"
-            )
-        elif sell_pct < 10 or buy_pct < 10:
-            logger.warning(f"  ⚠ Class imbalance detected!")
-        else:
-            logger.info(f"  ✓ Reasonable signal distribution")
 
         return labels
 
     def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, silent: bool = False) -> tuple[int, float]:
-        """
-        Generate a live trading signal based on the latest data.
-        NO LOOKAHEAD is used.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Primary timeframe data (1H) with features, must contain at least 2 rows.
-        df_4h : pd.DataFrame, optional
-            Higher timeframe data (4H) with features
-        silent : bool, optional
-            If True, suppresses informational logging. Defaults to False.
-
-        Returns:
-        --------
-        tuple[int, float]
-            Signal: -1 (SELL), 0 (HOLD), 1 (BUY)
-            Confidence: 0.0 to 1.0
-        """
+        """Generate live signal without lookahead"""
         if len(df) < self.get_warmup_period():
-            if not silent:
-                logger.warning(
-                    f"[{self.name}] Dataframe too short for live signal generation. Need {self.get_warmup_period()}, have {len(df)}"
-                )
-            return 0, 0.0  # Not enough data
+            return 0, 0.0
 
-        # Get the latest data point
         latest = df.iloc[-1]
-
-        # === CALCULATE 1H TIMEFRAME SCORES for the latest candle ===
         bullish_score = 0.0
         bearish_score = 0.0
 
         # 1. MA Alignment (0-2 points)
         if latest["sma_fast"] > latest["sma_slow"]:
-            ma_separation = (latest["sma_fast"] - latest["sma_slow"]) / latest["sma_slow"]
-            bullish_score += 2.0 if ma_separation > 0.001 else 1.0
+            bullish_score += 2.0 if (latest["sma_fast"] - latest["sma_slow"])/latest["sma_slow"] > 0.001 else 1.0
         elif latest["sma_fast"] < latest["sma_slow"]:
-            ma_separation = (latest["sma_slow"] - latest["sma_fast"]) / latest["sma_slow"]
-            bearish_score += 2.0 if ma_separation > 0.001 else 1.0
+            bearish_score += 2.0 if (latest["sma_slow"] - latest["sma_fast"])/latest["sma_slow"] > 0.001 else 1.0
 
         # 2. MACD (0-1.5 points)
-        if latest["macd_hist"] > 0:
-            macd_strength = abs(latest["macd_hist"])
-            if macd_strength > df["macd_hist"].iloc[-6:-1].std():
-                bullish_score += 1.5
-            else:
-                bullish_score += 1.0
-        elif latest["macd_hist"] < 0:
-            macd_strength = abs(latest["macd_hist"])
-            if macd_strength > df["macd_hist"].iloc[-6:-1].std():
-                bearish_score += 1.5
-            else:
-                bearish_score += 1.0
+        if latest["macd_hist"] > 0: bullish_score += 1.5
+        elif latest["macd_hist"] < 0: bearish_score += 1.5
 
         # 3. Directional Indicators (0-1.5 points)
-        if latest["plus_di"] > latest["minus_di"]:
-            di_diff = latest["plus_di"] - latest["minus_di"]
-            bullish_score += 1.5 if di_diff > 10 else 1.0
-        elif latest["minus_di"] > latest["plus_di"]:
-            di_diff = latest["minus_di"] - latest["plus_di"]
-            bearish_score += 1.5 if di_diff > 10 else 1.0
+        if latest["plus_di"] > latest["minus_di"]: bullish_score += 1.5
+        elif latest["minus_di"] > latest["plus_di"]: bearish_score += 1.5
 
         # 4. Price Position (0-1 point)
-        if latest["close"] > latest["sma_fast"]:
-            bullish_score += 1.0
-        elif latest["close"] < latest["sma_fast"]:
-            bearish_score += 1.0
+        if latest["close"] > latest["sma_fast"]: bullish_score += 1.0
+        elif latest["close"] < latest["sma_fast"]: bearish_score += 1.0
 
         # 5. ADX Bonus (0-1 point)
         if latest["adx"] > 25:
-            if bullish_score > bearish_score:
-                bullish_score += 1.0
-            elif bearish_score > bullish_score:
-                bearish_score += 1.0
-        elif latest["adx"] > self.adx_threshold:
-            if bullish_score > bearish_score:
-                bullish_score += 0.5
-            elif bearish_score > bullish_score:
-                bearish_score += 0.5
+            if bullish_score > bearish_score: bullish_score += 1.0
+            elif bearish_score > bullish_score: bearish_score += 1.0
 
-        # === APPLY 4H CONTEXT ===
+        # ✅ T1.2C: Live Squeeze Filter
+        recent_widths = df["bb_width_norm"].tail(100).values
+        if len(recent_widths) >= 50:
+            lower_20 = np.percentile(recent_widths, 20)
+            upper_70 = np.percentile(recent_widths, 70)
+            
+            if latest["bb_width_norm"] <= lower_20:
+                bullish_score += 1.0; bearish_score += 1.0
+                if not silent: logger.info(f"[{self.name}] 🌀 Volatility Squeeze detected (+1.0 bonus)")
+            elif latest["bb_width_norm"] >= upper_70:
+                bullish_score -= 0.5; bearish_score -= 0.5
+                if not silent: logger.info(f"[{self.name}] 🌋 High Volatility Expansion (-0.5 penalty)")
+
+        # 4H Context
         if self.use_4h_context and df_4h is not None:
-            if "sma_fast" not in df_4h.columns:
-                df_4h = self.generate_features(df_4h)
-
+            if "sma_fast" not in df_4h.columns: df_4h = self.generate_features(df_4h)
             df_4h_aligned = self._align_4h_to_1h(df.tail(1), df_4h)
-
             if df_4h_aligned is not None and not df_4h_aligned.empty:
-                h4_bullish, h4_bearish = self._calculate_4h_trend_score(
-                    df_4h_aligned, -1
-                )
-
-                h4_trend = 0
-                if h4_bullish > h4_bearish + 0.5:
-                    h4_trend = 1
-                elif h4_bearish > h4_bullish + 0.5:
-                    h4_trend = -1
-
-                # Higher Low (HL) check for 1H
-                # PHASE 4: Waiver Logic
-                current_low = latest["low"]
-                prev_low = df["low"].iloc[-2]
-                is_higher_low = current_low > prev_low
-                
-                h4_penalty = self.h4_counter_penalty
-                if latest["adx"] > 30 and is_higher_low:
-                    h4_penalty = 0.0
-                    if not silent: logger.info(f"[{self.name}] 🌊 Super-cycle HL: Waiving {self.h4_counter_penalty} counter-trend penalty.")
-
-                if h4_trend == 1:
+                h4_bull, h4_bear = self._calculate_4h_trend_score(df_4h_aligned, -1)
+                if h4_bull > h4_bear:
                     bullish_score += self.h4_trend_weight
-                    bearish_score -= h4_penalty
-                elif h4_trend == -1:
+                    bearish_score -= self.h4_counter_penalty
+                elif h4_bear > h4_bull:
                     bearish_score += self.h4_trend_weight
-                    bullish_score -= h4_penalty
+                    bullish_score -= self.h4_counter_penalty
 
-                if self.require_4h_alignment:
-                    if h4_trend == 1 and bearish_score > bullish_score:
-                        return 0, 0.0
-                    if h4_trend == -1 and bullish_score > bearish_score:
-                        return 0, 0.0
-                        
-        # === DETERMINE FINAL SIGNAL ===
+        # FINAL SIGNAL
+        normalization_factor = 6.5
         signal = 0
         confidence = 0.0
-        
-        # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
-        # Reason: 6.5 is the empirical 85th percentile of historical bullish scores
-        normalization_factor = 6.5
 
         if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
             signal = 1
@@ -604,35 +386,6 @@ class TrendFollowingStrategy(BaseStrategy):
         return signal, confidence
 
     def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None, silent: bool = False):
-        """
-        Generates signals for either training or live trading.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Primary timeframe data (1H) with features.
-        mode : str, optional
-            'train' for training labels (with lookahead), 'live' for live signals. Defaults to 'live'.
-        df_4h : pd.DataFrame, optional
-            Higher timeframe data (4H) with features.
-        silent : bool, optional
-            If True, suppresses informational logging. Defaults to False.
-
-        Returns:
-        --------
-        pd.Series or tuple(int, float)
-            - pd.Series of labels for 'train' mode.
-            - (int, float) signal and confidence for 'live' mode.
-        """
         df = self.generate_features(df)
-        
-        if mode == "train":
-            if not silent: logger.info(f"[{self.name}] Generating training labels...")
-            return self._generate_training_labels(df, df_4h)
-        elif mode == "live":
-            if not silent: 
-                # Note: We don't log here because _generate_live_signal handles it with its own silent flag
-                pass
-            return self._generate_live_signal(df, df_4h, silent=silent)
-        else:
-            raise ValueError(f"Invalid mode '{mode}'. Must be 'train' or 'live'.")
+        if mode == "train": return self._generate_training_labels(df, df_4h)
+        return self._generate_live_signal(df, df_4h, silent=silent)

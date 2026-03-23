@@ -885,7 +885,10 @@ class BinanceExecutionHandler:
             logger.info(f"{'='*80}")
 
             risk_pct = self.portfolio_manager.get_risk_budget(
-                asset=asset_name, strategy_type=trade_type
+                asset=asset_name, 
+                strategy_type=trade_type,
+                confidence_score=signal_details.get("mode_confidence"),
+                market_condition=signal_details.get("regime")
             )
 
             if risk_pct <= 0:
