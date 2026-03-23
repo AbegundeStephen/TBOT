@@ -253,6 +253,14 @@ class EMAStrategy(BaseStrategy):
             df["adx"] = 20
             df["strong_trend"] = 0
 
+        # ATR (for bounce detection)
+        try:
+            df["atr"] = ta.ATR(high, low, close, timeperiod=14)
+            df["atr"] = df["atr"].fillna(df["close"] * 0.01)
+        except Exception as e:
+            logger.warning(f"[{self.name}] Error calculating ATR: {e}")
+            df["atr"] = df["close"] * 0.01
+
         # Final NaN cleanup
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         df[numeric_columns] = df[numeric_columns].fillna(0)
@@ -387,13 +395,12 @@ class EMAStrategy(BaseStrategy):
                 signal = 1
             elif ema_cross == -1:
                 signal = -1
-            else:
-                return 0, 0.0
-
+            
             # ================================================================
             # ✅ T42: APPLY 4H CONTEXT (Prevent Train/Serve Skew)
             # ================================================================
-            if signal != 0 and self.use_4h_context and df_4h is not None:
+            h4_macro_trend = 'NEUTRAL'
+            if self.use_4h_context and df_4h is not None:
                 try:
                     # Generate 4H features if missing
                     if 'ema_fast' not in df_4h.columns:
@@ -405,8 +412,10 @@ class EMAStrategy(BaseStrategy):
                     df_4h_aligned = self._align_4h_to_1h(df.tail(1), df_4h_feat)
                     if df_4h_aligned is not None:
                         h4_context = self._calculate_4h_trend_context(df_4h_aligned, -1)
+                        if h4_context['trend_direction'] == 1: h4_macro_trend = 'BULLISH'
+                        elif h4_context['trend_direction'] == -1: h4_macro_trend = 'BEARISH'
                         
-                        if h4_context['trend_direction'] != 0:
+                        if signal != 0 and h4_context['trend_direction'] != 0:
                             # alignment_score is 0-3 points
                             if h4_context['trend_direction'] == signal:
                                 # Boost confidence for alignment
@@ -429,6 +438,22 @@ class EMAStrategy(BaseStrategy):
                                     return 0, 0.0
                 except Exception as e:
                     logger.warning(f"[{self.name}] 4H context validation failed: {e}")
+
+            # ================================================================
+            # ✅ EMA-200 BOUNCE MODE (Institutional Standard)
+            # ================================================================
+            atr = latest["atr"]
+            close = latest["close"]
+            ema_slow = latest["ema_slow"]
+            
+            if signal == 0:
+                if (h4_macro_trend == 'BULLISH') and (abs(close - ema_slow) <= 0.5 * atr) and (close > ema_slow):
+                    signal = 1
+                    confidence = 0.85
+                    logger.info(f"[{self.name}] 🚀 EMA-200 Bounce detected (Bullish)")
+
+            if signal == 0:
+                return 0, 0.0
 
             confidence = min(1.0, confidence)
             return signal, confidence

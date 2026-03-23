@@ -825,6 +825,17 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
     cerebro.broker.setcash(initial_capital)
     cerebro.broker.setcommission(commission=config["backtesting"]["commission_pct"])
 
+    # ✅ ASSET-SPECIFIC SLIPPAGE (T2.2)
+    asset_cfg = config.get("assets", {}).get(asset_key.upper(), {})
+    if "backtest_slippage_pct" in asset_cfg:
+        slippage_pct = asset_cfg["backtest_slippage_pct"]
+        logger.info(f"⚙️ Using asset-specific slippage for {asset_key.upper()}: {slippage_pct:.5%}")
+    else:
+        slippage_pct = config["backtesting"].get("slippage_pct", 0.0005)
+        logger.info(f"⚙️ Using global slippage: {slippage_pct:.5%}")
+    
+    cerebro.broker.set_slippage(bt.slippage.SlippagePercent(perc=slippage_pct))
+
     # Add analyzers
     cerebro.addanalyzer(
         bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days

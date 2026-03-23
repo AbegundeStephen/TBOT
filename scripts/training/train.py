@@ -12,6 +12,12 @@ import sys
 from datetime import datetime, timedelta
 import warnings
 
+# ✅ FIX: Add project root to sys.path (relative to this script)
+script_path = Path(__file__).resolve()
+project_root = script_path.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 warnings.filterwarnings("ignore")
 
 if sys.platform == "win32":
@@ -29,11 +35,13 @@ from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
 
 # Setup logging
+log_dir = project_root / "logs"
+log_dir.mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("logs/training_multi_source.log", encoding="utf-8"),
+        logging.FileHandler(log_dir / "training_multi_source.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -285,7 +293,7 @@ def train_asset_strategies(
 
     try:
         mr_strategy = MeanReversionStrategy(mr_config)
-        mr_model_path = f"models/mean_reversion_{asset_key.lower()}.pkl"
+        mr_model_path = project_root / "models" / f"mean_reversion_{asset_key.lower()}.pkl"
 
         logger.info(f"Training on {len(train_df)} bars...")
         mr_metrics = mr_strategy.train_model(train_df, mr_model_path)
@@ -317,7 +325,7 @@ def train_asset_strategies(
 
     try:
         tf_strategy = TrendFollowingStrategy(tf_config)
-        tf_model_path = f"models/trend_following_{asset_key.lower()}.pkl"
+        tf_model_path = project_root / "models" / f"trend_following_{asset_key.lower()}.pkl"
 
         logger.info(f"Training on {len(train_df)} bars...")
         tf_metrics = tf_strategy.train_model(train_df, tf_model_path)
@@ -349,7 +357,7 @@ def train_asset_strategies(
 
     try:
         ema_strategy = EMAStrategy(ema_config)
-        ema_model_path = f"models/ema_strategy_{asset_key.lower()}.pkl"
+        ema_model_path = project_root / "models" / f"ema_strategy_{asset_key.lower()}.pkl"
 
         logger.info(f"Training on {len(train_df)} bars...")
         ema_metrics = ema_strategy.train_model(train_df, ema_model_path)
@@ -451,9 +459,9 @@ def main():
     logger.info("=" * 70)
 
     # Load config from config.json
-    config_path = Path("config/config.json")
+    config_path = project_root / "config" / "config.json"
     if not config_path.exists():
-        logger.error("config.json not found!")
+        logger.error(f"config.json not found at {config_path}!")
         return
 
     with open(config_path) as f:
@@ -501,13 +509,13 @@ def main():
         exchange = asset_cfg.get("exchange", "binance")
         
         # Try local raw data first if fetch fails or for speed
-        raw_file = f"data/raw/{asset_cfg.get('symbol', asset_key)}_1h.csv"
-        if asset_key == "BTC": raw_file = "data/raw/BTCUSDT_1h.csv"
-        elif asset_key == "GOLD": raw_file = "data/raw/XAUUSDm_1h.csv"
-        else: raw_file = f"data/raw/{asset_key}m_1h.csv"
+        raw_file = project_root / "data" / "raw" / f"{asset_cfg.get('symbol', asset_key)}_1h.csv"
+        if asset_key == "BTC": raw_file = project_root / "data" / "raw" / "BTCUSDT_1h.csv"
+        elif asset_key == "GOLD": raw_file = project_root / "data" / "raw" / "XAUUSDm_1h.csv"
+        else: raw_file = project_root / "data" / "raw" / f"{asset_key}m_1h.csv"
         
         df = pd.DataFrame()
-        if Path(raw_file).exists():
+        if raw_file.exists():
             logger.info(f"Loading {asset_key} from local file: {raw_file}")
             df = pd.read_csv(raw_file, index_col=0)
             
@@ -578,8 +586,8 @@ def main():
         train_df, test_df = data_manager.split_train_test(df, train_pct=0.8)
 
         # Save both train and test for backtest
-        train_file = f"data/train_data_{asset_key.lower()}.csv"
-        test_file = f"data/test_data_{asset_key.lower()}.csv"
+        train_file = project_root / "data" / f"train_data_{asset_key.lower()}.csv"
+        test_file = project_root / "data" / f"test_data_{asset_key.lower()}.csv"
 
         train_df.to_csv(train_file)
         test_df.to_csv(test_file)
@@ -653,7 +661,7 @@ def main():
         },
     }
 
-    metadata_file = "models/training_metadata.json"
+    metadata_file = project_root / "models" / "training_metadata.json"
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2, default=str)
     logger.info(f"\n✓ Metadata saved: {metadata_file}")
@@ -683,9 +691,9 @@ def main():
 
 
 if __name__ == "__main__":
-    Path("models").mkdir(exist_ok=True)
-    Path("data").mkdir(exist_ok=True)
-    Path("logs").mkdir(exist_ok=True)
+    (project_root / "models").mkdir(exist_ok=True)
+    (project_root / "data").mkdir(exist_ok=True)
+    (project_root / "logs").mkdir(exist_ok=True)
 
     try:
         from binance.client import Client

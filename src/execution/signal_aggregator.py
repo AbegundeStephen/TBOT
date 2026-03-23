@@ -145,7 +145,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # 1. Define Defaults first (guarantees all keys exist)
         if self.asset_type == "BTC":
             self.config = {
-                "buy_threshold": 0.32,
+                "buy_threshold": 0.30,
                 "sell_threshold": 0.26,
                 "two_strategy_bonus": 0.25,
                 "three_strategy_bonus": 0.30,
@@ -163,7 +163,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "buy_threshold": 0.30,
                 "sell_threshold": 0.24,
                 "two_strategy_bonus": 0.25,
-                "three_strategy_bonus": 0.35,
+                "three_strategy_bonus": 0.30,
                 "bull_buy_boost": 0.22,
                 "bull_sell_penalty": 0.15,
                 "bear_sell_boost": 0.22,
