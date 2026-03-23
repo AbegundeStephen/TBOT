@@ -37,13 +37,14 @@
     "initial_capital": 10000,
     "max_portfolio_exposure": 5.0,
     "max_single_asset_exposure": 0.7,
-    "max_drawdown": 0.2,
-    "target_risk_per_trade": 0.015,
+    "max_drawdown": 0.15,
+    "target_risk_per_trade": 0.01,
+    "profit_lock_threshold": 0.15,
     "max_risk_per_trade": 0.02,
     "aggressive_risk_threshold": 0.7,
     "volatility_scaling": true,
     "max_positions_per_asset": 3,
-    "correlation_threshold": 0.7,
+    "correlation_threshold": 0.65,
     "reduce_correlated_positions": true,
     "import_existing_positions": true,
     "allow_scaled_positions": true,
@@ -114,7 +115,10 @@
           0.25
         ],
         "runner_trail_pct": 0.025,
-        "time_stop_bars": 72,
+        "time_stop_bars": 120,
+        "time_stop_trend": 120,
+        "time_stop_reversion": 24,
+        "time_stop_scalp": 12,
         "use_ema_structure": false,
         "use_structure_targets": true,
         "max_hold_bars": 72,
@@ -138,6 +142,7 @@
       "weight": 0.5,
       "force_min_lot": false,
       "allow_scalps": false,
+      "backtest_slippage_pct": 0.00005,
       "min_position_usd": 4000,
       "max_position_usd": 50000,
       "lot_size": 0.01,
@@ -178,7 +183,9 @@
           0.25
         ],
         "runner_trail_pct": 0.015,
-        "time_stop_bars": 60,
+        "time_stop_bars": 90,
+        "time_stop_trend": 90,
+        "time_stop_reversion": 24,
         "use_ema_structure": true,
         "use_structure_targets": true,
         "max_hold_bars": 60,
@@ -293,7 +300,7 @@
         "take_profit_pct": 0.02,
         "trailing_stop_pct": 0.008,
         "max_holding_hours": 72,
-        "atr_multiplier": 1.5,
+        "atr_multiplier": 2.2,
         "pivot_lookback": 25,
         "partial_targets": [
           1.5,
@@ -306,7 +313,9 @@
           0.25
         ],
         "runner_trail_pct": 0.015,
-        "time_stop_bars": 60,
+        "time_stop_bars": 48,
+        "time_stop_trend": 72,
+        "time_stop_reversion": 48,
         "use_ema_structure": true,
         "use_structure_targets": true,
         "max_hold_bars": 60,
@@ -357,7 +366,7 @@
         "take_profit_pct": 0.015,
         "trailing_stop_pct": 0.005,
         "max_holding_hours": 72,
-        "atr_multiplier": 1.5,
+        "atr_multiplier": 2.2,
         "pivot_lookback": 25,
         "partial_targets": [
           1.5,
@@ -370,17 +379,9 @@
           0.25
         ],
         "runner_trail_pct": 0.01,
-        "time_stop_bars": 60,
-        "use_ema_structure": true,
-        "use_structure_targets": true,
-        "max_hold_bars": 60,
-        "breakeven_after_bars": 8,
-        "breakeven_profit_threshold": 0.006,
-        "early_scale_enabled": true,
-        "early_scale_threshold": 0.01,
-        "early_scale_bars": 4,
-        "early_lock_atr_multiplier": 0.5,
-        "runner_trail_atr_multiplier": 2.0
+        "time_stop_bars": 48,
+        "time_stop_trend": 72,
+        "time_stop_reversion": 48
       }
     }
   },
@@ -562,8 +563,8 @@
         "min_confidence": 0.55,
         "use_4h_context": true,
         "require_4h_alignment": false,
-        "h4_trend_weight": 0.5,
-        "h4_counter_penalty": 0.2,
+        "h4_trend_weight": 1.0,
+        "h4_counter_penalty": 0.3,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -587,7 +588,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.2,
+        "h4_counter_penalty": 0.3,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -596,7 +597,7 @@
       "USTEC": {
         "fast_ma": 20,
         "slow_ma": 50,
-        "adx_threshold": 25,
+        "adx_threshold": 22,
         "adx_required": false,
         "min_return_threshold": 0.001,
         "min_return_pct": 0.0015,
@@ -611,37 +612,13 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.2,
+        "h4_counter_penalty": 0.3,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
         }
       },
       "EURJPY": {
-        "fast_ma": 20,
-        "slow_ma": 50,
-        "adx_threshold": 25,
-        "adx_required": false,
-        "min_return_threshold": 0.001,
-        "min_return_pct": 0.0015,
-        "min_score": 1.5,
-        "min_conditions": 2.5,
-        "volume_confirmation": false,
-        "use_ema_slope": true,
-        "pullback_filter": true,
-        "remove_outliers": true,
-        "outlier_std": 4.0,
-        "min_confidence": 0.52,
-        "use_4h_context": true,
-        "require_4h_alignment": false,
-        "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.2,
-        "model_params": {
-          "max_features": "sqrt",
-          "class_weight": "balanced_subsample"
-        }
-      },
-      "EURUSD": {
         "fast_ma": 20,
         "slow_ma": 50,
         "adx_threshold": 20,
@@ -659,7 +636,31 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.2,
+        "h4_counter_penalty": 0.3,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "EURUSD": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 18,
+        "adx_required": false,
+        "min_return_threshold": 0.001,
+        "min_return_pct": 0.0015,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 0.3,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -784,9 +785,8 @@
     }
   },
   "ml": {
-    "train_test_split": 0.8,
     "min_training_accuracy": 0.54,
-    "cross_validation_folds": 5,
+    "cross_validation_folds": 7,
     "feature_importance_threshold": 0.01,
     "retrain_frequency_days": 7,
     "enable_autotrain": true
@@ -813,7 +813,7 @@
   },
   "risk_management": {
     "max_daily_trades": 10,
-    "max_daily_loss_pct": 0.05,
+    "max_daily_loss_pct": 0.03,
     "max_position_loss_pct": 0.02,
     "circuit_breaker_loss_pct": 0.1,
     "trailing_stop_activation_pct": 0.02,

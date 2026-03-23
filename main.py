@@ -1084,6 +1084,8 @@ class TradingBot:
                         config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
                         trend_aligned_threshold=3.5,  # Defaults (will be overridden by config)
                         counter_trend_threshold=4.0,
+                        weight_structure=1.0,
+                        weight_momentum=1.5,
                         performance_tracker=self.portfolio_manager.performance_tracker,
                     )
 
@@ -1139,6 +1141,8 @@ class TradingBot:
                         config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
                         trend_aligned_threshold=3.5,
                         counter_trend_threshold=4.0,
+                        weight_structure=1.0,
+                        weight_momentum=1.5,
                     )
 
                     # Store both in a dict
@@ -2118,6 +2122,8 @@ class TradingBot:
                     config=preset_config,
                     trend_aligned_threshold=3.5,
                     counter_trend_threshold=4.0,
+                    weight_structure=1.0,
+                    weight_momentum=1.5,
                 )
 
                 self.aggregators[asset_name] = {

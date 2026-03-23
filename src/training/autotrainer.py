@@ -13,6 +13,7 @@ import asyncio
 from datetime import datetime, timedelta
 import pandas as pd
 from typing import Dict, Any
+from sklearn.metrics import accuracy_score, f1_score
 
 from src.data.data_manager import DataManager
 from src.strategies.mean_reversion import MeanReversionStrategy
@@ -42,10 +43,17 @@ class ContinuousLearningPipeline:
             "retrain_frequency_days", 7
         )
         self.min_accuracy_threshold = config.get("ml", {}).get(
-            "min_training_accuracy", 0.55
+            "min_training_accuracy", 0.54
         )
         self.models_dir = "models"
         self.metadata_file = os.path.join(self.models_dir, "training_metadata.json")
+        
+        # Strategy mapping for evaluation
+        self.strategy_classes = {
+            "mean_reversion": MeanReversionStrategy,
+            "trend_following": TrendFollowingStrategy,
+            "exponential_moving_averages": EMAStrategy,
+        }
 
         logger.info(
             f"[AUTO-TRAIN] Pipeline initialized. Retraining every {self.retrain_frequency_days} days."
@@ -106,18 +114,22 @@ class ContinuousLearningPipeline:
         logger.error("[AUTO-TRAIN] Timed out waiting for bot connections.")
         return False
 
-    def _get_last_training_time(self) -> datetime:
-        """Read the last training time from metadata."""
+    def _get_metadata(self) -> Dict:
+        """Read the full training metadata."""
         try:
             if os.path.exists(self.metadata_file):
                 with open(self.metadata_file, "r") as f:
-                    metadata = json.load(f)
-                    return datetime.fromisoformat(
-                        metadata.get("last_trained", "2000-01-01T00:00:00")
-                    )
+                    return json.load(f)
         except Exception as e:
             logger.warning(f"[AUTO-TRAIN] Could not read metadata: {e}")
-        return datetime.min
+        return {}
+
+    def _get_last_training_time(self) -> datetime:
+        """Read the last training time from metadata."""
+        metadata = self._get_metadata()
+        return datetime.fromisoformat(
+            metadata.get("last_trained", "2000-01-01T00:00:00")
+        )
 
     def _training_loop(self):
         """Main loop that checks if retraining is needed."""
@@ -132,15 +144,25 @@ class ContinuousLearningPipeline:
                 next_training = last_trained + timedelta(days=self.retrain_frequency_days)
                 now = datetime.now()
 
-                # Trigger training if it's time (Sundays are best for low volatility)
-                if now >= next_training and now.weekday() == 6:  # 6 = Sunday
-                    logger.info("\n" + "=" * 70)
+                # ✅ CHANGE 2: Drift Detection
+                accuracy_drop = self._calculate_max_drift()
+                
+                if accuracy_drop > 0.05:
+                    trigger_retrain = True  # drift detected
+                    logger.info(f"🧠 [AUTO-TRAIN] DRIFT DETECTED (Max drop: {accuracy_drop:.1%}) - INITIATING IMMEDIATE RETRAIN")
+                elif now >= next_training and now.weekday() == 6:  # 6 = Sunday
+                    trigger_retrain = True  # scheduled retrain
                     logger.info(f"🧠 [AUTO-TRAIN] SCHEDULED BRAIN UPGRADE INITIATED")
+                else:
+                    trigger_retrain = False
+
+                if trigger_retrain:
+                    logger.info("\n" + "=" * 70)
                     logger.info("=" * 70)
 
                     self._run_training_pipeline()
                     
-                    # Snooze for a day to prevent re-running on the same day, especially after a failure
+                    # Snooze for a day to prevent re-running on the same day
                     time.sleep(24 * 3600)
                 else:
                     # Sleep for 1 hour before checking the clock again
@@ -150,15 +172,74 @@ class ContinuousLearningPipeline:
                 logger.error(f"[AUTO-TRAIN] Fatal error in training loop: {e}", exc_info=True)
                 time.sleep(3600)  # Sleep on error to prevent CPU thrashing
 
-    def _fetch_latest_data(self, asset: str) -> pd.DataFrame:
-        """Fetch the most recent data block for training."""
+    def _calculate_max_drift(self) -> float:
+        """Calculate the maximum accuracy drop across all enabled models."""
+        metadata = self._get_metadata()
+        last_summary = metadata.get("summary", {})
+        if not last_summary:
+            return 0.0
+
+        max_drop = 0.0
+        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
+        
+        for asset in enabled_assets:
+            if asset not in last_summary: continue
+            
+            # Fetch last 7 days for drift detection
+            df = self._fetch_latest_data(asset, days=7)
+            if df is None or len(df) < 100: continue
+            
+            for strat_name, last_acc in last_summary[asset].items():
+                current_acc = self._evaluate_current_model(asset, strat_name, df)
+                if current_acc == 0: continue
+                
+                drop = last_acc - current_acc
+                if drop > max_drop:
+                    max_drop = drop
+                    
+        return max_drop
+
+    def _evaluate_current_model(self, asset: str, strategy_name: str, df: pd.DataFrame) -> float:
+        """Evaluate the currently active model on new data."""
+        model_path = os.path.join(self.models_dir, f"{strategy_name}_{asset.lower()}.pkl")
+        if not os.path.exists(model_path):
+            return 0.0
+            
+        try:
+            strat_class = self.strategy_classes.get(strategy_name)
+            if not strat_class: return 0.0
+            
+            strat_config = self.config["strategy_configs"][strategy_name][asset]
+            temp_strat = strat_class(strat_config)
+            if not temp_strat.load_model(model_path): return 0.0
+            
+            feat_df = temp_strat.generate_features(df)
+            feat_df["label"] = temp_strat.generate_labels(feat_df)
+            clean_df = temp_strat.remove_data_leakage(feat_df)
+            
+            X = clean_df[temp_strat.feature_columns].values
+            y = clean_df["label"].values
+            
+            if len(X) == 0: return 0.0
+            
+            X_scaled = temp_strat.scaler.transform(X)
+            y_pred = temp_strat.model.predict(X_scaled)
+            
+            return accuracy_score(y, y_pred)
+        except Exception as e:
+            logger.debug(f"[AUTO-TRAIN] Could not evaluate drift for {asset} {strategy_name}: {e}")
+            return 0.0
+
+    def _fetch_latest_data(self, asset: str, days: int = None) -> pd.DataFrame:
+        """Fetch the most recent data block."""
         asset_cfg = self.config["assets"][asset]
-        lookback_days = asset_cfg.get("lookback_days", 730)
+        lookback_days = days if days is not None else asset_cfg.get("lookback_days", 730)
 
         end_time = datetime.now()
         start_time = end_time - timedelta(days=lookback_days)
 
-        logger.info(f"[AUTO-TRAIN] Fetching {lookback_days} days of data for {asset}...")
+        if days is None: # Only log for training fetch, not drift check
+            logger.info(f"[AUTO-TRAIN] Fetching {lookback_days} days of data for {asset}...")
 
         if asset_cfg["exchange"] == "binance":
             return self.data_manager.fetch_binance_data(
@@ -192,7 +273,6 @@ class ContinuousLearningPipeline:
             return {"success": False, "error": "Missing configuration"}
 
         # 1. SPLIT DATA (Strict 90-day Holdout)
-        # Assuming 1H candles (~24 per day)
         holdout_bars = 90 * 24
         if len(df) < (holdout_bars * 2):
             logger.warning(f"[AUTO-TRAIN] {asset} dataset too small for strict 90-day holdout. Using 20% fallback.")
@@ -214,15 +294,32 @@ class ContinuousLearningPipeline:
         
         # 4. Validate on unseen holdout set (Honest performance)
         logger.info(f"[AUTO-TRAIN] Validating on 90-day holdout...")
-        # Note: We use the same model_path to evaluate the newly saved model
-        test_results = temp_strategy.evaluate_on_test_data(test_df)
         
+        # Calculate features and labels for holdout set
+        test_df_features = temp_strategy.generate_features(test_df)
+        test_df_features["label"] = temp_strategy.generate_labels(test_df_features)
+        test_df_clean = temp_strategy.remove_data_leakage(test_df_features)
+        
+        X_test = test_df_clean[temp_strategy.feature_columns].values
+        y_test = test_df_clean["label"].values
+        
+        if len(X_test) > 0:
+            X_test_scaled = temp_strategy.scaler.transform(X_test)
+            y_pred = temp_strategy.model.predict(X_test_scaled)
+            
+            # ✅ CHANGE 1: Use F1-score with [1, -1] labels (Buy/Sell)
+            f1 = f1_score(y_test, y_pred, labels=[1, -1], average='macro')
+            accuracy = accuracy_score(y_test, y_pred)
+        else:
+            f1 = 0.0
+            accuracy = 0.0
+            
         # Merge results for reporting
         final_results = train_results.copy()
-        final_results["holdout_accuracy"] = test_results.get("accuracy", 0)
-        final_results["holdout_f1"] = test_results.get("f1", 0)
+        final_results["holdout_accuracy"] = accuracy
+        final_results["holdout_f1"] = f1
         
-        logger.info(f"[AUTO-TRAIN] {asset} {strategy_name} Holdout Acc: {final_results['holdout_accuracy']:.1%}")
+        logger.info(f"[AUTO-TRAIN] {asset} {strategy_name} Holdout F1: {f1:.3f} (Acc: {accuracy:.1%})")
 
         # Free memory aggressively
         del temp_strategy
@@ -263,26 +360,26 @@ class ContinuousLearningPipeline:
                 for strat_class, strat_name in strategies:
                     results = self._train_strategy(strat_class, asset, df, strat_name)
 
-                    # ✅ TASK 16: Use Holdout Accuracy for shadow test (Honest validation)
+                    # ✅ CHANGE 1: Use F1-score for shadow test
+                    f1 = results.get("holdout_f1", 0)
                     accuracy = results.get("holdout_accuracy", 0)
                     summary[asset][strat_name] = accuracy
 
-                    # SHADOW TEST: Check if the new model meets minimum standards
-                    if accuracy < self.min_accuracy_threshold:
+                    if f1 < 0.45:
                         logger.warning(
-                            f"[AUTO-TRAIN] ❌ {asset} {strat_name} failed shadow test (Holdout Acc: {accuracy:.1%}). Aborting swap."
+                            f"[AUTO-TRAIN] ❌ {asset} {strat_name} failed shadow test (Holdout F1: {f1:.3f}). Aborting swap."
                         )
                         all_successful = False
                     else:
                         logger.info(
-                            f"[AUTO-TRAIN] ✅ {asset} {strat_name} passed shadow test (Holdout Acc: {accuracy:.1%})"
+                            f"[AUTO-TRAIN] ✅ {asset} {strat_name} passed shadow test (Holdout F1: {f1:.3f})"
                         )
 
             # 3. Hot-Swap (Only if all models improved or maintained stability)
             if all_successful:
                 self._hot_swap_models(summary)
             else:
-                msg = "⚠️ *Brain Upgrade Aborted*\n\nNew models failed to meet accuracy thresholds. Keeping current robust models active."
+                msg = "⚠️ *Brain Upgrade Aborted*\n\nNew models failed to meet F1-score thresholds. Keeping current robust models active."
                 logger.warning(msg)
                 self._safe_send_telegram(msg)
 

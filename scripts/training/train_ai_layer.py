@@ -16,13 +16,27 @@ from sklearn.metrics import classification_report, confusion_matrix
 import logging
 import pickle
 from pathlib import Path
+import sys
 from collections import Counter
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# ✅ FIX: Add project root to sys.path (relative to this script)
+script_path = Path(__file__).resolve()
+project_root = script_path.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 # Setup logging
+log_dir = project_root / "logs"
+log_dir.mkdir(exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_dir / "dual_timeframe_training.log"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -35,7 +49,7 @@ from src.ai.analyst import DynamicAnalyst
 def train_dual_timeframe_system(
     # DATA SOURCES (must provide both timeframes)
     assets=["btc", "gold", "ustec", "eurjpy", "eurusd"],
-    data_folder="data",
+    data_folder=None,
     # TRAINING PARAMETERS
     samples_per_pattern=2000,
     min_samples_per_class=50,
@@ -50,20 +64,18 @@ def train_dual_timeframe_system(
 ):
     """
     Complete training pipeline for dual timeframe system
-
-    Expected Data Structure:
-        data/
-            train_data_btc_15m.csv   ← Sniper training
-            train_data_btc_4h.csv    ← Analyst validation
-            train_data_gold_15m.csv
-            train_data_gold_4h.csv
     """
+    if data_folder is None:
+        data_folder = project_root / "data"
+    else:
+        data_folder = Path(data_folder)
+
     logger.info("=" * 80)
     logger.info("DUAL TIMEFRAME TRAINING SYSTEM")
     logger.info("Analyst: 4H candles | Sniper: 15min candles")
     logger.info("=" * 80)
 
-    models_dir = Path("models/ai")
+    models_dir = project_root / "models" / "ai"
     models_dir.mkdir(parents=True, exist_ok=True)
 
     # =========================================================================

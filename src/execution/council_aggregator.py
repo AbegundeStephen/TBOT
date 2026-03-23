@@ -53,8 +53,8 @@ class InstitutionalCouncilAggregator:
         
         # Judge weights (must sum to 5.0)
         weight_trend: float = 1.5,
-        weight_structure: float = 1.5,
-        weight_momentum: float = 1.0,
+        weight_structure: float = 1.0,
+        weight_momentum: float = 1.5,
         weight_pattern: float = 0.5,
         weight_volume: float = 0.5,
         
@@ -136,7 +136,7 @@ class InstitutionalCouncilAggregator:
                 'rsi_oversold_bonus': 30,
                 'rsi_overbought_bonus': 70,
                 'volume_ma_period': 20,
-                'pattern_confidence_min': 0.60,
+                'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
                 'trend_safety_threshold': 0.50, # ✨ NEW: Blocks Council if TF disagrees > 50%
             }
@@ -269,7 +269,7 @@ class InstitutionalCouncilAggregator:
                 atr_ratio_series = atr_f_series / atr_s_series
                 
                 # Check last 20 bars for extreme compression
-                if np.max(atr_ratio_series[-20:]) < 0.60:
+                if np.max(atr_ratio_series[-20:]) < 0.65:
                     logger.info("[VOLATILITY] Coiled Spring Detected - Breakout readiness high")
                     return True
 
@@ -337,9 +337,9 @@ class InstitutionalCouncilAggregator:
             atr_ratio_series = pd.Series(atr_fast_series / atr_slow_series)
 
             conviction_score = 0.0
-            if atr_ratio_series.iloc[-20:].max() < 0.60:
+            if atr_ratio_series.iloc[-20:].max() < 0.65:
                 conviction_score += 1.0
-                logger.info(f"[SNIPER] 🌀 Coiled Spring detected: Compression < 0.60. Conviction +1.0")
+                logger.info(f"[SNIPER] 🌀 Coiled Spring detected: Compression < 0.65. Conviction +1.0")
 
             if conviction_score >= 1.0:
                 displacement_passed = True # Override for coiled spring breakout
@@ -600,9 +600,9 @@ class InstitutionalCouncilAggregator:
             consensus_regime = governor_data.get("consensus_regime", "NEUTRAL") if governor_data else "NEUTRAL"
             
             if consensus_regime in ["SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH"]:
-                w_momentum = 0.5  # ✨ Allow partial momentum points
+                w_momentum = 0.75  # ✨ Balanced momentum points
                 w_structure = 1.5 # ✨ Standard structure weight
-                w_pattern = 1.0   # ✨ Increased pattern weight for trigger clarity
+                w_pattern = 0.75   # ✨ Balanced pattern weight
                 if self.detailed_logging: logger.info(f"[COUNCIL] ⚖️ DYNAMIC WEIGHTS APPLIED: {consensus_regime}")
 
             if self.s_mean_reversion:
@@ -1471,6 +1471,9 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 5: VOLUME (Same for both directions)
         """
+        if self.asset_type in ['GOLD', 'EURUSD', 'EURJPY', 'USTEC']:
+            return 0.5 * weight, 0.5 * weight, {'buy': 'VOL: Neutral (MT5 tick volume unreliable)', 'sell': 'VOL: Neutral (MT5 tick volume unreliable)'}
+
         try:
             if 'volume' not in df.columns:
                 return 0.0, 0.0, {'buy': "VOL: No data", 'sell': "VOL: No data"}

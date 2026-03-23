@@ -125,17 +125,17 @@ class Position:
                 # --------------------------------------------------------
                 # Adjust VTM parameters based on hybrid intelligence
                 # --------------------------------------------------------
-                account_risk = 0.015  # Base 1.5%
+                account_risk = 0.010  # Base 1.0%
 
                 # Council + strong trend = More aggressive
                 if hybrid_mode == "council" and trend_strength == "strong":
-                    account_risk *= 1.2  # 1.5% → 1.8%
+                    account_risk *= 1.2  # 1.0% → 1.2%
                     early_lock_threshold_pct = 0.008  # Lock @ 0.8%
                     logger.info("  → Council strong trend: Risk↑ Lock↓")
 
                 # Performance + choppy = More conservative
                 elif hybrid_mode == "performance" and volatility_regime == "high":
-                    account_risk *= 0.8  # 1.5% → 1.2%
+                    account_risk *= 0.8  # 1.0% → 0.8%
                     early_lock_threshold_pct = 0.007  # Lock @ 0.7%
                     logger.info("  → Performance choppy: Risk↓ Lock↓")
 
@@ -496,7 +496,7 @@ class PortfolioManager:
         self.execution_handlers = execution_handlers or {}
         self.risk_cfg = config.get("risk_management", {})
         
-        self.correlation_threshold = self.portfolio_config.get("correlation_threshold", 0.70)
+        self.correlation_threshold = self.portfolio_config.get("correlation_threshold", 0.65)
         logger.info(f"[RISK] Correlation threshold: {self.correlation_threshold:.0%}")
 
         self.mode = config["trading"].get("mode", "paper")
@@ -807,7 +807,7 @@ class PortfolioManager:
             # ✅ TASK 24: Rolling Pearson Correlation
             # ================================================================
             correlation_threshold = self.portfolio_config.get(
-                "correlation_threshold", 0.70
+                "correlation_threshold", 0.65
             )
             correlation_malus = 1.0
             
@@ -849,8 +849,8 @@ class PortfolioManager:
             
             drawdown_malus = 1.0
             
-            if current_drawdown > 0.05:  # 5% drawdown trigger
-                drawdown_malus = 0.5
+            if current_drawdown > 0.08:  # 8% drawdown trigger
+                drawdown_malus = 0.65
                 logger.warning(
                     f"  ⚠️ Drawdown Shield: {current_drawdown:.2%} drawdown detected"
                 )
@@ -970,7 +970,7 @@ class PortfolioManager:
         """Check if trading should be halted due to risk breaches"""
         if self.session_start_equity and self.session_start_equity > 0:
             daily_loss = (self.session_start_equity - self.equity) / self.session_start_equity
-            limit = self.risk_cfg.get('max_daily_loss_pct', 0.05)
+            limit = self.risk_cfg.get('max_daily_loss_pct', 0.03)
 
             if daily_loss > limit:
                 return True, f'Daily loss {daily_loss:.1%} > limit {limit:.1%}'
@@ -978,14 +978,14 @@ class PortfolioManager:
         if self.peak_equity > 0:
             drawdown = (self.peak_equity - self.equity) / self.peak_equity
             
-            # Layer 1: Hard Max Drawdown (20%) - Severe protection
-            max_dd = self.portfolio_config.get('max_drawdown', 0.20)
+            # Layer 1: Hard Max Drawdown (15%) - Severe protection
+            max_dd = self.portfolio_config.get('max_drawdown', 0.15)
             if drawdown > max_dd:
                 return True, f'CRITICAL: Hard Drawdown {drawdown:.1%} > max {max_dd:.1%}'
             
-            # Layer 2: Profit Lock (10%) - Protects recent gains from peak
+            # Layer 2: Profit Lock (15%) - Protects recent gains from peak
             # Triggered when equity drops from its highest ever point based on config
-            profit_lock_threshold = self.portfolio_config.get('profit_lock_threshold', 0.10)
+            profit_lock_threshold = self.portfolio_config.get('profit_lock_threshold', 0.15)
             if drawdown > profit_lock_threshold:
                 reason = f'PROFIT LOCK: Equity dropped {drawdown:.1%} from peak. Protecting gains.'
                 send_alert(reason)

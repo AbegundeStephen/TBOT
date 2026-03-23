@@ -81,7 +81,7 @@ class MultiTimeFrameRegimeDetector:
 
         # Cache
         self.cache = {}
-        self.cache_duration = 60  # 1 minute
+        self.cache_duration = 300  # 5 minutes
 
         logger.info(f"[MTF REGIME] Initialized for {asset_type} (Strict Option 2)")
         logger.info(f"  EMAs: FAST={FAST_EMA}, SLOW={SLOW_EMA}, BASELINE={BASELINE_EMA}")

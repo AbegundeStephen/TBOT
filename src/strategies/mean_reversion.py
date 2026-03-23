@@ -479,6 +479,10 @@ class MeanReversionStrategy(BaseStrategy):
             close = latest["close"]
             ema_50 = latest["ema_50"]
             ema_20 = latest["ema_20"]
+
+            # ✅ ATR-Scaled Return Threshold (T1.1 / Section 3A)
+            current_atr_pct = atr / close
+            min_return = max(self.min_return_threshold, 0.30 * current_atr_pct)
             
             # Check for stretch (Main component)
             stretch_long = (ema_50 - close > 2.0 * atr) or (bb_pos < self.bb_lower_threshold)

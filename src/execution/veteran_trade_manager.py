@@ -312,7 +312,10 @@ class VeteranTradeManager:
         self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
 
         self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
-        self.time_stop_bars = self.risk_config.get("time_stop_bars", 72)
+        self.time_stop_bars = self.risk_config.get(
+            f'time_stop_{self.trade_type.lower()}',
+            self.risk_config.get('time_stop_bars', 72)
+        )
         self.use_ema_structure = self.risk_config.get("use_ema_structure", False)
         
         # State
@@ -382,11 +385,11 @@ class VeteranTradeManager:
                 
             ratio = atr_fast / atr_slow
             
-            if ratio > 1.35:
+            if ratio > 1.30:
                 # Expanding vol — tighten fast
                 selected_atr = atr_fast
                 reason = "Expanding Vol (Tighten)"
-            elif ratio < 0.75:
+            elif ratio < 0.70:
                 # Compressed vol — breathe wide
                 selected_atr = atr_slow
                 reason = "Compressed Vol (Wide)"
@@ -416,7 +419,7 @@ class VeteranTradeManager:
                 if avg_vol > 0:
                     volume_ratio = current_vol / avg_vol
             
-            volume_strong = volume_ratio > 1.2
+            volume_strong = volume_ratio > 1.5
             
             candle_conviction = False
             if len(self.high) > 0 and len(self.low) > 0:
