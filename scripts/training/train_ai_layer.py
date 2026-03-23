@@ -73,7 +73,8 @@ def train_dual_timeframe_system(
     Complete training pipeline for dual timeframe system
     """
     if data_folder is None:
-        data_folder = project_root / "data"
+        # ✅ Look in data/raw where downloader saves files
+        data_folder = project_root / "data" / "raw"
     else:
         data_folder = Path(data_folder)
 
@@ -89,41 +90,49 @@ def train_dual_timeframe_system(
     # STEP 1: Validate Data Existence
     # =========================================================================
 
-    logger.info("\nSTEP 1: Validating data files...")
+    logger.info(f"\nSTEP 1: Validating data files in {data_folder}...")
+
+    # ✅ Asset to Filename Mapping (match download_multi_tf_data.py)
+    asset_map = {
+        "btc": "BTCUSDT",
+        "gold": "XAUUSDm",
+        "ustec": "USTECm",
+        "eurjpy": "EURJPYm",
+        "eurusd": "EURUSDm"
+    }
 
     missing_15m = []
     missing_4h = []
+    valid_assets = []
 
     for asset in assets:
+        symbol = asset_map.get(asset.lower(), asset.upper())
+        
         # Check 15min (required for Sniper)
-        path_15m = data_folder / f"train_data_{asset}_15m.csv"
-        if path_15m.exists():
-            df = pd.read_csv(path_15m)
-            logger.info(f"  [OK] {asset} 15min: {len(df)} candles")
-        else:
-            missing_15m.append(asset)
-            logger.error(f"  [MISSING] {asset} 15min: {path_15m}")
-
+        path_15m = data_folder / f"{symbol}_15m.csv"
         # Check 4H (required for Analyst)
-        path_4h = data_folder / f"train_data_{asset}_4h.csv"
-        if path_4h.exists():
-            df = pd.read_csv(path_4h)
-            logger.info(f"  [OK] {asset} 4H: {len(df)} candles")
+        path_4h = data_folder / f"{symbol}_4h.csv"
+
+        if path_15m.exists() and path_4h.exists():
+            df_15 = pd.read_csv(path_15m)
+            df_4 = pd.read_csv(path_4h)
+            logger.info(f"  [OK] {asset.upper()}: {len(df_15)} (15m), {len(df_4)} (4h) candles")
+            valid_assets.append(asset)
         else:
-            missing_4h.append(asset)
-            logger.error(f"  [MISSING] {asset} 4H: {path_4h}")
+            if not path_15m.exists():
+                missing_15m.append(f"{asset} (15m)")
+                logger.error(f"  [MISSING] {asset} 15min: {path_15m}")
+            if not path_4h.exists():
+                missing_4h.append(f"{asset} (4H)")
+                logger.error(f"  [MISSING] {asset} 4H: {path_4h}")
 
-    if missing_15m:
-        logger.error("\nCRITICAL: Sniper REQUIRES 15min candles for training!")
-        logger.error(f"Missing data for: {', '.join(missing_15m)}")
+    if not valid_assets:
+        logger.error("\nCRITICAL: No valid data found for any requested assets!")
         logger.info("Please run scripts/data_tools/download_multi_tf_data.py first.")
-        raise FileNotFoundError(f"Missing 15min data for: {', '.join(missing_15m)}")
+        raise FileNotFoundError("No training data found.")
 
-    if missing_4h:
-        logger.warning(
-            f"Missing 4H data for: {', '.join(missing_4h)}\n"
-            f"Analyst needs 4H candles, but will validate later."
-        )
+    # Update asset list to only those we actually have data for
+    assets = valid_assets
 
     # =========================================================================
     # STEP 2: Mine Patterns from 15min Data (SNIPER)
@@ -138,9 +147,9 @@ def train_dual_timeframe_system(
     # Collect all 15min training files
     all_15m_files = []
     for asset in assets:
-        if asset not in missing_15m:
-            path = Path(data_folder) / f"train_data_{asset}_15m.csv"
-            all_15m_files.append(str(path))
+        symbol = asset_map.get(asset.lower(), asset.upper())
+        path = data_folder / f"{symbol}_15m.csv"
+        all_15m_files.append(str(path))
 
     # Load and mine
     df_15m_combined = miner.load_multiple_sources(
@@ -707,8 +716,8 @@ if __name__ == "__main__":
 
     # Train the system
     sniper, pattern_map, history, config = train_dual_timeframe_system(
-        assets=["btc", "gold"],
-        data_folder="data",
+        assets=["btc", "gold", "ustec", "eurjpy", "eurusd"],
+        data_folder=None, # ✅ Defaults to project_root / "data" / "raw"
         samples_per_pattern=2000,
         min_samples_per_class=50,
         epochs=300,
