@@ -332,9 +332,9 @@ class MT5ExecutionHandler:
             if account_info:
                 margin_free = account_info.margin_free
                 
-                # ✅ T38: Lower sanity floor to $5.0
+                # ✅ T38: Set sanity floor to $12.0
                 # Real margin check happens below in _validate_margin()
-                margin_required = 5.0
+                margin_required = 12.0
 
                 if margin_free < margin_required:
                     return False, f"Insufficient margin: ${margin_free:.2f} free (need ${margin_required:.2f} sanity floor)"

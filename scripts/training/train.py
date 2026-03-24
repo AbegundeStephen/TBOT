@@ -59,7 +59,7 @@ def validate_data_quality(df: pd.DataFrame, asset_name: str, min_bars: int) -> b
     logger.info(f"Data Quality Check - {asset_name}")
     logger.info("=" * 60)
 
-    if df.empty:
+    if df is None or df.empty:
         logger.error("❌ DataFrame is empty")
         return False
 
@@ -68,6 +68,14 @@ def validate_data_quality(df: pd.DataFrame, asset_name: str, min_bars: int) -> b
         logger.error(f"❌ Insufficient data: {len(df)} bars (need {min_bars})")
         return False
     logger.info(f"✓ Sufficient bars: {len(df)} >= {min_bars}")
+
+    # Ensure index is datetime-like
+    if not pd.api.types.is_datetime64_any_dtype(df.index):
+        try:
+            df.index = pd.to_datetime(df.index, utc=True)
+        except Exception as e:
+            logger.error(f"❌ Could not convert index to datetime: {e}")
+            return False
 
     date_range = df.index[-1] - df.index[0]
     logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
@@ -78,6 +86,10 @@ def validate_data_quality(df: pd.DataFrame, asset_name: str, min_bars: int) -> b
         logger.warning(f"⚠ Missing values: {missing}")
     else:
         logger.info("✓ No missing values")
+
+    # Ensure OHLC are numeric
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
     zero_prices = (df[["open", "high", "low", "close"]] <= 0).any(axis=1).sum()
     if zero_prices > 0:
@@ -111,27 +123,26 @@ def validate_data_quality(df: pd.DataFrame, asset_name: str, min_bars: int) -> b
     return True
 
 
-def fetch_btc_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
-    """Fetch BTC data from Binance"""
+def fetch_binance_asset_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
+    """Fetch asset data from Binance"""
     logger.info("\n" + "=" * 70)
-    logger.info("Fetching BTC Data from Binance")
+    logger.info(f"Fetching {config['symbol']} Data from Binance")
     logger.info("=" * 70)
 
     end_date = datetime.now()
     start_date = end_date - timedelta(days=config["lookback_days"])
 
     logger.info(f"Symbol: {config['symbol']}")
-    logger.info(f"Interval: {config['interval']}")
+    logger.info(f"Interval: {config.get('interval', '1h')}")
     logger.info(
         f"Start Date: {start_date.strftime('%Y-%m-%d')} (going back {config['lookback_days']} days)"
     )
     logger.info(f"End Date: {end_date.strftime('%Y-%m-%d')} (today)")
-    logger.info(f"Expected bars: ~{config['lookback_days'] * 24} (for hourly data)")
 
     try:
         df = data_manager.fetch_binance_data(
             symbol=config["symbol"],
-            interval=config["interval"],
+            interval=config.get("interval", "1h"),
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
         )
@@ -149,74 +160,50 @@ def fetch_btc_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
         return df
 
     except Exception as e:
-        logger.error(f"❌ Error fetching BTC data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching Binance data: {e}", exc_info=True)
         return pd.DataFrame()
 
 
-def find_available_gold_symbol(data_manager) -> str:
-    """Find available gold symbol on MT5 account"""
+def find_mt5_symbol(base_name: str) -> str:
+    """Find available MT5 symbol matching base name (e.g., BTCUSDT or BTCUSDTm)"""
     try:
         import MetaTrader5 as mt5
-
         symbols = mt5.symbols_get()
         if symbols is None:
-            logger.error("Could not retrieve MT5 symbols")
             return None
-
-        priority_patterns = ["XAUUSD", "XAU/USD", "GOLD"]
-        found_symbols = []
-
-        for symbol in symbols:
-            symbol_name = symbol.name
-            symbol_upper = symbol_name.upper()
-
-            if "BTC" not in symbol_upper:
-                if any(
-                    pattern.upper() in symbol_upper for pattern in priority_patterns
-                ):
-                    found_symbols.append(symbol.name)
-
-        if found_symbols:
-            logger.info(f"\n📋 Found {len(found_symbols)} gold symbols:")
-            for sym in found_symbols:
-                logger.info(f"   • {sym}")
-
-            for sym in found_symbols:
-                if "XAUUSD" in sym.upper():
-                    logger.info(f"\n✓ Using symbol: {sym} (preferred XAUUSD variant)")
-                    return sym
-
-            logger.info(f"\n✓ Using symbol: {found_symbols[0]}")
-            return found_symbols[0]
-        else:
-            logger.warning("No gold symbols found on this account")
-            return None
-
-    except Exception as e:
-        logger.error(f"Error finding gold symbol: {e}")
+            
+        # Try exact match first
+        for s in symbols:
+            if s.name.upper() == base_name.upper():
+                return s.name
+                
+        # Try contains match (handle suffixes like 'm')
+        for s in symbols:
+            if base_name.upper() in s.name.upper():
+                return s.name
+        return None
+    except Exception:
         return None
 
 
-def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
-    """Fetch Gold data from MT5"""
+def fetch_mt5_asset_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
+    """Fetch asset data from MT5"""
     logger.info("\n" + "=" * 70)
-    logger.info("Fetching Gold Data from MT5")
+    logger.info(f"Fetching {config['symbol']} Data from MT5")
     logger.info("=" * 70)
 
-    logger.info("\nSearching for available gold symbols...")
-    available_symbol = find_available_gold_symbol(data_manager)
-
-    if not available_symbol:
-        logger.error("❌ No gold symbols available on this MT5 account")
+    # Resolve actual symbol (handle suffixes)
+    actual_symbol = find_mt5_symbol(config["symbol"])
+    if not actual_symbol:
+        logger.error(f"❌ Symbol {config['symbol']} not found on this MT5 account")
         return pd.DataFrame()
 
-    symbol = available_symbol
+    logger.info(f"Resolved Symbol: {actual_symbol}")
 
     end_date = datetime.now()
     start_date = end_date - timedelta(days=config["lookback_days"])
 
-    logger.info(f"\nSymbol: {symbol}")
-    logger.info(f"Timeframe: {config['timeframe']}")
+    logger.info(f"Timeframe: {config.get('timeframe', 'H1')}")
     logger.info(
         f"Start Date: {start_date.strftime('%Y-%m-%d')} (going back {config['lookback_days']} days)"
     )
@@ -224,14 +211,14 @@ def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
 
     try:
         df = data_manager.fetch_mt5_data(
-            symbol=symbol,
-            timeframe=config["timeframe"],
+            symbol=actual_symbol,
+            timeframe=config.get("timeframe", "H1"),
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
         )
 
         if df.empty:
-            logger.error("❌ No data received from MT5")
+            logger.error(f"❌ No data received from MT5 for {actual_symbol}")
             return pd.DataFrame()
 
         logger.info(f"✓ Fetched {len(df)} bars from MT5")
@@ -243,7 +230,7 @@ def fetch_gold_data(data_manager: DataManager, config: dict) -> pd.DataFrame:
         return df
 
     except Exception as e:
-        logger.error(f"❌ Error fetching Gold data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching MT5 data: {e}", exc_info=True)
         return pd.DataFrame()
 
 
@@ -572,7 +559,7 @@ def main():
                     "lookback_days": asset_cfg["lookback_days"],
                     "min_bars_required": asset_cfg["min_bars_training"],
                 }
-                df = fetch_btc_data(data_manager, fetch_cfg)
+                df = fetch_binance_asset_data(data_manager, fetch_cfg)
             elif exchange == "mt5" and mt5_ok:
                 fetch_cfg = {
                     "symbol": asset_cfg["symbol"],
@@ -580,7 +567,7 @@ def main():
                     "lookback_days": asset_cfg["lookback_days"],
                     "min_bars_required": asset_cfg["min_bars_training"],
                 }
-                df = fetch_gold_data(data_manager, fetch_cfg) 
+                df = fetch_mt5_asset_data(data_manager, fetch_cfg) 
         
         if not df.empty and validate_data_quality(df, asset_key, asset_cfg["min_bars_training"]):
             asset_data[asset_key] = df
