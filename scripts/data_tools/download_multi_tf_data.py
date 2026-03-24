@@ -11,12 +11,17 @@ from pathlib import Path
 import sys
 from datetime import datetime, timedelta
 import warnings
+import os
+from dotenv import load_dotenv
 
 # ✅ FIX: Add project root to sys.path (relative to this script)
 script_path = Path(__file__).resolve()
 project_root = script_path.parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+# ✅ FIX: Load .env from project root
+load_dotenv(project_root / ".env")
 
 warnings.filterwarnings("ignore")
 
@@ -139,6 +144,14 @@ def main():
 
     with open(config_path) as f:
         config = json.load(f)
+
+    # ✅ FIX: Override with credentials from .env
+    if os.getenv("MT5_LOGIN"):
+        config.setdefault("api", {}).setdefault("mt5", {})["login"] = os.getenv("MT5_LOGIN")
+    if os.getenv("MT5_PASSWORD"):
+        config.setdefault("api", {}).setdefault("mt5", {})["password"] = os.getenv("MT5_PASSWORD")
+    if os.getenv("MT5_SERVER"):
+        config.setdefault("api", {}).setdefault("mt5", {})["server"] = os.getenv("MT5_SERVER")
 
     # ✅ Use project_root for data directory
     data_dir = project_root / "data" / "raw"
