@@ -10,6 +10,19 @@ from pathlib import Path
 import logging
 import time
 import json
+import sys
+
+# ✅ FIX: Add project root to sys.path (relative to this script)
+script_path = Path(__file__).resolve()
+project_root = script_path.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except:
+        pass
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -197,7 +210,7 @@ def main():
     logger.info("=" * 70)
 
     # Load config to get enabled assets and their symbols
-    config_path = Path("config/config.json")
+    config_path = project_root / "config" / "config.json"
     enabled_assets = []
     active_symbols = []
     if config_path.exists():
@@ -213,7 +226,7 @@ def main():
             logger.error(f"Failed to load config: {e}")
 
     # Search in both data/ and data/raw/
-    search_dirs = [Path("data"), Path("data/raw")]
+    search_dirs = [project_root / "data", project_root / "data" / "raw"]
     files_to_process = []
     
     for d in search_dirs:
