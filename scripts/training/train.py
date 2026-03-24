@@ -472,6 +472,14 @@ def main():
     with open(config_path) as f:
         config = json.load(f)
 
+    # ✅ FIX: Override with credentials from .env
+    if os.getenv("MT5_LOGIN"):
+        config.setdefault("api", {}).setdefault("mt5", {})["login"] = os.getenv("MT5_LOGIN")
+    if os.getenv("MT5_PASSWORD"):
+        config.setdefault("api", {}).setdefault("mt5", {})["password"] = os.getenv("MT5_PASSWORD")
+    if os.getenv("MT5_SERVER"):
+        config.setdefault("api", {}).setdefault("mt5", {})["server"] = os.getenv("MT5_SERVER")
+
     # Initialize data manager
     logger.info("\n" + "=" * 70)
     logger.info("STEP 1: Initializing Data Sources")
