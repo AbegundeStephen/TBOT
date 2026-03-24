@@ -11,12 +11,17 @@ from pathlib import Path
 import sys
 from datetime import datetime, timedelta
 import warnings
+import os
+from dotenv import load_dotenv
 
 # ✅ FIX: Add project root to sys.path (relative to this script)
 script_path = Path(__file__).resolve()
 project_root = script_path.parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+# ✅ FIX: Load .env from project root
+load_dotenv(project_root / ".env")
 
 warnings.filterwarnings("ignore")
 
