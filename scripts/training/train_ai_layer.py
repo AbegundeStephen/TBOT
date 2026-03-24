@@ -742,8 +742,8 @@ if __name__ == "__main__":
 
     # Load trained model
     bot.load_model(
-        model_path="models/ai/sniper_dual_timeframe_v1.weights.h5",
-        mapping_path="models/ai/sniper_dual_timeframe_v1_mapping.pkl",
+        model_path=str(project_root / "models" / "ai" / "sniper_dual_timeframe_v1.weights.h5"),
+        mapping_path=str(project_root / "models" / "ai" / "sniper_dual_timeframe_v1_mapping.pkl"),
     )
 
     # Example: Load test data

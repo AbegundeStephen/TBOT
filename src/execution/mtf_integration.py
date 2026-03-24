@@ -43,6 +43,9 @@ class MTFRegimeIntegration:
 
         # Create detectors for each asset
         self.detectors = {}
+        
+        # ✅ Store latest regime data for aggregators
+        self._current_regime_data = {}
 
         logger.info("[MTF INTEGRATION] Initialized")
 
@@ -283,7 +286,7 @@ class MTFRegimeIntegration:
             # Institutional Rule: NO counter-trend allowed in Phase 1-5
             allow_counter_trend = False
 
-            return {
+            regime_data = {
                 "regime": regime_status.consensus_regime,
                 "regime_score": regime_status.score,
                 "is_bullish": regime_status.is_bullish,
@@ -304,6 +307,11 @@ class MTFRegimeIntegration:
                 "governor": regime_status, # ✨ ADDED: For Council & Performance Aggregators
                 "full_regime_status": regime_status,
             }
+            
+            # ✅ Cache for aggregators
+            self._current_regime_data[asset_name] = regime_data
+            
+            return regime_data
 
         except Exception as e:
             logger.error(f"[MTF] Error getting regime: {e}")
