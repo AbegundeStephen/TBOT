@@ -517,24 +517,39 @@ def main():
         df = pd.DataFrame()
         if raw_file.exists():
             logger.info(f"Loading {asset_key} from local file: {raw_file}")
-            df = pd.read_csv(raw_file, index_col=0)
-            
-            # Ensure index is datetime
-            if not isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index, errors='coerce')
-            
-            # Drop rows with invalid index
-            if df.index.isnull().any():
-                logger.warning(f"⚠️  Removing {df.index.isnull().sum()} rows with invalid timestamps for {asset_key}")
-                df = df[df.index.notnull()]
-            
-            df.sort_index(inplace=True)
+            try:
+                # Try reading with first column as index and automatic date parsing
+                df = pd.read_csv(raw_file)
+                
+                # Robust date column identification
+                date_cols = [c for x in ['timestamp', 'date', 'time', 'datetime', 'open_time'] for c in df.columns if x in c.lower()]
+                if date_cols:
+                    date_col = date_cols[0]
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce', utc=True)
+                    df.set_index(date_col, inplace=True)
+                else:
+                    # Fallback to index_col=0 if no date-like column found
+                    df = pd.read_csv(raw_file, index_col=0)
+                    df.index = pd.to_datetime(df.index, errors='coerce', utc=True)
+                
+                # Drop rows with invalid index
+                if df.index.isnull().any():
+                    invalid_count = df.index.isnull().sum()
+                    logger.warning(f"⚠️  Removing {invalid_count} rows with invalid timestamps for {asset_key}")
+                    df = df[df.index.notnull()]
+                
+                # Ensure index is sorted and name is clean
+                df.index.name = 'timestamp'
+                df.sort_index(inplace=True)
 
-            # Check if local data is sufficient
-            if len(df) < asset_cfg["min_bars_training"]:
-                logger.warning(f"⚠️  Local data for {asset_key} is insufficient ({len(df)} < {asset_cfg['min_bars_training']}).")
-                logger.info(f"🔄 Attempting to fetch fresh data from API...")
-                df = pd.DataFrame() # Reset to trigger fetch logic below
+                # Check if local data is sufficient
+                if len(df) < asset_cfg["min_bars_training"]:
+                    logger.warning(f"⚠️  Local data for {asset_key} is insufficient ({len(df)} < {asset_cfg['min_bars_training']}).")
+                    logger.info(f"🔄 Attempting to fetch fresh data from API...")
+                    df = pd.DataFrame() # Reset to trigger fetch logic below
+            except Exception as e:
+                logger.error(f"❌ Error loading local file {raw_file}: {e}")
+                df = pd.DataFrame()
         
         if df.empty:
             if exchange == "binance" and binance_ok:
