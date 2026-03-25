@@ -759,11 +759,10 @@ class VeteranTradeManager:
                     self.enable_trailing_stop()
 
         # --- STEP 5: Time Decay Protection ---
-        # Objective: Prevent Mean Reversion trades from turning into long-term losses.
-        if self.trade_type == "REVERSION":
-            if self.bars_in_trade >= 8:
-                logger.info(f"[VTM] ⏳ Stale MR trade closed for {self.asset} (Bars: {self.bars_in_trade} >= 8)")
-                return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
+        # Objective: Prevent stale trades from turning into long-term losses.
+        if self.bars_in_trade >= self.time_stop_bars:
+            logger.info(f"[VTM] ⏳ Stale {self.trade_type} trade closed for {self.asset} (Bars: {self.bars_in_trade} >= {self.time_stop_bars})")
+            return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price

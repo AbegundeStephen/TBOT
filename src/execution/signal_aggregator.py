@@ -1174,11 +1174,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
 
             # STEP 2: Get strategy signals
-            # Pass 4H context to EMA strategy if available
+            # Pass 4H context to strategies if available
             df_4h = governor_data.get('df_4h') if governor_data else None
             
-            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df)
-            tf_signal, tf_conf = self.s_trend_following.generate_signal(df)
+            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h)
+            tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h)
             ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h)
 
             # Store originals for logging
