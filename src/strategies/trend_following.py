@@ -162,6 +162,14 @@ class TrendFollowingStrategy(BaseStrategy):
         if not isinstance(df_4h.index, pd.DatetimeIndex):
             df_4h = df_4h.set_index("timestamp")
 
+        # ✅ FIX: Handle timezone mismatch between 1H and 4H indices
+        if df_1h.index.tz is not None:
+            df_1h = df_1h.copy()
+            df_1h.index = df_1h.index.tz_localize(None)
+        if df_4h.index.tz is not None:
+            df_4h = df_4h.copy()
+            df_4h.index = df_4h.index.tz_localize(None)
+
         h4_features = [
             "sma_fast", "sma_slow", "adx", "macd_hist", "plus_di", "minus_di", "close"
         ]

@@ -282,13 +282,20 @@ class EMAStrategy(BaseStrategy):
             df_1h = df_1h.set_index('timestamp')
         if not isinstance(df_4h.index, pd.DatetimeIndex):
             df_4h = df_4h.set_index('timestamp')
-        
+
+        # ✅ FIX: Handle timezone mismatch between 1H and 4H indices
+        if df_1h.index.tz is not None:
+            df_1h = df_1h.copy()
+            df_1h.index = df_1h.index.tz_localize(None)
+        if df_4h.index.tz is not None:
+            df_4h = df_4h.copy()
+            df_4h.index = df_4h.index.tz_localize(None)
+
         # Select 4H features to align
-        h4_features = ['ema_fast', 'ema_slow', 'ema_diff_pct', 'ema_trend', 
+        h4_features = ['ema_fast', 'ema_slow', 'ema_diff_pct', 'ema_trend',
                        'adx', 'macd_hist', 'trend_strength']
-        
-        df_4h_aligned = pd.DataFrame(index=df_1h.index)
-        
+
+        df_4h_aligned = pd.DataFrame(index=df_1h.index)        
         for feature in h4_features:
             if feature in df_4h.columns:
                 df_4h_aligned[f'h4_{feature}'] = df_4h[feature].reindex(
