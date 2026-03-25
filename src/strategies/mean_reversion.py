@@ -469,45 +469,140 @@ class MeanReversionStrategy(BaseStrategy):
 
         return labels
 
-    def generate_signal(self, df: pd.DataFrame) -> tuple:
+    def generate_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple:
         """
-        Generate real-time signal based on scorecard logic.
+        Generate real-time signal based on full scorecard logic.
+        Eliminates Train/Serve skew by mirroring generate_labels.
         """
         if len(df) < self.get_warmup_period():
             return 0, 0.0
 
         try:
-            features_df = self.generate_features(df.tail(100))
-            latest = features_df.iloc[-1]
-            
-            # Simplified real-time signal logic mirroring the scorecard
-            bb_pos = latest["bb_position"]
-            rsi = latest["rsi"]
-            atr = latest["atr"]
-            close = latest["close"]
-            ema_50 = latest["ema_50"]
-            ema_20 = latest["ema_20"]
-
-            # ✅ ATR-Scaled Return Threshold (T1.1 / Section 3A)
-            current_atr_pct = atr / close
-            min_return = max(self.min_return_threshold, 0.30 * current_atr_pct)
-            
-            # Check for stretch (Main component)
-            stretch_long = (ema_50 - close > 2.0 * atr) or (bb_pos < self.bb_lower_threshold)
-            stretch_short = (close - ema_50 > 2.0 * atr) or (bb_pos > self.bb_upper_threshold)
-            
-            # Confidence based on stretch and RSI
-            if stretch_long:
-                confidence = min(1.0, 0.5 + abs(bb_pos) if bb_pos < 0 else 0.6)
-                if rsi < 30: confidence += 0.1
-                return 1, min(1.0, confidence)
-            
-            if stretch_short:
-                confidence = min(1.0, 0.5 + (bb_pos - 1.0) if bb_pos > 1 else 0.6)
-                if rsi > 70: confidence += 0.1
-                return -1, min(1.0, confidence)
+            # Generate features for the full window needed (at least 100 for liquidity sweep)
+            features_df = self.generate_features(df.tail(150))
+            if len(features_df) < 100:
+                return 0, 0.0
                 
-            return 0, 0.0
+            latest = features_df.iloc[-1]
+            idx = len(features_df) - 1
+            
+            close = features_df["close"].values
+            high = features_df["high"].values
+            low = features_df["low"].values
+            bb_upper = features_df["bb_upper"].values
+            bb_lower = features_df["bb_lower"].values
+            bb_pos = features_df["bb_position"].values
+            rsi = features_df["rsi"].values
+            atr = features_df["atr"].values
+            ema_20 = features_df["ema_20"].values
+            ema_50 = features_df["ema_50"].values
+
+            current_close = close[-1]
+            
+            # ATR Velocity Veto
+            velocity_drop = close[-4] - current_close # i-3 to i
+            velocity_rise = current_close - close[-4]
+            atr_threshold = 4.0 * atr[-1]
+            
+            # ================================================================
+            # ✅ MACRO REVERSION SCORECARD (Mirroring generate_labels)
+            # ================================================================
+            score_long = 0
+            score_short = 0
+            
+            # PILLAR 1: THE STRETCH (2pts)
+            stretch_long = (ema_50[-1] - current_close > 2.0 * atr[-1]) or (current_close < bb_lower[-1])
+            stretch_short = (current_close - ema_50[-1] > 2.0 * atr[-1]) or (current_close > bb_upper[-1])
+            if stretch_long: score_long += 2
+            if stretch_short: score_short += 2
+
+            # PILLAR 2: THE DIVERGENCE (1pt)
+            div_long = self._check_divergence(features_df, signal=1, period=60)
+            div_short = self._check_divergence(features_df, signal=-1, period=60)
+            if div_long: score_long += 1
+            if div_short: score_short += 1
+            
+            # PILLAR 3: LIQUIDITY SWEEP (1pt)
+            lookback_100 = low[-101:-1]
+            highback_100 = high[-101:-1]
+            sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
+            sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
+            if sweep_long: score_long += 1
+            if sweep_short: score_short += 1
+
+            # PILLAR 4: THE EXHAUSTION (1pt)
+            if bb_pos[-1] < 0.15 or bb_pos[-1] > 0.85:
+                patterns_to_check = {
+                    'Hammer': ta.CDLHAMMER,
+                    'Doji': ta.CDLDOJI,
+                    'Engulfing': ta.CDLENGULFING
+                }
+                o, h, l, c = features_df['open'].values, features_df['high'].values, features_df['low'].values, features_df['close'].values
+                for name, func in patterns_to_check.items():
+                    res = func(o, h, l, c)
+                    if res[-1] != 0:
+                        if res[-1] > 0: score_long += 1
+                        if res[-1] < 0: score_short += 1
+
+            # ================================================================
+            # ✅ MICRO-REVERSION PATH
+            # ================================================================
+            micro_triggered_long = False
+            micro_triggered_short = False
+            
+            # Align 4H data if provided
+            if self.use_4h_context and df_4h is not None:
+                if "bb_position" not in df_4h.columns:
+                    df_4h = self.generate_features(df_4h)
+                df_4h_aligned = self._align_4h_to_1h(features_df.tail(1), df_4h)
+                
+                if df_4h_aligned is not None:
+                    h4_context = self._calculate_4h_reversion_context(df_4h_aligned, -1)
+                    micro_score_long = 0
+                    micro_score_short = 0
+                    
+                    # LONG: 4H BULLISH + 1H RSI < 40 + EMA-20 touch
+                    if h4_context['trend_direction'] == 1: micro_score_long += 0.5
+                    if rsi[-1] < 40: micro_score_long += 0.5
+                    if low[-1] <= ema_20[-1] <= high[-1]: micro_score_long += 0.5
+                    if micro_score_long >= 1.5: micro_triggered_long = True
+                    
+                    # SHORT: 4H BEARISH + 1H RSI > 60 + EMA-20 touch
+                    if h4_context['trend_direction'] == -1: micro_score_short += 0.5
+                    if rsi[-1] > 60: micro_score_short += 0.5
+                    if low[-1] <= ema_20[-1] <= high[-1]: micro_score_short += 0.5
+                    if micro_score_short >= 1.5: micro_triggered_short = True
+
+            # ================================================================
+            # FINAL SIGNAL GENERATION
+            # ================================================================
+            signal = 0
+            confidence = 0.0
+            
+            # BUY setup
+            if (score_long >= 3.0) or micro_triggered_long:
+                if velocity_drop > atr_threshold:
+                    logger.debug(f"[{self.name}] VETO BUY: Velocity drop {velocity_drop:.2f} > {atr_threshold:.2f}")
+                else:
+                    signal = 1
+                    # Confidence scaling: Score 3.0 = 0.6 conf, Score 5.0 = 1.0 conf
+                    if micro_triggered_long:
+                        confidence = 0.65
+                    else:
+                        confidence = 0.6 + (score_long - 3.0) * 0.2
+            
+            # SELL setup
+            elif (score_short >= 3.0) or micro_triggered_short:
+                if velocity_rise > atr_threshold:
+                    logger.debug(f"[{self.name}] VETO SELL: Velocity rise {velocity_rise:.2f} > {atr_threshold:.2f}")
+                else:
+                    signal = -1
+                    if micro_triggered_short:
+                        confidence = 0.65
+                    else:
+                        confidence = 0.6 + (score_short - 3.0) * 0.2
+            
+            return signal, min(1.0, confidence)
 
         except Exception as e:
             logger.error(f"[{self.name}] Signal error: {e}")

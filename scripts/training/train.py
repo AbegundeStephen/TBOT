@@ -452,9 +452,15 @@ def main():
 
     # Load config from config.json
     config_path = project_root / "config" / "config.json"
+    import shutil
+    template_path = project_root / "config" / "config.template.json"
     if not config_path.exists():
-        logger.error(f"config.json not found at {config_path}!")
-        return
+        if template_path.exists():
+            logger.warning("config.json missing. Auto-generating from config.template.json...")
+            shutil.copy(template_path, config_path)
+        else:
+            logger.error("Both config.json and config.template.json are missing!")
+            return
 
     with open(config_path) as f:
         config = json.load(f)

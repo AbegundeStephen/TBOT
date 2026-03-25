@@ -379,6 +379,16 @@ class ContinuousLearningPipeline:
             if all_successful:
                 self._hot_swap_models(summary)
             else:
+                # ✅ FIX: Update metadata even on abort to prevent recursive re-triggering
+                try:
+                    with open(self.metadata_file, "w") as f:
+                        json.dump(
+                            {"last_trained": datetime.now().isoformat(), "summary": summary, "status": "aborted"}, f
+                        )
+                    logger.info("[AUTO-TRAIN] Stale timestamp updated after aborted upgrade.")
+                except Exception as e:
+                    logger.error(f"[AUTO-TRAIN] Failed to update metadata on abort: {e}")
+
                 msg = "⚠️ *Brain Upgrade Aborted*\n\nNew models failed to meet F1-score thresholds. Keeping current robust models active."
                 logger.warning(msg)
                 self._safe_send_telegram(msg)
