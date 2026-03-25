@@ -768,30 +768,9 @@ class InstitutionalCouncilAggregator:
                 # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
                 # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
                 safety_threshold = self.config.get('trend_safety_threshold', 0.50)
-                if signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold:
-                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong SELL ({tf_conf:.2f} >= {safety_threshold}) while Council says BUY.")
-                    return 0, {
-                        'timestamp': timestamp,
-                        'signal': 0,
-                        'asset': self.asset_type,
-                        'decision_type': "BLOCKED (Opposite Trend)",
-                        'reasoning': "blocked_by_opposite_trend",
-                        'final_signal': 0,
-                        'signal_quality': 0.0,
-                        'total_score': total_score,
-                        'scores': chosen_scores,
-                        'buy_total': buy_total,
-                        'sell_total': sell_total,
-                        'regime': regime_name,
-                        'mr_signal': mr_signal,
-                        'mr_confidence': mr_conf,
-                        'tf_signal': tf_signal,
-                        'tf_confidence': tf_conf,
-                        'ema_signal': ema_signal,
-                        'ema_confidence': ema_conf,
-                    }
-                elif signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold:
-                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong BUY ({tf_conf:.2f} >= {safety_threshold}) while Council says SELL.")
+                if (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
+                   (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
+                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees.")
                     return 0, {
                         'timestamp': timestamp,
                         'signal': 0,
