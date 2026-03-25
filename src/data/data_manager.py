@@ -580,7 +580,7 @@ class DataManager:
                 return pd.DataFrame()
 
             df = pd.DataFrame(rates)
-            df["timestamp"] = pd.to_datetime(df["time"], unit="s")
+            df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df[["timestamp", "open", "high", "low", "close", "tick_volume"]]
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
             df = df.set_index("timestamp")
