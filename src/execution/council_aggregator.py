@@ -557,11 +557,39 @@ class InstitutionalCouncilAggregator:
             
             if macro_regime == "BEARISH" and prelim_signal == 1:
                 logger.info("[COUNCIL] Governor VETO: Bearish regime blocks LONG.")
-                return 0, {'timestamp': timestamp, 'reasoning': "governor_veto_bearish", 'signal': 0}
+                return 0, {
+                    'timestamp': timestamp, 
+                    'reasoning': "governor_veto_bearish", 
+                    'signal': 0,
+                    'asset': self.asset_type,
+                    'decision_type': "VETOED (Macro Bearish)",
+                    'final_signal': 0,
+                    'signal_quality': 0.0,
+                    'mr_signal': mr_signal,
+                    'mr_confidence': mr_conf,
+                    'tf_signal': tf_signal,
+                    'tf_confidence': tf_conf,
+                    'ema_signal': ema_signal,
+                    'ema_confidence': ema_conf,
+                }
 
             if macro_regime == "BULLISH" and prelim_signal == -1:
                 logger.info("[COUNCIL] Governor VETO: Bullish regime blocks SHORT.")
-                return 0, {'timestamp': timestamp, 'reasoning': "governor_veto_bullish", 'signal': 0}
+                return 0, {
+                    'timestamp': timestamp, 
+                    'reasoning': "governor_veto_bullish", 
+                    'signal': 0,
+                    'asset': self.asset_type,
+                    'decision_type': "VETOED (Macro Bullish)",
+                    'final_signal': 0,
+                    'signal_quality': 0.0,
+                    'mr_signal': mr_signal,
+                    'mr_confidence': mr_conf,
+                    'tf_signal': tf_signal,
+                    'tf_confidence': tf_conf,
+                    'ema_signal': ema_signal,
+                    'ema_confidence': ema_conf,
+                }
         except Exception as e:
             logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
 
