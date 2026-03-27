@@ -995,6 +995,13 @@ class TradingBot:
         if not hasattr(self, "aggregators") or self.aggregators is None:
             self.aggregators = {}
 
+        # Extract global filter flags
+        agg_settings = self.config.get("aggregator_settings", {})
+        use_macro_gov = agg_settings.get("use_macro_governor", True)
+        use_gatekeeper = agg_settings.get("use_gatekeeper", True)
+        trend_threshold = agg_settings.get("trend_aligned_threshold", 3.0)
+        counter_threshold = agg_settings.get("counter_trend_threshold", 3.5)
+
         for asset_name, strategies in self.strategies.items():
             # Skip disabled assets
             if not self.config["assets"][asset_name].get("enabled", False):
@@ -1051,6 +1058,8 @@ class TradingBot:
                         strong_signal_bypass_threshold=getattr(
                             self.params, "ai_strong_signal_bypass", 0.70
                         ),
+                        use_macro_governor=use_macro_gov,
+                        use_gatekeeper=use_gatekeeper
                     )
 
                     logger.info(f"  Type:       Performance Aggregator")
@@ -1082,11 +1091,13 @@ class TradingBot:
                         ),
                         # Council-specific settings
                         config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
-                        trend_aligned_threshold=3.5,  # Defaults (will be overridden by config)
-                        counter_trend_threshold=4.0,
+                        trend_aligned_threshold=trend_threshold,
+                        counter_trend_threshold=counter_threshold,
                         weight_structure=1.0,
                         weight_momentum=1.5,
                         performance_tracker=self.portfolio_manager.performance_tracker,
+                        use_macro_governor=use_macro_gov,
+                        use_gatekeeper=use_gatekeeper
                     )
 
                     logger.info(f"  Type:       Council Aggregator")
@@ -1139,10 +1150,12 @@ class TradingBot:
                         ),
                         enable_detailed_logging=False,
                         config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
-                        trend_aligned_threshold=3.5,
-                        counter_trend_threshold=4.0,
+                        trend_aligned_threshold=trend_threshold,
+                        counter_trend_threshold=counter_threshold,
                         weight_structure=1.0,
                         weight_momentum=1.5,
+                        use_macro_governor=use_macro_gov,
+                        use_gatekeeper=use_gatekeeper
                     )
 
                     # Store both in a dict
@@ -2063,6 +2076,13 @@ class TradingBot:
             if hasattr(self, "ai_validator") and self.ai_validator:
                 ai_validator = self.ai_validator
 
+            # Extract global filter flags
+            agg_settings = self.config.get("aggregator_settings", {})
+            use_macro_gov = agg_settings.get("use_macro_governor", True)
+            use_gatekeeper = agg_settings.get("use_gatekeeper", True)
+            trend_threshold = agg_settings.get("trend_aligned_threshold", 3.0)
+            counter_threshold = agg_settings.get("counter_trend_threshold", 3.5)
+
             # Determine aggregator mode from config
             global_mode = (
                 self.config.get("aggregator_settings", {})
@@ -2111,6 +2131,8 @@ class TradingBot:
                     strong_signal_bypass_threshold=getattr(
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
+                    use_macro_governor=use_macro_gov,
+                    use_gatekeeper=use_gatekeeper
                 )
                 council_agg = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
@@ -2120,10 +2142,12 @@ class TradingBot:
                     ai_validator=ai_validator,
                     enable_detailed_logging=False,
                     config=preset_config,
-                    trend_aligned_threshold=3.5,
-                    counter_trend_threshold=4.0,
+                    trend_aligned_threshold=trend_threshold,
+                    counter_trend_threshold=counter_threshold,
                     weight_structure=1.0,
                     weight_momentum=1.5,
+                    use_macro_governor=use_macro_gov,
+                    use_gatekeeper=use_gatekeeper
                 )
 
                 self.aggregators[asset_name] = {
@@ -2145,8 +2169,10 @@ class TradingBot:
                     ai_validator=ai_validator,
                     enable_detailed_logging=getattr(self, "detailed_logging", False),
                     config=preset_config,
-                    trend_aligned_threshold=3.5,
-                    counter_trend_threshold=4.0,
+                    trend_aligned_threshold=trend_threshold,
+                    counter_trend_threshold=counter_threshold,
+                    use_macro_governor=use_macro_gov,
+                    use_gatekeeper=use_gatekeeper
                 )
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(
@@ -2169,6 +2195,8 @@ class TradingBot:
                     strong_signal_bypass_threshold=getattr(
                         self.params, "ai_strong_signal_bypass", 0.70
                     ),
+                    use_macro_governor=use_macro_gov,
+                    use_gatekeeper=use_gatekeeper
                 )
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(

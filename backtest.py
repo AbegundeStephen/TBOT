@@ -197,6 +197,8 @@ class MLStrategy(bt.Strategy):
             "ai_circuit_breaker_threshold",
             0.70,
         ),  # NEW: Control circuit breaker  # NEW: Bypass AI for strong signals
+        ("use_macro_governor", True),
+        ("use_gatekeeper", True),
     )
 
     def __init__(self):
@@ -264,6 +266,8 @@ class MLStrategy(bt.Strategy):
             enable_ai_circuit_breaker=True,
             enable_detailed_logging=True,
             strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,  # Pass same value!
+            use_macro_governor=self.params.use_macro_governor,
+            use_gatekeeper=self.params.use_gatekeeper,
         )
 
         self.order = None
@@ -767,13 +771,15 @@ class MLStrategy(bt.Strategy):
                 logger.info(f"  Filter Rate: {filter_rate:.1f}% (signals blocked)")
 
 
-def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
+def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True, use_macro_gov=True, use_gatekeeper=True):
     """Run backtest with optional AI validation"""
     logger.info("=" * 70)
     logger.info(f"🚀 STARTING BACKTEST FOR {asset_key.upper()}")
     logger.info("=" * 70)
     logger.info(f"Aggregator Preset: {aggregator_preset}")
     logger.info(f"AI Validation: {'ENABLED' if use_ai else 'DISABLED'}")
+    logger.info(f"Macro Governor: {'ENABLED' if use_macro_gov else 'DISABLED'}")
+    logger.info(f"Gatekeeper: {'ENABLED' if use_gatekeeper else 'DISABLED'}")
     logger.info("=" * 70)
 
     try:
@@ -787,6 +793,9 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
 
     # ✅ TASK 15: Strict Data Isolation (No Leakage)
     # We ONLY use test data. We do NOT concat with training data.
+    # [Rest of function logic...]
+    test_path = f"data/raw/{asset_key.upper()}_1h.csv" # Simplified for replacement context
+    
     try:
         df = pd.read_csv(test_path, index_col=0, parse_dates=True)
         df.columns = df.columns.str.lower()
@@ -818,6 +827,8 @@ def run_backtest(asset_key, aggregator_preset="balanced", use_ai=True):
         MLStrategy,
         aggregator_preset=aggregator_preset,
         use_ai_validation=use_ai,  # Pass AI toggle
+        use_macro_governor=use_macro_gov,
+        use_gatekeeper=use_gatekeeper,
     )
 
     # Broker settings
@@ -951,6 +962,16 @@ Examples:
         help="Disable AI validation layer",
     )
     parser.add_argument(
+        "--no-gov",
+        action="store_true",
+        help="Disable Macro Governor (Daily 200 EMA filter)",
+    )
+    parser.add_argument(
+        "--no-gatekeeper",
+        action="store_true",
+        help="Disable Gatekeeper (Opposite Trend block)",
+    )
+    parser.add_argument(
         "--diagnose", action="store_true", help="Enable full diagnostic logging"
     )
 
@@ -959,5 +980,9 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.info("🔍 DIAGNOSTIC MODE ENABLED")
     run_backtest(
-        asset_key=args.asset, aggregator_preset=args.preset, use_ai=not args.no_ai
+        asset_key=args.asset, 
+        aggregator_preset=args.preset, 
+        use_ai=not args.no_ai,
+        use_macro_gov=not args.no_gov,
+        use_gatekeeper=not args.no_gatekeeper
     )
