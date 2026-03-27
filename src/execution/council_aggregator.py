@@ -61,7 +61,9 @@ class InstitutionalCouncilAggregator:
         # Asset-specific tuning
         config: Optional[Dict] = None,
         mtf_integration=None, # ✨ INJECTED: The Governor
-        performance_tracker=None # ✨ INJECTED: Performance Analytics
+        performance_tracker=None, # ✨ INJECTED: Performance Analytics
+        use_macro_governor: bool = True,
+        use_gatekeeper: bool = True
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -71,6 +73,9 @@ class InstitutionalCouncilAggregator:
         self.detailed_logging = enable_detailed_logging
         self.mtf_integration = mtf_integration 
         self.performance_tracker = performance_tracker        
+        self.use_macro_governor = use_macro_governor
+        self.use_gatekeeper = use_gatekeeper
+
         # Configuration merge
         self.config = self._get_default_config()
         if config:
@@ -83,10 +88,12 @@ class InstitutionalCouncilAggregator:
 
         # Dynamic threshold loading
         self.trend_aligned_threshold = self.config.get(
-            'council_trend_aligned', trend_aligned_threshold
+            'trend_aligned_threshold', 
+            self.config.get('council_trend_aligned', trend_aligned_threshold)
         )
         self.counter_trend_threshold = self.config.get(
-            'council_counter_trend', counter_trend_threshold
+            'counter_trend_threshold',
+            self.config.get('council_counter_trend', counter_trend_threshold)
         )
         
         # Weights
@@ -547,51 +554,52 @@ class InstitutionalCouncilAggregator:
         # STEP 1 — Governor-First Protocol
         # ====================================================================
         # Move macro regime check to the very first step.
-        macro_regime = self._check_macro_regime(self.asset_type)
-        
-        # Determine preliminary signal from Trend Following to enable immediate veto
-        # Reason: Must check veto BEFORE computing RSI, ATR, or AI validation.
-        try:
-            # We use a fast, low-compute check of the Trend Following strategy
-            prelim_signal, _ = self.s_trend_following.generate_signal(df, silent=True)
+        if self.use_macro_governor:
+            macro_regime = self._check_macro_regime(self.asset_type)
             
-            if macro_regime == "BEARISH" and prelim_signal == 1:
-                logger.info("[COUNCIL] Governor VETO: Bearish regime blocks LONG.")
-                return 0, {
-                    'timestamp': timestamp, 
-                    'reasoning': "governor_veto_bearish", 
-                    'signal': 0,
-                    'asset': self.asset_type,
-                    'decision_type': "VETOED (Macro Bearish)",
-                    'final_signal': 0,
-                    'signal_quality': 0.0,
-                    'mr_signal': mr_signal,
-                    'mr_confidence': mr_conf,
-                    'tf_signal': tf_signal,
-                    'tf_confidence': tf_conf,
-                    'ema_signal': ema_signal,
-                    'ema_confidence': ema_conf,
-                }
+            # Determine preliminary signal from Trend Following to enable immediate veto
+            # Reason: Must check veto BEFORE computing RSI, ATR, or AI validation.
+            try:
+                # We use a fast, low-compute check of the Trend Following strategy
+                prelim_signal, _ = self.s_trend_following.generate_signal(df, silent=True)
+                
+                if macro_regime == "BEARISH" and prelim_signal == 1:
+                    logger.info("[COUNCIL] Governor VETO: Bearish regime blocks LONG.")
+                    return 0, {
+                        'timestamp': timestamp, 
+                        'reasoning': "governor_veto_bearish", 
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "VETOED (Macro Bearish)",
+                        'final_signal': 0,
+                        'signal_quality': 0.0,
+                        'mr_signal': 0,
+                        'mr_confidence': 0.0,
+                        'tf_signal': 0,
+                        'tf_confidence': 0.0,
+                        'ema_signal': 0,
+                        'ema_confidence': 0.0,
+                    }
 
-            if macro_regime == "BULLISH" and prelim_signal == -1:
-                logger.info("[COUNCIL] Governor VETO: Bullish regime blocks SHORT.")
-                return 0, {
-                    'timestamp': timestamp, 
-                    'reasoning': "governor_veto_bullish", 
-                    'signal': 0,
-                    'asset': self.asset_type,
-                    'decision_type': "VETOED (Macro Bullish)",
-                    'final_signal': 0,
-                    'signal_quality': 0.0,
-                    'mr_signal': mr_signal,
-                    'mr_confidence': mr_conf,
-                    'tf_signal': tf_signal,
-                    'tf_confidence': tf_conf,
-                    'ema_signal': ema_signal,
-                    'ema_confidence': ema_conf,
-                }
-        except Exception as e:
-            logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
+                if macro_regime == "BULLISH" and prelim_signal == -1:
+                    logger.info("[COUNCIL] Governor VETO: Bullish regime blocks SHORT.")
+                    return 0, {
+                        'timestamp': timestamp, 
+                        'reasoning': "governor_veto_bullish", 
+                        'signal': 0,
+                        'asset': self.asset_type,
+                        'decision_type': "VETOED (Macro Bullish)",
+                        'final_signal': 0,
+                        'signal_quality': 0.0,
+                        'mr_signal': 0,
+                        'mr_confidence': 0.0,
+                        'tf_signal': 0,
+                        'tf_confidence': 0.0,
+                        'ema_signal': 0,
+                        'ema_confidence': 0.0,
+                    }
+            except Exception as e:
+                logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
 
         try:
             # ================================================================
@@ -767,56 +775,58 @@ class InstitutionalCouncilAggregator:
 
                 # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
                 # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
-                safety_threshold = self.config.get('trend_safety_threshold', 0.50)
-                if (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
-                   (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
-                    logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees.")
-                    return 0, {
-                        'timestamp': timestamp,
-                        'signal': 0,
-                        'asset': self.asset_type,
-                        'decision_type': "BLOCKED (Opposite Trend)",
-                        'reasoning': "blocked_by_opposite_trend",
-                        'final_signal': 0,
-                        'signal_quality': 0.0,
-                        'total_score': total_score,
-                        'scores': chosen_scores,
-                        'buy_total': buy_total,
-                        'sell_total': sell_total,
-                        'regime': regime_name,
-                        'mr_signal': mr_signal,
-                        'mr_confidence': mr_conf,
-                        'tf_signal': tf_signal,
-                        'tf_confidence': tf_conf,
-                        'ema_signal': ema_signal,
-                        'ema_confidence': ema_conf,
-                    }
+                if self.use_gatekeeper:
+                    safety_threshold = self.config.get('trend_safety_threshold', 0.50)
+                    if (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
+                       (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
+                        logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees.")
+                        return 0, {
+                            'timestamp': timestamp,
+                            'signal': 0,
+                            'asset': self.asset_type,
+                            'decision_type': "BLOCKED (Opposite Trend)",
+                            'reasoning': "blocked_by_opposite_trend",
+                            'final_signal': 0,
+                            'signal_quality': 0.0,
+                            'total_score': total_score,
+                            'scores': chosen_scores,
+                            'buy_total': buy_total,
+                            'sell_total': sell_total,
+                            'regime': regime_name,
+                            'mr_signal': mr_signal,
+                            'mr_confidence': mr_conf,
+                            'tf_signal': tf_signal,
+                            'tf_confidence': tf_conf,
+                            'ema_signal': ema_signal,
+                            'ema_confidence': ema_conf,
+                        }
 
                 # 1. MACRO GOVERNOR (ABSOLUTE VETO)
                 # Reason: Proves macro alignment (1D 200 EMA). Sacrosanct macro rule.
-                gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data, trade_type)
-                if not gov_passed:
-                    logger.info(f"[VETO] ❌ BLOCKED - Macro Regime Conflict.")
-                    return 0, {
-                        'timestamp': timestamp,
-                        'signal': 0,
-                        'asset': self.asset_type,
-                        'decision_type': "BLOCKED (Macro Regime Conflict)",
-                        'reasoning': "blocked_by_macro_governor",
-                        'final_signal': 0,
-                        'signal_quality': 0.0,
-                        'total_score': total_score,
-                        'scores': chosen_scores,
-                        'buy_total': buy_total,
-                        'sell_total': sell_total,
-                        'regime': regime_name,
-                        'mr_signal': mr_signal,
-                        'mr_confidence': mr_conf,
-                        'tf_signal': tf_signal,
-                        'tf_confidence': tf_conf,
-                        'ema_signal': ema_signal,
-                        'ema_confidence': ema_conf,
-                    }
+                if self.use_macro_governor:
+                    gov_passed, trade_type = self._check_governor_filter(df, signal, governor_data, trade_type)
+                    if not gov_passed:
+                        logger.info(f"[VETO] ❌ BLOCKED - Macro Regime Conflict.")
+                        return 0, {
+                            'timestamp': timestamp,
+                            'signal': 0,
+                            'asset': self.asset_type,
+                            'decision_type': "BLOCKED (Macro Regime Conflict)",
+                            'reasoning': "blocked_by_macro_governor",
+                            'final_signal': 0,
+                            'signal_quality': 0.0,
+                            'total_score': total_score,
+                            'scores': chosen_scores,
+                            'buy_total': buy_total,
+                            'sell_total': sell_total,
+                            'regime': regime_name,
+                            'mr_signal': mr_signal,
+                            'mr_confidence': mr_conf,
+                            'tf_signal': tf_signal,
+                            'tf_confidence': tf_conf,
+                            'ema_signal': ema_signal,
+                            'ema_confidence': ema_conf,
+                        }
 
                 # 2. ATR WICK TRAP (ABSOLUTE VETO)
                 if not validate_candle_structure(df, self.asset_type, direction="long" if signal == 1 else "short"):
