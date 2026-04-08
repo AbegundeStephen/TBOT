@@ -800,7 +800,7 @@
     "description": "auto = Analyzes market conditions at startup to select optimal preset per asset\n",
     "use_macro_governor": true,
     "use_gatekeeper": true,
-    "trend_aligned_threshold": 3.0,
+    "trend_aligned_threshold": 2.75,
     "counter_trend_threshold": 3.5
   },
   "trading": {
