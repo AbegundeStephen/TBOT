@@ -448,19 +448,68 @@ def get_signals():
     """Get recent trading signals"""
     try:
         limit = request.args.get("limit", 20, type=int)
+        asset = request.args.get("asset", None)
 
-        result = (
+        query = (
             supabase.table("signals")
             .select("*")
             .order("timestamp", desc=True)
             .limit(limit)
-            .execute()
         )
+        if asset:
+            query = query.eq("asset", asset)
+
+        result = query.execute()
 
         return jsonify({"signals": result.data})
 
     except Exception as e:
         logger.error(f"Error getting signals: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/signals/history")
+def get_signals_history():
+    """Get paginated signal history with optional date-range and asset filter"""
+    try:
+        days      = request.args.get("days",      30,  type=int)
+        page      = request.args.get("page",      1,   type=int)
+        page_size = request.args.get("page_size", 50,  type=int)
+        asset     = request.args.get("asset",     None)
+
+        page_size = min(page_size, 200)   # hard cap
+        page      = max(page, 1)
+        offset    = (page - 1) * page_size
+
+        start_time = (datetime.now() - timedelta(days=days)).isoformat()
+
+        query = (
+            supabase.table("signals")
+            .select("*", count="exact")
+            .gte("timestamp", start_time)
+            .order("timestamp", desc=True)
+            .range(offset, offset + page_size - 1)
+        )
+
+        if asset:
+            query = query.eq("asset", asset)
+
+        result = query.execute()
+
+        total       = result.count or 0
+        total_pages = max(1, (total + page_size - 1) // page_size)
+
+        return jsonify({
+            "signals":     result.data,
+            "total":       total,
+            "page":        page,
+            "page_size":   page_size,
+            "total_pages": total_pages,
+            "days":        days,
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting signal history: {e}")
         return jsonify({"error": str(e)}), 500
 
 

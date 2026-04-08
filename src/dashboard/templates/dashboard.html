@@ -545,11 +545,103 @@
         .audit-price { color: #facc15; }
         .audit-pnl { font-weight: bold; }
 
+        /* ── Signal History Toolbar ── */
+        .signals-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 12px 16px;
+            background: #f8fafc;
+            border-radius: 10px;
+            margin-bottom: 12px;
+        }
+        .signals-toolbar-left, .signals-toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .mode-btn {
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .mode-btn.active {
+            background: #667eea;
+            color: white;
+        }
+        .mode-btn:hover:not(.active) {
+            background: #eef2ff;
+        }
+        .signals-asset-filter {
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            font-size: 12px;
+            color: #334155;
+            background: white;
+            cursor: pointer;
+        }
+        .export-btn {
+            padding: 6px 14px;
+            border-radius: 8px;
+            border: none;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .export-btn-csv { background: #10b981; color: white; }
+        .export-btn-csv:hover { background: #059669; }
+        .export-btn-copy { background: #667eea; color: white; }
+        .export-btn-copy:hover { background: #5a67d8; }
+        .signals-meta {
+            font-size: 11px;
+            color: #94a3b8;
+            padding: 0 4px;
+        }
+        /* ── Pagination ── */
+        .pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 10px 0;
+            flex-wrap: wrap;
+        }
+        .page-btn {
+            padding: 5px 12px;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            background: white;
+            color: #334155;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .page-btn:hover:not(:disabled) { background: #667eea; color: white; border-color: #667eea; }
+        .page-btn.current { background: #667eea; color: white; border-color: #667eea; font-weight: 700; }
+        .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .page-info { font-size: 12px; color: #64748b; padding: 0 8px; }
+        /* ── Outcome column ── */
+        .outcome-taken  { color: #10b981; font-weight: 600; font-size: 11px; }
+        .outcome-hold   { color: #94a3b8; font-size: 11px; }
+        .outcome-filtered { color: #ef4444; font-size: 11px; }
+        .outcome-conflict { color: #f59e0b; font-size: 11px; }
+
         @media (max-width: 768px) {
             .stats-grid {
                 grid-template-columns: 1fr;
             }
-            
+
             .charts-grid {
                 grid-template-columns: 1fr;
             }
@@ -557,7 +649,7 @@
             .header h1 {
                 font-size: 24px;
             }
-            
+
             .header-left {
                 flex-direction: column;
                 align-items: flex-start;
@@ -675,9 +767,31 @@
             </div>
 
             <div id="signals" class="tab-content" style="display: none;">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    Loading data...
+                <!-- Toolbar -->
+                <div class="signals-toolbar">
+                    <div class="signals-toolbar-left">
+                        <button class="mode-btn active" id="btn-mode-recent"  onclick="switchSignalMode('recent')">Recent 20</button>
+                        <button class="mode-btn"        id="btn-mode-history" onclick="switchSignalMode('history')">Last 30 Days</button>
+                        <select class="signals-asset-filter" id="signals-asset-filter" onchange="onSignalFilterChange()">
+                            <option value="">All Assets</option>
+                            <option value="BTC">BTC</option>
+                            <option value="GOLD">GOLD</option>
+                            <option value="EURUSD">EURUSD</option>
+                            <option value="EURJPY">EURJPY</option>
+                            <option value="USTEC">USTEC</option>
+                        </select>
+                        <span class="signals-meta" id="signals-meta"></span>
+                    </div>
+                    <div class="signals-toolbar-right">
+                        <button class="export-btn export-btn-csv"  onclick="exportSignalsCSV()">⬇ Export CSV</button>
+                        <button class="export-btn export-btn-copy" onclick="copySignalsToClipboard()">📋 Copy</button>
+                    </div>
+                </div>
+                <!-- Pagination (history mode only) -->
+                <div id="signals-pagination" style="display:none;"></div>
+                <!-- Table -->
+                <div id="signals-table-container">
+                    <div class="loading"><div class="spinner"></div>Loading data...</div>
                 </div>
             </div>
         </div>
@@ -1124,93 +1238,322 @@
             container.innerHTML = html;
         }
 
+        // ============================================================================
+        // SIGNAL HISTORY STATE
+        // ============================================================================
+        let signalMode       = 'recent';   // 'recent' | 'history'
+        let signalPage       = 1;
+        let signalPageSize   = 50;
+        let signalTotalPages = 1;
+        let signalTotal      = 0;
+        let signalCache      = [];          // all rows currently rendered (for export)
+
+        function switchSignalMode(mode) {
+            signalMode = mode;
+            signalPage = 1;
+            document.getElementById('btn-mode-recent').classList.toggle('active',  mode === 'recent');
+            document.getElementById('btn-mode-history').classList.toggle('active', mode === 'history');
+            document.getElementById('signals-pagination').style.display = mode === 'history' ? 'block' : 'none';
+            loadSignals();
+        }
+
+        function onSignalFilterChange() {
+            signalPage = 1;
+            loadSignals();
+        }
+
         async function loadSignals() {
-            const response = await fetch(`${API_BASE_URL}/api/signals?limit=20`);
-            const data = await response.json();
-            const container = document.getElementById('signals');
-            
-            if (!data.signals || data.signals.length === 0) {
-                container.innerHTML = '<p class="loading">No signals yet</p>';
+            const asset = document.getElementById('signals-asset-filter')?.value || '';
+            if (signalMode === 'recent') {
+                await loadRecentSignals(asset);
+            } else {
+                await loadSignalHistory(signalPage, asset);
+            }
+        }
+
+        async function loadRecentSignals(asset = '') {
+            const container = document.getElementById('signals-table-container');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+            try {
+                let url = `${API_BASE_URL}/api/signals?limit=20`;
+                if (asset) url += `&asset=${encodeURIComponent(asset)}`;
+                const response = await fetch(url);
+                const data = await response.json();
+                signalCache = data.signals || [];
+                document.getElementById('signals-meta').textContent =
+                    `${signalCache.length} signals`;
+                renderSignalsTable(signalCache, container);
+            } catch (e) {
+                container.innerHTML = '<p class="loading">Failed to load signals.</p>';
+            }
+        }
+
+        async function loadSignalHistory(page = 1, asset = '') {
+            const container = document.getElementById('signals-table-container');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+            try {
+                let url = `${API_BASE_URL}/api/signals/history?days=30&page=${page}&page_size=${signalPageSize}`;
+                if (asset) url += `&asset=${encodeURIComponent(asset)}`;
+                const response = await fetch(url);
+                const data = await response.json();
+                signalCache      = data.signals || [];
+                signalTotal      = data.total || 0;
+                signalTotalPages = data.total_pages || 1;
+                signalPage       = data.page || 1;
+                document.getElementById('signals-meta').textContent =
+                    `${signalTotal.toLocaleString()} signals in last 30 days`;
+                renderSignalsTable(signalCache, container);
+                renderPagination(signalPage, signalTotalPages, signalTotal);
+            } catch (e) {
+                container.innerHTML = '<p class="loading">Failed to load signal history.</p>';
+            }
+        }
+
+        function getSignalOutcome(signal) {
+            if (signal.executed) {
+                return { cls: 'outcome-taken', text: '✅ Executed' };
+            }
+            if (signal.signal === 0) {
+                return { cls: 'outcome-hold', text: '⚪ Hold — no signal' };
+            }
+            // Signal was BUY/SELL but not executed — figure out why
+            let reasons = [];
+
+            // AI rejection
+            if (signal.ai_details) {
+                try {
+                    const ai = typeof signal.ai_details === 'string'
+                        ? JSON.parse(signal.ai_details) : signal.ai_details;
+                    if (ai.action === 'rejected') {
+                        const why = ai.reason || ai.rejection_reason || '';
+                        reasons.push('AI rejected' + (why ? ': ' + why : ''));
+                    }
+                } catch(e) {}
+            }
+            if (!signal.ai_validated && !reasons.length) {
+                reasons.push('AI not validated');
+            }
+
+            // Strategy conflict — MR and TF disagree with each other or with final signal
+            const strats = [signal.mr_signal, signal.tf_signal, signal.ema_signal]
+                .filter(s => s !== null && s !== undefined && s !== 0);
+            const agreeing = strats.filter(s => s === signal.signal).length;
+            if (strats.length > 0 && agreeing === 0) {
+                reasons.push('Strategy conflict (MR/TF/EMA disagree)');
+            }
+
+            if (reasons.length) {
+                return { cls: 'outcome-filtered', text: '❌ ' + reasons.join(' · ') };
+            }
+            // Fallback to reasoning
+            if (signal.reasoning) {
+                return { cls: 'outcome-conflict', text: '⏳ ' + signal.reasoning };
+            }
+            return { cls: 'outcome-filtered', text: '⏳ Filtered — see details' };
+        }
+
+        function renderSignalsTable(signals, container) {
+            if (!signals || signals.length === 0) {
+                container.innerHTML = '<p class="loading">No signals found.</p>';
                 return;
             }
-            
-            let html = '<div style="overflow-x: auto;"><table class="trades-table" style="min-width: 1000px;"><thead><tr>';
+
+            let html = '<div style="overflow-x: auto;"><table class="trades-table" style="min-width: 1100px;"><thead><tr>';
             html += '<th>Time</th><th>Asset</th><th>Signal</th><th>Reasoning</th>';
-            html += '<th>Regime</th><th>MR Signal</th><th>TF Signal</th>';
-            html += '<th>AI Status</th><th>Status</th></tr></thead><tbody>';
-            
-            data.signals.forEach(signal => {
-                const signalText = signal.signal === 1 ? 'BUY' : signal.signal === -1 ? 'SELL' : 'HOLD';
+            html += '<th>Regime</th><th>MR</th><th>TF</th><th>EMA</th>';
+            html += '<th>AI</th><th>Price</th><th>Outcome / Why</th>';
+            html += '</tr></thead><tbody>';
+
+            signals.forEach(signal => {
+                const signalText  = signal.signal === 1 ? 'BUY' : signal.signal === -1 ? 'SELL' : 'HOLD';
                 const signalBadge = signal.signal === 1 ? 'badge-long' : signal.signal === -1 ? 'badge-short' : '';
-                const timestamp = new Date(signal.timestamp).toLocaleString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
+                const timestamp   = new Date(signal.timestamp).toLocaleString('en-US', {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
                 });
-                
-                // Parse regime
+
+                // Regime
                 let regimeDisplay = signal.regime || 'UNKNOWN';
-                if (regimeDisplay.includes('BEAR')) regimeDisplay = '🐻 BEAR';
-                else if (regimeDisplay.includes('BULL')) regimeDisplay = '🐂 BULL';
+                if (regimeDisplay.includes('BEAR'))    regimeDisplay = '🐻 BEAR';
+                else if (regimeDisplay.includes('BULL'))    regimeDisplay = '🐂 BULL';
                 else if (regimeDisplay.includes('RANGING')) regimeDisplay = '↔️ RANGE';
-                
-                // MR Signal
-                const mrIcon = signal.mr_signal === 1 ? '🟢' : signal.mr_signal === -1 ? '🔴' : '⚪';
-                const mrDisplay = `${mrIcon} ${(signal.mr_confidence * 100).toFixed(0)}%`;
-                
-                // TF Signal
-                const tfIcon = signal.tf_signal === 1 ? '🟢' : signal.tf_signal === -1 ? '🔴' : '⚪';
-                const tfDisplay = `${tfIcon} ${(signal.tf_confidence * 100).toFixed(0)}%`;
-                
-                // AI Status
+
+                // Per-strategy helpers
+                function stratCell(sig, conf) {
+                    if (sig === null || sig === undefined) return '<td style="text-align:center;color:#94a3b8;">—</td>';
+                    const icon = sig === 1 ? '🟢' : sig === -1 ? '🔴' : '⚪';
+                    const dir  = sig === 1 ? 'BUY' : sig === -1 ? 'SELL' : 'FLAT';
+                    const pct  = conf != null ? `<div style="font-size:10px;color:#666;">${(conf*100).toFixed(0)}%</div>` : '';
+                    return `<td style="text-align:center;">${icon} ${dir}${pct}</td>`;
+                }
+
+                // AI
                 let aiStatus = '—';
                 let patternInfo = '';
                 if (signal.ai_details) {
                     try {
-                        const aiData = JSON.parse(signal.ai_details);
-                        if (aiData.action === 'approved') {
-                            aiStatus = '✅ Approved';
-                        } else if (aiData.action === 'rejected') {
-                            aiStatus = '❌ Rejected';
-                        } else {
-                            aiStatus = `⚠️ ${aiData.action}`;
+                        const ai = typeof signal.ai_details === 'string'
+                            ? JSON.parse(signal.ai_details) : signal.ai_details;
+                        if (ai.action === 'approved')      aiStatus = '✅ Approved';
+                        else if (ai.action === 'rejected') aiStatus = '❌ Rejected';
+                        else                               aiStatus = `⚠️ ${ai.action}`;
+                        if (ai.pattern_detected && ai.pattern_name) {
+                            patternInfo = `<div style="font-size:10px;color:#667eea;margin-top:2px;">${ai.pattern_name}</div>`;
                         }
-                        
-                        if (aiData.pattern_detected && aiData.pattern_name) {
-                            patternInfo = `<div style="font-size: 10px; color: #667eea; margin-top: 2px;">${aiData.pattern_name}</div>`;
-                        }
-                    } catch (e) {
-                        aiStatus = signal.ai_validated ? '✅' : '—';
-                    }
+                    } catch(e) { aiStatus = signal.ai_validated ? '✅' : '—'; }
                 } else {
-                    aiStatus = signal.ai_validated ? '✅' : '—';
+                    aiStatus = signal.ai_validated ? '✅ Validated' : '—';
                 }
-               
-                html += `<tr onclick='showSignalDetails(${JSON.stringify(signal).replace(/'/g, "\\'")})'  style="cursor: pointer;">
-                    <td style="white-space: nowrap;">${timestamp}</td>
+
+                // Price
+                const priceDisplay = signal.price != null
+                    ? signal.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 5 })
+                    : '—';
+
+                // Outcome
+                const outcome = getSignalOutcome(signal);
+
+                html += `<tr onclick='showSignalDetails(${JSON.stringify(signal).replace(/'/g, "\\'")})' style="cursor:pointer;">
+                    <td style="white-space:nowrap;">${timestamp}</td>
                     <td><strong>${signal.asset}</strong></td>
                     <td>
                         <span class="badge ${signalBadge}">${signalText}</span>
-                        <div style="font-size: 10px; color: #666; margin-top: 2px;">${(signal.signal_quality * 100).toFixed(0)}% quality</div>
+                        <div style="font-size:10px;color:#666;margin-top:2px;">${(signal.signal_quality*100).toFixed(0)}% quality</div>
                     </td>
-                    <td style="max-width: 250px;">
-                        <strong style="color: #333;">${signal.reasoning || 'No reasoning'}</strong>
+                    <td style="max-width:240px;font-size:12px;">
+                        ${signal.reasoning || '<span style="color:#94a3b8;">—</span>'}
                         ${patternInfo}
                     </td>
                     <td>
                         <div>${regimeDisplay}</div>
-                        <div style="font-size: 10px; color: #666;">${(signal.regime_confidence * 100).toFixed(0)}%</div>
+                        <div style="font-size:10px;color:#666;">${(signal.regime_confidence*100).toFixed(0)}%</div>
                     </td>
-                    <td style="text-align: center;">${mrDisplay}</td>
-                    <td style="text-align: center;">${tfDisplay}</td>
-                    <td style="font-size: 12px;">${aiStatus}</td>
-                    <td style="text-align: center;">${signal.executed ? '✅ Done' : '⏳ Pending'}</td>
+                    ${stratCell(signal.mr_signal,  signal.mr_confidence)}
+                    ${stratCell(signal.tf_signal,  signal.tf_confidence)}
+                    ${stratCell(signal.ema_signal, signal.ema_confidence)}
+                    <td style="font-size:12px;">${aiStatus}</td>
+                    <td style="white-space:nowrap;">${priceDisplay}</td>
+                    <td class="${outcome.cls}" style="max-width:200px;">${outcome.text}</td>
                 </tr>`;
             });
-            
+
             html += '</tbody></table></div>';
             container.innerHTML = html;
+        }
+
+        function renderPagination(page, totalPages, total) {
+            const el = document.getElementById('signals-pagination');
+            if (!el) return;
+
+            let html = `<div class="pagination">`;
+            html += `<button class="page-btn" onclick="goToSignalPage(1)" ${page <= 1 ? 'disabled' : ''}>«</button>`;
+            html += `<button class="page-btn" onclick="goToSignalPage(${page - 1})" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button>`;
+
+            // Window of page buttons
+            const window_start = Math.max(1, page - 2);
+            const window_end   = Math.min(totalPages, page + 2);
+            for (let p = window_start; p <= window_end; p++) {
+                html += `<button class="page-btn ${p === page ? 'current' : ''}" onclick="goToSignalPage(${p})">${p}</button>`;
+            }
+
+            html += `<button class="page-btn" onclick="goToSignalPage(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>Next ›</button>`;
+            html += `<button class="page-btn" onclick="goToSignalPage(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>»</button>`;
+            html += `<span class="page-info">Page ${page} of ${totalPages} &nbsp;·&nbsp; ${total.toLocaleString()} total</span>`;
+            html += `</div>`;
+
+            el.innerHTML = html;
+        }
+
+        function goToSignalPage(page) {
+            if (page < 1 || page > signalTotalPages) return;
+            signalPage = page;
+            const asset = document.getElementById('signals-asset-filter')?.value || '';
+            loadSignalHistory(signalPage, asset);
+            document.getElementById('signals').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // ── Export helpers ────────────────────────────────────────────────────
+        function signalsToCsvText(signals) {
+            const headers = [
+                'Timestamp','Asset','Signal','Signal Quality','Reasoning',
+                'Regime','Regime Confidence',
+                'MR Signal','MR Confidence','TF Signal','TF Confidence','EMA Signal','EMA Confidence',
+                'Buy Score','Sell Score',
+                'AI Validated','AI Status','Price',
+                'Executed','Trade ID','Outcome'
+            ];
+
+            function esc(v) {
+                if (v === null || v === undefined) return '';
+                const s = String(v);
+                return s.includes(',') || s.includes('"') || s.includes('\n')
+                    ? `"${s.replace(/"/g, '""')}"` : s;
+            }
+
+            function aiStatusText(signal) {
+                if (signal.ai_details) {
+                    try {
+                        const ai = typeof signal.ai_details === 'string'
+                            ? JSON.parse(signal.ai_details) : signal.ai_details;
+                        return ai.action || '';
+                    } catch(e) {}
+                }
+                return signal.ai_validated ? 'validated' : '';
+            }
+
+            function signalLabel(v) { return v === 1 ? 'BUY' : v === -1 ? 'SELL' : 'HOLD'; }
+
+            const rows = signals.map(s => [
+                esc(s.timestamp),
+                esc(s.asset),
+                esc(signalLabel(s.signal)),
+                esc(s.signal_quality),
+                esc(s.reasoning),
+                esc(s.regime),
+                esc(s.regime_confidence),
+                esc(signalLabel(s.mr_signal)),
+                esc(s.mr_confidence),
+                esc(signalLabel(s.tf_signal)),
+                esc(s.tf_confidence),
+                esc(s.ema_signal != null ? signalLabel(s.ema_signal) : ''),
+                esc(s.ema_confidence),
+                esc(s.buy_score),
+                esc(s.sell_score),
+                esc(s.ai_validated ? 'true' : 'false'),
+                esc(aiStatusText(s)),
+                esc(s.price),
+                esc(s.executed ? 'true' : 'false'),
+                esc(s.trade_id || ''),
+                esc(getSignalOutcome(s).text.replace(/[✅❌⏳⚪]/g, '').trim())
+            ].join(','));
+
+            return [headers.join(','), ...rows].join('\n');
+        }
+
+        function exportSignalsCSV() {
+            if (!signalCache.length) { alert('No signals loaded to export.'); return; }
+            const csv      = signalsToCsvText(signalCache);
+            const blob     = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url      = URL.createObjectURL(blob);
+            const a        = document.createElement('a');
+            const mode     = signalMode === 'history' ? '30d' : 'recent';
+            const asset    = document.getElementById('signals-asset-filter')?.value || 'all';
+            a.href         = url;
+            a.download     = `signals_${mode}_${asset}_page${signalPage}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function copySignalsToClipboard() {
+            if (!signalCache.length) { alert('No signals loaded to copy.'); return; }
+            const csv = signalsToCsvText(signalCache);
+            navigator.clipboard.writeText(csv)
+                .then(() => {
+                    const btn = document.querySelector('.export-btn-copy');
+                    const original = btn.textContent;
+                    btn.textContent = '✅ Copied!';
+                    setTimeout(() => { btn.textContent = original; }, 2000);
+                })
+                .catch(() => alert('Copy failed — try Export CSV instead.'));
         }
         
         function showSignalDetails(signal) {
