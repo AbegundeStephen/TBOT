@@ -476,8 +476,9 @@ def get_signals_history():
         page      = request.args.get("page",      1,   type=int)
         page_size = request.args.get("page_size", 50,  type=int)
         asset     = request.args.get("asset",     None)
+        is_export = request.args.get("export",    "false").lower() == "true"
 
-        page_size = min(page_size, 200)   # hard cap
+        page_size = min(page_size, 10000 if is_export else 200)   # relaxed cap for full export
         page      = max(page, 1)
         offset    = (page - 1) * page_size
 
