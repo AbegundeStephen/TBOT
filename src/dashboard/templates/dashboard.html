@@ -1529,16 +1529,43 @@
             return [headers.join(','), ...rows].join('\n');
         }
 
-        function exportSignalsCSV() {
-            if (!signalCache.length) { alert('No signals loaded to export.'); return; }
-            const csv      = signalsToCsvText(signalCache);
-            const blob     = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url      = URL.createObjectURL(blob);
-            const a        = document.createElement('a');
-            const mode     = signalMode === 'history' ? '30d' : 'recent';
-            const asset    = document.getElementById('signals-asset-filter')?.value || 'all';
-            a.href         = url;
-            a.download     = `signals_${mode}_${asset}_page${signalPage}.csv`;
+        async function exportSignalsCSV() {
+            const asset   = document.getElementById('signals-asset-filter')?.value || '';
+            const csvBtn  = document.querySelector('.export-btn-csv');
+
+            if (signalMode === 'history') {
+                // Fetch ALL 30 days in one shot — bypass page cap with export=true
+                csvBtn.textContent = '⏳ Fetching…';
+                csvBtn.disabled    = true;
+                try {
+                    let url = `${API_BASE_URL}/api/signals/history?days=30&page=1&page_size=10000&export=true`;
+                    if (asset) url += `&asset=${encodeURIComponent(asset)}`;
+                    const resp = await fetch(url);
+                    const data = await resp.json();
+                    const all  = data.signals || [];
+                    if (!all.length) { alert('No signals found for the last 30 days.'); return; }
+                    const assetLabel = asset || 'all';
+                    triggerCsvDownload(signalsToCsvText(all), `signals_30d_${assetLabel}_full.csv`);
+                } catch (e) {
+                    alert('Export failed: ' + e.message);
+                } finally {
+                    csvBtn.textContent = '⬇ Export CSV';
+                    csvBtn.disabled    = false;
+                }
+            } else {
+                // Recent mode — just dump the cached 20 rows
+                if (!signalCache.length) { alert('No signals loaded to export.'); return; }
+                const assetLabel = asset || 'all';
+                triggerCsvDownload(signalsToCsvText(signalCache), `signals_recent_${assetLabel}.csv`);
+            }
+        }
+
+        function triggerCsvDownload(csv, filename) {
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href     = url;
+            a.download = filename;
             a.click();
             URL.revokeObjectURL(url);
         }
