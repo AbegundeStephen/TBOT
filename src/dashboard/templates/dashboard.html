@@ -668,6 +668,100 @@
         /* Progress bar util */
         .progress-wrap { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 6px; }
         .progress-fill { height: 100%; border-radius: 2px; transition: width 0.4s; }
+
+        /* ── Control Center ───────────────────── */
+        .cc-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 16px; border-bottom: 1px solid var(--border);
+            background: var(--surface); position: sticky; top: 56px; z-index: 10;
+        }
+        .cc-title { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+        .cc-badges { display: flex; align-items: center; gap: 10px; }
+        .cc-change-badge {
+            font-size: 11px; font-family: var(--font-mono);
+            background: rgba(251,191,36,0.15); color: var(--yellow2);
+            border: 1px solid rgba(251,191,36,0.3); border-radius: 20px;
+            padding: 2px 10px; display: none;
+        }
+        .cc-change-badge.visible { display: inline; }
+        .cc-bot-status {
+            font-size: 11px; font-family: var(--font-mono);
+            padding: 2px 10px; border-radius: 20px;
+        }
+        .cc-bot-status.running { background: rgba(16,185,129,0.12); color: var(--green); border: 1px solid rgba(16,185,129,0.25); }
+        .cc-bot-status.stopped { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+        .cc-btn {
+            font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px;
+            cursor: pointer; border: none; transition: opacity .15s;
+        }
+        .cc-btn:disabled { opacity: .4; cursor: not-allowed; }
+        .cc-btn-save  { background: var(--accent); color: #fff; }
+        .cc-btn-restart { background: var(--yellow); color: #000; }
+        .cc-btn-restart:not(:disabled):hover { opacity: .85; }
+        .cc-btn-save:not(:disabled):hover { opacity: .85; }
+
+        .cc-body { padding: 16px; display: flex; flex-direction: column; gap: 20px; }
+        .cc-section {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+        }
+        .cc-section-hdr {
+            padding: 10px 14px; background: var(--surface2); border-bottom: 1px solid var(--border);
+            font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+            color: var(--muted2); display: flex; align-items: center; gap: 6px;
+        }
+        .cc-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 1px; background: var(--border);
+        }
+        .cc-field {
+            background: var(--surface); padding: 12px 14px;
+            display: flex; flex-direction: column; gap: 5px;
+        }
+        .cc-label {
+            font-size: 11px; color: var(--muted2); font-weight: 500;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .cc-label.dirty { color: var(--yellow2); }
+        .cc-input {
+            background: var(--surface2); border: 1px solid var(--border2);
+            color: var(--text); border-radius: 5px; padding: 5px 8px;
+            font-size: 13px; font-family: var(--font-mono); width: 100%;
+            transition: border-color .15s;
+        }
+        .cc-input:focus { outline: none; border-color: var(--accent); }
+        .cc-input.dirty { border-color: var(--yellow2); }
+        .cc-toggle-row { display: flex; align-items: center; justify-content: space-between; }
+        .cc-toggle {
+            width: 38px; height: 20px; border-radius: 10px;
+            background: var(--border2); border: none; cursor: pointer;
+            position: relative; transition: background .2s; flex-shrink: 0;
+        }
+        .cc-toggle.on { background: var(--green); }
+        .cc-toggle::after {
+            content: ''; position: absolute; top: 3px; left: 3px;
+            width: 14px; height: 14px; border-radius: 50%; background: #fff;
+            transition: left .2s;
+        }
+        .cc-toggle.on::after { left: 21px; }
+        .cc-toggle.dirty { outline: 2px solid var(--yellow2); }
+
+        .cc-asset-tabs { display: flex; gap: 2px; padding: 8px 10px; background: var(--surface2); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+        .cc-asset-btn {
+            font-size: 11px; padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border2);
+            background: transparent; color: var(--muted2); cursor: pointer; transition: all .15s; font-weight: 600;
+        }
+        .cc-asset-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .cc-asset-btn.has-changes { border-color: var(--yellow2); color: var(--yellow2); }
+        .cc-asset-btn.active.has-changes { background: var(--yellow); color: #000; border-color: var(--yellow); }
+
+        .cc-feedback {
+            margin: 12px 16px; padding: 10px 14px; border-radius: 7px; font-size: 12px;
+            font-weight: 600; display: none; align-items: center; gap: 8px;
+        }
+        .cc-feedback.show { display: flex; }
+        .cc-feedback.ok  { background: rgba(16,185,129,0.1); color: var(--green);  border: 1px solid rgba(16,185,129,0.2); }
+        .cc-feedback.err { background: rgba(239,68,68,0.1);  color: var(--red);    border: 1px solid rgba(239,68,68,0.2); }
+        .cc-feedback.info{ background: rgba(59,130,246,0.1); color: var(--accent2); border: 1px solid rgba(59,130,246,0.2); }
     </style>
 </head>
 <body>
@@ -806,6 +900,7 @@
                 <button class="tab-btn" data-tab="closed">Closed Trades</button>
                 <button class="tab-btn" data-tab="signals">Signals</button>
                 <button class="tab-btn" data-tab="shadow">🟣 Shadow Intel</button>
+                <button class="tab-btn" data-tab="control">🎛 Control</button>
                 <button class="tab-btn" data-tab="config">⚙️ Config</button>
             </div>
 
@@ -878,6 +973,13 @@
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
                 <div id="shadow-strats-panel" style="display:none;">
+                    <div class="spinner-wrap"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <!-- Control Center -->
+            <div class="tab-panel" id="tab-control">
+                <div id="cc-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
             </div>
@@ -1835,8 +1937,9 @@ function setupTabs() {
             btn.classList.add('active');
             const panel = document.getElementById('tab-' + btn.dataset.tab);
             if (panel) panel.classList.add('active');
-            // Lazy load config on first open
-            if (btn.dataset.tab === 'config') loadConfig();
+            // Lazy load on first open
+            if (btn.dataset.tab === 'config')   loadConfig();
+            if (btn.dataset.tab === 'control')  loadControlCenter();
         });
     });
 }
@@ -1906,6 +2009,293 @@ function timeAgo(d) {
     if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
     return Math.floor(sec/86400) + 'd ago';
 }
+
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║              🎛  CONTROL CENTER                                  ║
+// ╚══════════════════════════════════════════════════════════════════╝
+let ccSchema   = null;   // raw schema from /api/config/editable
+let ccDirty    = {};     // { dot_path: new_value }
+let ccCurAsset = 'BTC';  // which asset tab is shown
+
+// Section → emoji mapping
+const CC_SECTIONS = {
+    aggregator:       { icon: '📡', label: 'Signal Aggregator' },
+    circuit_breaker:  { icon: '🔴', label: 'Circuit Breaker' },
+    portfolio:        { icon: '💼', label: 'Portfolio' },
+};
+const CC_ASSETS = ['BTC', 'GOLD', 'EURUSD', 'EURJPY', 'USTEC'];
+
+async function loadControlCenter() {
+    if (ccSchema) { renderCC(); return; }
+    try {
+        const r = await fetch(API + '/api/config/editable');
+        ccSchema = await r.json();
+        renderCC();
+    } catch(e) {
+        document.getElementById('cc-content').innerHTML =
+            `<div style="padding:32px;text-align:center;color:var(--red);">⚠️ Failed to load config: ${e.message}</div>`;
+    }
+}
+
+function renderCC() {
+    const el = document.getElementById('cc-content');
+    if (!el) return;
+
+    const changeCount = Object.keys(ccDirty).length;
+
+    let h = `
+    <div class="cc-header">
+        <div class="cc-title">🎛 Control Center
+            <span class="cc-change-badge ${changeCount?'visible':''}" id="cc-change-badge">
+                ${changeCount} unsaved change${changeCount!==1?'s':''}
+            </span>
+        </div>
+        <div class="cc-badges">
+            <span class="cc-bot-status" id="cc-bot-status">— checking…</span>
+            <button class="cc-btn cc-btn-save" id="cc-save-btn" onclick="ccSave()">💾 Save Changes</button>
+            <button class="cc-btn cc-btn-restart" id="cc-restart-btn" onclick="ccRestart()">🔄 Save & Restart</button>
+        </div>
+    </div>
+    <div class="cc-feedback" id="cc-feedback"></div>
+    <div class="cc-body">`;
+
+    // ── Global sections ──────────────────────────────────────────────
+    const globalData = ccSchema.global || {};
+    const sectionOrder = ['aggregator', 'circuit_breaker', 'portfolio'];
+    sectionOrder.forEach(sec => {
+        const fields = globalData[sec];
+        if (!fields) return;
+        const meta = CC_SECTIONS[sec] || { icon: '⚙️', label: sec };
+        h += `<div class="cc-section">
+            <div class="cc-section-hdr">${meta.icon} ${meta.label}</div>
+            <div class="cc-grid">`;
+        Object.entries(fields).forEach(([dotPath, field]) => {
+            h += ccFieldHtml(dotPath, field);
+        });
+        h += `</div></div>`;
+    });
+
+    // ── Per-asset section ────────────────────────────────────────────
+    h += `<div class="cc-section">
+        <div class="cc-section-hdr">📈 Per-Asset Settings</div>
+        <div class="cc-asset-tabs" id="cc-asset-tabs">`;
+    CC_ASSETS.forEach(asset => {
+        const hasChanges = Object.keys(ccDirty).some(p => p.startsWith(`assets.${asset}.`));
+        const active = asset === ccCurAsset ? 'active' : '';
+        const dirty  = hasChanges ? 'has-changes' : '';
+        h += `<button class="cc-asset-btn ${active} ${dirty}" onclick="ccSwitchAsset('${asset}')">${asset}</button>`;
+    });
+    h += `</div>`;
+
+    // Asset fields panel
+    CC_ASSETS.forEach(asset => {
+        const fields = (ccSchema.assets || {})[asset] || {};
+        const display = asset === ccCurAsset ? 'block' : 'none';
+        h += `<div id="cc-asset-${asset}" style="display:${display}">
+            <div class="cc-grid">`;
+        Object.entries(fields).forEach(([dotPath, field]) => {
+            h += ccFieldHtml(dotPath, field);
+        });
+        h += `</div></div>`;
+    });
+    h += `</div>`;  // end per-asset section
+
+    h += `</div>`;  // end cc-body
+    el.innerHTML = h;
+    updateCCBotStatus();
+}
+
+function ccFieldHtml(dotPath, field) {
+    const isDirty = dotPath in ccDirty;
+    const currentVal = isDirty ? ccDirty[dotPath] : field.value;
+    const safePath = dotPath.replace(/\./g, '__');
+
+    if (field.type === 'bool') {
+        const on = currentVal === true || currentVal === 'true';
+        return `<div class="cc-field">
+            <div class="cc-toggle-row">
+                <span class="cc-label ${isDirty?'dirty':''}">${field.label}</span>
+                <button class="cc-toggle ${on?'on':''} ${isDirty?'dirty':''}"
+                    id="cc-tog-${safePath}"
+                    onclick="ccToggle('${dotPath}', '${safePath}', ${field.type})"
+                    title="${on?'Enabled — click to disable':'Disabled — click to enable'}">
+                </button>
+            </div>
+        </div>`;
+    }
+
+    // numeric (float / int / pct)
+    let displayVal = currentVal ?? '';
+    let step = field.step ?? (field.type === 'int' ? 1 : 0.01);
+    let min  = field.min  ?? '';
+    let max  = field.max  ?? '';
+
+    if (field.type === 'pct' && displayVal !== '') {
+        displayVal = (parseFloat(displayVal) * 100).toFixed(2); // store as fraction, show as %
+    }
+
+    const unit = field.type === 'pct' ? ' %' : '';
+    return `<div class="cc-field">
+        <label class="cc-label ${isDirty?'dirty':''}" for="cc-inp-${safePath}">${field.label}${unit}</label>
+        <input class="cc-input ${isDirty?'dirty':''}" id="cc-inp-${safePath}"
+            type="number" value="${displayVal}"
+            step="${step}" ${min!==''?`min="${min}"`:''}  ${max!==''?`max="${max}"`:''}
+            onchange="ccChange('${dotPath}', '${safePath}', '${field.type}', this.value)"
+            oninput="ccChange('${dotPath}', '${safePath}', '${field.type}', this.value)">
+    </div>`;
+}
+
+function ccToggle(dotPath, safePath, _type) {
+    const btn = document.getElementById(`cc-tog-${safePath}`);
+    if (!btn) return;
+    const isOn = btn.classList.toggle('on');
+    btn.classList.add('dirty');
+    const label = btn.closest('.cc-field')?.querySelector('.cc-label');
+    if (label) label.classList.add('dirty');
+    ccDirty[dotPath] = isOn;
+    ccUpdateBadge();
+}
+
+function ccChange(dotPath, safePath, ftype, rawVal) {
+    const inp = document.getElementById(`cc-inp-${safePath}`);
+    let val;
+    if (ftype === 'int')   val = parseInt(rawVal, 10);
+    else if (ftype === 'pct') val = parseFloat(rawVal) / 100;
+    else val = parseFloat(rawVal);
+    if (isNaN(val)) return;
+    ccDirty[dotPath] = val;
+    if (inp) inp.classList.add('dirty');
+    const label = inp?.closest('.cc-field')?.querySelector('.cc-label');
+    if (label) label.classList.add('dirty');
+    ccUpdateBadge();
+}
+
+function ccUpdateBadge() {
+    const count = Object.keys(ccDirty).length;
+    const badge = document.getElementById('cc-change-badge');
+    if (badge) {
+        badge.textContent = `${count} unsaved change${count!==1?'s':''}`;
+        badge.classList.toggle('visible', count > 0);
+    }
+    // Refresh asset tab dirty indicators without full re-render
+    CC_ASSETS.forEach(asset => {
+        const btn = document.querySelector(`.cc-asset-btn[onclick*="'${asset}'"]`);
+        if (!btn) return;
+        const hasChanges = Object.keys(ccDirty).some(p => p.startsWith(`assets.${asset}.`));
+        btn.classList.toggle('has-changes', hasChanges);
+        if (asset === ccCurAsset) btn.classList.add('active');
+    });
+}
+
+function ccSwitchAsset(asset) {
+    CC_ASSETS.forEach(a => {
+        const panel = document.getElementById(`cc-asset-${a}`);
+        const btn   = document.querySelector(`.cc-asset-btn[onclick*="'${a}'"]`);
+        if (panel) panel.style.display = a === asset ? 'block' : 'none';
+        if (btn)   btn.classList.toggle('active', a === asset);
+    });
+    ccCurAsset = asset;
+}
+
+async function ccSave() {
+    if (!Object.keys(ccDirty).length) { ccFeedback('No changes to save', 'info'); return; }
+    const btn = document.getElementById('cc-save-btn');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetch(API + '/api/config/save', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ updates: ccDirty })
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Save failed');
+        ccFeedback(`✅ Saved ${data.changes} change${data.changes!==1?'s':''} — restart bot to apply`, 'ok');
+        ccDirty = {};
+        ccSchema = null; // force reload on next open
+        ccUpdateBadge();
+    } catch(e) {
+        ccFeedback('❌ ' + e.message, 'err');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function ccRestart() {
+    const count = Object.keys(ccDirty).length;
+    if (count) {
+        await ccSave();
+        // If save failed, feedback is already shown — check for error state
+        const fb = document.getElementById('cc-feedback');
+        if (fb && fb.classList.contains('err')) return;
+    }
+    const btn = document.getElementById('cc-restart-btn');
+    if (btn) btn.disabled = true;
+    ccFeedback('🔄 Restart signal sent — bot will restart within 5–10 seconds…', 'info');
+    try {
+        const r = await fetch(API + '/api/bot/restart', { method: 'POST' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Restart failed');
+        // Poll for bot to come back online
+        setTimeout(async () => {
+            for (let i = 0; i < 12; i++) {
+                await new Promise(res => setTimeout(res, 5000));
+                try {
+                    const s = await fetch(API + '/api/bot/pid');
+                    const sd = await s.json();
+                    if (sd.running) {
+                        ccFeedback('✅ Bot restarted successfully', 'ok');
+                        if (btn) btn.disabled = false;
+                        updateCCBotStatus();
+                        return;
+                    }
+                } catch(e2) {}
+            }
+            ccFeedback('⚠️ Restart sent, but could not confirm bot is back online. Check logs.', 'info');
+            if (btn) btn.disabled = false;
+        }, 1000);
+    } catch(e) {
+        ccFeedback('❌ ' + e.message, 'err');
+        if (btn) btn.disabled = false;
+    }
+}
+
+function ccFeedback(msg, type='ok') {
+    const el = document.getElementById('cc-feedback');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = `cc-feedback show ${type}`;
+    if (type === 'ok') setTimeout(() => el.classList.remove('show'), 6000);
+}
+
+async function updateCCBotStatus() {
+    try {
+        const r = await fetch(API + '/api/bot/pid');
+        const d = await r.json();
+        const el = document.getElementById('cc-bot-status');
+        if (!el) return;
+        if (d.running === true) {
+            el.textContent = `🟢 Running PID ${d.pid}`;
+            el.className = 'cc-bot-status running';
+        } else if (d.running === false) {
+            el.textContent = '🔴 Stopped';
+            el.className = 'cc-bot-status stopped';
+        } else {
+            el.textContent = `⚪ PID ${d.pid} (status unknown)`;
+            el.className = 'cc-bot-status';
+        }
+    } catch(e) {
+        const el = document.getElementById('cc-bot-status');
+        if (el) { el.textContent = '⚠️ Dashboard only'; el.className = 'cc-bot-status'; }
+    }
+}
+
+// Refresh bot status every 30s when CC tab is visible
+document.addEventListener('DOMContentLoaded', () => {
+    setInterval(() => {
+        const panel = document.getElementById('tab-control');
+        if (panel && panel.classList.contains('active')) updateCCBotStatus();
+    }, 30000);
+});
 </script>
 </body>
 </html>

@@ -25,6 +25,7 @@ class ExitReason(Enum):
     BREAK_EVEN = "break_even"
     MANUAL = "manual"
     TIME_STOP = "time_stop"
+    EARLY_SCALE = "early_scale"
 
 
 def find_resistance_levels(
@@ -344,10 +345,26 @@ class VeteranTradeManager:
         self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
         self.time_stop_bars = self.risk_config.get(
             f'time_stop_{self.trade_type.lower()}',
-            self.risk_config.get('time_stop_bars', 72)
+            self.risk_config.get(
+                'time_stop_bars',
+                self.risk_config.get('max_hold_bars', 72)  # max_hold_bars is legacy alias
+            )
         )
         self.use_ema_structure = self.risk_config.get("use_ema_structure", False)
-        
+        self.use_structure_targets = self.risk_config.get("use_structure_targets", True)
+        # Runner trailing stop ATR multiplier (replaces hardcoded 2.0)
+        self.runner_trail_atr_multiplier = self.risk_config.get("runner_trail_atr_multiplier", 2.0)
+        # Time-based break-even: move SL to entry after N bars if pnl >= threshold
+        self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
+        self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
+
+        # Early Scale: lock in a small partial exit within the first N bars
+        self.early_scale_enabled = self.risk_config.get("early_scale_enabled", False)
+        self.early_scale_threshold = self.risk_config.get("early_scale_threshold", 0.02)
+        self.early_scale_bars = self.risk_config.get("early_scale_bars", 4)
+        self.early_lock_atr_multiplier = self.risk_config.get("early_lock_atr_multiplier", 0.5)
+        self._early_scaled = False  # fires at most once per trade
+
         # State
         self.initial_stop_loss = None
         self.current_stop_loss = None
@@ -525,13 +542,14 @@ class VeteranTradeManager:
                     standard_sl = self.entry_price - target_stop_dist
                     final_sl = standard_sl
 
-                    # 2. Joint Synergy: MA Shield
-                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                        if ma and standard_sl < ma < self.entry_price:
-                            buffered_ma_sl = ma - (0.5 * atr)
-                            if buffered_ma_sl > final_sl:
-                                logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
-                                final_sl = buffered_ma_sl
+                    # 2. Joint Synergy: MA Shield (only active when use_ema_structure=true)
+                    if self.use_ema_structure:
+                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                            if ma and standard_sl < ma < self.entry_price:
+                                buffered_ma_sl = ma - (0.5 * atr)
+                                if buffered_ma_sl > final_sl:
+                                    logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                                    final_sl = buffered_ma_sl
 
                     # 3. Apply global clamps
                     final_sl = max(
@@ -544,13 +562,14 @@ class VeteranTradeManager:
                     standard_sl = self.entry_price + target_stop_dist
                     final_sl = standard_sl
 
-                    # 2. Joint Synergy: MA Shield
-                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                        if ma and standard_sl > ma > self.entry_price:
-                            buffered_ma_sl = ma + (0.5 * atr)
-                            if buffered_ma_sl < final_sl:
-                                logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
-                                final_sl = buffered_ma_sl
+                    # 2. Joint Synergy: MA Shield (only active when use_ema_structure=true)
+                    if self.use_ema_structure:
+                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                            if ma and standard_sl > ma > self.entry_price:
+                                buffered_ma_sl = ma + (0.5 * atr)
+                                if buffered_ma_sl < final_sl:
+                                    logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
+                                    final_sl = buffered_ma_sl
 
                     # 3. Apply global clamps
                     final_sl = min(
@@ -572,33 +591,45 @@ class VeteranTradeManager:
                 # Global clamped final_sl assignment
                 self.initial_stop_loss = final_sl
 
-                # ATR-based adaptive tolerance for structure identification
-                tolerance = 0.5 * atr
-                structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
-                
-                raw_targets, self.partial_sizes = calculate_hybrid_targets(
-                    self.entry_price, self.initial_stop_loss, self.side, structure_levels,
-                    self.partial_targets, self.partial_sizes,
-                    min_rr=2.0 # Standard TREND requirement
-                )
-                
-                # ✅ PHASE 5: MA FRONT-RUN (Take Profit)
+                # Structure-based targets (only when use_structure_targets=true)
+                if self.use_structure_targets:
+                    tolerance = 0.5 * atr
+                    structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
+                    raw_targets, self.partial_sizes = calculate_hybrid_targets(
+                        self.entry_price, self.initial_stop_loss, self.side, structure_levels,
+                        self.partial_targets, self.partial_sizes,
+                        min_rr=2.0  # Standard TREND requirement
+                    )
+                    logger.debug(f"[VTM] Structure targets active: {len(structure_levels)} levels found")
+                else:
+                    # Pure ATR-multiple targets, no pivot hunting
+                    raw_targets = [
+                        self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m)
+                        for m in self.partial_targets
+                    ]
+                    logger.debug("[VTM] Structure targets disabled — using ATR multiples only")
+
+                # ✅ PHASE 5: MA FRONT-RUN (Take Profit — only when use_ema_structure=true)
                 self.take_profit_levels = []
-                for tp in raw_targets:
-                    adjusted_tp = tp
-                    for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
-                        if ma:
-                            if self.side == "long":
-                                if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
-                                    candidate_tp = ma - (0.25 * atr)
-                                    if candidate_tp > self.entry_price + (0.5 * atr):
-                                        adjusted_tp = max(adjusted_tp, candidate_tp)
-                            else: # short
-                                if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
-                                    candidate_tp = ma + (0.25 * atr)
-                                    if candidate_tp < self.entry_price - (0.5 * atr):
-                                        adjusted_tp = min(adjusted_tp, candidate_tp)
-                    self.take_profit_levels.append(adjusted_tp)
+                if self.use_ema_structure:
+                    for tp in raw_targets:
+                        adjusted_tp = tp
+                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                            if ma:
+                                if self.side == "long":
+                                    if abs(tp - ma) < (0.5 * atr) or (tp > ma > self.entry_price):
+                                        candidate_tp = ma - (0.25 * atr)
+                                        if candidate_tp > self.entry_price + (0.5 * atr):
+                                            adjusted_tp = max(adjusted_tp, candidate_tp)
+                                else:  # short
+                                    if abs(tp - ma) < (0.5 * atr) or (tp < ma < self.entry_price):
+                                        candidate_tp = ma + (0.25 * atr)
+                                        if candidate_tp < self.entry_price - (0.5 * atr):
+                                            adjusted_tp = min(adjusted_tp, candidate_tp)
+                        self.take_profit_levels.append(adjusted_tp)
+                else:
+                    # No EMA adjustment — use raw targets directly
+                    self.take_profit_levels = list(raw_targets)
 
                 # Fallback targets
                 if not self.take_profit_levels:
@@ -667,19 +698,18 @@ class VeteranTradeManager:
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
-                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL
-                    # SL breathes with 2.0 * ATR
-                    new_trail = self.highest_price_reached - (2.0 * atr)
-                    
-                    if new_trail > self.current_stop_loss: 
+                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL (multiplier from runner_trail_atr_multiplier config)
+                    new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
+
+                    if new_trail > self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
             else:
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
-                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL - SHORT
-                    new_trail = self.lowest_price_reached + (2.0 * atr)
+                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL - SHORT (multiplier from runner_trail_atr_multiplier config)
+                    new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
                     
                     if new_trail < self.current_stop_loss: 
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
@@ -740,6 +770,29 @@ class VeteranTradeManager:
                 logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
                 self.current_stop_loss = self.entry_price
 
+        # --- STEP 1.5: Time-Based Break-Even Lock ---
+        # Fires independently of ATR: if the trade has been open for N bars and
+        # pnl >= threshold, lock SL to break-even. Gated by breakeven_after_bars config.
+        if self.breakeven_after_bars is not None and self.bars_in_trade >= self.breakeven_after_bars:
+            _tbe_pnl = (
+                (current_price - self.entry_price) / self.entry_price
+                if self.side == "long"
+                else (self.entry_price - current_price) / self.entry_price
+            )
+            if _tbe_pnl >= self.breakeven_profit_threshold:
+                if self.side == "long" and self.current_stop_loss < self.entry_price:
+                    logger.info(
+                        f"[VTM] ⏱ Time-based BE lock: {self.asset} bar={self.bars_in_trade} "
+                        f"pnl={_tbe_pnl:.2%} >= {self.breakeven_profit_threshold:.2%}"
+                    )
+                    self.current_stop_loss = self.entry_price
+                elif self.side == "short" and self.current_stop_loss > self.entry_price:
+                    logger.info(
+                        f"[VTM] ⏱ Time-based BE lock: {self.asset} bar={self.bars_in_trade} "
+                        f"pnl={_tbe_pnl:.2%} >= {self.breakeven_profit_threshold:.2%}"
+                    )
+                    self.current_stop_loss = self.entry_price
+
         # --- STEP 2: Greed Mode Accelerator ---
         # Reason: During extreme trends/volatility, remove early targets to ride the move with trailing stops.
         adx_value = self._calculate_adx()
@@ -752,6 +805,47 @@ class VeteranTradeManager:
                 self.take_profit_levels = [self.take_profit_levels[-1]]
                 # Exit full size at final target (managed by runner trail)
                 self.partial_sizes = [1.0]
+
+        # --- STEP 2.5: Early Scale Exit ---
+        # Objective: Lock in a small partial profit quickly in the first few bars before
+        # momentum fades. Enabled via early_scale_enabled in per-asset risk config.
+        if self.early_scale_enabled and not self._early_scaled:
+            if self.bars_in_trade <= self.early_scale_bars:
+                early_pnl_pct = (
+                    (current_price - self.entry_price) / self.entry_price
+                    if self.side == "long"
+                    else (self.entry_price - current_price) / self.entry_price
+                )
+                if early_pnl_pct >= self.early_scale_threshold:
+                    self._early_scaled = True
+                    early_size = 0.20  # Fixed 20% early exit
+                    self.remaining_position = max(0.0, self.remaining_position - early_size)
+
+                    # Tighten SL to lock in partial profit
+                    lock_offset = self.early_lock_atr_multiplier * atr_value
+                    if self.side == "long":
+                        lock_sl = self.entry_price + lock_offset
+                        if lock_sl > self.current_stop_loss:
+                            logger.info(
+                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                f"(entry + {self.early_lock_atr_multiplier}x ATR)"
+                            )
+                            self.current_stop_loss = lock_sl
+                    else:
+                        lock_sl = self.entry_price - lock_offset
+                        if lock_sl < self.current_stop_loss:
+                            logger.info(
+                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                f"(entry - {self.early_lock_atr_multiplier}x ATR)"
+                            )
+                            self.current_stop_loss = lock_sl
+
+                    logger.info(
+                        f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
+                        f"exiting {early_size:.0%} at ${current_price:,.2f} "
+                        f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
+                    )
+                    return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
 
         # --- STEP 3: Trend Pyramiding ---
         # Objective: Scale into strong breakout trends.

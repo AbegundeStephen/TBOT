@@ -407,13 +407,13 @@ class EMAStrategy(BaseStrategy):
                 bullish_score += 3
             if ema_fast_val > ema_slow_val and ema_diff_pct > self.min_distance_pct:
                 bullish_score += 2                                # EMA separation
-            if close > ema_fast_val and close > ema_slow_val:
+            if self.use_price_confirmation and close > ema_fast_val and close > ema_slow_val:
                 bullish_score += 1                                # Price above both EMAs
             if macd_hist_val > 0:
                 bullish_score += 1                                # MACD confirms momentum
             if 40 < rsi < 70:
                 bullish_score += 1                                # RSI not overbought
-            if high_volume == 1:
+            if self.use_volume_filter and high_volume == 1:
                 bullish_score += 1                                # Volume surge
             if adx > 25:
                 bullish_score += 1                                # Strong trend (ADX)
@@ -427,13 +427,13 @@ class EMAStrategy(BaseStrategy):
                 bearish_score += 3
             if ema_fast_val < ema_slow_val and ema_diff_pct < -self.min_distance_pct:
                 bearish_score += 2                                # EMA separation
-            if close < ema_fast_val and close < ema_slow_val:
+            if self.use_price_confirmation and close < ema_fast_val and close < ema_slow_val:
                 bearish_score += 1                                # Price below both EMAs
             if macd_hist_val < 0:
                 bearish_score += 1                                # MACD confirms momentum
             if 30 < rsi < 60:
                 bearish_score += 1                                # RSI not oversold
-            if high_volume == 1:
+            if self.use_volume_filter and high_volume == 1:
                 bearish_score += 1                                # Volume surge
             if adx > 25:
                 bearish_score += 1                                # Strong trend (ADX)

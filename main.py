@@ -290,6 +290,9 @@ class TradingBot:
         self._snapshot_interval = self.config.get("database", {}).get(
             "snapshot_interval_seconds", 300
         )
+        _db_cfg = self.config.get("database", {})
+        self._log_all_signals = _db_cfg.get("log_all_signals", True)
+        self._log_system_events = _db_cfg.get("log_system_events", True)
         self._df_4h_cache = {}
 
         # T3.5: BTC funding rate Z-score state (fetched every 8 hours)
@@ -319,6 +322,7 @@ class TradingBot:
             config={
                 "error_window_seconds": 300,  # 5 minutes
                 "max_duplicate_notifications": 3,
+                "database": self.config.get("database", {}),
             },
         )
 
@@ -3730,8 +3734,8 @@ class TradingBot:
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")
 
-            # Log signal to database (if enabled)
-            if self.db_manager:
+            # Log signal to database (gated by log_all_signals config flag)
+            if self.db_manager and self._log_all_signals:
                 signal_id, is_new = self.db_manager.insert_signal_smart(
                     asset=asset_name,
                     signal=signal,
@@ -4083,8 +4087,17 @@ class TradingBot:
             # Run initial cycle
             self.run_trading_cycle()
 
+            _restart_flag = str(Path("logs") / "restart.flag")
             while self.is_running:
                 try:
+                    # ── Control Center restart hook ──────────────────────────
+                    if _os.path.exists(_restart_flag):
+                        _os.remove(_restart_flag)
+                        logger.info("[CONTROL] 🔄 Restart flag detected — restarting bot now…")
+                        self.stop()
+                        import sys as _sys
+                        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+
                     schedule.run_pending()
                     time.sleep(1)
 
@@ -4330,6 +4343,12 @@ def main():
     Path("models").mkdir(exist_ok=True)
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
+
+    # Write PID so the dashboard Control Center can check bot liveness
+    import os as _os
+    _pid_path = Path("logs") / "bot.pid"
+    _pid_path.write_text(str(_os.getpid()))
+    logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
 
     try:
         with open("config/config.json", encoding="utf-8") as f:
