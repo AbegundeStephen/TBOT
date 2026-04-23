@@ -983,10 +983,20 @@ class InstitutionalCouncilAggregator:
                 penalty = 0.0
                 
                 # A. SNIPER LOCK
+                # Regime-aligned signals (sell in bear, buy in bull) get a reduced penalty
+                # because the macro filter has already confirmed direction — we're only
+                # missing a dramatic entry candle, not conviction. Counter-trend signals
+                # that also fail sniper get the full -1.0 as they need both macro AND
+                # micro confirmation to justify trading against the trend.
                 sniper_passed, sniper_details = self._check_sniper_filter(df, signal)
                 if not sniper_passed:
-                    penalty += 1.0
-                    logger.info(f"[PENALTY] ⚠️ Sniper confirmation failure: -1.0")
+                    regime_aligned = (signal == 1 and is_bull) or (signal == -1 and not is_bull)
+                    sniper_penalty = 0.5 if regime_aligned else 1.0
+                    penalty += sniper_penalty
+                    logger.info(
+                        f"[PENALTY] ⚠️ Sniper confirmation failure: -{sniper_penalty:.1f} "
+                        f"({'regime-aligned' if regime_aligned else 'counter-trend'})"
+                    )
 
                 # B. PROFIT ECONOMICS
                 # ✅ FIXED: Using corrected method from Task 10
