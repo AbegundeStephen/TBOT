@@ -4091,12 +4091,11 @@ class TradingBot:
             while self.is_running:
                 try:
                     # ── Control Center restart hook ──────────────────────────
-                    if _os.path.exists(_restart_flag):
-                        _os.remove(_restart_flag)
+                    if os.path.exists(_restart_flag):
+                        os.remove(_restart_flag)
                         logger.info("[CONTROL] 🔄 Restart flag detected — restarting bot now…")
                         self.stop()
-                        import sys as _sys
-                        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
 
                     schedule.run_pending()
                     time.sleep(1)
