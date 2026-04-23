@@ -385,84 +385,146 @@ class EMAStrategy(BaseStrategy):
             rsi = latest["rsi"]
             high_volume = latest["high_volume"]
 
-            # Calculate confidence score
-            # ✅ TASK 22: Recalibrated normalizer (Institutional Grade)
+            # ── Pull extra latest values needed for scoring ───────────────
+            macd_hist_val  = latest["macd_hist"]
+            ema_diff_pct   = latest["ema_diff_pct"]
+            ema_fast_val   = latest["ema_fast"]
+            ema_slow_val   = latest["ema_slow"]
+            adx            = latest["adx"]
+            close          = latest["close"]
+            atr            = latest["atr"]
+
+            # ================================================================
+            # FULL SCORING — mirrors generate_labels() so live signals match
+            # training labels.  Crossovers score highest; trend-continuation
+            # fires between crossovers so EMA contributes every cycle.
+            # ================================================================
+            bullish_score = 0
+            bearish_score = 0
+
+            # --- Bullish conditions -----------------------------------------
+            if ema_cross == 1:                                    # Golden Cross
+                bullish_score += 3
+            if ema_fast_val > ema_slow_val and ema_diff_pct > self.min_distance_pct:
+                bullish_score += 2                                # EMA separation
+            if close > ema_fast_val and close > ema_slow_val:
+                bullish_score += 1                                # Price above both EMAs
+            if macd_hist_val > 0:
+                bullish_score += 1                                # MACD confirms momentum
+            if 40 < rsi < 70:
+                bullish_score += 1                                # RSI not overbought
+            if high_volume == 1:
+                bullish_score += 1                                # Volume surge
+            if adx > 25:
+                bullish_score += 1                                # Strong trend (ADX)
+            # Trend continuation (no crossover required)
+            if (close > ema_fast_val and ema_fast_slope > 0
+                    and rsi < 70 and macd_hist_val > 0 and adx > 20):
+                bullish_score += 2
+
+            # --- Bearish conditions -----------------------------------------
+            if ema_cross == -1:                                   # Death Cross
+                bearish_score += 3
+            if ema_fast_val < ema_slow_val and ema_diff_pct < -self.min_distance_pct:
+                bearish_score += 2                                # EMA separation
+            if close < ema_fast_val and close < ema_slow_val:
+                bearish_score += 1                                # Price below both EMAs
+            if macd_hist_val < 0:
+                bearish_score += 1                                # MACD confirms momentum
+            if 30 < rsi < 60:
+                bearish_score += 1                                # RSI not oversold
+            if high_volume == 1:
+                bearish_score += 1                                # Volume surge
+            if adx > 25:
+                bearish_score += 1                                # Strong trend (ADX)
+            # Trend continuation (no crossover required)
+            if (close < ema_fast_val and ema_fast_slope < 0
+                    and rsi > 30 and macd_hist_val < 0 and adx > 20):
+                bearish_score += 2
+
+            # --- Determine preliminary signal --------------------------------
+            signal = 0
+            if bullish_score >= self.min_score_threshold and bullish_score > bearish_score:
+                signal = 1
+            elif bearish_score >= self.min_score_threshold and bearish_score > bullish_score:
+                signal = -1
+
+            logger.debug(
+                f"[{self.name}] Score → bullish={bullish_score} bearish={bearish_score} "
+                f"cross={ema_cross} signal={signal}"
+            )
+
+            # ── Confidence (score-driven, capped at 1.0) ─────────────────
+            active_score  = bullish_score if signal == 1 else bearish_score
+            # Normalise: max achievable raw score is ~13 with everything firing
             normalization_factor = 6.5
             confidence = min(1.0, trend_strength / normalization_factor)
+            confidence += 0.05 * min(active_score, 6)     # up to +0.30 from score
             if macd_aligned == 1:
-                confidence += 0.15
-            if (ema_cross == 1 and 40 < rsi < 70) or (ema_cross == -1 and 30 < rsi < 60):
+                confidence += 0.10
+            if ema_cross != 0:                             # extra boost for actual crossover
                 confidence += 0.10
             if high_volume == 1:
-                confidence += 0.10
-            
-            # Determine preliminary signal
-            signal = 0
-            if ema_cross == 1:
-                signal = 1
-            elif ema_cross == -1:
-                signal = -1
-            
+                confidence += 0.05
+
             # ================================================================
-            # ✅ T42: APPLY 4H CONTEXT (Prevent Train/Serve Skew)
+            # 4H CONTEXT (alignment boost / counter-trend penalty)
             # ================================================================
             h4_macro_trend = 'NEUTRAL'
             if self.use_4h_context and df_4h is not None:
                 try:
-                    # Generate 4H features if missing
-                    if 'ema_fast' not in df_4h.columns:
-                        df_4h_feat = self.generate_features(df_4h)
-                    else:
-                        df_4h_feat = df_4h
-                    
-                    # Align and calculate context for the latest bar
+                    df_4h_feat = self.generate_features(df_4h) \
+                        if 'ema_fast' not in df_4h.columns else df_4h
                     df_4h_aligned = self._align_4h_to_1h(df.tail(1), df_4h_feat)
                     if df_4h_aligned is not None:
                         h4_context = self._calculate_4h_trend_context(df_4h_aligned, -1)
-                        if h4_context['trend_direction'] == 1: h4_macro_trend = 'BULLISH'
-                        elif h4_context['trend_direction'] == -1: h4_macro_trend = 'BEARISH'
-                        
+                        if h4_context['trend_direction'] == 1:
+                            h4_macro_trend = 'BULLISH'
+                        elif h4_context['trend_direction'] == -1:
+                            h4_macro_trend = 'BEARISH'
+
                         if signal != 0 and h4_context['trend_direction'] != 0:
-                            # alignment_score is 0-3 points
                             if h4_context['trend_direction'] == signal:
-                                # Boost confidence for alignment
-                                boost = self.h4_trend_weight * h4_context['alignment_score'] / 30.0 # Scale to 0.15 max
+                                boost = self.h4_trend_weight * h4_context['alignment_score'] / 30.0
                                 confidence += boost
                                 logger.debug(f"[{self.name}] 4H Alignment Boost: +{boost:.2f}")
                             else:
-                                # Penalize for counter-trend
                                 penalty = self.h4_counter_penalty * 0.5
                                 confidence -= penalty
                                 logger.info(f"[{self.name}] 4H Counter-Trend Penalty: -{penalty:.2f}")
-                                
-                                # Block if required or confidence falls too low
                                 if self.require_4h_alignment and h4_context['alignment_score'] > 2.0:
-                                    logger.info(f"[{self.name}] ❌ Signal blocked by strict 4H alignment rule.")
+                                    logger.info(f"[{self.name}] ❌ Blocked by strict 4H alignment.")
                                     return 0, 0.0
-                                
                                 if confidence < self.min_confidence:
-                                    logger.info(f"[{self.name}] ❌ Signal confidence ({confidence:.2f}) below threshold after 4H penalty.")
+                                    logger.info(
+                                        f"[{self.name}] ❌ Confidence {confidence:.2f} below "
+                                        f"threshold after 4H penalty."
+                                    )
                                     return 0, 0.0
                 except Exception as e:
                     logger.warning(f"[{self.name}] 4H context validation failed: {e}")
 
             # ================================================================
-            # ✅ EMA-200 BOUNCE MODE (Institutional Standard)
+            # EMA-200 BOUNCE MODE (fallback when no trend score met)
             # ================================================================
-            atr = latest["atr"]
-            close = latest["close"]
-            ema_slow = latest["ema_slow"]
-            
             if signal == 0:
-                if (h4_macro_trend == 'BULLISH') and (abs(close - ema_slow) <= 0.5 * atr) and (close > ema_slow):
+                if (h4_macro_trend == 'BULLISH'
+                        and abs(close - ema_slow_val) <= 0.5 * atr
+                        and close > ema_slow_val):
                     signal = 1
-                    confidence = 0.85
-                    logger.info(f"[{self.name}] 🚀 EMA-200 Bounce detected (Bullish)")
+                    confidence = 0.75
+                    logger.info(f"[{self.name}] 🚀 EMA-200 Bounce (Bullish)")
+                elif (h4_macro_trend == 'BEARISH'
+                        and abs(close - ema_slow_val) <= 0.5 * atr
+                        and close < ema_slow_val):
+                    signal = -1
+                    confidence = 0.75
+                    logger.info(f"[{self.name}] 🔻 EMA-200 Bounce (Bearish)")
 
             if signal == 0:
                 return 0, 0.0
 
-            confidence = min(1.0, confidence)
+            confidence = max(0.0, min(1.0, confidence))
             return signal, confidence
 
         except Exception as e:
