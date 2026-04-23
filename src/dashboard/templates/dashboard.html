@@ -598,17 +598,60 @@
         .log-error   { color: #f87171; }
         .log-ts      { color: #475569; margin-right: 8px; }
 
-        /* ── Audit rows ────────────────────────── */
-        .audit-row   { border-bottom: 1px solid var(--border); padding: 6px 0; }
-        .audit-badge { padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 8px; text-transform: uppercase; }
-        .audit-ENTRY      { background: rgba(16,185,129,0.2); color: var(--green2); }
-        .audit-EXIT       { background: rgba(239,68,68,0.2);  color: var(--red2); }
-        .audit-SL_HIT     { background: rgba(239,68,68,0.2);  color: var(--red2); }
-        .audit-TP_HIT     { background: rgba(16,185,129,0.2); color: var(--green2); }
-        .audit-REJECTION  { background: rgba(245,158,11,0.2); color: var(--yellow2); }
-        .audit-asset { color: #60a5fa; font-weight: 700; }
-        .audit-price { color: #facc15; }
-        .audit-pnl   { font-weight: 700; }
+        /* ── Audit Cards ───────────────────────── */
+        .audit-wrap         { display:flex; flex-direction:column; gap:0; }
+        .audit-topbar       { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px; }
+        .audit-summary      { display:flex; gap:20px; flex-wrap:wrap; }
+        .audit-sum-item     { text-align:center; }
+        .audit-sum-val      { font-size:18px; font-weight:700; font-family:var(--font-mono); }
+        .audit-sum-lbl      { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+        .audit-filters      { display:flex; gap:5px; flex-wrap:wrap; align-items:center; }
+        .af-btn             { padding:3px 10px; border-radius:20px; border:1px solid var(--border2); background:transparent; color:var(--muted2); font-size:10px; font-weight:700; cursor:pointer; text-transform:uppercase; letter-spacing:.05em; transition:all .15s; }
+        .af-btn:hover       { border-color:var(--accent2); color:var(--accent2); }
+        .af-btn.af-active   { background:var(--accent); border-color:var(--accent); color:#fff; }
+        .audit-cards        { display:flex; flex-direction:column; gap:7px; }
+
+        .trade-card         { background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:12px 16px; border-left:4px solid var(--border2); transition:box-shadow .15s; }
+        .trade-card:hover   { box-shadow:0 4px 16px rgba(0,0,0,.4); }
+        .tc-ENTRY           { border-left-color:#10b981; }
+        .tc-EXIT            { border-left-color:#3b82f6; }
+        .tc-SL_HIT          { border-left-color:#ef4444; }
+        .tc-TP_HIT          { border-left-color:#34d399; }
+        .tc-PYRAMID         { border-left-color:#8b5cf6; }
+        .tc-REJECTION       { border-left-color:#f59e0b; }
+        .tc-PARTIAL_EXIT    { border-left-color:#06b6d4; }
+        .tc-BREAKEVEN       { border-left-color:#fbbf24; }
+        .tc-SCALE_OUT       { border-left-color:#06b6d4; }
+
+        .tc-top             { display:flex; align-items:center; gap:7px; margin-bottom:9px; flex-wrap:wrap; }
+        .tc-evt             { padding:3px 8px; border-radius:5px; font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; }
+        .tc-evt-ENTRY       { background:rgba(16,185,129,.18); color:#34d399; }
+        .tc-evt-EXIT        { background:rgba(59,130,246,.18); color:#60a5fa; }
+        .tc-evt-SL_HIT      { background:rgba(239,68,68,.22); color:#f87171; }
+        .tc-evt-TP_HIT      { background:rgba(52,211,153,.22); color:#6ee7b7; }
+        .tc-evt-PYRAMID     { background:rgba(139,92,246,.22); color:#c4b5fd; }
+        .tc-evt-REJECTION   { background:rgba(245,158,11,.18); color:#fbbf24; }
+        .tc-evt-PARTIAL_EXIT{ background:rgba(6,182,212,.18); color:#67e8f9; }
+        .tc-evt-BREAKEVEN   { background:rgba(251,191,36,.15); color:#fde68a; }
+        .tc-evt-SCALE_OUT   { background:rgba(6,182,212,.18); color:#67e8f9; }
+        .tc-evt-default     { background:rgba(100,116,139,.18); color:#94a3b8; }
+
+        .tc-asset           { font-size:14px; font-weight:700; color:#fff; }
+        .tc-icon            { font-size:13px; }
+        .tc-side            { padding:2px 8px; border-radius:20px; font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+        .tc-side-long       { background:rgba(16,185,129,.15); color:#34d399; border:1px solid rgba(16,185,129,.3); }
+        .tc-side-short      { background:rgba(239,68,68,.15); color:#f87171; border:1px solid rgba(239,68,68,.3); }
+        .tc-strat           { font-size:9px; color:var(--muted2); padding:2px 6px; border-radius:4px; border:1px solid var(--border2); text-transform:uppercase; letter-spacing:.04em; }
+
+        .tc-body            { display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; margin-bottom:8px; }
+        .tc-stat            { display:flex; flex-direction:column; min-width:64px; }
+        .tc-lbl             { font-size:9px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:2px; }
+        .tc-val             { font-size:13px; font-weight:600; font-family:var(--font-mono); }
+        .tc-pnl-pos         { color:#34d399; }
+        .tc-pnl-neg         { color:#f87171; }
+
+        .tc-foot            { display:flex; justify-content:space-between; font-size:10px; color:#475569; flex-wrap:wrap; gap:4px; }
+        .tc-pid             { font-family:var(--font-mono); font-size:9px; color:#334155; }
 
         /* ── Signal detail ─────────────────────── */
         .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 12px 0; }
@@ -1076,7 +1119,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupModal();
     setupDropdown();
     document.getElementById('logs-btn').addEventListener('click', () => showLogs('bot'));
-    document.getElementById('audit-btn').addEventListener('click', () => showLogs('audit'));
+    document.getElementById('audit-btn').addEventListener('click', () => showAudit());
 
     await loadAll();
     setInterval(loadAll, 30000);
@@ -1876,7 +1919,7 @@ async function showLogs(type='bot') {
             const ts  = tm ? tm[1] : '';
             const cnt = tm ? line.substring(ts.length).trim() : line;
             if (cnt.includes('[TRADE_EVENT]')) {
-                try { const ev=JSON.parse(cnt.split('[TRADE_EVENT]')[1].trim()); return `<div class="terminal-line audit-row"><span class="log-ts">${ts}</span>${fmtAudit(ev)}</div>`; } catch(e){}
+                try { const ev=JSON.parse(cnt.split('[TRADE_EVENT]')[1].trim()); return `<div style="margin:3px 0">${tradeCard(ev)}</div>`; } catch(e){}
             }
             const cls = line.includes('ERROR')||line.includes('CRITICAL')?'log-error':line.includes('WARNING')?'log-warning':'log-info';
             return `<div class="terminal-line"><span class="log-ts">${ts}</span><span class="${cls}">${esc(cnt)}</span></div>`;
@@ -1895,11 +1938,136 @@ async function showLogs(type='bot') {
     }
 }
 
-function fmtAudit(ev) {
-    const event = ev.event||'EVENT'; const asset=ev.asset||ev.symbol||'N/A'; const side=ev.side||'';
-    const price=ev.price?`at <span class="audit-price">$${ev.price.toLocaleString()}</span>`:'';
-    const pnl=ev.pnl!=null?`<span class="audit-pnl ${ev.pnl>=0?'pos':'neg'}"> P&L: ${ev.pnl>=0?'+':'-'}$${Math.abs(ev.pnl).toFixed(2)} (${(ev.pnl_pct||0).toFixed(2)}%)</span>`:'';
-    return `<span class="audit-badge audit-${event}">${event}</span><span class="audit-asset">${asset}</span>${side?` <span class="badge badge-${side.toLowerCase()}">${side}</span>`:''} ${price}${pnl}${ev.reason?`<div style="font-size:11px;color:var(--muted);margin-top:2px;">Reason: ${ev.reason}</div>`:''}`;
+// ────────────────────────────────────────────────────────────
+// AUDIT MODAL — card-based trade log
+// ────────────────────────────────────────────────────────────
+const ASSET_ICONS = {
+    BTC:'₿', GOLD:'🥇', USTEC:'📊', EURUSD:'💱', EURJPY:'💱',
+    ETH:'Ξ', XAU:'🥇', NAS100:'📊',
+};
+function assetIcon(asset) {
+    for (const k in ASSET_ICONS) if (asset && asset.toUpperCase().includes(k)) return ASSET_ICONS[k];
+    return '🔹';
+}
+function fmtPrice(p, asset) {
+    if (p == null) return '—';
+    const a = (asset||'').toUpperCase();
+    const dec = a.includes('JPY') ? 3 : a.includes('BTC') || a.includes('ETH') ? 2 :
+                a.includes('EUR') || a.includes('GBP') || a.includes('USD') ? 5 : 2;
+    return p.toLocaleString(undefined, {minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+function fmtSize(sz, asset) {
+    if (sz == null) return '—';
+    const a = (asset||'').toUpperCase();
+    if (a.includes('BTC') || a.includes('ETH')) return sz.toFixed(4) + ' BTC';
+    if (a.includes('USTEC') || a.includes('NAS')) return sz.toFixed(2) + ' lots';
+    if (a.includes('GOLD') || a.includes('XAU')) return sz.toFixed(2) + ' oz';
+    return sz.toLocaleString(undefined, {maximumFractionDigits:4});
+}
+function evtClass(ev) {
+    const known = ['ENTRY','EXIT','SL_HIT','TP_HIT','PYRAMID','REJECTION','PARTIAL_EXIT','BREAKEVEN','SCALE_OUT'];
+    return known.includes(ev) ? ev : 'default';
+}
+function evtLabel(ev) {
+    const labels = {SL_HIT:'SL Hit', TP_HIT:'TP Hit', PARTIAL_EXIT:'Partial', BREAKEVEN:'Break Even', SCALE_OUT:'Scale Out'};
+    return labels[ev] || ev;
+}
+
+let _auditAll = [];
+let _auditFilter = 'ALL';
+
+async function showAudit() {
+    document.getElementById('modal-title').textContent = '📋 Trade Audit Log';
+    document.getElementById('modal-body').innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
+    document.getElementById('main-modal').classList.add('show');
+    try {
+        const d = await fetchJSON(`${API}/api/audit?limit=500`);
+        if (d.error) throw new Error(d.error);
+        _auditAll = d.events || [];
+        _auditFilter = 'ALL';
+        renderAuditModal();
+    } catch(e) {
+        document.getElementById('modal-body').innerHTML = `<div style="color:var(--red2);padding:20px;">Error: ${e.message}</div>`;
+    }
+}
+
+function renderAuditModal() {
+    const events = _auditAll;
+    // Compute summary stats (only closed events)
+    const closed   = events.filter(e => ['SL_HIT','TP_HIT','EXIT','PARTIAL_EXIT'].includes(e.event));
+    const wins     = closed.filter(e => (e.pnl||0) > 0).length;
+    const losses   = closed.filter(e => (e.pnl||0) < 0).length;
+    const winRate  = closed.length ? Math.round(wins / closed.length * 100) : 0;
+    const totalPnl = closed.reduce((s,e) => s + (e.pnl||0), 0);
+    const entries  = events.filter(e => e.event === 'ENTRY').length;
+
+    // Filter types present
+    const types = ['ALL', ...new Set(events.map(e => e.event).filter(Boolean))];
+
+    // Apply filter
+    const visible = _auditFilter === 'ALL' ? events : events.filter(e => e.event === _auditFilter);
+
+    const statsHtml = `
+        <div class="audit-summary">
+            <div class="audit-sum-item"><div class="audit-sum-val">${entries}</div><div class="audit-sum-lbl">Entries</div></div>
+            <div class="audit-sum-item"><div class="audit-sum-val ${totalPnl>=0?'pos':'neg'}">${totalPnl>=0?'+':''}$${Math.abs(totalPnl).toFixed(2)}</div><div class="audit-sum-lbl">Net P&L</div></div>
+            <div class="audit-sum-item"><div class="audit-sum-val ${winRate>=50?'pos':'neg'}">${winRate}%</div><div class="audit-sum-lbl">Win Rate</div></div>
+            <div class="audit-sum-item"><div class="audit-sum-val">${wins}W / ${losses}L</div><div class="audit-sum-lbl">Results</div></div>
+        </div>`;
+
+    const filterHtml = `<div class="audit-filters">
+        ${types.map(t => `<button class="af-btn ${_auditFilter===t?'af-active':''}" onclick="_auditFilter='${t}';renderAuditModal()">${t==='ALL'?'All':evtLabel(t)}</button>`).join('')}
+        <button onclick="showAudit()" class="af-btn" style="margin-left:4px;">🔄</button>
+    </div>`;
+
+    const cardsHtml = visible.length === 0
+        ? `<div style="text-align:center;padding:40px;color:var(--muted);">No events</div>`
+        : visible.map(ev => tradeCard(ev)).join('');
+
+    document.getElementById('modal-body').innerHTML = `
+        <div class="audit-wrap">
+            <div class="audit-topbar">${statsHtml}${filterHtml}</div>
+            <div class="audit-cards">${cardsHtml}</div>
+        </div>`;
+}
+
+function tradeCard(ev) {
+    const event   = ev.event || 'EVENT';
+    const asset   = ev.asset || ev.symbol || 'N/A';
+    const side    = (ev.side || '').toLowerCase();
+    const strat   = ev.type && ev.type !== 'UNKNOWN' ? ev.type.replace('_',' ') : '';
+    const price   = fmtPrice(ev.price, asset);
+    const size    = fmtSize(ev.size, asset);
+    const hasPnl  = ev.pnl != null;
+    const pnlPos  = hasPnl && ev.pnl >= 0;
+    const pnlVal  = hasPnl ? `${pnlPos?'+':'-'}$${Math.abs(ev.pnl).toFixed(2)}` : '—';
+    const pnlPct  = hasPnl && ev.pnl_pct != null ? `(${(ev.pnl_pct*100).toFixed(3)}%)` : '';
+    const pnlCls  = hasPnl ? (pnlPos ? 'tc-pnl-pos' : 'tc-pnl-neg') : '';
+    const ts      = ev.datetime || (ev.timestamp ? new Date(ev.timestamp*1000).toLocaleString() : '—');
+    const pid     = ev.position_id ? String(ev.position_id).slice(-20) : '';
+    const reason  = ev.reason || '';
+    const ec      = evtClass(event);
+    const icon    = assetIcon(asset);
+
+    return `<div class="trade-card tc-${ec}">
+        <div class="tc-top">
+            <span class="tc-evt tc-evt-${ec}">${evtLabel(event)}</span>
+            <span class="tc-icon">${icon}</span>
+            <span class="tc-asset">${asset}</span>
+            ${side ? `<span class="tc-side tc-side-${side}">${side}</span>` : ''}
+            ${strat ? `<span class="tc-strat">${strat}</span>` : ''}
+        </div>
+        <div class="tc-body">
+            <div class="tc-stat"><div class="tc-lbl">Price</div><div class="tc-val">${price !== '—' ? '$' : ''}${price}</div></div>
+            <div class="tc-stat"><div class="tc-lbl">Size</div><div class="tc-val">${size}</div></div>
+            ${hasPnl ? `<div class="tc-stat"><div class="tc-lbl">P&L</div><div class="tc-val ${pnlCls}">${pnlVal} <span style="font-size:10px;opacity:.75">${pnlPct}</span></div></div>` : ''}
+            ${reason ? `<div class="tc-stat"><div class="tc-lbl">Reason</div><div class="tc-val" style="font-size:11px;color:var(--muted2)">${reason}</div></div>` : ''}
+        </div>
+        <div class="tc-foot">
+            <span>${ts}</span>
+            ${pid ? `<span class="tc-pid">#${pid}</span>` : ''}
+        </div>
+    </div>`;
 }
 
 // ────────────────────────────────────────────────────────────
