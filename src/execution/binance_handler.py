@@ -885,7 +885,7 @@ class BinanceExecutionHandler:
             logger.info(f"{'='*80}")
 
             risk_pct = self.portfolio_manager.get_risk_budget(
-                asset=asset_name, 
+                asset=asset_name,
                 strategy_type=trade_type,
                 confidence_score=signal_details.get("mode_confidence"),
                 market_condition=signal_details.get("regime")
@@ -897,6 +897,12 @@ class BinanceExecutionHandler:
                     f"  → Trade rejected by Portfolio Manager"
                 )
                 return False
+
+            # T1.7 fix: apply MTF regime multiplier computed in main.py but previously orphaned
+            mtf_multiplier = signal_details.get("mtf_risk_multiplier", 1.0) if signal_details else 1.0
+            if mtf_multiplier != 1.0:
+                risk_pct *= mtf_multiplier
+                logger.info(f"[RISK] MTF multiplier applied: {mtf_multiplier:.1f}x → risk_pct={risk_pct:.4f}")
 
             logger.info(f"[STRATEGIC] ✓ Risk budget approved: {risk_pct:.3%}")
 

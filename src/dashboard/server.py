@@ -689,6 +689,88 @@ def get_logs():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/shadow/state")
+def get_shadow_state():
+    """
+    Returns the full shadow trading snapshot written by ShadowTradingEngine.dump_state().
+    The bot writes this file every candle to logs/shadow_state.json.
+    """
+    try:
+        state_path = os.path.join(project_root, "logs", "shadow_state.json")
+        if not os.path.exists(state_path):
+            return jsonify({
+                "open_positions": [],
+                "closed_results": [],
+                "gate_scorecard": {},
+                "strategy_scorecard": {},
+                "summary": {"open_count": 0, "closed_count": 0},
+                "last_updated": None,
+                "available": False,
+            })
+        import json as _json
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = _json.load(f)
+        state["available"] = True
+        return jsonify(state)
+    except Exception as e:
+        logger.error(f"Shadow state error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/config/overview")
+def get_config_overview():
+    """
+    Returns a sanitised view of config.json for display in the dashboard.
+    Strips API keys and passwords.
+    """
+    try:
+        import json as _json
+        cfg_path = os.path.join(project_root, "config", "config.json")
+        if not os.path.exists(cfg_path):
+            return jsonify({"error": "config.json not found"}), 404
+
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+
+        # Sanitise — remove credentials
+        _REDACT = {
+            "api_key", "api_secret", "secret", "password", "token",
+            "supabase_url", "supabase_key", "telegram_token",
+        }
+        def _scrub(obj):
+            if isinstance(obj, dict):
+                return {
+                    k: "***" if k.lower() in _REDACT else _scrub(v)
+                    for k, v in obj.items()
+                }
+            if isinstance(obj, list):
+                return [_scrub(x) for x in obj]
+            return obj
+
+        safe = _scrub(cfg)
+
+        # Extract the most useful slices for the dashboard
+        assets_cfg = {}
+        for asset in ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"]:
+            if asset in safe:
+                assets_cfg[asset] = safe[asset]
+
+        result = {
+            "trading_mode": safe.get("trading_mode", safe.get("mode", "unknown")),
+            "assets": assets_cfg,
+            "risk": safe.get("risk", {}),
+            "strategies": safe.get("strategies", {}),
+            "aggregator": safe.get("aggregator", safe.get("signal_aggregator", {})),
+            "economic_calendar": safe.get("economic_calendar", {}),
+            "session_blocks": safe.get("session_blocks", {}),
+            "circuit_breaker": safe.get("circuit_breaker", {}),
+        }
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Config overview error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/health")
 def health_check():
     """Health check endpoint"""

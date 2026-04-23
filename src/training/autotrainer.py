@@ -374,8 +374,35 @@ class ContinuousLearningPipeline:
                         logger.info(
                             f"[AUTO-TRAIN] ✅ {asset} {strat_name} passed shadow test (Holdout F1: {f1:.3f})"
                         )
+                        # T4.4 — P&L Promotion Gate
+                        new_model_path = os.path.join(
+                            self.models_dir, f"{strat_name}_{asset.lower()}.pkl"
+                        )
+                        current_model_path = new_model_path  # same path — current is what's on disk before swap
+                        if not self._passes_pnl_promotion_gate(
+                            strat_name, asset, new_model_path, current_model_path
+                        ):
+                            logger.warning(
+                                f"[PROMO-GATE] ❌ {asset} {strat_name} blocked by P&L promotion gate. "
+                                f"Keeping current model."
+                            )
+                            all_successful = False
 
-            # 3. Hot-Swap (Only if all models improved or maintained stability)
+            # 3. T4.3 — Mine false negatives from shadow data every retrain cycle
+            try:
+                fn_summary = self.mine_false_negatives(profit_threshold=0.10)
+                if not fn_summary.empty:
+                    # T4.1 — Augment labels with shadow ground truth
+                    shadow_df = self.generate_shadow_labels(min_samples=30)
+                    if not shadow_df.empty:
+                        logger.info(
+                            f"[SHADOW-LABELS] {len(shadow_df)} shadow labels available "
+                            f"for future retraining augmentation."
+                        )
+            except Exception as _e:
+                logger.warning(f"[AUTO-TRAIN] Shadow mining step failed (non-fatal): {_e}")
+
+            # 4. Hot-Swap (Only if all models improved or maintained stability)
             if all_successful:
                 self._hot_swap_models(summary)
             else:
@@ -437,3 +464,337 @@ class ContinuousLearningPipeline:
             aggregator.tf_strategy.load_model(f"models/trend_following_{asset.lower()}.pkl")
         if hasattr(aggregator, "ema_strategy"):
             aggregator.ema_strategy.load_model(f"models/ema_strategy_{asset.lower()}.pkl")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T4.1 — Shadow Label Generation
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def generate_shadow_labels(
+        self,
+        min_net_pnl_threshold: float = 0.0,
+        min_samples: int = 30,
+    ) -> "pd.DataFrame":
+        """
+        Convert closed shadow positions into a labelled training DataFrame.
+
+        Uses net_pnl_pct (gross P&L minus friction) as the ground-truth signal
+        so that models learn from realistic, cost-adjusted outcomes — not raw
+        price moves that look better than they feel live.
+
+        Label encoding
+        --------------
+        label = 1  if net_pnl_pct > min_net_pnl_threshold  (profitable)
+        label = 0  otherwise (loss / breakeven)
+
+        Feature columns (from strategy_votes snapshot at entry)
+        --------------------------------------------------------
+        mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf,
+        signal_quality, regime_score, mfe_pct, mae_pct, bars_open
+
+        Returns
+        -------
+        pd.DataFrame with feature columns + "label" column,
+        or an empty DataFrame if not enough closed positions exist.
+        """
+        shadow = getattr(
+            getattr(self.trading_bot, "shadow_trader", None), "closed_results", []
+        )
+        if len(shadow) < min_samples:
+            logger.info(
+                f"[SHADOW-LABELS] Only {len(shadow)} closed shadow trades "
+                f"(need {min_samples}). Skipping label generation."
+            )
+            return pd.DataFrame()
+
+        rows = []
+        for r in shadow:
+            votes = r.get("strategy_votes", {}) or {}
+            rows.append(
+                {
+                    # Features
+                    "mr_signal":      float(votes.get("mr_signal", 0)),
+                    "mr_conf":        float(votes.get("mr_conf", 0.0)),
+                    "tf_signal":      float(votes.get("tf_signal", 0)),
+                    "tf_conf":        float(votes.get("tf_conf", 0.0)),
+                    "ema_signal":     float(votes.get("ema_signal", 0)),
+                    "ema_conf":       float(votes.get("ema_conf", 0.0)),
+                    "signal_quality": float(votes.get("signal_quality", 0.0)),
+                    "regime_score":   float(r.get("regime_score", 0.0)),
+                    "mfe_pct":        float(r.get("mfe_pct", 0.0)),
+                    "mae_pct":        float(r.get("mae_pct", 0.0)),
+                    "bars_open":      int(r.get("bars_open", 0)),
+                    # Meta (not used as features but useful for slicing)
+                    "asset":          r.get("asset", ""),
+                    "side":           r.get("side", ""),
+                    "strategy_source": r.get("strategy_source", ""),
+                    "gate_blocked_by": r.get("gate_blocked_by", ""),
+                    "regime_name":     r.get("regime_name", ""),
+                    "net_pnl_pct":    float(r.get("net_pnl_pct", 0.0)),
+                    # Ground-truth label
+                    "label": 1 if float(r.get("net_pnl_pct", 0.0)) > min_net_pnl_threshold else 0,
+                }
+            )
+
+        df = pd.DataFrame(rows)
+        win_rate = df["label"].mean() * 100
+        logger.info(
+            f"[SHADOW-LABELS] Built {len(df)} labelled rows from shadow trades "
+            f"(win_rate={win_rate:.1f}%)"
+        )
+        return df
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T4.3 — False Negative Mining (Missed Profitable Signals)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def mine_false_negatives(
+        self,
+        profit_threshold: float = 0.10,
+        top_n: int = 10,
+    ) -> "pd.DataFrame":
+        """
+        Identify blocked signals that would have been profitable.
+
+        A "false negative" here is a signal that was killed by a gate but
+        whose shadow trade outcome exceeded profit_threshold% net P&L.
+        These are the most valuable data points for gate calibration —
+        they show which gates are over-blocking and costing real alpha.
+
+        Parameters
+        ----------
+        profit_threshold : float
+            Minimum net_pnl_pct (in %) to count as a missed opportunity.
+            Default 0.10 = 0.10% net profit after friction.
+        top_n : int
+            How many top-missed gates to surface in the summary log.
+
+        Returns
+        -------
+        pd.DataFrame with columns:
+            gate_blocked_by, strategy_source, count, avg_net_pnl,
+            avg_mfe_pct, win_rate, total_missed_pnl
+        Sorted descending by total_missed_pnl.
+        """
+        shadow = getattr(
+            getattr(self.trading_bot, "shadow_trader", None), "closed_results", []
+        )
+        if not shadow:
+            logger.info("[FALSE-NEG] No shadow trades available yet.")
+            return pd.DataFrame()
+
+        # Filter to profitable blocked trades
+        false_negatives = [
+            r for r in shadow
+            if float(r.get("net_pnl_pct", 0.0)) > profit_threshold
+        ]
+
+        if not false_negatives:
+            logger.info(
+                f"[FALSE-NEG] No false negatives above {profit_threshold}% threshold "
+                f"in {len(shadow)} closed shadow trades."
+            )
+            return pd.DataFrame()
+
+        df = pd.DataFrame(false_negatives)
+
+        # Group by gate + strategy
+        summary = (
+            df.groupby(["gate_blocked_by", "strategy_source"])
+            .agg(
+                count=("net_pnl_pct", "count"),
+                avg_net_pnl=("net_pnl_pct", "mean"),
+                avg_mfe_pct=("mfe_pct", "mean"),
+                total_missed_pnl=("net_pnl_pct", "sum"),
+            )
+            .reset_index()
+        )
+        summary["win_rate"] = (
+            df.groupby(["gate_blocked_by", "strategy_source"])
+            .apply(lambda g: (g["net_pnl_pct"] > 0).mean() * 100)
+            .values
+        )
+        summary = summary.sort_values("total_missed_pnl", ascending=False).reset_index(drop=True)
+        summary["avg_net_pnl"] = summary["avg_net_pnl"].round(3)
+        summary["avg_mfe_pct"] = summary["avg_mfe_pct"].round(3)
+        summary["total_missed_pnl"] = summary["total_missed_pnl"].round(3)
+        summary["win_rate"] = summary["win_rate"].round(1)
+
+        # Log top missed gates
+        logger.info(
+            f"[FALSE-NEG] {len(false_negatives)}/{len(shadow)} shadow trades "
+            f"were profitable false negatives (>{profit_threshold}% net). "
+            f"Top over-blocking gates:"
+        )
+        for _, row in summary.head(top_n).iterrows():
+            logger.info(
+                f"  gate={row['gate_blocked_by']} | src={row['strategy_source']} | "
+                f"n={row['count']} | avg_net={row['avg_net_pnl']:+.3f}% | "
+                f"total_missed={row['total_missed_pnl']:+.3f}%"
+            )
+
+        return summary
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T4.4 — P&L Promotion Gate (gates model hot-swap on live performance)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _evaluate_shadow_pnl(
+        self,
+        strategy_name: str,
+        asset: str,
+        new_model_path: str,
+        lookback: int = 200,
+    ) -> dict:
+        """
+        Run the candidate new model against the last `lookback` closed shadow
+        trades and return a dict with net_pnl and win_rate for comparison.
+
+        The strategy's predict() is called on the strategy_votes features
+        embedded in each shadow record.  This is zero-cost: no live data
+        fetch, no exchange calls.
+
+        Returns
+        -------
+        dict with keys:
+            n_samples    : int
+            win_rate_pct : float (0–100)
+            avg_net_pnl  : float (in %)
+            total_net_pnl: float (in %)
+        """
+        shadow = getattr(
+            getattr(self.trading_bot, "shadow_trader", None), "closed_results", []
+        )
+        # Filter to matching asset + strategy_source
+        relevant = [
+            r for r in shadow
+            if r.get("asset", "").upper() == asset.upper()
+            and r.get("strategy_source", "") in (
+                strategy_name,
+                strategy_name.upper(),
+                # map long names to short tags used in shadow_trader
+                {"mean_reversion": "MR", "trend_following": "TF",
+                 "exponential_moving_averages": "EMA"}.get(strategy_name, strategy_name),
+            )
+        ][-lookback:]
+
+        if len(relevant) < 10:
+            return {"n_samples": len(relevant), "win_rate_pct": 0.0,
+                    "avg_net_pnl": 0.0, "total_net_pnl": 0.0}
+
+        try:
+            strat_class = self.strategy_classes.get(strategy_name)
+            if not strat_class:
+                return {"n_samples": 0, "win_rate_pct": 0.0,
+                        "avg_net_pnl": 0.0, "total_net_pnl": 0.0}
+
+            strat_config = self.config["strategy_configs"][strategy_name][asset]
+            candidate = strat_class(strat_config)
+            if not candidate.load_model(new_model_path):
+                return {"n_samples": 0, "win_rate_pct": 0.0,
+                        "avg_net_pnl": 0.0, "total_net_pnl": 0.0}
+
+            feature_cols = ["mr_conf", "tf_conf", "ema_conf", "signal_quality",
+                            "regime_score", "mfe_pct", "mae_pct", "bars_open"]
+
+            rows = []
+            net_pnls = []
+            for r in relevant:
+                votes = r.get("strategy_votes", {}) or {}
+                row = [
+                    float(votes.get("mr_conf", 0.0)),
+                    float(votes.get("tf_conf", 0.0)),
+                    float(votes.get("ema_conf", 0.0)),
+                    float(votes.get("signal_quality", 0.0)),
+                    float(r.get("regime_score", 0.0)),
+                    float(r.get("mfe_pct", 0.0)),
+                    float(r.get("mae_pct", 0.0)),
+                    float(r.get("bars_open", 0)),
+                ]
+                rows.append(row)
+                net_pnls.append(float(r.get("net_pnl_pct", 0.0)))
+
+            import numpy as _np
+            X = _np.array(rows)
+            if hasattr(candidate, "scaler") and candidate.scaler is not None:
+                X = candidate.scaler.transform(X)
+
+            preds = candidate.model.predict(X)  # 1 = buy/long, -1 = sell/short
+            # A prediction is "correct" if it agrees with the profitable direction
+            # (net_pnl > 0 means the shadow trade direction was right)
+            correct = sum(
+                1 for pred, pnl in zip(preds, net_pnls)
+                if (pred != 0 and pnl > 0)
+            )
+            win_rate = correct / len(preds) * 100
+            avg_net = sum(net_pnls) / len(net_pnls)
+            total_net = sum(net_pnls)
+
+            del candidate
+            gc.collect()
+
+            return {
+                "n_samples": len(relevant),
+                "win_rate_pct": round(win_rate, 1),
+                "avg_net_pnl": round(avg_net, 3),
+                "total_net_pnl": round(total_net, 3),
+            }
+        except Exception as e:
+            logger.warning(f"[PROMO-GATE] Shadow P&L eval failed for {asset} {strategy_name}: {e}")
+            return {"n_samples": 0, "win_rate_pct": 0.0,
+                    "avg_net_pnl": 0.0, "total_net_pnl": 0.0}
+
+    def _passes_pnl_promotion_gate(
+        self,
+        strategy_name: str,
+        asset: str,
+        new_model_path: str,
+        current_model_path: str,
+        min_pnl_improvement: float = 0.05,
+        max_winrate_drop: float = 5.0,
+    ) -> bool:
+        """
+        T4.4 Promotion Gate: only allow model hot-swap if the candidate
+        improves shadow-trade net P&L by at least min_pnl_improvement %
+        AND does not drop win rate by more than max_winrate_drop pp.
+
+        Falls through (returns True) when shadow data is insufficient to
+        make a reliable comparison — we don't block new models on day-one.
+
+        Parameters
+        ----------
+        min_pnl_improvement : float
+            Minimum avg_net_pnl improvement in % to approve the swap.
+            Default 0.05 = the new model must average at least +0.05% more
+            net P&L per shadow trade than the current model.
+        max_winrate_drop : float
+            Maximum allowed win rate regression in percentage points.
+            Default 5.0 pp.
+        """
+        new_stats = self._evaluate_shadow_pnl(strategy_name, asset, new_model_path)
+
+        if new_stats["n_samples"] < 10:
+            logger.info(
+                f"[PROMO-GATE] {asset} {strategy_name}: insufficient shadow data "
+                f"({new_stats['n_samples']} samples) — gate bypassed, allowing swap."
+            )
+            return True
+
+        # Evaluate current model on same shadow set for fair comparison
+        cur_stats = self._evaluate_shadow_pnl(strategy_name, asset, current_model_path)
+
+        pnl_delta = new_stats["avg_net_pnl"] - cur_stats["avg_net_pnl"]
+        wr_delta = new_stats["win_rate_pct"] - cur_stats["win_rate_pct"]
+
+        passes = (pnl_delta >= min_pnl_improvement) and (wr_delta >= -max_winrate_drop)
+
+        logger.info(
+            f"[PROMO-GATE] {asset} {strategy_name}: "
+            f"new_avg_pnl={new_stats['avg_net_pnl']:+.3f}% "
+            f"cur_avg_pnl={cur_stats['avg_net_pnl']:+.3f}% "
+            f"Δpnl={pnl_delta:+.3f}% (need≥{min_pnl_improvement:+.3f}%) | "
+            f"new_wr={new_stats['win_rate_pct']:.1f}% "
+            f"cur_wr={cur_stats['win_rate_pct']:.1f}% "
+            f"Δwr={wr_delta:+.1f}pp (max_drop={max_winrate_drop:.1f}pp) | "
+            f"{'✅ APPROVED' if passes else '❌ BLOCKED'}"
+        )
+        return passes

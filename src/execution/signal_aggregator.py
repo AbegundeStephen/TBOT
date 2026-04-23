@@ -140,7 +140,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 f"[AGGREGATOR] Detailed logging: {'ENABLED' if self.detailed_logging else 'DISABLED'}"
             )
 
-        # Strategy weights
+        # Strategy weights — read from config, used for priority when multiple strategies fire
+        # NOT for consensus voting. Hardcoded 0.50/0.50 was ignoring mean_reversion_weight: 0.0
+        # in all presets, causing MR opposition penalty to bleed into every BTC TF score.
+        # Will be updated after config merge below so we use a temporary default here.
         self.weights = {"mean_reversion": 0.50, "trend_following": 0.50}
 
         # ================================================================
@@ -159,7 +162,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "bear_buy_penalty": 0.30,
                 "min_confidence_to_use": 0.08,
                 "min_signal_quality": 0.28,
-                "hold_contribution_pct": 0.20,
+                "hold_contribution_pct": 0.0,
                 "opposition_penalty": 0.40,
             }
         else:  # GOLD (Default)
@@ -174,7 +177,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "bear_buy_penalty": 0.28,
                 "min_confidence_to_use": 0.06,
                 "min_signal_quality": 0.25,
-                "hold_contribution_pct": 0.18,
+                "hold_contribution_pct": 0.0,
                 "opposition_penalty": 0.40,
             }
         
@@ -182,6 +185,32 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         if config is not None:
             # This ensures keys missing from 'config' are filled by defaults above
             self.config.update(config)
+
+        # 3. Wire strategy weights from merged config (T1.2 fix)
+        # Previously hardcoded to 0.50/0.50, ignoring mean_reversion_weight: 0.0 in presets.
+        self.weights = {
+            "mean_reversion": self.config.get("mean_reversion_weight", 0.50),
+            "trend_following": self.config.get("trend_following_weight", 0.50),
+        }
+        logger.info(
+            f"[AGGREGATOR] Strategy weights: MR={self.weights['mean_reversion']:.2f}, "
+            f"TF={self.weights['trend_following']:.2f}"
+        )
+
+        # 4. Independent strategy thresholds (T1.1 fix)
+        # allow_single_override and single_override_threshold exist in presets but were
+        # never read by this class — orphaned config keys. Now wired.
+        self.independent_thresholds = {
+            "trend_following": self.config.get("single_override_threshold", 0.72),
+            "mean_reversion": self.config.get("single_override_threshold", 0.75),
+            "ema": self.config.get("single_override_threshold", 0.72),
+        }
+        self.allow_independent = self.config.get("allow_single_override", True)
+        logger.info(
+            f"[AGGREGATOR] Independent firing: {'ENABLED' if self.allow_independent else 'DISABLED'} "
+            f"(TF≥{self.independent_thresholds['trend_following']:.2f}, "
+            f"MR≥{self.independent_thresholds['mean_reversion']:.2f})"
+        )
 
         self.stats = {
             "total_evaluations": 0,
@@ -196,6 +225,22 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             "single_strategy_signals": 0,
             "regime_detection_failures": 0,
         }
+
+        # T1.5: Stale price detection state
+        # Tracks (last_price, last_change_time) per asset to catch frozen data feeds.
+        self._last_prices = {}
+        self._stale_threshold_minutes = 30
+
+        # T3.4: Economic calendar — load once at startup
+        self._econ_events = []
+        try:
+            import json as _json
+            _cal_path = "config/economic_calendar.json"
+            with open(_cal_path) as _f:
+                self._econ_events = _json.load(_f).get("events", [])
+            logger.info(f"[CALENDAR] Loaded {len(self._econ_events)} economic events from {_cal_path}")
+        except Exception as _e:
+            logger.warning(f"[CALENDAR] Could not load economic_calendar.json: {_e}")
 
         self._log_initialization()
 
@@ -874,10 +919,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             else:
                 trade_type = getattr(raw_trade_type, 'value', str(raw_trade_type))
 
-            # IF the Governor says NEUTRAL, BLOCK THE TRADE.
+            # T2.1 fix: NEUTRAL used to block all trading.
+            # Simulation: 129 blocked signals at 70.5% WR, +70.2% P&L.
+            # NEUTRAL is MR's best environment (+159% P&L, 71% WR).
+            # Now returns TRANSITION so trades fire at 50% position size
+            # (sizing reduction applied in get_aggregated_signal below).
             if trade_type == "NEUTRAL":
-                logger.info("[GOV] ❌ BLOCKED - Market is Neutral/Cash")
-                return False, trade_type
+                logger.info("[GOV] ⚠️ TRANSITION — market neutral, allowing at 50% size")
+                return True, "TRANSITION"
 
             return True, trade_type
         
@@ -1165,6 +1214,91 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         try:
             timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
+            # ═══════════════════════════════════════════════════════════════
+            # T1.5: STALE PRICE DETECTION
+            # Gold was frozen at 5021.08 for 47.6 hours (March 13–15), firing
+            # 12 SELL signals on dead data. Block evaluation if price has not
+            # moved by even 1 pip in over 30 minutes.
+            # ═══════════════════════════════════════════════════════════════
+            from datetime import datetime as _dt
+            _current_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+            _now = _dt.now()
+            _last = self._last_prices.get(self.asset_type)
+            if _last:
+                _last_price, _last_time = _last
+                _minutes_since_move = (_now - _last_time).total_seconds() / 60
+                _price_moved = abs(_current_price - _last_price) / max(_last_price, 1) > 0.00001
+                if not _price_moved and _minutes_since_move > self._stale_threshold_minutes:
+                    logger.warning(
+                        f"[STALE] ❌ {self.asset_type} price frozen at {_current_price} "
+                        f"for {_minutes_since_move:.0f}min — blocking signal evaluation"
+                    )
+                    return 0, {
+                        "timestamp": timestamp,
+                        "regime": "UNKNOWN",
+                        "reasoning": f"stale_price_{_minutes_since_move:.0f}min",
+                        "final_signal": 0,
+                        "signal_quality": 0.0,
+                        "mr_signal": 0, "mr_confidence": 0.0,
+                        "tf_signal": 0, "tf_confidence": 0.0,
+                        "ema_signal": 0, "ema_confidence": 0.0,
+                    }
+            # Update last-seen price only when it actually moves
+            if not _last or abs(_current_price - _last[0]) / max(_last[0], 1) > 0.00001:
+                self._last_prices[self.asset_type] = (_current_price, _now)
+
+            # ═══════════════════════════════════════════════════════════════
+            # T3.3: NY OPEN HOUR BLOCK (13:00–13:59 UTC)
+            # TF signals at NY open: 53% WR, -21.2% P&L (stop-hunting territory).
+            # Trades 1–2 hours later: 60% WR, +101.5% P&L.
+            # BTC trades 24/7 — only block market-hours assets.
+            # ═══════════════════════════════════════════════════════════════
+            _hour_utc = _dt.utcnow().hour
+            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD", "EURJPY", "EURUSD"):
+                logger.info(
+                    f"[SESSION] ⏸️ NY open hour block — no new entries for {self.asset_type}"
+                )
+                return 0, {
+                    "timestamp": timestamp,
+                    "regime": "UNKNOWN",
+                    "reasoning": "ny_open_block",
+                    "final_signal": 0, "signal_quality": 0.0,
+                    "mr_signal": 0, "mr_confidence": 0.0,
+                    "tf_signal": 0, "tf_confidence": 0.0,
+                    "ema_signal": 0, "ema_confidence": 0.0,
+                }
+
+            # ═══════════════════════════════════════════════════════════════
+            # T3.4: ECONOMIC CALENDAR BLOCK
+            # Trading through NFP/FOMC/CPI on a 1H timeframe is gambling.
+            # Block N hours before each high-impact event.
+            # ═══════════════════════════════════════════════════════════════
+            if self._econ_events:
+                from datetime import timezone as _tz, timedelta as _td
+                _utc_now = _dt.now(_tz.utc)
+                for _evt in self._econ_events:
+                    try:
+                        _evt_time = _dt.fromisoformat(_evt["datetime"].replace("Z", "+00:00"))
+                        _hours_before = _evt.get("block_hours_before", 2)
+                        _block_start = _evt_time - _td(hours=_hours_before)
+                        if _block_start <= _utc_now < _evt_time:
+                            _mins_to_evt = (_evt_time - _utc_now).total_seconds() / 60
+                            logger.warning(
+                                f"[CALENDAR] ⏸️ Blocking — {_evt['event']} in "
+                                f"{_mins_to_evt:.0f}min"
+                            )
+                            return 0, {
+                                "timestamp": timestamp,
+                                "regime": "UNKNOWN",
+                                "reasoning": f"econ_calendar_{_evt['event'].replace(' ', '_')}",
+                                "final_signal": 0, "signal_quality": 0.0,
+                                "mr_signal": 0, "mr_confidence": 0.0,
+                                "tf_signal": 0, "tf_confidence": 0.0,
+                                "ema_signal": 0, "ema_confidence": 0.0,
+                            }
+                    except Exception:
+                        continue
+
             # STEP 1: Use EXTERNAL regime context, not internal detection
             is_bull = is_bull_market
             regime_conf = governor_data.get('confidence', 0.5) if governor_data else 0.5
@@ -1192,43 +1326,156 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             mr_original = mr_signal
             tf_original = tf_signal
 
+            # ═══════════════════════════════════════════════════════════════
+            # T3.5: BTC FUNDING RATE Z-SCORE CONFIDENCE MULTIPLIER
+            # Extreme funding rates (Z ≥ 2.0) indicate crowded positioning.
+            # Over-leveraged longs → MR short setups become highest probability.
+            # Z-score adapts to sustained bull runs; static threshold doesn't.
+            # ═══════════════════════════════════════════════════════════════
+            _funding_z = governor_data.get("funding_rate_zscore", 0.0) if governor_data else 0.0
+            if self.asset_type in ("BTC", "BTCUSDT") and abs(_funding_z) >= 2.0:
+                if mr_signal != 0:
+                    mr_conf = min(1.0, mr_conf * 1.15)
+                    logger.info(
+                        f"[FUNDING] Extreme positioning (Z={_funding_z:+.1f}): "
+                        f"MR conf boosted to {mr_conf:.2f}"
+                    )
+
+            # ═══════════════════════════════════════════════════════════════
+            # T3.6: DXY PROXY CONFIDENCE MULTIPLIER
+            # Rising EUR/USD = falling dollar = bullish for GOLD/USTEC/EURJPY.
+            # Computed from already-traded EUR/USD data — zero API cost.
+            # ═══════════════════════════════════════════════════════════════
+            _dxy_falling = governor_data.get("dxy_falling") if governor_data else None
+            if _dxy_falling is not None and self.asset_type in ("GOLD", "USTEC", "EURJPY"):
+                if self.asset_type == "GOLD":
+                    # Dollar weakness → gold strength
+                    if _dxy_falling and tf_signal == 1:
+                        tf_conf = min(1.0, tf_conf * 1.10)
+                        logger.debug(f"[DXY] Weak dollar: GOLD TF BUY conf boosted to {tf_conf:.2f}")
+                    elif not _dxy_falling and tf_signal == -1:
+                        tf_conf = min(1.0, tf_conf * 1.10)
+                        logger.debug(f"[DXY] Strong dollar: GOLD TF SELL conf boosted to {tf_conf:.2f}")
+                elif self.asset_type == "USTEC":
+                    # Dollar weakness generally supportive of risk assets
+                    if _dxy_falling and tf_signal == 1:
+                        tf_conf = min(1.0, tf_conf * 1.05)
+                        logger.debug(f"[DXY] Weak dollar: USTEC TF BUY conf boosted to {tf_conf:.2f}")
+
+            # ═══════════════════════════════════════════════════════════════
+            # T2.6: CONSECUTIVE CANDLE CONFIDENCE MULTIPLIER
+            # BTC after 3 consecutive same-direction bars + low ADX: 66% MR WR
+            # GOLD after 5 consecutive bars: 85% TF continue rate
+            # ADX guard prevents counter-trend fading during strong momentum
+            # (MR fading streaks in high ADX: 33% WR on GOLD, 56% on BTC).
+            # This is a confidence bonus, not a new gate — fails silently.
+            # ═══════════════════════════════════════════════════════════════
+            try:
+                _closes = df['close'].values
+                _consec = 0
+                for _i in range(len(_closes) - 1, max(len(_closes) - 10, 0), -1):
+                    if _i == 0:
+                        break
+                    if _closes[_i] > _closes[_i - 1]:
+                        if _consec >= 0:
+                            _consec += 1
+                        else:
+                            break
+                    else:
+                        if _consec <= 0:
+                            _consec -= 1
+                        else:
+                            break
+
+                # Compute ADX for the guard
+                _adx_guard = 25.0  # default if calculation fails
+                try:
+                    import talib as _talib_c
+                    _adx_raw = _talib_c.ADX(
+                        df['high'].values, df['low'].values, _closes, timeperiod=14
+                    )[-1]
+                    if not np.isnan(_adx_raw):
+                        _adx_guard = _adx_raw
+                except Exception:
+                    pass
+
+                # BTC: boost MR when price has made 3+ consecutive candles in one
+                # direction AND momentum is low — classic mean reversion setup
+                if self.asset_type == "BTC" and abs(_consec) >= 3 and _adx_guard < 25:
+                    if mr_signal != 0:
+                        mr_conf = min(1.0, mr_conf * 1.20)
+                        logger.debug(
+                            f"[CANDLE] BTC {_consec}-bar streak + low ADX ({_adx_guard:.0f}): "
+                            f"MR conf boosted to {mr_conf:.2f}"
+                        )
+
+                # GOLD: boost TF when riding a 5+ bar streak — trend continuation
+                if self.asset_type == "GOLD" and abs(_consec) >= 5:
+                    if tf_signal != 0:
+                        tf_conf = min(1.0, tf_conf * 1.15)
+                        logger.debug(
+                            f"[CANDLE] GOLD {_consec}-bar streak: "
+                            f"TF conf boosted to {tf_conf:.2f}"
+                        )
+            except Exception:
+                pass  # Bonus only — never block execution on failure
+
             # Extract regime score for Gatekeeper (Phase 3)
             regime_score = governor_data.get("regime_score", 0.0)
             regime_is_bullish = governor_data.get("is_bullish", False)
             regime_is_bearish = governor_data.get("is_bearish", False)
 
-            # --- Gatekeeper Filtering (Phase 3) ---
+            # ═══════════════════════════════════════════════════════════════
+            # SMART GATEKEEPER — Strategy-Aware Routing (T1.3 fix)
+            # ═══════════════════════════════════════════════════════════════
+            # OLD BEHAVIOUR (bug): regime_score == 0.0 (NEUTRAL) killed ALL signals.
+            # MR was treated identically to TF despite being an opposite strategy type.
+            #
+            # NEW RULES (from 30-day simulation data):
+            #   TF/EMA: Block counter-trend ALWAYS. Allow trend-aligned ALWAYS.
+            #   MR: Block counter-trend in BULLISH/BEARISH/SLIGHTLY regimes.
+            #       Allow counter-trend ONLY in NEUTRAL (+159% P&L, 71% WR).
+            #       Allow trend-aligned ALWAYS (+110% in SLIGHTLY_BEAR, 87% WR).
+            #   NEUTRAL (regime_score == 0): All strategies fire freely.
+            #       50% sizing is applied via T2.1 TRANSITION state in governor.
+            # ═══════════════════════════════════════════════════════════════
             if self.use_gatekeeper:
-                # If regime_score is 0, block all signals
-                if regime_score == 0.0:
-                    if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
-                        logger.warning(f"[GATEKEEPER] ❌ BLOCKED ALL: Regime score is 0.0 ({self.asset_type}).")
-                    mr_signal = 0; mr_conf = 0.0
-                    tf_signal = 0; tf_conf = 0.0
-                    ema_signal = 0; ema_conf = 0.0
-                # If regime is bullish (score > 0) and a signal is bearish (short), block short signals
-                elif regime_is_bullish and (mr_signal < 0 or tf_signal < 0 or ema_signal < 0):
-                    if mr_signal < 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
-                        mr_signal = 0; mr_conf = 0.0
+                is_neutral = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
+
+                if is_neutral:
+                    # NEUTRAL: all strategies allowed in any direction
+                    logger.debug(f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})")
+
+                elif regime_is_bullish:
+                    # TF/EMA: block shorts (counter-trend in bull)
                     if tf_signal < 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Bullish regime for {self.asset_type}")
                         tf_signal = 0; tf_conf = 0.0
-                    if ema_signal < 0: # Assuming EMA signal can also be filtered
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Bullish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    if ema_signal < 0:
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Bullish regime for {self.asset_type}")
                         ema_signal = 0; ema_conf = 0.0
-                # If regime is bearish (score < 0) and a signal is bullish (long), block long signals
-                elif regime_is_bearish and (mr_signal > 0 or tf_signal > 0 or ema_signal > 0):
-                    if mr_signal > 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    # MR: block counter-trend SELL, allow trend-aligned BUY (dip buying)
+                    if mr_signal < 0:
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in Bullish for {self.asset_type}")
                         mr_signal = 0; mr_conf = 0.0
+                    elif mr_signal > 0:
+                        logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in Bullish for {self.asset_type}")
+
+                elif regime_is_bearish:
+                    # TF/EMA: block longs (counter-trend in bear)
                     if tf_signal > 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Bearish regime for {self.asset_type}")
                         tf_signal = 0; tf_conf = 0.0
-                    if ema_signal > 0: # Assuming EMA signal can also be filtered
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Bearish regime ({regime_score:.2f}) for {self.asset_type}.")
+                    if ema_signal > 0:
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Bearish regime for {self.asset_type}")
                         ema_signal = 0; ema_conf = 0.0
-            # --- End Gatekeeper Filtering ---
+                    # MR: block counter-trend BUY (falling knives), allow trend-aligned SELL
+                    if mr_signal > 0:
+                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in Bearish for {self.asset_type}")
+                        mr_signal = 0; mr_conf = 0.0
+                    elif mr_signal < 0:
+                        logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in Bearish for {self.asset_type}")
+            # --- End Smart Gatekeeper ---
             
             # Initialize core variables for details building (prevents UnboundLocalError if we skip)
             buy_score = 0.0
@@ -1245,28 +1492,31 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 logger.debug(f"[AGGREGATOR] {self.asset_type}: No signals to validate, skipping to end.")
                 # We can skip to building the details dictionary
             else:
-                # Strict Trend Enforcement & Ranging Logic
+                # Ranging Detection — keeps position limits, counter-trend blocking
+                # now handled exclusively by the Smart Gatekeeper above (T1.3 fix).
                 is_ranging = regime_conf <= 0.50
                 max_trades_override = None
                 filter_reason = ""
                 if is_ranging:
                     max_trades_override = 1
                     filter_reason = "Ranging Mode (Max 1 Trade)"
-                else:
-                    if is_bull:
-                        if tf_signal == -1: tf_signal = 0; filter_reason += "TF Short Blocked; "
-                        if mr_signal == -1: mr_signal = 0; filter_reason += "MR Short Blocked; "
-                    else:
-                        if tf_signal == 1: tf_signal = 0; filter_reason += "TF Long Blocked; "
-                        if mr_signal == 1: mr_signal = 0; filter_reason += "MR Long Blocked; "
 
                 signal_quality = max(mr_conf, tf_conf)
 
-                # --- Directional Trap Filter Veto (Computational Efficiency) ---
+                # --- Directional Trap Filter Veto (T2.3: regime-aware) ---
                 if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
-                    # Determine likely direction for structure check
                     test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
-                    if not validate_candle_structure(df, self.asset_type, direction=test_direction):
+                    # regime_aligned: signal direction matches macro regime
+                    _trap_aligned = (
+                        (test_direction == "long" and is_bull) or
+                        (test_direction == "short" and not is_bull)
+                    )
+                    if not validate_candle_structure(
+                        df, self.asset_type,
+                        direction=test_direction,
+                        regime_confidence=regime_conf,
+                        regime_aligned=_trap_aligned,
+                    ):
                         logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
                         return 0, {
                             "timestamp": timestamp,
@@ -1282,31 +1532,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             "ema_confidence": 0.0
                         }
 
-                # STEP 3: AI VALIDATION (with circuit breaker)
+                # STEP 3: PRE-SCORE AI VALIDATION — DISABLED (T2.2)
+                # Previously killed individual MR/TF votes before scoring, destroying
+                # the consensus and independent evaluation pipeline.
+                # Blocked 13 signals with 92.3% WR and +17.2% P&L.
+                # AI validation now runs post-score via hybrid_validator.py.
+                # The circuit breaker and stats objects are preserved for post-score use.
                 ai_bypass = False
-                if self.ai_enabled and self.ai_validator is not None:
-                    ai_bypass = self._check_ai_circuit_breaker()
-                    if self.ai_bypass_active and self.ai_bypass_cooldown > 0:
-                        self.ai_bypass_cooldown -= 1
-
-                    if not ai_bypass:
-                        if mr_signal != 0:
-                            self.ai_stats["mr_signals_checked"] += 1
-                            validated_mr, mr_details = self.ai_validator.validate_signal(mr_signal, {"strategy": "mean_reversion", "confidence": mr_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
-                            if validated_mr == 0:
-                                self.ai_stats["mr_rejected"] += 1; self.ai_rejection_window.append(True); mr_signal = 0; mr_conf = 0.0
-                            else:
-                                self.ai_stats["mr_approved"] += 1; self.ai_rejection_window.append(False)
-                            ai_validation_details = mr_details.get('ai_validation', {})
-
-                        if tf_signal != 0:
-                            self.ai_stats["tf_signals_checked"] += 1
-                            validated_tf, tf_details = self.ai_validator.validate_signal(tf_signal, {"strategy": "trend_following", "confidence": tf_conf, "regime": "bull" if is_bull else "bear", "regime_confidence": regime_conf, "asset": self.asset_type, "signal_quality": signal_quality}, df)
-                            if validated_tf == 0:
-                                self.ai_stats["tf_rejected"] += 1; self.ai_rejection_window.append(True); tf_signal = 0; tf_conf = 0.0
-                            else:
-                                self.ai_stats["tf_approved"] += 1; self.ai_rejection_window.append(False)
-                            ai_validation_details = tf_details.get('ai_validation', {})
+                ai_validation_details = {}
 
                 # STEP 4: Calculate scores
                 buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
@@ -1332,6 +1565,52 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
                     final_signal = 0
                     reasoning = f"hold_lowquality (original:{reasoning}, quality:{signal_quality:.2f})"
+
+                # ═══════════════════════════════════════════════════════════
+                # INDEPENDENT STRATEGY EVALUATION (T1.1 fix)
+                # Consensus failed (final_signal still 0). Check if any single
+                # strategy has enough individual confidence to fire alone.
+                # Priority: TF > EMA > MR (based on solo P&L simulation data).
+                # allow_single_override and single_override_threshold are config
+                # keys that existed in presets but were never read — now wired.
+                # ═══════════════════════════════════════════════════════════
+                if final_signal == 0 and self.allow_independent:
+                    candidates = []
+
+                    # TF: use the original (pre-gatekeeper) signal so a gatekeeper
+                    # veto doesn't double-block an otherwise valid solo TF signal.
+                    if tf_original != 0 and tf_conf >= self.independent_thresholds["trend_following"]:
+                        candidates.append(("TF", tf_original, tf_conf))
+
+                    # EMA: evaluated post-gatekeeper (gatekeeper treats EMA same as TF)
+                    if ema_signal != 0 and ema_conf >= self.independent_thresholds["ema"]:
+                        candidates.append(("EMA", ema_signal, ema_conf))
+
+                    # MR: use post-gatekeeper signal (Smart Gatekeeper already filtered it)
+                    if mr_signal != 0 and mr_conf >= self.independent_thresholds["mean_reversion"]:
+                        candidates.append(("MR", mr_signal, mr_conf))
+
+                    if candidates:
+                        # Sort by confidence descending; TF wins ties (listed first)
+                        candidates.sort(key=lambda x: x[2], reverse=True)
+                        best_name, best_signal, best_conf = candidates[0]
+                        final_signal = best_signal
+                        signal_quality = best_conf * 0.85  # Solo signals get a small quality discount
+
+                        # Multi-strategy confirmation bonus: any agreeing strategy lifts quality
+                        agreeing = [c for c in candidates if c[1] == best_signal]
+                        if len(agreeing) >= 2:
+                            signal_quality = min(1.0, best_conf * 1.1)
+
+                        reasoning = (
+                            f"{'BUY' if final_signal == 1 else 'SELL'} "
+                            f"(independent:{best_name}, conf:{best_conf:.2f}, "
+                            f"confirmations:{len(agreeing)})"
+                        )
+                        logger.info(
+                            f"[INDEPENDENT] {self.asset_type}: {best_name} fires alone "
+                            f"(conf={best_conf:.2f}, aligned={len(agreeing)} strategies)"
+                        )
 
                 # World-Class Filters
                 if final_signal != 0 and self.enable_filters:
@@ -1390,6 +1669,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "mr_signal_raw": mr_original,  # Ensure originals are present
                 "tf_signal_raw": tf_original,
             })
+
+            # T2.1: TRANSITION sizing — governor approved but market is neutral.
+            # Apply 50% risk multiplier so these trades fire at half normal size.
+            # T1.7 already wires mtf_risk_multiplier into both execution handlers.
+            if final_signal != 0 and trade_type == "TRANSITION":
+                current_multiplier = details.get("mtf_risk_multiplier", 1.0)
+                details["mtf_risk_multiplier"] = current_multiplier * 0.5
+                logger.info(
+                    f"[TRANSITION] {self.asset_type}: signal approved at 50% size "
+                    f"(mtf_risk_multiplier={details['mtf_risk_multiplier']:.2f})"
+                )
 
             return final_signal, details
         

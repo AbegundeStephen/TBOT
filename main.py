@@ -88,6 +88,7 @@ from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_e
 from src.execution.mtf_integration import MTFRegimeIntegration
 from src.training.autotrainer import ContinuousLearningPipeline
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
+from src.execution.shadow_trader import ShadowTradingEngine  # T3.1
 
 
 def setup_logging(config):
@@ -290,6 +291,14 @@ class TradingBot:
             "snapshot_interval_seconds", 300
         )
         self._df_4h_cache = {}
+
+        # T3.5: BTC funding rate Z-score state (fetched every 8 hours)
+        self.current_funding_rate = 0.0
+        self.funding_rate_zscore = 0.0
+        self._last_funding_fetch = None
+
+        # T3.1: Shadow trading engine — tracks blocked signals' outcomes for ML
+        self.shadow_trader: Optional[ShadowTradingEngine] = None
 
         # Initialize components in CORRECT order
         self._initialize_telegram()
@@ -2277,6 +2286,12 @@ class TradingBot:
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
+            # T3.5: Refresh BTC funding rate (self-throttles to every 8 hours)
+            try:
+                self._update_funding_rate()
+            except Exception as _fe:
+                logger.debug(f"[FUNDING] Skipped: {_fe}")
+
             # ✨ Record heartbeat and check health
             if hasattr(self, 'health_monitor') and self.health_monitor:
                 logger.info("[HEARTBEAT] System running...")
@@ -2370,6 +2385,22 @@ class TradingBot:
                         current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                 except Exception as e:
                     logger.error(f"Failed to get {asset_name} price: {e}")
+
+            # T3.1: Shadow candle-tier update — every trading cycle (~5min)
+            try:
+                if self.shadow_trader and current_prices:
+                    self.shadow_trader.candle_update_all(current_prices)
+                    self.shadow_trader.tick_update_all(current_prices)
+                    logger.debug(f"[SHADOW] {self.shadow_trader.summary}")
+                    # Persist snapshot for dashboard
+                    import os as _os
+                    _shadow_path = _os.path.join(
+                        _os.path.dirname(_os.path.abspath(__file__)),
+                        "logs", "shadow_state.json"
+                    )
+                    self.shadow_trader.dump_state(_shadow_path)
+            except Exception as _sle:
+                logger.debug(f"[SHADOW] Update failed: {_sle}")
 
             # ✨ NEW: Update positions with OHLC data for VTM
             try:
@@ -3495,6 +3526,58 @@ class TradingBot:
             # Return empty dataframe as fallback
             return pd.DataFrame()
 
+    def _update_funding_rate(self):
+        """
+        T3.5: Fetch BTC perpetual funding rate every 8 hours and compute Z-score.
+
+        Z-score approach (vs static threshold): A fixed threshold like 0.03% fails
+        during sustained bull runs where funding stays elevated for weeks.
+        Z-score adapts to the current 14-day baseline automatically.
+
+        Z ≥ +2.0 → market is over-leveraged long → MR shorts are high probability
+        Z ≤ -2.0 → market is over-leveraged short → MR longs are high probability
+        """
+        try:
+            from datetime import timezone as _tz
+            import numpy as _np_fr
+
+            # Only refresh every 8 hours
+            _now = datetime.now(_tz.utc)
+            if (
+                self._last_funding_fetch is not None
+                and (_now - self._last_funding_fetch).total_seconds() < 8 * 3600
+            ):
+                return
+
+            futures_client = self.data_manager.get_futures_client()
+            if not futures_client:
+                logger.debug("[FUNDING] No futures client available, skipping")
+                return
+
+            # Fetch last 42 funding rate records (~14 days at 8h intervals)
+            rates = futures_client.futures_funding_rate(symbol="BTCUSDT", limit=42)
+            rate_values = [float(r["fundingRate"]) for r in rates]
+
+            self.current_funding_rate = rate_values[-1] if rate_values else 0.0
+            self.funding_rate_zscore = 0.0
+
+            if len(rate_values) >= 10:
+                mean = _np_fr.mean(rate_values)
+                std = _np_fr.std(rate_values)
+                if std > 0:
+                    self.funding_rate_zscore = (self.current_funding_rate - mean) / std
+
+            self._last_funding_fetch = _now
+            logger.info(
+                f"[FUNDING] Rate: {self.current_funding_rate:.4%}, "
+                f"Z-score: {self.funding_rate_zscore:+.2f} "
+                f"({'EXTREME' if abs(self.funding_rate_zscore) >= 2.0 else 'normal'})"
+            )
+
+        except Exception as e:
+            logger.debug(f"[FUNDING] Fetch failed: {e}")
+            self.funding_rate_zscore = 0.0
+
     def _update_asset_signal(self, asset_name: str):
         """
         Update signal for an asset (handles all aggregator modes)
@@ -3570,7 +3653,35 @@ class TradingBot:
                 hasattr(self, "_current_regime_data")
                 and asset_name in self._current_regime_data
             ):
-                mtf_regime = self._current_regime_data[asset_name]
+                mtf_regime = self._current_regime_data[asset_name].copy()
+
+            # T3.5: Inject BTC funding rate Z-score into governor_data
+            # signal_aggregator reads this to boost MR confidence at extremes.
+            if asset_name in ("BTC", "BTCUSDT"):
+                mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+
+            # T3.6: Inject DXY proxy (computed below) into governor_data
+            # Computed from EUR/USD 20-SMA vs current close. Zero API cost.
+            try:
+                _eurusd_assets = [a for a in self.config.get("assets", {})
+                                  if "EURUSD" in a.upper() or "EUR_USD" in a.upper()]
+                if _eurusd_assets:
+                    _eu_sym = self.config["assets"][_eurusd_assets[0]].get("symbol", "EURUSD")
+                    _eu_df = None
+                    try:
+                        _eu_df = self.data_manager.fetch_mt5_data(
+                            symbol=_eu_sym, timeframe="H1",
+                            start_date=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d"),
+                            end_date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                    except Exception:
+                        pass
+                    if _eu_df is not None and len(_eu_df) >= 20:
+                        _eu_sma = _eu_df["close"].iloc[-20:].mean()
+                        _eu_now = _eu_df["close"].iloc[-1]
+                        mtf_regime["dxy_falling"] = bool(_eu_now > _eu_sma)
+            except Exception:
+                pass  # DXY proxy is a bonus — never block execution
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 # HYBRID MODE: Use dynamic selector
@@ -3593,6 +3704,32 @@ class TradingBot:
                 else:
                     # Performance mode
                     signal, details = aggregator.get_aggregated_signal(df)
+            # T3.1: Shadow trade — open virtual position for every blocked signal
+            # so we can measure what gates are costing us in real P&L terms.
+            try:
+                if self.shadow_trader and signal == 0 and current_price > 0:
+                    _reasoning = details.get("reasoning", "")
+                    _raw_mr = details.get("mr_signal_raw", details.get("mr_signal", 0))
+                    _raw_tf = details.get("tf_signal_raw", details.get("tf_signal", 0))
+                    _raw_ema = details.get("ema_signal", 0)
+                    _intended = _raw_tf or _raw_ema or _raw_mr
+                    if _intended != 0 and _reasoning and "hold (no strategy" not in _reasoning:
+                        _side = "long" if _intended > 0 else "short"
+                        _src = ("TF" if _raw_tf != 0 else
+                                "EMA" if _raw_ema != 0 else "MR")
+                        _atr = details.get("atr_fast") or details.get("atr")
+                        self.shadow_trader.open_position(
+                            asset=asset_name,
+                            side=_side,
+                            entry_price=current_price,
+                            strategy_source=_src,
+                            gate_blocked_by=_reasoning[:60],
+                            signal_details=details,
+                            atr=float(_atr) if _atr else None,
+                        )
+            except Exception as _se:
+                logger.debug(f"[SHADOW] Open failed: {_se}")
+
             # Log signal to database (if enabled)
             if self.db_manager:
                 signal_id, is_new = self.db_manager.insert_signal_smart(
@@ -3857,6 +3994,10 @@ class TradingBot:
         try:
             # Initialize exchanges and handlers
             self.initialize_exchanges()
+
+            # T3.1: Initialise shadow trading engine after exchanges are ready
+            self.shadow_trader = ShadowTradingEngine(max_positions=50, max_closed=5000)
+            logger.info("[SHADOW] Shadow trading engine started")
 
             # ✅ FIXED: Initialize selectors AFTER exchanges are connected
             self.dynamic_selector = DynamicPresetSelector(
