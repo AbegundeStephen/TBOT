@@ -1480,15 +1480,30 @@ class MT5ExecutionHandler:
             logger.info(f"[SYNC] MT5: {mt5_long}L / {mt5_short}S | Portfolio: {portfolio_long}L / {portfolio_short}S")
 
             # ================================================================
-            # SCENARIO 1: IMPORT
+            # SCENARIO 1: IMPORT — handles both full (portfolio=0) and
+            # partial (portfolio < mt5_count) mismatches.
+            # Any MT5 position whose ticket is not already tracked is adopted.
             # ================================================================
-            if mt5_count > 0 and portfolio_count == 0:
-                import_enabled = bool(self.config.get("portfolio", {}).get("import_existing_positions", False))
+            import_enabled = bool(self.config.get("portfolio", {}).get("import_existing_positions", True))
 
-                if import_enabled:
-                    logger.info(f"[SYNC] Importing {mt5_count} positions for {asset}...")
+            if mt5_count > 0 and import_enabled:
+                # Build set of tickets already tracked in portfolio
+                tracked_tickets = {
+                    pos.mt5_ticket
+                    for pos in portfolio_positions
+                    if pos.mt5_ticket is not None
+                }
 
-                    # Fetch OHLC
+                orphaned = [p for p in mt5_positions if p.ticket not in tracked_tickets]
+
+                if orphaned:
+                    logger.info(
+                        f"[SYNC] Found {len(orphaned)} untracked MT5 position(s) for {asset} "
+                        f"(tracked tickets: {tracked_tickets}) — importing..."
+                    )
+
+                    # Fetch OHLC once for VTM initialisation
+                    import math
                     ohlc_data = None
                     try:
                         end_time = datetime.now(timezone.utc)
@@ -1507,15 +1522,13 @@ class MT5ExecutionHandler:
                     except Exception as e:
                         logger.error(f"[SYNC] OHLC fetch failed: {e}")
 
+                    lot_precision = 0
+                    if symbol_info.volume_step > 0:
+                        lot_precision = max(0, int(round(-math.log10(symbol_info.volume_step))))
+
                     imported_count = 0
-                    for pos in mt5_positions:
+                    for pos in orphaned:
                         pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                        
-                        # ✅ Get lot precision from volume step
-                        import math
-                        lot_precision = 0
-                        if symbol_info.volume_step > 0:
-                            lot_precision = max(0, int(round(-math.log10(symbol_info.volume_step))))
 
                         success = self.portfolio_manager.add_position(
                             asset=asset,
@@ -1529,17 +1542,29 @@ class MT5ExecutionHandler:
                             ohlc_data=ohlc_data,
                             use_dynamic_management=True,
                             entry_time=datetime.fromtimestamp(pos.time),
-                            signal_details={"imported": True},
+                            signal_details={"imported": True, "ticket": pos.ticket},
                             min_lot=symbol_info.volume_min,
-                            lot_precision=lot_precision
+                            lot_precision=lot_precision,
                         )
-                        if success: imported_count += 1
+                        if success:
+                            imported_count += 1
+                            logger.info(
+                                f"[SYNC] ✅ Adopted {pos_type} ticket #{pos.ticket} "
+                                f"@ {pos.price_open} for {asset}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[SYNC] ⚠️ Failed to adopt ticket #{pos.ticket} for {asset}"
+                            )
 
-                    logger.info(f"[SYNC] Imported {imported_count}/{mt5_count} positions for {asset}")
-                    return True
+                    logger.info(
+                        f"[SYNC] Imported {imported_count}/{len(orphaned)} orphaned position(s) for {asset}"
+                    )
+                else:
+                    logger.info(f"[SYNC] All MT5 positions for {asset} are already tracked — no import needed")
 
             # ================================================================
-            # SCENARIO 2: CLEANUP
+            # SCENARIO 2: CLEANUP — portfolio tracks positions MT5 no longer has
             # ================================================================
             if portfolio_count > 0 and mt5_count == 0:
                 logger.warning(f"[SYNC] Portfolio mismatch for {asset}: Portfolio={portfolio_count}, MT5=0")
@@ -1555,7 +1580,7 @@ class MT5ExecutionHandler:
             return False
 
             # ================================================================
-            # SCENARIO 1: MT5 has positions, portfolio is empty → IMPORT
+            # Dead code below — kept as reference only
             # ================================================================
             if mt5_count > 0 and portfolio_count == 0:
                 import_enabled = bool(
