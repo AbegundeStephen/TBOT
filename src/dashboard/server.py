@@ -771,6 +771,230 @@ def get_config_overview():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# CONTROL CENTER — editable config + restart
+# ============================================================================
+
+# The exact config paths the Control Center is allowed to read & write.
+# format: (dot_path, label, type, extra)
+#   type: "bool" | "float" | "int" | "pct"  (pct = float stored as 0–1, shown as %)
+#   extra: dict with optional min/max/step
+_EDITABLE_FIELDS = [
+    # ── Global: Aggregator ───────────────────────────────────────────────────
+    ("aggregator.use_macro_governor",     "Governor (Macro Filter)",      "bool",  {}),
+    ("aggregator.use_gatekeeper",         "Gatekeeper (Smart Routing)",   "bool",  {}),
+    ("aggregator.score_threshold",        "Signal Score Threshold",       "float", {"min": 0.1, "max": 1.0, "step": 0.05}),
+    ("aggregator.min_confidence",         "Min Strategy Confidence",      "float", {"min": 0.1, "max": 1.0, "step": 0.05}),
+    # ── Global: Circuit Breaker ──────────────────────────────────────────────
+    ("circuit_breaker.max_daily_loss_pct",  "Max Daily Loss",  "pct", {"min": 0.005, "max": 0.15, "step": 0.005}),
+    ("circuit_breaker.max_drawdown_pct",    "Max Drawdown",    "pct", {"min": 0.05,  "max": 0.40, "step": 0.01}),
+    # ── Global: Portfolio ────────────────────────────────────────────────────
+    ("portfolio.target_risk_per_trade",   "Risk Per Trade",   "pct", {"min": 0.005, "max": 0.05, "step": 0.005}),
+    ("portfolio.max_portfolio_exposure",  "Max Portfolio Exposure (x)", "float", {"min": 1.0, "max": 10.0, "step": 0.5}),
+]
+
+_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"]
+_ASSET_FIELDS = [
+    # (sub_path,                            label,                           type,    extra)
+    ("enabled",                             "Enabled",                       "bool",  {}),
+    ("allow_shorts",                        "Allow Shorts",                  "bool",  {}),
+    ("leverage",                            "Leverage",                      "int",   {"min": 1, "max": 200, "step": 1}),
+    ("weight",                              "Asset Weight",                  "float", {"min": 0.0, "max": 2.0, "step": 0.1}),
+    ("strategies.mean_reversion.enabled",   "Mean Reversion: Enabled",       "bool",  {}),
+    ("strategies.mean_reversion.weight",    "Mean Reversion: Weight",        "float", {"min": 0.0, "max": 2.0, "step": 0.1}),
+    ("strategies.trend_following.enabled",  "Trend Following: Enabled",      "bool",  {}),
+    ("strategies.trend_following.weight",   "Trend Following: Weight",       "float", {"min": 0.0, "max": 2.0, "step": 0.1}),
+    ("strategies.exponential_moving_averages.enabled", "EMA Crossover: Enabled", "bool", {}),
+    ("strategies.exponential_moving_averages.weight",  "EMA Crossover: Weight",  "float", {"min": 0.0, "max": 2.0, "step": 0.1}),
+    ("risk.atr_multiplier",                 "ATR Multiplier (SL distance)",  "float", {"min": 0.5, "max": 5.0, "step": 0.1}),
+    ("risk.use_ema_structure",              "EMA Structure (MA Shield/TP)",  "bool",  {}),
+    ("risk.use_structure_targets",          "Pivot Structure Targets",       "bool",  {}),
+    ("risk.early_scale_enabled",            "Early Scale Exit",              "bool",  {}),
+    ("risk.early_scale_threshold",          "Early Scale Threshold",         "pct",   {"min": 0.005, "max": 0.10, "step": 0.005}),
+    ("risk.breakeven_after_bars",           "Break-Even After (bars)",       "int",   {"min": 1, "max": 48, "step": 1}),
+    ("risk.runner_trail_atr_multiplier",    "Runner Trail ATR Multiplier",   "float", {"min": 0.5, "max": 5.0, "step": 0.1}),
+    ("risk.time_stop_trend",                "Time Stop — Trend (bars)",      "int",   {"min": 12, "max": 240, "step": 4}),
+    ("risk.time_stop_reversion",            "Time Stop — Reversion (bars)",  "int",   {"min": 4,  "max": 72,  "step": 2}),
+]
+
+def _cfg_get(cfg, dot_path):
+    """Walk a dot-separated path into a nested dict, return value or None."""
+    keys = dot_path.split(".")
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+def _cfg_set(cfg, dot_path, value):
+    """Walk a dot-separated path and set the leaf value (creates dicts as needed)."""
+    keys = dot_path.split(".")
+    cur = cfg
+    for k in keys[:-1]:
+        cur = cur.setdefault(k, {})
+    cur[keys[-1]] = value
+
+
+@app.route("/api/config/editable")
+def get_editable_config():
+    """Returns the subset of config values the Control Center can edit."""
+    try:
+        import json as _json
+        cfg_path = os.path.join(project_root, "config", "config.json")
+        if not os.path.exists(cfg_path):
+            return jsonify({"error": "config.json not found"}), 404
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+
+        result = {"global": {}, "assets": {}}
+
+        # Global fields
+        for dot_path, label, ftype, extra in _EDITABLE_FIELDS:
+            section = dot_path.split(".")[0]  # "aggregator", "circuit_breaker", "portfolio"
+            val = _cfg_get(cfg, dot_path)
+            result["global"].setdefault(section, {})[dot_path] = {
+                "label": label, "type": ftype, "value": val, **extra
+            }
+
+        # Per-asset fields
+        assets_root = cfg.get("assets", cfg)  # handle both nested and flat layouts
+        for asset in _ASSETS:
+            asset_cfg = assets_root.get(asset, {})
+            result["assets"][asset] = {}
+            for sub_path, label, ftype, extra in _ASSET_FIELDS:
+                val = _cfg_get(asset_cfg, sub_path)
+                full_path = f"assets.{asset}.{sub_path}"
+                result["assets"][asset][full_path] = {
+                    "label": label, "type": ftype, "value": val, **extra
+                }
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Editable config error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/config/save", methods=["POST"])
+def save_config():
+    """
+    Receives {updates: {dot_path: new_value, ...}}, validates each path is
+    in the allowed set, deep-merges into config.json (with backup), then
+    writes the updated file.
+    """
+    try:
+        import json as _json, shutil, copy
+
+        data = request.get_json(force=True, silent=True) or {}
+        updates = data.get("updates", {})
+        if not updates:
+            return jsonify({"error": "No updates provided"}), 400
+
+        # Build whitelist of allowed dot paths
+        allowed = set()
+        for dot_path, *_ in _EDITABLE_FIELDS:
+            allowed.add(dot_path)
+        for asset in _ASSETS:
+            for sub_path, *_ in _ASSET_FIELDS:
+                allowed.add(f"assets.{asset}.{sub_path}")
+
+        rejected = [p for p in updates if p not in allowed]
+        if rejected:
+            return jsonify({"error": f"Forbidden paths: {rejected}"}), 403
+
+        cfg_path = os.path.join(project_root, "config", "config.json")
+        if not os.path.exists(cfg_path):
+            return jsonify({"error": "config.json not found"}), 404
+
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+
+        # Backup before writing
+        backup_path = cfg_path.replace(".json", ".backup.json")
+        shutil.copy2(cfg_path, backup_path)
+
+        # Coerce types and apply updates
+        # Build type lookup
+        type_map = {}
+        for dot_path, _, ftype, _ in _EDITABLE_FIELDS:
+            type_map[dot_path] = ftype
+        for asset in _ASSETS:
+            for sub_path, _, ftype, _ in _ASSET_FIELDS:
+                type_map[f"assets.{asset}.{sub_path}"] = ftype
+
+        assets_root_key = "assets" if "assets" in cfg else None
+
+        for dot_path, raw_val in updates.items():
+            ftype = type_map.get(dot_path, "float")
+            try:
+                if ftype == "bool":
+                    val = bool(raw_val)
+                elif ftype == "int":
+                    val = int(raw_val)
+                elif ftype in ("float", "pct"):
+                    val = float(raw_val)
+                else:
+                    val = raw_val
+            except (TypeError, ValueError):
+                return jsonify({"error": f"Invalid value for {dot_path}: {raw_val}"}), 400
+
+            # For asset paths, handle both cfg["assets"]["BTC"]... and cfg["BTC"]...
+            if dot_path.startswith("assets.") and assets_root_key:
+                _cfg_set(cfg, dot_path, val)
+            elif dot_path.startswith("assets.") and not assets_root_key:
+                # Flat layout: strip "assets." prefix
+                _cfg_set(cfg, dot_path[len("assets."):], val)
+            else:
+                _cfg_set(cfg, dot_path, val)
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            _json.dump(cfg, f, indent=2)
+
+        logger.info(f"[CONFIG] Saved {len(updates)} changes via Control Center")
+        return jsonify({"status": "saved", "changes": len(updates), "backup": backup_path})
+
+    except Exception as e:
+        logger.error(f"Config save error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bot/restart", methods=["POST"])
+def request_bot_restart():
+    """Writes logs/restart.flag — main.py picks it up on next loop iteration."""
+    try:
+        flag_path = os.path.join(project_root, "logs", "restart.flag")
+        os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+        with open(flag_path, "w") as f:
+            f.write(datetime.utcnow().isoformat())
+        logger.info("[CONTROL] Bot restart flag written")
+        return jsonify({"status": "restart_requested", "flag": flag_path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bot/pid")
+def bot_pid():
+    """Returns bot PID and whether the process is alive."""
+    try:
+        import psutil
+        pid_path = os.path.join(project_root, "logs", "bot.pid")
+        if not os.path.exists(pid_path):
+            return jsonify({"running": False, "pid": None})
+        with open(pid_path) as f:
+            pid = int(f.read().strip())
+        running = psutil.pid_exists(pid)
+        return jsonify({"running": running, "pid": pid})
+    except ImportError:
+        # psutil not available — just report the PID file exists
+        pid_path = os.path.join(project_root, "logs", "bot.pid")
+        if os.path.exists(pid_path):
+            with open(pid_path) as f:
+                return jsonify({"running": "unknown", "pid": int(f.read().strip())})
+        return jsonify({"running": False, "pid": None})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/health")
 def health_check():
     """Health check endpoint"""

@@ -213,8 +213,9 @@ class GlobalErrorHandler:
             if severity == ErrorSeverity.CRITICAL:
                 send_alert(f"CRITICAL ERROR in {component}: {str(exception)[:100]}")
 
-            # Log to database if available
-            if self.db_manager:
+            # Log to database if available and log_system_events is enabled
+            _log_sys_events = self.config.get("database", {}).get("log_system_events", True)
+            if self.db_manager and _log_sys_events:
                 self._log_to_database(error_ctx)
 
             # Send notification if needed
