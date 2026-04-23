@@ -788,13 +788,44 @@ def get_config_overview():
             if asset in safe:
                 assets_cfg[asset] = safe[asset]
 
+        # Economic calendar: config.json may not have this key — read the
+        # dedicated file instead and synthesize the display object.
+        eco_cfg = safe.get("economic_calendar", {})
+        if not eco_cfg.get("events"):
+            cal_path = os.path.join(project_root, "config", "economic_calendar.json")
+            if os.path.exists(cal_path):
+                try:
+                    with open(cal_path, "r", encoding="utf-8") as _cf:
+                        cal_data = _json.load(_cf)
+                    from datetime import datetime as _dt, timezone as _tz
+                    _now = _dt.now(_tz.utc)
+                    # Include only future events (or within the last 24h), sorted soonest first
+                    from datetime import timedelta as _td
+                    upcoming = [
+                        e for e in cal_data.get("events", [])
+                        if _dt.fromisoformat(e["datetime"].replace("Z", "+00:00")) >= _now - _td(hours=24)
+                    ]
+                    upcoming.sort(key=lambda e: e["datetime"])
+                    eco_cfg = {
+                        "enabled": True,
+                        "source": "config/economic_calendar.json",
+                        "total_events": len(cal_data.get("events", [])),
+                        "upcoming_count": len(upcoming),
+                        "block_hours_before": 2,
+                        "events": upcoming[:15],   # show next 15
+                    }
+                except Exception as _e:
+                    eco_cfg = {"enabled": False, "error": str(_e), "events": []}
+            else:
+                eco_cfg = {"enabled": False, "events": [], "note": "economic_calendar.json not found"}
+
         result = {
             "trading_mode": safe.get("trading_mode", safe.get("mode", "unknown")),
             "assets": assets_cfg,
             "risk": safe.get("risk", {}),
             "strategies": safe.get("strategies", {}),
             "aggregator": safe.get("aggregator", safe.get("signal_aggregator", {})),
-            "economic_calendar": safe.get("economic_calendar", {}),
+            "economic_calendar": eco_cfg,
             "session_blocks": safe.get("session_blocks", {}),
             "circuit_breaker": safe.get("circuit_breaker", {}),
         }
@@ -814,16 +845,18 @@ def get_config_overview():
 #   extra: dict with optional min/max/step
 _EDITABLE_FIELDS = [
     # ── Global: Aggregator ───────────────────────────────────────────────────
-    ("aggregator.use_macro_governor",     "Governor (Macro Filter)",      "bool",  {}),
-    ("aggregator.use_gatekeeper",         "Gatekeeper (Smart Routing)",   "bool",  {}),
-    ("aggregator.score_threshold",        "Signal Score Threshold",       "float", {"min": 0.1, "max": 1.0, "step": 0.05}),
-    ("aggregator.min_confidence",         "Min Strategy Confidence",      "float", {"min": 0.1, "max": 1.0, "step": 0.05}),
+    # Paths match config.json key "aggregator_settings.*"
+    ("aggregator_settings.use_macro_governor",     "Governor (Macro Filter)",        "bool",  {}),
+    ("aggregator_settings.use_gatekeeper",         "Gatekeeper (Smart Routing)",     "bool",  {}),
+    ("aggregator_settings.trend_aligned_threshold","Trend Score Threshold",          "float", {"min": 1.0, "max": 6.0, "step": 0.25}),
+    ("aggregator_settings.counter_trend_threshold","Counter-Trend Score Threshold",  "float", {"min": 1.0, "max": 6.0, "step": 0.25}),
     # ── Global: Circuit Breaker ──────────────────────────────────────────────
-    ("circuit_breaker.max_daily_loss_pct",  "Max Daily Loss",  "pct", {"min": 0.005, "max": 0.15, "step": 0.005}),
-    ("circuit_breaker.max_drawdown_pct",    "Max Drawdown",    "pct", {"min": 0.05,  "max": 0.40, "step": 0.01}),
+    # max_daily_loss_pct lives under risk_management; max_drawdown under portfolio
+    ("risk_management.max_daily_loss_pct",  "Max Daily Loss",  "pct", {"min": 0.005, "max": 0.15, "step": 0.005}),
+    ("portfolio.max_drawdown",              "Max Drawdown",    "pct", {"min": 0.05,  "max": 0.40, "step": 0.01}),
     # ── Global: Portfolio ────────────────────────────────────────────────────
-    ("portfolio.target_risk_per_trade",   "Risk Per Trade",   "pct", {"min": 0.005, "max": 0.05, "step": 0.005}),
-    ("portfolio.max_portfolio_exposure",  "Max Portfolio Exposure (x)", "float", {"min": 1.0, "max": 10.0, "step": 0.5}),
+    ("portfolio.target_risk_per_trade",   "Risk Per Trade",            "pct",   {"min": 0.005, "max": 0.05, "step": 0.005}),
+    ("portfolio.max_portfolio_exposure",  "Max Portfolio Exposure (x)","float", {"min": 1.0,   "max": 10.0, "step": 0.5}),
 ]
 
 _ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"]

@@ -1654,20 +1654,81 @@ async function loadConfig() {
         // Economic calendar
         if (d.economic_calendar) {
             const cal = d.economic_calendar;
-            h += '<div class="config-section"><div class="config-section-title">📅 Economic Calendar</div>';
-            if (cal.enabled != null)
-                h += `<div style="font-size:11px;color:var(--muted2);margin-bottom:8px;">Blocking: <strong style="color:${cal.enabled?'var(--green)':'var(--red)'};">${cal.enabled?'ENABLED':'DISABLED'}</strong></div>`;
-            if (cal.block_hours_before || cal.block_hours_after)
-                h += `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Window: ±${cal.block_hours_before||0}h before / ±${cal.block_hours_after||0}h after</div>`;
+            const now = Date.now();
+            const statusColor = cal.enabled ? 'var(--green)' : 'var(--red2)';
+            const statusText  = cal.enabled ? 'ACTIVE' : 'DISABLED';
+            h += `<div class="config-section">
+                <div class="config-section-title">📅 Economic Calendar
+                    <span style="margin-left:8px;padding:2px 7px;border-radius:20px;font-size:9px;font-weight:700;
+                        background:${cal.enabled?'rgba(16,185,129,.15)':'rgba(239,68,68,.15)'};
+                        color:${statusColor};border:1px solid ${statusColor}20;">${statusText}</span>
+                </div>`;
+            if (cal.enabled && cal.block_hours_before)
+                h += `<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">
+                    Blocks ${cal.block_hours_before}h before each event &nbsp;·&nbsp;
+                    ${cal.upcoming_count != null ? cal.upcoming_count + ' upcoming' : ''}
+                </div>`;
+            if (cal.error)
+                h += `<div style="font-size:11px;color:var(--red2);margin-bottom:8px;">⚠ ${esc(cal.error)}</div>`;
+            if (cal.note)
+                h += `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">${esc(cal.note)}</div>`;
+
             if (Array.isArray(cal.events) && cal.events.length) {
-                h += '<table class="data-table" style="font-size:11px;"><thead><tr><th>Event</th><th>Impact</th></tr></thead><tbody>';
-                cal.events.slice(0, 10).forEach(ev => {
-                    const name = typeof ev === 'string' ? ev : (ev.name || JSON.stringify(ev));
-                    const imp  = typeof ev === 'object' ? (ev.impact || ev.tier || '') : '';
-                    const ic   = imp.toUpperCase().includes('HIGH') ? 'var(--red2)' : 'var(--yellow2)';
-                    h += `<tr><td>${esc(name)}</td><td style="color:${ic};">${esc(imp)}</td></tr>`;
+                h += '<div style="display:flex;flex-direction:column;gap:5px;">';
+                cal.events.forEach((ev, i) => {
+                    const name    = typeof ev === 'string' ? ev : (ev.event || ev.name || '?');
+                    const imp     = typeof ev === 'object' ? (ev.impact || ev.tier || 'HIGH') : 'HIGH';
+                    const cur     = typeof ev === 'object' ? (ev.currency || '') : '';
+                    const dtStr   = typeof ev === 'object' ? ev.datetime : '';
+                    const bhb     = typeof ev === 'object' ? (ev.block_hours_before || cal.block_hours_before || 2) : 2;
+
+                    let timeLabel = '', blockActive = false, blockSoon = false;
+                    if (dtStr) {
+                        const evMs  = new Date(dtStr).getTime();
+                        const diffMs = evMs - now;
+                        const diffH  = diffMs / 3600000;
+                        if (diffMs < 0) {
+                            timeLabel = 'passed';
+                        } else if (diffH < 1) {
+                            const mins = Math.round(diffMs / 60000);
+                            timeLabel = `in ${mins}m`;
+                            blockSoon = true;
+                        } else if (diffH < 24) {
+                            timeLabel = `in ${diffH.toFixed(1)}h`;
+                            if (diffH <= bhb) blockActive = true;
+                        } else {
+                            const days = Math.floor(diffH / 24);
+                            const hrs  = Math.round(diffH % 24);
+                            timeLabel = days > 0 ? `${days}d ${hrs}h` : `${hrs}h`;
+                        }
+                    }
+
+                    const isHigh  = imp.toUpperCase().includes('HIGH');
+                    const impColor = isHigh ? 'var(--red2)' : 'var(--yellow2)';
+                    const rowBg   = blockActive || blockSoon
+                        ? 'background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.25);'
+                        : i === 0 ? 'background:rgba(59,130,246,.07);border-color:rgba(59,130,246,.2);' : '';
+                    const nextBadge = i === 0 ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(59,130,246,.2);color:#60a5fa;margin-left:5px;">NEXT</span>' : '';
+                    const blockBadge = (blockActive||blockSoon) ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.25);color:#f87171;margin-left:4px;">BLOCKING</span>' : '';
+
+                    const dateStr = dtStr ? new Date(dtStr).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+                    const timeStr = dtStr ? new Date(dtStr).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',timeZoneName:'short'}) : '';
+
+                    h += `<div style="padding:8px 10px;border-radius:7px;border:1px solid var(--border);${rowBg}">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+                            <span style="font-size:12px;font-weight:600;">${esc(name)}${nextBadge}${blockBadge}</span>
+                            <span style="font-size:10px;color:${impColor};font-weight:700;">${esc(imp)}</span>
+                        </div>
+                        <div style="display:flex;gap:12px;font-size:10px;color:var(--muted);">
+                            ${cur ? `<span style="color:var(--accent2);font-weight:600;">${esc(cur)}</span>` : ''}
+                            <span>${dateStr} ${timeStr}</span>
+                            <span style="margin-left:auto;font-weight:600;color:${blockActive||blockSoon?'var(--red2)':'var(--muted2)'};">${timeLabel}</span>
+                        </div>
+                    </div>`;
                 });
-                h += '</tbody></table>';
+                h += '</div>';
+            } else if (cal.enabled) {
+                h += `<div style="font-size:12px;color:var(--muted);padding:12px 0;">No upcoming events loaded.</div>`;
             }
             h += '</div>';
         }
@@ -2187,14 +2248,21 @@ let ccCurAsset = 'BTC';  // which asset tab is shown
 
 // Section → emoji mapping
 const CC_SECTIONS = {
-    aggregator:       { icon: '📡', label: 'Signal Aggregator' },
-    circuit_breaker:  { icon: '🔴', label: 'Circuit Breaker' },
-    portfolio:        { icon: '💼', label: 'Portfolio' },
+    aggregator_settings: { icon: '📡', label: 'Signal Aggregator' },
+    risk_management:     { icon: '🔴', label: 'Circuit Breaker / Risk' },
+    portfolio:           { icon: '💼', label: 'Portfolio' },
 };
 const CC_ASSETS = ['BTC', 'GOLD', 'EURUSD', 'EURJPY', 'USTEC'];
 
-async function loadControlCenter() {
-    if (ccSchema) { renderCC(); return; }
+async function loadControlCenter(forceRefresh = false) {
+    // Always re-fetch if there are no unsaved changes, or if explicitly forced.
+    // This ensures schema stays in sync with the server after code changes.
+    if (ccSchema && !forceRefresh && Object.keys(ccDirty).length > 0) {
+        renderCC();
+        return;
+    }
+    document.getElementById('cc-content').innerHTML =
+        '<div class="spinner-wrap"><div class="spinner"></div></div>';
     try {
         const r = await fetch(API + '/api/config/editable');
         ccSchema = await r.json();
@@ -2229,7 +2297,7 @@ function renderCC() {
 
     // ── Global sections ──────────────────────────────────────────────
     const globalData = ccSchema.global || {};
-    const sectionOrder = ['aggregator', 'circuit_breaker', 'portfolio'];
+    const sectionOrder = ['aggregator_settings', 'risk_management', 'portfolio'];
     sectionOrder.forEach(sec => {
         const fields = globalData[sec];
         if (!fields) return;
@@ -2285,7 +2353,7 @@ function ccFieldHtml(dotPath, field) {
                 <span class="cc-label ${isDirty?'dirty':''}">${field.label}</span>
                 <button class="cc-toggle ${on?'on':''} ${isDirty?'dirty':''}"
                     id="cc-tog-${safePath}"
-                    onclick="ccToggle('${dotPath}', '${safePath}', ${field.type})"
+                    onclick="ccToggle('${dotPath}', '${safePath}')"
                     title="${on?'Enabled — click to disable':'Disabled — click to enable'}">
                 </button>
             </div>
@@ -2313,7 +2381,7 @@ function ccFieldHtml(dotPath, field) {
     </div>`;
 }
 
-function ccToggle(dotPath, safePath, _type) {
+function ccToggle(dotPath, safePath) {
     const btn = document.getElementById(`cc-tog-${safePath}`);
     if (!btn) return;
     const isOn = btn.classList.toggle('on');
