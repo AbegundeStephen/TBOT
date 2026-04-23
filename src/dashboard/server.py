@@ -6,6 +6,7 @@ Serves the real-time dashboard and provides API endpoints
 
 from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
+import json
 import os
 import sys
 import pandas as pd
@@ -686,6 +687,38 @@ def get_logs():
 
     except Exception as e:
         logger.error(f"Error reading logs: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/audit")
+def get_audit_events():
+    """Parse trade_audit.log and return structured event objects (newest first)"""
+    try:
+        log_file = os.path.join(project_root, "logs", "trade_audit.log")
+        if not os.path.exists(log_file):
+            return jsonify({"events": [], "total": 0})
+
+        limit = min(int(request.args.get("limit", 500)), 2000)
+
+        events = []
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        for line in lines:
+            if "[TRADE_EVENT]" not in line:
+                continue
+            try:
+                ev = json.loads(line.split("[TRADE_EVENT]", 1)[1].strip())
+                events.append(ev)
+            except Exception:
+                continue
+
+        # Newest first, capped at limit
+        events = events[-limit:]
+        events.reverse()
+        return jsonify({"events": events, "total": len(events)})
+    except Exception as e:
+        logger.error(f"Error reading audit: {e}")
         return jsonify({"error": str(e)}), 500
 
 
