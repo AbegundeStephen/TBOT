@@ -313,6 +313,9 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("presets", self.cmd_presets))
         self.application.add_handler(CommandHandler("signals", self.cmd_signals))
         self.application.add_handler(CommandHandler("vtm", self.cmd_VTM_status))
+        self.application.add_handler(CommandHandler("vtm_status", self.cmd_vtm_status_detail))
+        self.application.add_handler(CommandHandler("set_sl", self.cmd_set_sl))
+        self.application.add_handler(CommandHandler("set_tp", self.cmd_set_tp))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
         self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
@@ -926,6 +929,188 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"VTM status command error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {str(e)}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T3.2 — VTM Manual Override Commands
+    # /vtm_status  — rich per-position breakdown from VTM.get_override_status()
+    # /set_sl <asset> <price> — move stop loss on a live position
+    # /set_tp <asset> <price> [tier] — move take profit on a live position
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def cmd_vtm_status_detail(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /vtm_status — detailed VTM breakdown for all open positions.
+        Shows remaining TPs, bar count, runner state, and override hints.
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            positions = self.trading_bot.portfolio_manager.positions
+            if not positions:
+                await update.message.reply_text("📊 No open positions")
+                return
+
+            lines = ["🎯 <b>VTM OVERRIDE STATUS</b>\n"]
+            for pos_id, position in positions.items():
+                if not position.trade_manager:
+                    lines.append(f"• <b>{position.asset}</b>: static management (no VTM)\n")
+                    continue
+
+                s = position.trade_manager.get_override_status()
+                side_emoji = "🟢" if s["side"] == "LONG" else "🔴"
+                pnl_sign = "+" if s["pnl_pct"] >= 0 else ""
+                tps_str = " → ".join(f"{tp:.5g}" for tp in s["remaining_tps"]) or "none"
+                runner_str = "✅ active" if s["runner_active"] else "—"
+
+                lines.append(
+                    f"{side_emoji} <b>{s['asset']} {s['side']}</b>  |  "
+                    f"type={s['trade_type']}\n"
+                    f"  Entry   : {s['entry_price']:.5g}\n"
+                    f"  Current : {s['current_price']:.5g}\n"
+                    f"  SL      : {s['stop_loss']:.5g}  (init: {s['initial_sl']:.5g})\n"
+                    f"  TPs left: {tps_str}  (hit: {s['tps_hit']})\n"
+                    f"  P&L     : {pnl_sign}{s['pnl_pct']:.3f}%  |  "
+                    f"Size rem: {s['remaining_pct']:.0f}%\n"
+                    f"  Bars    : {s['bars_in_trade']}  |  Runner: {runner_str}\n\n"
+                    f"  💡 <i>/set_sl {s['asset']} &lt;price&gt;</i>\n"
+                    f"  💡 <i>/set_tp {s['asset']} &lt;price&gt; [tier]</i>\n"
+                )
+
+            await update.message.reply_text("".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"[TG] /vtm_status error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_set_sl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /set_sl <asset> <new_stop_loss_price>
+
+        Example: /set_sl BTC 93500
+        Moves the stop loss on the BTC position to 93500.
+        Validates direction (long SL must be below entry, short SL above).
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            # Parse args
+            args = context.args
+            if not args or len(args) < 2:
+                await update.message.reply_text(
+                    "ℹ️ Usage: /set_sl &lt;asset&gt; &lt;price&gt;\n"
+                    "Example: /set_sl BTC 93500",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_arg = args[0].upper()
+            try:
+                new_sl = float(args[1].replace(",", ""))
+            except ValueError:
+                await update.message.reply_text(f"❌ Invalid price: {args[1]}")
+                return
+
+            # Find matching position
+            positions = self.trading_bot.portfolio_manager.positions
+            matched = [
+                p for p in positions.values()
+                if p.asset.upper() == asset_arg and p.trade_manager
+            ]
+
+            if not matched:
+                await update.message.reply_text(
+                    f"⚠️ No active VTM position found for <b>{asset_arg}</b>.\n"
+                    f"Use /vtm_status to see open positions.",
+                    parse_mode="HTML",
+                )
+                return
+
+            position = matched[0]
+            result = position.trade_manager.override_stop_loss(new_sl)
+
+            # Sync portfolio_manager's cached stop loss so it stays consistent
+            if "✅" in result:
+                position.stop_loss = new_sl
+
+            await update.message.reply_text(
+                f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
+            )
+
+        except Exception as e:
+            logger.error(f"[TG] /set_sl error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_set_tp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /set_tp <asset> <new_tp_price> [tier_index]
+
+        Examples:
+          /set_tp BTC 98000        — update the nearest unfilled TP to 98000
+          /set_tp BTC 99000 2      — update TP tier 2 (1-indexed) to 99000
+        Validates direction (long TP must be above entry, short below).
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            args = context.args
+            if not args or len(args) < 2:
+                await update.message.reply_text(
+                    "ℹ️ Usage: /set_tp &lt;asset&gt; &lt;price&gt; [tier]\n"
+                    "Example: /set_tp BTC 98000\n"
+                    "Example: /set_tp BTC 99000 2",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_arg = args[0].upper()
+            try:
+                new_tp = float(args[1].replace(",", ""))
+            except ValueError:
+                await update.message.reply_text(f"❌ Invalid price: {args[1]}")
+                return
+
+            tier = 0  # default: nearest unfilled TP
+            if len(args) >= 3:
+                try:
+                    tier = max(0, int(args[2]) - 1)  # convert 1-indexed to 0-indexed
+                except ValueError:
+                    await update.message.reply_text(f"❌ Invalid tier: {args[2]}")
+                    return
+
+            positions = self.trading_bot.portfolio_manager.positions
+            matched = [
+                p for p in positions.values()
+                if p.asset.upper() == asset_arg and p.trade_manager
+            ]
+
+            if not matched:
+                await update.message.reply_text(
+                    f"⚠️ No active VTM position found for <b>{asset_arg}</b>.\n"
+                    f"Use /vtm_status to see open positions.",
+                    parse_mode="HTML",
+                )
+                return
+
+            position = matched[0]
+            result = position.trade_manager.override_take_profit(new_tp, target_index=tier)
+
+            # Sync portfolio_manager's cached take profit (tier-0 = primary TP)
+            if "✅" in result and tier == 0:
+                position.take_profit = new_tp
+
+            await update.message.reply_text(
+                f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
+            )
+
+        except Exception as e:
+            logger.error(f"[TG] /set_tp error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /history command (Non-Blocking)"""

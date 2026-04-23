@@ -301,6 +301,29 @@ class HybridSignalValidator:
         if "BULL" in regime.upper(): pattern_threshold *= 0.90
         else: pattern_threshold *= 0.95
 
+        # T2.7: Session-conditioned confidence thresholds (data-driven, inverted
+        # from conventional wisdom — Asian session is NOT low quality for this bot).
+        # Simulation data:
+        #   TF Asian (00-08 UTC):    62% WR, +114% P&L → LOWER barrier (0.85x)
+        #   MR London (08-12 UTC):   48% WR,  -6.5% P&L → RAISE barrier (1.20x)
+        #   MR NY Close (17-21 UTC): 67% WR, +19.7% P&L → LOWER barrier (0.85x)
+        try:
+            current_hour_utc = datetime.utcnow().hour
+            strategy_lower = strategy.lower() if strategy else ""
+            if 0 <= current_hour_utc < 8:
+                # Asian: TF thrives — lower the barrier for all strategies
+                pattern_threshold *= 0.85
+            elif 8 <= current_hour_utc < 12:
+                # London open: MR specifically struggles here
+                if "mean_reversion" in strategy_lower or "reversion" in strategy_lower:
+                    pattern_threshold *= 1.20
+            elif 17 <= current_hour_utc < 21:
+                # NY Close: MR's best session
+                if "mean_reversion" in strategy_lower or "reversion" in strategy_lower:
+                    pattern_threshold *= 0.85
+        except Exception:
+            pass  # Never let session logic block execution
+
         self.current_pattern_threshold = np.clip(pattern_threshold, 0.40, 0.75)
 
     def _check_support_resistance_fixed(
@@ -327,26 +350,53 @@ class HybridSignalValidator:
             level_type = "resistance"
 
         if not relevant_levels:
+            # T2.4: ATR-based 20 EMA fallback distance.
+            # Old code used a fixed % threshold that failed across asset price scales:
+            # 0.3% on BTC = $200; on EUR/USD = 30 pips. ATR scales automatically.
             ema_20_series = df["close"].ewm(span=20, adjust=False).mean()
             current_ema = ema_20_series.iloc[-1]
             prev_ema = ema_20_series.iloc[-2]
 
+            try:
+                import talib as _ta
+                _atr = _ta.ATR(
+                    df['high'].values, df['low'].values, df['close'].values,
+                    timeperiod=14
+                )[-1]
+            except Exception:
+                _atr = current_price * 0.01  # 1% fallback if TA-Lib unavailable
+
+            # Max distance allowed: 0.25x ATR from the 20 EMA
+            max_dist = 0.25 * _atr
+
             if signal == 1 and current_price > current_ema and current_ema > prev_ema:
+                if abs(current_price - current_ema) <= max_dist:
+                    return {
+                        "near_level": True,
+                        "level_type": "dynamic_ema_support",
+                        "nearest_level": current_ema,
+                        "distance_pct": ((current_price - current_ema) / current_price) * 100,
+                        "reason": "riding_dynamic_20_ema"
+                    }
                 return {
-                    "near_level": True,
-                    "level_type": "dynamic_ema_support",
-                    "nearest_level": current_ema,
-                    "distance_pct": ((current_price - current_ema) / current_price) * 100,
-                    "reason": "riding_dynamic_20_ema"
+                    "near_level": False,
+                    "reason": "dynamic_ema_too_far",
+                    "all_levels": all_levels
                 }
 
             elif signal == -1 and current_price < current_ema and current_ema < prev_ema:
+                if abs(current_price - current_ema) <= max_dist:
+                    return {
+                        "near_level": True,
+                        "level_type": "dynamic_ema_resistance",
+                        "nearest_level": current_ema,
+                        "distance_pct": ((current_ema - current_price) / current_price) * 100,
+                        "reason": "riding_dynamic_20_ema"
+                    }
                 return {
-                    "near_level": True,
-                    "level_type": "dynamic_ema_resistance",
-                    "nearest_level": current_ema,
-                    "distance_pct": ((current_ema - current_price) / current_price) * 100,
-                    "reason": "riding_dynamic_20_ema"
+                    "near_level": False,
+                    "reason": "dynamic_ema_too_far",
+                    "all_levels": all_levels
                 }
 
             # FALLBACK: Check if at level (boundary detection)

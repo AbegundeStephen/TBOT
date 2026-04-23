@@ -308,7 +308,37 @@ class VeteranTradeManager:
 
         logger.info(f"[VTM] Dynamic ATR Multiplier set to {self.atr_multiplier}x ({self.trade_type})")
 
-        self.partial_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
+        # T2.5: ADX-conditioned take profit targets.
+        # Static targets fail in chop (ADX<20) where price never reaches them,
+        # causing the 43% profit capture rate. Scale down in chop, up in momentum.
+        base_targets = self.risk_config.get("partial_targets", [1.5, 3.0, 5.0])
+        try:
+            if len(close) >= 14:
+                import talib as _talib
+                adx_val = _talib.ADX(high, low, close, timeperiod=14)[-1]
+                if not np.isnan(adx_val):
+                    if adx_val < 20:
+                        self.partial_targets = [max(1.0, t * 0.7) for t in base_targets]
+                        logger.info(
+                            f"[VTM] 📉 Chop mode (ADX={adx_val:.0f}): "
+                            f"Targets scaled to {self.partial_targets}"
+                        )
+                    elif adx_val > 40:
+                        self.partial_targets = [t * 1.3 for t in base_targets]
+                        logger.info(
+                            f"[VTM] 📈 Momentum mode (ADX={adx_val:.0f}): "
+                            f"Targets scaled to {self.partial_targets}"
+                        )
+                    else:
+                        self.partial_targets = list(base_targets)
+                else:
+                    self.partial_targets = list(base_targets)
+            else:
+                self.partial_targets = list(base_targets)
+        except Exception as _e:
+            logger.debug(f"[VTM] ADX target scaling failed ({_e}), using base targets")
+            self.partial_targets = list(base_targets)
+
         self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
 
         self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
@@ -700,8 +730,14 @@ class VeteranTradeManager:
             current_profit = self.entry_price - current_price
 
         if current_profit > atr_value:
-            if self.current_stop_loss != self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock activated for {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
+            # T1.4 fix: only move SL TO entry if it hasn't already passed entry.
+            # Original code fired every tick with no side check, pulling a trailing
+            # stop BACKWARDS to entry even after it had advanced beyond it.
+            if self.side == "long" and self.current_stop_loss < self.entry_price:
+                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
+                self.current_stop_loss = self.entry_price
+            elif self.side == "short" and self.current_stop_loss > self.entry_price:
+                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
                 self.current_stop_loss = self.entry_price
 
         # --- STEP 2: Greed Mode Accelerator ---
@@ -758,11 +794,37 @@ class VeteranTradeManager:
                     # 3. Activate greed mode trailing stop
                     self.enable_trailing_stop()
 
-        # --- STEP 5: Time Decay Protection ---
-        # Objective: Prevent stale trades from turning into long-term losses.
+        # --- STEP 5: Time Decay Protection (T4.2 — dynamic extension when in profit) ---
+        # Objective: Prevent stale trades turning into long-term losses.
+        # Extension rule: if the trade is in profit at the time-stop bar, grant ONE
+        # +24-bar extension so a live winner is not forcefully closed.  A second
+        # time-stop at bars_in_trade >= time_stop_bars + 24 closes unconditionally.
         if self.bars_in_trade >= self.time_stop_bars:
-            logger.info(f"[VTM] ⏳ Stale {self.trade_type} trade closed for {self.asset} (Bars: {self.bars_in_trade} >= {self.time_stop_bars})")
-            return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
+            _pnl_now = (
+                (current_price - self.entry_price) / self.entry_price
+                if self.side == "long"
+                else (self.entry_price - current_price) / self.entry_price
+            )
+            _extended = getattr(self, "_time_stop_extended", False)
+
+            if _pnl_now > 0 and not _extended:
+                # Grant one extension — the trade is profitable, give it room
+                self._time_stop_extended = True
+                logger.info(
+                    f"[VTM] ⏳ Time stop reached for {self.asset} but trade is in profit "
+                    f"({_pnl_now * 100:+.2f}%) — granting +24 bar extension "
+                    f"(bars={self.bars_in_trade}, new_limit={self.time_stop_bars + 24})"
+                )
+            elif self.bars_in_trade < self.time_stop_bars + (24 if _extended else 0):
+                pass  # still within extended window, no action
+            else:
+                logger.info(
+                    f"[VTM] ⏳ Stale {self.trade_type} trade closed for {self.asset} "
+                    f"(Bars: {self.bars_in_trade} >= "
+                    f"{self.time_stop_bars + (24 if _extended else 0)}, "
+                    f"pnl={_pnl_now * 100:+.2f}%)"
+                )
+                return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         try:
             pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
@@ -881,6 +943,135 @@ class VeteranTradeManager:
         )
         vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated, vtm.has_pyramided = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"], state.get("has_pyramided", False)
         return vtm
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T3.2 — Manual Override Methods (Telegram /set_sl /set_tp /vtm_status)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def override_stop_loss(self, new_sl: float) -> str:
+        """
+        Manually override the current stop loss level via Telegram command.
+
+        Validates the new SL is on the correct side of entry price to prevent
+        accidental inversions (e.g. setting a long SL above entry).
+
+        Returns a human-readable status string for the Telegram reply.
+        """
+        if new_sl <= 0:
+            return f"❌ Invalid SL: {new_sl} — must be > 0"
+
+        if self.side == "long" and new_sl >= self.entry_price:
+            return (
+                f"❌ Rejected: SL {new_sl:.5f} is above entry {self.entry_price:.5f} "
+                f"for a LONG position. Use /set_tp to move take profit instead."
+            )
+        if self.side == "short" and new_sl <= self.entry_price:
+            return (
+                f"❌ Rejected: SL {new_sl:.5f} is below entry {self.entry_price:.5f} "
+                f"for a SHORT position. Use /set_tp to move take profit instead."
+            )
+
+        old_sl = self.current_stop_loss
+        self.current_stop_loss = new_sl
+        logger.info(
+            f"[VTM] 🖊️ Manual SL override: {self.asset} {self.side.upper()} "
+            f"SL {old_sl:.5f} → {new_sl:.5f}"
+        )
+        direction = "tighter 🛡️" if (
+            (self.side == "long" and new_sl > old_sl) or
+            (self.side == "short" and new_sl < old_sl)
+        ) else "looser ↔️"
+        return (
+            f"✅ SL updated ({direction})\n"
+            f"  Asset : {self.asset} {self.side.upper()}\n"
+            f"  Old SL: {old_sl:.5f}\n"
+            f"  New SL: {new_sl:.5f}\n"
+            f"  Entry : {self.entry_price:.5f}"
+        )
+
+    def override_take_profit(self, new_tp: float, target_index: int = 0) -> str:
+        """
+        Manually override a specific take profit level via Telegram command.
+
+        target_index selects which TP tier to update (0 = first remaining TP,
+        1 = second, etc.).  Defaults to the nearest unfilled TP.
+
+        Returns a human-readable status string for the Telegram reply.
+        """
+        if new_tp <= 0:
+            return f"❌ Invalid TP: {new_tp} — must be > 0"
+
+        if self.side == "long" and new_tp <= self.entry_price:
+            return (
+                f"❌ Rejected: TP {new_tp:.5f} is below entry {self.entry_price:.5f} "
+                f"for a LONG position."
+            )
+        if self.side == "short" and new_tp >= self.entry_price:
+            return (
+                f"❌ Rejected: TP {new_tp:.5f} is above entry {self.entry_price:.5f} "
+                f"for a SHORT position."
+            )
+
+        # Find remaining (unhit) TP levels
+        remaining_indices = [
+            i for i, level in enumerate(self.take_profit_levels)
+            if i >= len(self.partials_hit) or not self.partials_hit[i]
+        ]
+
+        if not remaining_indices:
+            return f"⚠️ No remaining TP levels to override for {self.asset}."
+
+        if target_index >= len(remaining_indices):
+            target_index = 0  # fall back to nearest
+
+        actual_idx = remaining_indices[target_index]
+        old_tp = self.take_profit_levels[actual_idx]
+        self.take_profit_levels[actual_idx] = new_tp
+
+        logger.info(
+            f"[VTM] 🖊️ Manual TP override: {self.asset} {self.side.upper()} "
+            f"TP[{actual_idx}] {old_tp:.5f} → {new_tp:.5f}"
+        )
+        return (
+            f"✅ TP[{actual_idx + 1}] updated\n"
+            f"  Asset : {self.asset} {self.side.upper()}\n"
+            f"  Old TP: {old_tp:.5f}\n"
+            f"  New TP: {new_tp:.5f}\n"
+            f"  Entry : {self.entry_price:.5f}"
+        )
+
+    def get_override_status(self) -> dict:
+        """
+        Return current trade levels for Telegram /vtm_status display.
+
+        Returns a flat dict so the Telegram handler can format it freely.
+        """
+        levels = self.get_current_levels()
+        remaining_tps = [
+            round(tp, 5)
+            for i, tp in enumerate(self.take_profit_levels)
+            if i >= len(self.partials_hit) or not self.partials_hit[i]
+        ]
+        hit_tps = len(self.partials_hit) if hasattr(self, "partials_hit") else 0
+
+        return {
+            "asset":          self.asset,
+            "side":           self.side.upper(),
+            "entry_price":    round(self.entry_price, 5),
+            "current_price":  round(levels.get("current_price", 0.0), 5),
+            "stop_loss":      round(self.current_stop_loss, 5),
+            "initial_sl":     round(self.initial_stop_loss, 5),
+            "remaining_tps":  remaining_tps,
+            "tps_hit":        hit_tps,
+            "bars_in_trade":  self.bars_in_trade,
+            "pnl_pct":        round(levels.get("pnl_pct", 0.0), 3),
+            "remaining_pct":  round(
+                self.remaining_position / self.position_size * 100
+                if self.position_size > 0 else 0.0, 1
+            ),
+            "trade_type":     getattr(self, "trade_type", "UNKNOWN"),
+            "runner_active":  getattr(self, "runner_activated", False),
+        }
 
     def __repr__(self):
         levels = self.get_current_levels()
