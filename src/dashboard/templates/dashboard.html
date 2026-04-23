@@ -854,7 +854,10 @@
             <div class="tab-panel" id="tab-shadow">
                 <div class="shadow-header">
                     <span class="shadow-title">🔮 Shadow Trading Intelligence</span>
-                    <span class="shadow-meta" id="shadow-last-updated">—</span>
+                    <div style="display:flex;align-items:center;gap:16px;">
+                        <span id="shadow-cooldown-badge" style="font-size:10px;font-family:var(--font-mono);color:var(--muted);"></span>
+                        <span class="shadow-meta" id="shadow-last-updated">—</span>
+                    </div>
                 </div>
 
                 <!-- Shadow sub-tabs -->
@@ -1253,6 +1256,22 @@ async function loadShadow() {
         if (shadowState.last_updated) {
             document.getElementById('shadow-last-updated').textContent =
                 'Updated ' + timeAgo(new Date(shadowState.last_updated));
+        }
+
+        // Cooldown badge
+        const cd = shadowState.cooldown;
+        if (cd) {
+            const perAsset = cd.per_asset || {};
+            const waiting = Object.entries(perAsset)
+                .filter(([,v]) => !v.ready && v.remaining_h > 0)
+                .map(([a,v]) => `${a} ${v.remaining_h.toFixed(1)}h`)
+                .join(' · ');
+            const badgeEl = document.getElementById('shadow-cooldown-badge');
+            if (badgeEl) {
+                badgeEl.textContent = waiting
+                    ? `⏱ cooldown: ${waiting}`
+                    : `cooldown ${cd.hours}h · max ${cd.max_per_asset}/asset`;
+            }
         }
 
         // Update sub-tab count labels
