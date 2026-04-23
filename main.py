@@ -71,6 +71,7 @@ from src.ai.visualization import (
 from src.telegram.telegram_data_manager import ThreadSafeBotDataManager
 from src.update.historical_updater import HistoricalDataUpdater
 from src.utils.trade_logger import log_trade_event
+from src.utils.calendar_updater import CalendarUpdater
 from src.audit_logger.audit_logger import log_trade
 from src.monitoring.health_monitor import HealthMonitor
 from src.portfolio.hedging_support import (
@@ -333,6 +334,7 @@ class TradingBot:
         )
         self._last_history_update = None
         self.autotrainer = None
+        self.calendar_updater = None
 
     def initialize_exchanges(self):
         """
@@ -3999,6 +4001,18 @@ class TradingBot:
             # Initialize exchanges and handlers
             self.initialize_exchanges()
 
+            # ── Economic calendar: live refresh ───────────────────────────
+            def _reload_all_calendars():
+                for _agg in self.aggregators.values():
+                    if hasattr(_agg, "reload_calendar"):
+                        _agg.reload_calendar()
+
+            self.calendar_updater = CalendarUpdater(
+                config=self.config,
+                reload_callback=_reload_all_calendars,
+            )
+            self.calendar_updater.start_background_thread()
+
             # T3.1: Initialise shadow trading engine after exchanges are ready
             self.shadow_trader = ShadowTradingEngine(max_positions=50, max_closed=5000)
             logger.info("[SHADOW] Shadow trading engine started")
@@ -4156,6 +4170,10 @@ class TradingBot:
 
             except Exception as e:
                 logger.error(f"[DB] Shutdown error: {e}")
+
+        # Stop calendar updater background thread
+        if self.calendar_updater:
+            self.calendar_updater.stop()
 
         self.is_running = False
         self._main_loop_running = False

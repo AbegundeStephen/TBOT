@@ -1,22 +1,313 @@
 {
-  "_comment": "High-impact economic events. Bot blocks new entries N hours before each event.",
-  "_instructions": "Add future events here. datetime must be ISO 8601 UTC (Z suffix). block_hours_before is how many hours before the event to start blocking.",
+  "_comment": "Auto-maintained by CalendarUpdater. Live data from Forex Factory + anchor schedule. Do not edit manually \u2014 changes will be overwritten on next refresh.",
+  "_updated": "2026-04-23T22:48:24Z",
+  "_source": "forex_factory + schedule",
+  "_live_count": 0,
+  "_anchor_count": 38,
   "events": [
-    {"datetime": "2026-05-01T12:15Z", "event": "ADP Employment",         "block_hours_before": 1},
-    {"datetime": "2026-05-02T18:00Z", "event": "FOMC Rate Decision",      "block_hours_before": 2},
-    {"datetime": "2026-05-02T18:30Z", "event": "FOMC Press Conference",   "block_hours_before": 0},
-    {"datetime": "2026-05-09T12:30Z", "event": "US CPI",                  "block_hours_before": 2},
-    {"datetime": "2026-05-09T12:30Z", "event": "Non-Farm Payrolls",       "block_hours_before": 2},
-    {"datetime": "2026-06-05T12:30Z", "event": "Non-Farm Payrolls",       "block_hours_before": 2},
-    {"datetime": "2026-06-10T12:30Z", "event": "US CPI",                  "block_hours_before": 2},
-    {"datetime": "2026-06-17T18:00Z", "event": "FOMC Rate Decision",      "block_hours_before": 2},
-    {"datetime": "2026-07-03T12:30Z", "event": "Non-Farm Payrolls",       "block_hours_before": 2},
-    {"datetime": "2026-07-14T12:30Z", "event": "US CPI",                  "block_hours_before": 2},
-    {"datetime": "2026-07-29T18:00Z", "event": "FOMC Rate Decision",      "block_hours_before": 2},
-    {"datetime": "2026-08-07T12:30Z", "event": "Non-Farm Payrolls",       "block_hours_before": 2},
-    {"datetime": "2026-08-12T12:30Z", "event": "US CPI",                  "block_hours_before": 2},
-    {"datetime": "2026-09-04T12:30Z", "event": "Non-Farm Payrolls",       "block_hours_before": 2},
-    {"datetime": "2026-09-09T12:30Z", "event": "US CPI",                  "block_hours_before": 2},
-    {"datetime": "2026-09-16T18:00Z", "event": "FOMC Rate Decision",      "block_hours_before": 2}
+    {
+      "datetime": "2026-04-29T12:30:00Z",
+      "event": "US GDP (Q1 Advance)",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-04-29T18:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-05-01T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-05-06T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-05-12T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-06-03T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-06-04T11:15:00Z",
+      "event": "ECB Rate Decision",
+      "currency": "EUR",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-06-05T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-06-10T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-06-17T18:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-01T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-03T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-14T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-23T11:15:00Z",
+      "event": "ECB Rate Decision",
+      "currency": "EUR",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-29T12:30:00Z",
+      "event": "US GDP (Q2 Advance)",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-07-29T18:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-08-05T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-08-07T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-08-11T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-09-02T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-09-04T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-09-09T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-09-10T11:15:00Z",
+      "event": "ECB Rate Decision",
+      "currency": "EUR",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-09-16T18:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-02T12:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-07T12:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-13T12:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-28T18:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-29T11:15:00Z",
+      "event": "ECB Rate Decision",
+      "currency": "EUR",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-10-29T12:30:00Z",
+      "event": "US GDP (Q3 Advance)",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-11-04T13:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-11-06T13:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-11-10T13:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-12-02T13:15:00Z",
+      "event": "ADP Employment",
+      "currency": "USD",
+      "block_hours_before": 1,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-12-04T13:30:00Z",
+      "event": "Non-Farm Payrolls",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-12-08T13:30:00Z",
+      "event": "US CPI",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-12-16T19:00:00Z",
+      "event": "FOMC Rate Decision",
+      "currency": "USD",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    },
+    {
+      "datetime": "2026-12-17T11:15:00Z",
+      "event": "ECB Rate Decision",
+      "currency": "EUR",
+      "block_hours_before": 2,
+      "impact": "HIGH",
+      "source": "schedule"
+    }
   ]
 }

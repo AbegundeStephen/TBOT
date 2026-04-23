@@ -231,16 +231,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         self._last_prices = {}
         self._stale_threshold_minutes = 30
 
-        # T3.4: Economic calendar — load once at startup
+        # T3.4: Economic calendar — loaded at startup, hot-reloaded by CalendarUpdater
+        self._econ_cal_path = "config/economic_calendar.json"
         self._econ_events = []
-        try:
-            import json as _json
-            _cal_path = "config/economic_calendar.json"
-            with open(_cal_path) as _f:
-                self._econ_events = _json.load(_f).get("events", [])
-            logger.info(f"[CALENDAR] Loaded {len(self._econ_events)} economic events from {_cal_path}")
-        except Exception as _e:
-            logger.warning(f"[CALENDAR] Could not load economic_calendar.json: {_e}")
+        self._load_calendar_file()
 
         self._log_initialization()
 
@@ -257,6 +251,36 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         else:
             logger.info("   ⚠ AI VALIDATION: Disabled")
         logger.info("=" * 80)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # CALENDAR HELPERS
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _load_calendar_file(self):
+        """Load economic events from the JSON file on disk."""
+        try:
+            import json as _json
+            with open(self._econ_cal_path, encoding="utf-8") as _f:
+                self._econ_events = _json.load(_f).get("events", [])
+            logger.info(
+                f"[CALENDAR] Loaded {len(self._econ_events)} events "
+                f"from {self._econ_cal_path}"
+            )
+        except Exception as _e:
+            logger.warning(f"[CALENDAR] Could not load {self._econ_cal_path}: {_e}")
+            self._econ_events = []
+
+    def reload_calendar(self):
+        """
+        Hot-reload the economic calendar from disk.
+        Called by CalendarUpdater after each successful write so the
+        aggregator picks up fresh data without a bot restart.
+        """
+        self._load_calendar_file()
+        logger.info(
+            f"[CALENDAR] 🔄 Hot-reloaded — "
+            f"{len(self._econ_events)} active events in memory"
+        )
 
     def get_statistics(self) -> Dict:
         """Return comprehensive statistics"""
