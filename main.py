@@ -1032,6 +1032,28 @@ class TradingBot:
             # Get preset config for this asset
             selected_preset = asset_presets.get(asset_name, "balanced")
 
+            # Map auto-preset strategy names → valid AGGREGATOR_PRESETS keys.
+            # auto_preset_selector may return strategy-style names like "mean_reversion",
+            # "trend_following", "scalping" — these must be mapped to the four valid
+            # preset buckets so BTC always gets a working aggregator config.
+            PRESET_NAME_MAP = {
+                # Short-form aliases returned by auto_preset_selector
+                "mr": "conservative",           # sideways/chop mean-reversion mode
+                "mean_reversion": "conservative",
+                "mean_reversion_forced": "conservative",
+                "tf": "balanced",               # trend-following shorthand
+                "trend_following": "balanced",
+                "trend": "balanced",
+                "momentum": "aggressive",
+                "scalping": "scalper",
+                "scalper": "scalper",
+                # Pass-through for the four valid preset names
+                "conservative": "conservative",
+                "balanced": "balanced",
+                "aggressive": "aggressive",
+            }
+            selected_preset = PRESET_NAME_MAP.get(selected_preset, selected_preset)
+
             # Handle asset key mapping (BTCUSDT -> BTC, everything else defaults to GOLD presets for now)
             config_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
             preset_config = AGGREGATOR_PRESETS.get(config_key, {}).get(selected_preset)
@@ -2061,6 +2083,38 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
+
+    def _notify_blocked(
+        self,
+        asset: str,
+        signal: int,
+        block_source: str,
+        block_reason: str,
+        details: dict = None,
+        price: float = None,
+    ):
+        """
+        Fire-and-forget helper: sends a signal-blocked Telegram alert from the
+        main (non-async) thread.  Only sends when there is a real directional
+        signal (BUY=1 / SELL=-1) — HOLD=0 is silently skipped.
+        """
+        if signal == 0:
+            return  # genuine hold, nothing to report
+        if not self.telegram_bot or not self.telegram_bot._is_ready:
+            return
+        try:
+            self._send_telegram_notification(
+                self.telegram_bot.notify_signal_blocked(
+                    asset=asset,
+                    signal=signal,
+                    block_source=block_source,
+                    block_reason=block_reason,
+                    details=details or {},
+                    price=price,
+                )
+            )
+        except Exception as e:
+            logger.error(f"[TELEGRAM] _notify_blocked failed for {asset}: {e}")
 
     def _reinitialize_aggregator(self, asset_name: str, preset: str):
         """
@@ -3146,6 +3200,17 @@ class TradingBot:
                             f"  Reason:           MTF confidence {mtf_regime.get('confidence', 0):.2%} "
                             f"blocks counter-trend in {regime_str} regime."
                         )
+                        self._notify_blocked(
+                            asset=asset_name,
+                            signal=signal,
+                            block_source="MTF Counter-Trend",
+                            block_reason=(
+                                f"{'LONG' if signal == 1 else 'SHORT'} rejected in {regime_str} regime "
+                                f"(MTF confidence {mtf_regime.get('confidence', 0):.0%})"
+                            ),
+                            details=details,
+                            price=details.get("price"),
+                        )
                         return  # ← Block the trade
 
                 # --------------------------------------------------------
@@ -3161,6 +3226,17 @@ class TradingBot:
                     logger.info(
                         f"  Current: {current_positions}, Max: {max_positions} "
                         f"(MTF Risk: {mtf_regime['risk_level'].upper()})"
+                    )
+                    self._notify_blocked(
+                        asset=asset_name,
+                        signal=signal,
+                        block_source="MTF Max Positions",
+                        block_reason=(
+                            f"Already at max {max_positions} open position(s) "
+                            f"(MTF risk level: {mtf_regime.get('risk_level','').upper()})"
+                        ),
+                        details=details,
+                        price=details.get("price"),
                     )
                     return  # ← Block the trade
 
@@ -3205,7 +3281,25 @@ class TradingBot:
             # 3. Check HOLD Signal
             # ============================================================
             if signal == 0:
-                logger.info(f"[HOLD] {asset_name}: No action taken")
+                # Distinguish AI rejection (original signal was directional but
+                # got blocked inside the aggregator) from a natural HOLD.
+                original_sig = details.get("original_signal", 0)
+                if original_sig != 0 and details.get("action") == "rejected":
+                    logger.info(f"[HOLD] {asset_name}: Signal REJECTED by AI validation (original={original_sig})")
+                    self._notify_blocked(
+                        asset=asset_name,
+                        signal=original_sig,
+                        block_source="AI Validation",
+                        block_reason=(
+                            ", ".join(details.get("rejection_reasons") or [])
+                            or details.get("ai_rejection_reason", "Signal did not pass AI gate")
+                            or "Signal did not pass AI gate"
+                        ),
+                        details=details,
+                        price=details.get("price"),
+                    )
+                else:
+                    logger.info(f"[HOLD] {asset_name}: No action taken")
                 return
 
             # ============================================================
@@ -3213,10 +3307,26 @@ class TradingBot:
             # ============================================================
             if not self.check_trading_limits():
                 logger.info(f"[LIMIT] Trading limits reached")
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Trading Limits",
+                    block_reason="Daily trade count or loss limit reached — trading paused",
+                    details=details,
+                    price=details.get("price"),
+                )
                 return
 
             if not self.check_min_time_between_trades(asset_name):
                 logger.info(f"[COOLDOWN] {asset_name} is in cooldown")
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Cooldown",
+                    block_reason=f"Minimum time between trades for {asset_name} not yet elapsed",
+                    details=details,
+                    price=details.get("price"),
+                )
                 return
 
             # Store BEFORE state
@@ -3229,12 +3339,28 @@ class TradingBot:
             # A. System Health Check
             if hasattr(self, 'health_monitor') and not self.health_monitor.is_healthy():
                 logger.error(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: System is unhealthy.")
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="System Health",
+                    block_reason="Bot health monitor reports system is unhealthy — execution vetoed",
+                    details=details,
+                    price=details.get("price"),
+                )
                 return
 
             # B. Circuit Breaker Check (Last Second)
             halted, reason = self.portfolio_manager.check_circuit_breaker()
             if halted:
                 logger.error(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: Circuit breaker triggered: {reason}")
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Circuit Breaker",
+                    block_reason=str(reason),
+                    details=details,
+                    price=details.get("price"),
+                )
                 return
 
             # C. Confidence/Quality Check
@@ -3242,6 +3368,16 @@ class TradingBot:
             signal_quality = details.get("signal_quality", 0)
             if signal_quality < min_quality:
                 logger.warning(f"[SAFETY] ✗ EXECUTION VETOED for {asset_name}: Quality {signal_quality:.2f} < {min_quality:.2f}")
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Quality Gate",
+                    block_reason=(
+                        f"Signal quality {signal_quality:.1%} below minimum threshold {min_quality:.1%}"
+                    ),
+                    details=details,
+                    price=details.get("price"),
+                )
                 return
 
             logger.info(f"[SAFETY] ✓ Final validation passed for {asset_name}. Executing...")

@@ -512,6 +512,11 @@ class InstitutionalCouncilAggregator:
         self.stats['total_evaluations'] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
+        # AI-5: Clear pattern cache at the start of each cycle so all internal
+        # calls to _check_pattern() within this evaluation share the first result.
+        if self.ai_validator and hasattr(self.ai_validator, 'clear_pattern_cache'):
+            self.ai_validator.clear_pattern_cache()
+
         # ====================================================================
         # ⚡ THE FLASH VETO: Volatility Circuit Breaker
         # ====================================================================
@@ -701,7 +706,29 @@ class InstitutionalCouncilAggregator:
             buy_explanations.append(structure_exp['buy'])
             sell_explanations.append(structure_exp['sell'])
             
-            if is_breakout_mode:
+            # Use trend-aligned momentum scoring for non-neutral regimes.
+            # The reversion judge (RSI extreme crosses) is wrong for trend-continuation
+            # setups — it scores 0 when RSI is 50-65, which is exactly where a
+            # healthy trend lives. The trend momentum judge correctly awards points
+            # when RSI is in the directional zone (e.g. 40-65 for bearish GOLD).
+            # This was causing all MT5 trend signals to score only 2.25/5.0 max
+            # (TREND 1.5 + PATTERN 0.5 + VOLUME 0.25) regardless of how aligned
+            # TF/EMA were, because is_breakout_mode was always False for MT5 assets
+            # (MT5 tick volume is unreliable so the volume-surge gate never triggered).
+            is_trending_regime = consensus_regime not in ["NEUTRAL", "UNKNOWN"]
+            # Fallback: MTF regime detector often returns NEUTRAL (0% confidence) for all
+            # assets because the MTF data feed is stale or the regime boundary is ambiguous.
+            # In that case, use local ADX as a tie-breaker — if ADX > 20 the market is
+            # directional regardless of what the regime string says, so switch to the
+            # trend-aligned momentum judge to avoid permanently scoring only 1.75/5.0.
+            ADX_TRENDING_THRESHOLD = 20
+            if not is_trending_regime and adx > ADX_TRENDING_THRESHOLD:
+                is_trending_regime = True
+                logger.info(
+                    f"[MOMENTUM] MTF regime='{consensus_regime}' but local ADX={adx:.1f} > {ADX_TRENDING_THRESHOLD} "
+                    f"— overriding to trend-aligned momentum judge"
+                )
+            if is_breakout_mode or is_trending_regime:
                 buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_momentum_bidirectional(df, is_bull, is_breakout_mode, w_momentum, adx)
             else:
                 buy_scores['momentum'], sell_scores['momentum'], momentum_exp = self._judge_reversion_bidirectional(df, w_momentum)
@@ -1075,7 +1102,12 @@ class InstitutionalCouncilAggregator:
                         logger.warning(f"[DYNAMIC WEIGHT] Failed: {e}")
 
                 # Final execution check
-                min_quality_threshold = 0.65  # ✨ NEW: High-confidence filter
+                # Quality gate aligned with the council's own score threshold.
+                # Previously 0.65 (requiring total_score ≥ 3.25) which was STRICTER
+                # than the trend_aligned_threshold (3.0), making any signal that
+                # barely passed the threshold still get rejected. Lowered to 0.55
+                # so the score threshold (3.0) is the authoritative gate.
+                min_quality_threshold = 0.55
                 signal_quality = total_score / 5.0
 
                 if total_score < required_score:

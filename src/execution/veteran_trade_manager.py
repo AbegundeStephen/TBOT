@@ -363,7 +363,9 @@ class VeteranTradeManager:
         self.early_scale_threshold = self.risk_config.get("early_scale_threshold", 0.02)
         self.early_scale_bars = self.risk_config.get("early_scale_bars", 4)
         self.early_lock_atr_multiplier = self.risk_config.get("early_lock_atr_multiplier", 0.5)
-        self._early_scaled = False  # fires at most once per trade
+        self._early_scaled = False          # fires at most once per trade
+        self._greed_mode_activated = False  # fires at most once per trade
+        self._time_stop_extended = False    # fires at most once per trade
 
         # State
         self.initial_stop_loss = None
@@ -518,12 +520,17 @@ class VeteranTradeManager:
                 wick_buffer = 0.5 * atr
 
                 if self.side == "long":
+                    # Long reversion: price bouncing up from below — exit just *below* the
+                    # EMA so we don't overshoot into the resistance zone above it.
                     self.initial_stop_loss = self.low[-1] - wick_buffer
                     tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
 
                 else:
+                    # Short reversion: price falling from above — exit just *above* the
+                    # EMA (mean-convergence point). The original code used ema_4h_50 + 0.2*atr
+                    # which placed TP *above* the EMA — wrong direction for a short.
                     self.initial_stop_loss = self.high[-1] + wick_buffer
-                    tp_target = self.ema_4h_50 + (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
+                    tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
 
                 self.current_stop_loss = self.initial_stop_loss
                 self.take_profit_levels = [tp_target]
@@ -793,20 +800,53 @@ class VeteranTradeManager:
                     )
                     self.current_stop_loss = self.entry_price
 
-        # --- STEP 2: Greed Mode Accelerator ---
-        # Reason: During extreme trends/volatility, remove early targets to ride the move with trailing stops.
+        # Calculate ADX and atr_slow once — used by multiple steps below.
         adx_value = self._calculate_adx()
         atr_slow = self._calculate_atr_slow()
-        
-        if adx_value > 40 and atr_value > (1.5 * atr_slow):
-            if len(self.take_profit_levels) > 1:
-                logger.info(f"[VTM] 🔥 GREED MODE: Strong trend (ADX:{adx_value:.1f}) & Volatility Expansion detected. Removing early targets.")
-                # Keep only final target
-                self.take_profit_levels = [self.take_profit_levels[-1]]
-                # Exit full size at final target (managed by runner trail)
-                self.partial_sizes = [1.0]
+        # Guard: atr_slow may be NaN when trade has < 100 bars of history.
+        # Fall back to atr_value (fast ATR) so greed-mode comparisons don't silently fail.
+        if np.isnan(atr_slow) or atr_slow == 0:
+            atr_slow = atr_value
 
-        # --- STEP 2.5: Early Scale Exit ---
+        # --- STEP 2: Stop-Loss Check (HIGHEST PRIORITY after BE locks) ---
+        # Must be evaluated before pyramiding / early-scale returns so that a bar
+        # which closes below the SL and also happens to meet pyramid conditions is
+        # always treated as a stop-loss, never as a scale-in signal.
+        try:
+            if (self.side == "long" and current_price <= self.current_stop_loss) or \
+               (self.side == "short" and current_price >= self.current_stop_loss):
+                reason = ExitReason.STOP_LOSS
+                offset = 0.125 * atr_value
+                if self.side == "long":
+                    if self.current_stop_loss > self.entry_price + offset:
+                        reason = ExitReason.TRAILING_STOP
+                    elif self.runner_activated:
+                        reason = ExitReason.BREAK_EVEN
+                else:
+                    if self.current_stop_loss < self.entry_price - offset:
+                        reason = ExitReason.TRAILING_STOP
+                    elif self.runner_activated:
+                        reason = ExitReason.BREAK_EVEN
+                return {"reason": reason, "price": current_price, "size": self.remaining_position}
+        except Exception as e:
+            logger.error(f"[VTM] SL check error: {e}")
+
+        # --- STEP 3: Greed Mode Accelerator ---
+        # During extreme trends/volatility, collapse early targets so the runner
+        # trail captures the full move. One-shot: _greed_mode_activated prevents
+        # re-executing every bar, avoiding log spam and repeated partial_sizes mutation.
+        if not getattr(self, "_greed_mode_activated", False):
+            if adx_value > 40 and atr_value > (1.5 * atr_slow):
+                if len(self.take_profit_levels) > 1:
+                    logger.info(
+                        f"[VTM] 🔥 GREED MODE: Strong trend (ADX:{adx_value:.1f}) & "
+                        f"Volatility Expansion detected. Collapsing to final target."
+                    )
+                    self.take_profit_levels = [self.take_profit_levels[-1]]
+                    self.partial_sizes = [1.0]
+                    self._greed_mode_activated = True
+
+        # --- STEP 3.5: Early Scale Exit ---
         # Objective: Lock in a small partial profit quickly in the first few bars before
         # momentum fades. Enabled via early_scale_enabled in per-asset risk config.
         if self.early_scale_enabled and not self._early_scaled:
@@ -847,19 +887,15 @@ class VeteranTradeManager:
                     )
                     return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
 
-        # --- STEP 3: Trend Pyramiding ---
-        # Objective: Scale into strong breakout trends.
+        # --- STEP 4: Trend Pyramiding ---
+        # Objective: Scale into strong breakout trends. Fires only after SL is confirmed
+        # safe (Step 2 above) so a fast reversal bar cannot be misclassified as a pyramid.
         if self.trade_type == "TREND" and not self.has_pyramided:
             if current_profit >= (1.0 * atr_value) and adx_value > 25:
                 logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
-                
-                # Action 1: Move SL of position 1 to entry
+                # Move SL of position 1 to entry before adding exposure
                 self.current_stop_loss = self.entry_price
-                
-                # Action 2: Signal for second trade (new_size = original_size * 0.5)
-                # Note: We set the flag here; the return dict signals the caller (PortfolioManager) to execute.
                 self.has_pyramided = True
-                
                 return {
                     "action": "pyramid",
                     "asset": self.asset,
@@ -868,27 +904,19 @@ class VeteranTradeManager:
                     "reason": "Trend Pyramiding Triggered"
                 }
 
-        # --- STEP 4: Trade State Mutation ---
+        # --- STEP 5: Trade State Mutation ---
         # Objective: Allow profitable Mean Reversion trades to convert into trend trades.
         if self.trade_type == "REVERSION":
             if adx_value > 30 and current_profit > 0:
-                # Check actual direction of profit
                 is_actually_profitable = (self.side == "long" and current_price > self.entry_price) or \
                                          (self.side == "short" and current_price < self.entry_price)
-                
                 if is_actually_profitable:
                     logger.info("[VTM] 🧬 Trade mutated from REVERSION to TREND. Ride the move.")
-                    
-                    # 1. Cancel existing take profit orders
                     self.cancel_take_profit()
-                    
-                    # 2. Switch trade tag
                     self.trade_type = "TREND"
-                    
-                    # 3. Activate greed mode trailing stop
                     self.enable_trailing_stop()
 
-        # --- STEP 5: Time Decay Protection (T4.2 — dynamic extension when in profit) ---
+        # --- STEP 6: Time Decay Protection (T4.2 — dynamic extension when in profit) ---
         # Objective: Prevent stale trades turning into long-term losses.
         # Extension rule: if the trade is in profit at the time-stop bar, grant ONE
         # +24-bar extension so a live winner is not forcefully closed.  A second
@@ -902,7 +930,6 @@ class VeteranTradeManager:
             _extended = getattr(self, "_time_stop_extended", False)
 
             if _pnl_now > 0 and not _extended:
-                # Grant one extension — the trade is profitable, give it room
                 self._time_stop_extended = True
                 logger.info(
                     f"[VTM] ⏳ Time stop reached for {self.asset} but trade is in profit "
@@ -920,47 +947,31 @@ class VeteranTradeManager:
                 )
                 return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
+        # --- STEP 7: TP Partial Exits ---
         try:
-            pnl_pct = (current_price - self.entry_price) / self.entry_price if self.side == "long" else (self.entry_price - current_price) / self.entry_price
-
-            if (self.side == "long" and current_price <= self.current_stop_loss) or (self.side == "short" and current_price >= self.current_stop_loss):
-                # Determine specific reason based on stop loss level relative to entry
-                reason = ExitReason.STOP_LOSS
-                
-                # ATR-based adaptive offset check for trailing reason
-                offset = 0.125 * atr_value
-                if self.side == "long":
-                    if self.current_stop_loss > self.entry_price + offset:
-                        reason = ExitReason.TRAILING_STOP
-                    elif self.runner_activated:
-                        reason = ExitReason.BREAK_EVEN
-                else: # short
-                    if self.current_stop_loss < self.entry_price - offset:
-                        reason = ExitReason.TRAILING_STOP
-                    elif self.runner_activated:
-                        reason = ExitReason.BREAK_EVEN
-                
-                return {"reason": reason, "price": current_price, "size": self.remaining_position}
-
             for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):
                 if i in self.partials_hit: continue
                 if (self.side == "long" and current_price >= target) or (self.side == "short" and current_price <= target):
                     self.partials_hit.append(i)
                     self.remaining_position -= size
-                    
-                    # ✅ PHASE 5: TP1 TRAILING (Simplified to ATR baseline)
-                    if len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND": 
+
+                    # After TP1 (first partial), attempt early runner promotion based on
+                    # volume strength and candle conviction. Falls back to mechanical
+                    # activation after TP2 if promotion conditions are not met.
+                    if len(self.partials_hit) == 1 and not self.runner_activated and self.trade_type == "TREND":
+                        promoted = self.check_promotion_to_runner(current_price)
+                        if not promoted:
+                            logger.info("[VTM] 🏃 TP1 hit — runner promotion skipped (conditions not met, waiting for TP2)")
+
+                    # Mechanical fallback: activate runner after TP2
+                    if len(self.partials_hit) >= 2 and not self.runner_activated and self.trade_type == "TREND":
                         self.runner_activated = True
-                        logger.info(f"[VTM TACTICAL] 🏃 Runner Activated: Trailing stop will now follow price.")
-                    
-                    # ✅ T34: Safe TP Exit Reason Lookup
+                        logger.info(f"[VTM TACTICAL] 🏃 Runner Activated (mechanical — TP2 hit): trailing stop now follows price.")
+
                     tp_reasons = [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3]
                     reason = tp_reasons[i] if i < len(tp_reasons) else ExitReason.TAKE_PROFIT_3
-                    
                     return {"reason": reason, "price": current_price, "size": size}
 
-            # if self.bars_in_trade >= self.time_stop_bars:
-            #     return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
             return None
         except Exception as e:
             logger.error(f"[VTM] Exit check error: {e}")
@@ -997,45 +1008,76 @@ class VeteranTradeManager:
 
     def to_dict(self) -> Dict:
         return {
-            "entry_price": self.entry_price, 
-            "side": self.side, 
-            "asset": self.asset, 
-            "position_size": self.position_size, 
-            "initial_stop_loss": self.initial_stop_loss, 
-            "current_stop_loss": self.current_stop_loss, 
-            "take_profit_levels": self.take_profit_levels, 
-            "partial_sizes": self.partial_sizes, 
-            "remaining_position": self.remaining_position, 
-            "partials_hit": self.partials_hit, 
-            "bars_in_trade": self.bars_in_trade, 
-            "highest_price_reached": self.highest_price_reached, 
-            "lowest_price_reached": self.lowest_price_reached, 
-            "runner_activated": self.runner_activated, 
-            "has_pyramided": self.has_pyramided, # ✨ NEW
-            "trade_type": self.trade_type, 
+            "entry_price": self.entry_price,
+            "side": self.side,
+            "asset": self.asset,
+            "position_size": self.position_size,
+            "initial_stop_loss": self.initial_stop_loss,
+            "current_stop_loss": self.current_stop_loss,
+            "take_profit_levels": self.take_profit_levels,
+            "partial_sizes": self.partial_sizes,
+            "remaining_position": self.remaining_position,
+            "partials_hit": self.partials_hit,
+            "bars_in_trade": self.bars_in_trade,
+            "highest_price_reached": self.highest_price_reached,
+            "lowest_price_reached": self.lowest_price_reached,
+            "runner_activated": self.runner_activated,
+            "has_pyramided": self.has_pyramided,
+            "trade_type": self.trade_type,
             "entry_time": self.entry_time.isoformat(),
             "local_free_margin": self.local_free_margin,
             "current_ask": self.current_ask,
-            "current_bid": self.current_bid
+            "current_bid": self.current_bid,
+            # One-shot state flags — persisted so from_dict() restores them correctly
+            "_greed_mode_activated": getattr(self, "_greed_mode_activated", False),
+            "_early_scaled": getattr(self, "_early_scaled", False),
+            "_time_stop_extended": getattr(self, "_time_stop_extended", False),
+            # Snapshot of the ADX-adjusted partial targets used at open — needed so
+            # from_dict() can pass them to risk_config and avoid recalculation drift
+            "partial_targets_snapshot": list(self.partial_targets),
         }
 
     @classmethod
     def from_dict(cls, state: Dict, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> 'VeteranTradeManager':
+        # Pass a minimal risk_config that satisfies _calculate_initial_levels() without
+        # triggering a lot-size ValueError. The position_size from state was already
+        # validated when the trade was originally opened, so we set a min_lot of 0 and
+        # bypass the leverage ceiling by leaving local_free_margin at 0.
+        # All VTM state is fully overwritten from the stored dict immediately after.
+        _restore_risk_config = {
+            "partial_targets": state.get("partial_targets_snapshot", [1.5, 3.0, 5.0]),
+            "partial_sizes": state.get("partial_sizes", [0.45, 0.30, 0.25]),
+        }
         vtm = cls(
-            entry_price=state["entry_price"], 
-            side=state["side"], 
-            asset=state["asset"], 
-            high=high, 
-            low=low, 
-            close=close, 
-            quantity=state["position_size"], 
-            trade_type=state.get("trade_type", "TREND"), 
-            risk_config={},
-            local_free_margin=state.get("local_free_margin", 0.0),
+            entry_price=state["entry_price"],
+            side=state["side"],
+            asset=state["asset"],
+            high=high,
+            low=low,
+            close=close,
+            quantity=state["position_size"],
+            trade_type=state.get("trade_type", "TREND"),
+            risk_config=_restore_risk_config,
+            local_free_margin=0.0,   # Suppress leverage ceiling during restore
             current_ask=state.get("current_ask", 0.0),
-            current_bid=state.get("current_bid", 0.0)
+            current_bid=state.get("current_bid", 0.0),
+            min_lot_override=0.0,    # Suppress lot-size ValueError during restore
         )
-        vtm.initial_stop_loss, vtm.current_stop_loss, vtm.take_profit_levels, vtm.partial_sizes, vtm.remaining_position, vtm.partials_hit, vtm.bars_in_trade, vtm.highest_price_reached, vtm.lowest_price_reached, vtm.runner_activated, vtm.has_pyramided = state["initial_stop_loss"], state["current_stop_loss"], state["take_profit_levels"], state["partial_sizes"], state["remaining_position"], state["partials_hit"], state["bars_in_trade"], state["highest_price_reached"], state["lowest_price_reached"], state["runner_activated"], state.get("has_pyramided", False)
+        # Overwrite all state from the persisted snapshot
+        vtm.initial_stop_loss = state["initial_stop_loss"]
+        vtm.current_stop_loss = state["current_stop_loss"]
+        vtm.take_profit_levels = state["take_profit_levels"]
+        vtm.partial_sizes = state["partial_sizes"]
+        vtm.remaining_position = state["remaining_position"]
+        vtm.partials_hit = state["partials_hit"]
+        vtm.bars_in_trade = state["bars_in_trade"]
+        vtm.highest_price_reached = state["highest_price_reached"]
+        vtm.lowest_price_reached = state["lowest_price_reached"]
+        vtm.runner_activated = state["runner_activated"]
+        vtm.has_pyramided = state.get("has_pyramided", False)
+        vtm._greed_mode_activated = state.get("_greed_mode_activated", False)
+        vtm._early_scaled = state.get("_early_scaled", False)
+        vtm._time_stop_extended = state.get("_time_stop_extended", False)
         return vtm
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1106,10 +1148,13 @@ class VeteranTradeManager:
                 f"for a SHORT position."
             )
 
-        # Find remaining (unhit) TP levels
+        # Find remaining (unhit) TP levels.
+        # self.partials_hit is a list of hit *index integers* (e.g. [0, 1] means
+        # TP0 and TP1 were hit). The old filter used self.partials_hit[i] as a bool
+        # which is wrong — it returned another index integer, not a hit/unhit flag.
         remaining_indices = [
-            i for i, level in enumerate(self.take_profit_levels)
-            if i >= len(self.partials_hit) or not self.partials_hit[i]
+            i for i in range(len(self.take_profit_levels))
+            if i not in self.partials_hit
         ]
 
         if not remaining_indices:

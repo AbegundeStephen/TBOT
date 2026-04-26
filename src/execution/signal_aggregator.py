@@ -68,9 +68,34 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         self.enable_filters = enable_world_class_filters
 
         # ✨ NEW: Initialize filter thresholds
+        # Volatility gate: asset-class-specific defaults so FX pairs (EURJPY ATR ~0.07%)
+        # aren't permanently blocked by a crypto-calibrated 0.35% threshold.
+        #   FX  (EUR*, GBP*, USD*, JPY*, CHF*, AUD*, NZD*, CAD*) → 0.03% (0.0003)
+        #   Metals / Indices (XAU, GOLD, USTEC, NAS*, SP5*, GER*) → 0.10% (0.0010)
+        #   Crypto (BTC*, ETH*, BNB*)                             → 0.20% (0.0020)
+        # Config override still wins if explicitly set.
+        _asset_upper = asset_type.upper()
+        _is_fx = any(
+            fx in _asset_upper
+            for fx in ("EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD")
+        ) and "BTC" not in _asset_upper and "ETH" not in _asset_upper
+        _is_crypto = any(c in _asset_upper for c in ("BTC", "ETH", "BNB", "SOL", "XRP"))
+        _is_metals_indices = any(
+            m in _asset_upper
+            for m in ("XAU", "GOLD", "USTEC", "NAS", "SP5", "GER", "UK1", "NDX")
+        )
+        if _is_fx:
+            _default_vol_threshold = 0.0003   # 0.03% — FX pairs
+        elif _is_metals_indices:
+            _default_vol_threshold = 0.0010   # 0.10% — metals / indices
+        elif _is_crypto:
+            _default_vol_threshold = 0.0020   # 0.20% — crypto (relaxed from original 0.35%)
+        else:
+            _default_vol_threshold = 0.0010   # 0.10% — safe generic fallback
+
         self.filter_thresholds = {
             'volatility_gate': config.get('world_class_filters', {}).get(
-                'volatility_gate_threshold', 0.0035
+                'volatility_gate_threshold', _default_vol_threshold
             ),
             'sniper_confidence': config.get('world_class_filters', {}).get(
                 'sniper_pattern_confidence', 0.60
@@ -188,13 +213,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # 3. Wire strategy weights from merged config (T1.2 fix)
         # Previously hardcoded to 0.50/0.50, ignoring mean_reversion_weight: 0.0 in presets.
+        # EMA weight now included so all three strategies contribute to consensus scoring.
         self.weights = {
             "mean_reversion": self.config.get("mean_reversion_weight", 0.50),
             "trend_following": self.config.get("trend_following_weight", 0.50),
+            "ema": self.config.get("ema_weight", 0.40),
         }
         logger.info(
             f"[AGGREGATOR] Strategy weights: MR={self.weights['mean_reversion']:.2f}, "
-            f"TF={self.weights['trend_following']:.2f}"
+            f"TF={self.weights['trend_following']:.2f}, "
+            f"EMA={self.weights['ema']:.2f}"
         )
 
         # 4. Independent strategy thresholds (T1.1 fix)
@@ -603,18 +631,20 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         base_buy = self.config["buy_threshold"]
         base_sell = self.config["sell_threshold"]
 
-        # Scale adjustment by regime confidence
+        # Fix E: proportional adjustments (percentage of base) instead of fixed offsets.
+        # Fixed offsets were regime-blind: a 0.10 offset on a 0.23 scalper threshold
+        # is a 43% swing, while the same offset on a 0.33 conservative is only 30%.
         strength = (regime_confidence - 0.5) * 2  # Map 0.5-1.0 to 0.0-1.0
         strength = max(0.0, min(1.0, strength))
 
         if is_bull:
-            # Bull market: encourage buying
-            adjusted_buy = base_buy - (0.10 * strength)
-            adjusted_sell = base_sell + (0.10 * strength)
+            # Bull: ease buy gate by up to 18%, tighten sell gate by up to 15%
+            adjusted_buy = base_buy * (1.0 - 0.18 * strength)
+            adjusted_sell = base_sell * (1.0 + 0.15 * strength)
         else:
-            # Bear market: discourage buying
-            adjusted_buy = base_buy + (0.15 * strength)
-            adjusted_sell = base_sell - (0.12 * strength)
+            # Bear: tighten buy gate by up to 20%, ease sell gate by up to 18%
+            adjusted_buy = base_buy * (1.0 + 0.20 * strength)
+            adjusted_sell = base_sell * (1.0 - 0.18 * strength)
 
         # Safety bounds
         adjusted_buy = max(0.15, min(0.60, adjusted_buy))
@@ -821,9 +851,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         mr_conf: float,
         tf_signal: int,
         tf_conf: float,
+        ema_signal: int,
+        ema_conf: float,
         is_bull: bool,
     ) -> Tuple[float, str, int]:
-        """Calculate aggregated score"""
+        """Calculate aggregated score for all three strategies (MR + TF + EMA)."""
         components = []
         total_score = 0.0
         agreement_count = 0
@@ -875,13 +907,35 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             total_score -= penalty
             components.append(f"TF_oppose:-{penalty:.3f}")
 
+        # EMA contribution (previously excluded — now a full voting member)
+        if ema_signal == target_signal:
+            effective_conf = max(ema_conf, min_conf)
+            contribution = effective_conf * self.weights["ema"]
+            total_score += contribution
+            components.append(f"EMA_agree:{contribution:.3f}")
+            agreement_count += 1
+        elif ema_signal == 0:
+            effective_conf = max(ema_conf, min_conf)
+            contribution = (effective_conf * hold_contrib) * self.weights["ema"]
+            total_score += contribution
+            components.append(f"EMA_hold:{contribution:.3f}")
+        else:
+            effective_conf = max(ema_conf, min_conf)
+            penalty = (effective_conf * opposition_penalty) * self.weights["ema"]
+            total_score -= penalty
+            components.append(f"EMA_oppose:-{penalty:.3f}")
+
         explanation = " + ".join(components) if components else "no_agreement"
 
-        # Agreement bonus
-        if agreement_count == 2:
+        # Agreement bonus — tiered (two_strategy_bonus and three_strategy_bonus now both active)
+        if agreement_count == 3:
+            bonus = self.config.get("three_strategy_bonus", self.config["two_strategy_bonus"])
+            total_score += bonus
+            explanation += f" + bonus3({bonus:.2f})"
+        elif agreement_count == 2:
             bonus = self.config["two_strategy_bonus"]
             total_score += bonus
-            explanation += f" + bonus({bonus:.2f})"
+            explanation += f" + bonus2({bonus:.2f})"
 
         # Regime context
         if target_signal == 1:  # BUY
@@ -1184,45 +1238,62 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
     def _check_atr_expansion_filter(self, df: pd.DataFrame, trade_type: str) -> bool:
         """
-        Filter 5: ATR Expansion Proxy
-        Pre-trade check: candle_range >= 1.5 * current_ATR
-        Only applies to TREND trades.
+        Fix C: Replaced ATR Expansion (candle_range >= 1.5*ATR) with ADX Trend Confirmation.
+
+        Old logic required the latest candle's range to exceed 1.5× ATR. This blocked
+        valid signals in slow-grinding trends (GOLD, EURUSD) where candles are small but
+        direction is clear. The 1.5× bar was consistently failing even when ADX showed a
+        strong trend (ADX > 25).
+
+        New logic: confirm a trend is in force (ADX > 18). This threshold is intentionally
+        low — 18 separates genuine trend from pure noise without demanding strong momentum.
+        Counter-trend and REVERSION trades bypass the check (trade_type != "TREND").
         """
         if trade_type != "TREND":
             return True
-            
+
         try:
             if len(df) < 20:
                 return True
-                
-            latest = df.iloc[-1]
-            candle_range = latest['high'] - latest['low']
-            
-            # Calculate ATR (14)
+
+            # Calculate ADX (14)
             try:
                 import talib
-                atr = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+                adx_series = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+                adx = adx_series[-1]
             except Exception:
-                # Manual ATR calculation fallback
+                # Manual ADX fallback: use DM-based approximation via TR rolling
                 high_low = df['high'] - df['low']
                 high_close = np.abs(df['high'] - df['close'].shift())
                 low_close = np.abs(df['low'] - df['close'].shift())
-                ranges = pd.concat([high_low, high_close, low_close], axis=1)
-                true_range = ranges.max(axis=1)
-                atr = true_range.rolling(14).mean().iloc[-1]
-            
-            if pd.isna(atr) or atr == 0:
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr14 = tr.rolling(14).mean()
+                dm_plus = (df['high'].diff()).clip(lower=0)
+                dm_minus = (-df['low'].diff()).clip(lower=0)
+                # Use only the dominant direction
+                dm_plus = dm_plus.where(dm_plus > dm_minus, 0)
+                dm_minus = dm_minus.where(dm_minus > dm_plus, 0)
+                di_plus = 100 * dm_plus.rolling(14).mean() / atr14
+                di_minus = 100 * dm_minus.rolling(14).mean() / atr14
+                dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus).replace(0, np.nan)
+                adx = dx.rolling(14).mean().iloc[-1]
+
+            if pd.isna(adx):
                 return True
-                
-            passed = candle_range >= 1.5 * atr
-            
+
+            ADX_MIN = 18
+            passed = adx >= ADX_MIN
+
             if not passed:
-                logger.info(f"[ATR_EXP] ❌ BLOCKED - Range {candle_range:.5f} < 1.5 * ATR ({1.5*atr:.5f})")
-                
+                logger.info(f"[ADX_TREND] ❌ BLOCKED - ADX {adx:.1f} < {ADX_MIN} (insufficient trend strength)")
+            else:
+                logger.debug(f"[ADX_TREND] ✅ PASSED - ADX {adx:.1f}")
+
             return passed
+
         except Exception as e:
-            logger.error(f"[ATR_EXP] Error: {e}")
-            return True # Fail-open
+            logger.error(f"[ADX_TREND] Error: {e}")
+            return True  # Fail-open
 
     def get_aggregated_signal(
         self,
@@ -1237,6 +1308,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         self.stats["total_evaluations"] += 1
         try:
             timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
+
+            # AI-5: Clear per-cycle pattern cache so sniper filter and format_viz share results.
+            if self.ai_validator and hasattr(self.ai_validator, 'clear_pattern_cache'):
+                self.ai_validator.clear_pattern_cache()
 
             # ═══════════════════════════════════════════════════════════════
             # T1.5: STALE PRICE DETECTION
@@ -1565,9 +1640,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 ai_bypass = False
                 ai_validation_details = {}
 
-                # STEP 4: Calculate scores
-                buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
-                sell_score, sell_explanation, sell_agreement = self._calculate_score(-1, mr_signal, mr_conf, tf_signal, tf_conf, is_bull)
+                # STEP 4: Calculate scores (MR + TF + EMA all contribute)
+                buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
+                sell_score, sell_explanation, sell_agreement = self._calculate_score(-1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
 
                 # STEP 5: Dynamic thresholds
                 adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
@@ -1581,7 +1656,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})" if final_signal == 1 else f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})" if final_signal == -1 else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
                 original_signal = final_signal
 
-                raw_quality = max(min(buy_score, 0.7), min(sell_score, 0.7))
+                # Fix F: removed hard cap at 0.7 — score can now reflect true 3-strategy consensus
+                raw_quality = max(buy_score, sell_score)
                 if buy_agreement < 2 and sell_agreement < 2: raw_quality *= 0.7
                 if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull): raw_quality *= 1.15
                 signal_quality = min(raw_quality, 1.0)
@@ -1601,10 +1677,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if final_signal == 0 and self.allow_independent:
                     candidates = []
 
-                    # TF: use the original (pre-gatekeeper) signal so a gatekeeper
-                    # veto doesn't double-block an otherwise valid solo TF signal.
-                    if tf_original != 0 and tf_conf >= self.independent_thresholds["trend_following"]:
-                        candidates.append(("TF", tf_original, tf_conf))
+                    # TF: use post-gatekeeper signal (consistent with MR/EMA treatment).
+                    # tf_original pre-bypass was causing asymmetric gatekeeper application.
+                    if tf_signal != 0 and tf_conf >= self.independent_thresholds["trend_following"]:
+                        candidates.append(("TF", tf_signal, tf_conf))
 
                     # EMA: evaluated post-gatekeeper (gatekeeper treats EMA same as TF)
                     if ema_signal != 0 and ema_conf >= self.independent_thresholds["ema"]:
@@ -1637,6 +1713,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         )
 
                 # World-Class Filters
+                # Fix D: profit filter removed — it duplicated the volatility filter (both
+                # measured ATR/price%) while adding an independent failure point that blocked
+                # valid signals in low-ATR trending regimes (e.g. GOLD steady grind moves).
+                # Fix C: ATR expansion filter replaced with ADX trend confirmation (see method).
                 if final_signal != 0 and self.enable_filters:
                     gov_passed, trade_type = self._check_governor_filter(final_signal)
                     if not gov_passed: final_signal = 0; reasoning = "blocked_by_governor"
@@ -1648,10 +1728,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             if not sniper_passed: final_signal = 0; reasoning = "no_sniper_confirmation"
                             else:
                                 atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
-                                if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_candle_expansion"
-                                else:
-                                    profit_passed, _ = self._check_profit_filter(df)
-                                    if not profit_passed: final_signal = 0; reasoning = "insufficient_profit_potential"
+                                if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_trend_strength"
             
             # STEP 7: Build base response
             details = {
