@@ -248,25 +248,23 @@ class AIVisualizationGenerator:
                 label=f"Current: ${current_price:,.2f}",
             )
 
-            # Add EMAs if available
-            if "ema_50" in df_plot.columns and df_plot["ema_50"].notna().any():
-                ax.plot(
-                    range(len(df_plot)),
-                    df_plot["ema_50"],
-                    color="cyan",
-                    linewidth=1.5,
-                    label="EMA 50",
-                    alpha=0.7,
-                )
-            if "ema_200" in df_plot.columns and df_plot["ema_200"].notna().any():
-                ax.plot(
-                    range(len(df_plot)),
-                    df_plot["ema_200"],
-                    color="magenta",
-                    linewidth=1.5,
-                    label="EMA 200",
-                    alpha=0.7,
-                )
+            # Add EMAs if available — try multiple common column naming conventions
+            ema_defs = [
+                (["ema_20", "EMA_20", "EMA20", "ema20"], "yellow",   1.2, "EMA 20"),
+                (["ema_50", "EMA_50", "EMA50", "ema50"], "cyan",     1.5, "EMA 50"),
+                (["ema_200","EMA_200","EMA200","ema200"],"magenta",  1.5, "EMA 200"),
+            ]
+            for col_names, color, lw, label in ema_defs:
+                col = next((c for c in col_names if c in df_plot.columns and df_plot[c].notna().any()), None)
+                if col:
+                    ax.plot(
+                        range(len(df_plot)),
+                        df_plot[col],
+                        color=color,
+                        linewidth=lw,
+                        label=label,
+                        alpha=0.7,
+                    )
 
             ax.set_title(
                 f"{asset_name} - 15min Candlesticks (Last 100 candles)",
@@ -748,65 +746,118 @@ class AIVisualizationGenerator:
             ax.axis("off")
 
     def _plot_signal_breakdown(self, ax, details: Dict):
-        """Plot signal aggregation breakdown"""
+        """Plot signal aggregation breakdown — handles both performance and council modes"""
         try:
-            # Get individual strategy signals
-            mr_signal = details.get("mr_signal", 0)
-            mr_conf = details.get("mr_confidence", 0)
-            tf_signal = details.get("tf_signal", 0)
-            tf_conf = details.get("tf_confidence", 0)
-            ema_signal = details.get("ema_signal", 0)
-            ema_conf = details.get("ema_confidence", 0)
-
-            # Create stacked bar chart
-            strategies = ["Mean\nReversion", "Trend\nFollowing", "EMA\nRegime"]
-            signals = [mr_signal, tf_signal, ema_signal]
-            confidences = [mr_conf, tf_conf, ema_conf]
-
-            colors = []
-            for sig in signals:
-                if sig == 1:
-                    colors.append("lime")
-                elif sig == -1:
-                    colors.append("red")
-                else:
-                    colors.append("gray")
-
-            x = range(len(strategies))
-            bars = ax.bar(x, confidences, color=colors, alpha=0.7, edgecolor="white")
-
-            # Add signal labels on bars
-            for i, (bar, sig, conf) in enumerate(zip(bars, signals, confidences)):
-                signal_text = "BUY" if sig == 1 else "SELL" if sig == -1 else "HOLD"
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    conf / 2,
-                    f"{signal_text}\n{conf:.2%}",
-                    ha="center",
-                    va="center",
-                    fontsize=9,
-                    fontweight="bold",
-                )
-
-            ax.set_xticks(x)
-            ax.set_xticklabels(strategies, fontsize=9)
-            ax.set_ylabel("Confidence", fontsize=10)
-            ax.set_ylim(0, 1)
-            ax.set_title("Individual Strategy Signals", fontsize=11, fontweight="bold")
-            ax.grid(True, alpha=0.3, axis="y")
-
-            # Add final aggregated signal
+            agg_mode = details.get("aggregator_mode", "performance")
             final_quality = details.get("signal_quality", 0)
             regime = details.get("regime", "UNKNOWN")
+            trade_type = details.get("trade_type", "")
+            adx_val = details.get("adx", None)
 
+            # ── Info box text ─────────────────────────────────────────────
+            info_lines = [f"Quality: {final_quality:.1%}", f"Regime: {regime}"]
+            if trade_type:
+                info_lines.append(f"Mode: {trade_type}")
+            if adx_val is not None:
+                adx_label = "Strong" if adx_val >= 40 else "Trending" if adx_val >= 25 else "Weak"
+                info_lines.append(f"ADX: {adx_val:.1f} ({adx_label})")
+
+            # ── Council aggregator mode ───────────────────────────────────
+            if agg_mode == "council":
+                total_score = details.get("total_score", 0) or 0
+                decision_type = details.get("decision_type", "N/A")
+
+                # Prefer buy_scores or sell_scores depending on the final signal
+                buy_scores = details.get("buy_scores", {}) or {}
+                sell_scores = details.get("sell_scores", {}) or {}
+
+                # Use whichever side has the higher total
+                buy_total = sum(buy_scores.values()) if buy_scores else 0
+                sell_total = sum(sell_scores.values()) if sell_scores else 0
+                judge_scores = sell_scores if sell_total >= buy_total else buy_scores
+                side_label = "SELL" if sell_total >= buy_total else "BUY"
+
+                judge_names = list(judge_scores.keys())
+                judge_values = [judge_scores[k] for k in judge_names]
+
+                if not judge_names:
+                    # Fallback: just show total score bar
+                    judge_names = ["Council Score"]
+                    judge_values = [min(total_score / 5.0, 1.0)]
+
+                colors = ["lime" if side_label == "BUY" else "red"] * len(judge_names)
+                y_pos = range(len(judge_names))
+
+                ax.barh(y_pos, judge_values, color=colors, alpha=0.7, edgecolor="white")
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels([n.replace("_", " ").title() for n in judge_names], fontsize=8)
+                ax.set_xlabel("Judge Score", fontsize=10)
+                ax.set_xlim(0, max(max(judge_values, default=1) * 1.2, 1.5))
+
+                # Value labels
+                for i, val in enumerate(judge_values):
+                    ax.text(val + 0.02, i, f"{val:.2f}", va="center", fontsize=8)
+
+                ax.set_title(
+                    f"Council Judges — {decision_type}  ({side_label} lean: {total_score:.2f}/5.0)",
+                    fontsize=11, fontweight="bold"
+                )
+                info_lines.insert(0, f"Engine: COUNCIL")
+                info_lines.insert(1, f"Decision: {decision_type}")
+
+            else:
+                # ── Performance-weighted aggregator ───────────────────────
+                # Try both short-form and long-form key names (aggregator may use either)
+                mr_signal = details.get("mean_reversion_signal") or details.get("mr_signal", 0)
+                mr_conf   = details.get("mean_reversion_confidence") or details.get("mr_confidence", 0) or 0
+                tf_signal = details.get("trend_following_signal") or details.get("tf_signal", 0)
+                tf_conf   = details.get("trend_following_confidence") or details.get("tf_confidence", 0) or 0
+                ema_signal = details.get("ema_signal", 0)
+                ema_conf   = details.get("ema_confidence") or details.get("ema_conf", 0) or 0
+
+                strategies  = ["Mean\nReversion", "Trend\nFollowing", "EMA\nRegime"]
+                signals     = [mr_signal, tf_signal, ema_signal]
+                confidences = [mr_conf, tf_conf, ema_conf]
+
+                colors = []
+                for sig in signals:
+                    if sig == 1:
+                        colors.append("lime")
+                    elif sig == -1:
+                        colors.append("red")
+                    else:
+                        colors.append("gray")
+
+                x = range(len(strategies))
+                bars = ax.bar(x, confidences, color=colors, alpha=0.7, edgecolor="white")
+
+                for bar, sig, conf in zip(bars, signals, confidences):
+                    if conf > 0.05:
+                        signal_text = "BUY" if sig == 1 else "SELL" if sig == -1 else "HOLD"
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            conf / 2,
+                            f"{signal_text}\n{conf:.2%}",
+                            ha="center", va="center",
+                            fontsize=9, fontweight="bold",
+                        )
+
+                ax.set_xticks(x)
+                ax.set_xticklabels(strategies, fontsize=9)
+                ax.set_ylabel("Confidence", fontsize=10)
+                ax.set_ylim(0, 1)
+                ax.set_title("Individual Strategy Signals", fontsize=11, fontweight="bold")
+                info_lines.insert(0, "Engine: PERF-WEIGHTED")
+
+            ax.grid(True, alpha=0.3, axis="y" if agg_mode != "council" else "x")
+
+            # Info box
             ax.text(
-                0.02,
-                0.98,
-                f"Final Quality: {final_quality:.1%}\nRegime: {regime}",
+                0.02, 0.98,
+                "\n".join(info_lines),
                 transform=ax.transAxes,
-                va="top",
-                fontsize=9,
-                bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
+                va="top", fontsize=8,
+                bbox=dict(boxstyle="round", facecolor="black", alpha=0.6),
             )
 
         except Exception as e:
@@ -947,20 +998,64 @@ class AIVisualizationGenerator:
                     summary_lines.append(f"[RESULT: APPROVED]")
                     summary_lines.append(f"  All layers passed")
                     summary_lines.append(f"  Signal confirmed by AI")
+            elif action in ("hold", "none", "ai_disabled"):
+                # HOLD — score below threshold, not an AI rejection
+                summary_lines.append(f"[RESULT: HOLD]")
+                if action == "ai_disabled":
+                    summary_lines.append(f"  AI validation disabled")
+                else:
+                    summary_lines.append(f"  Score below signal threshold")
+                    summary_lines.append(f"  No trade action taken")
             else:
+                # Genuine rejection: AI validator blocked a non-zero signal
                 summary_lines.append(f"[RESULT: REJECTED]")
                 reasons = ai_details.get("rejection_reasons", [])
+                # Fallback: single-string reason from hybrid_validator
+                if not reasons:
+                    single = ai_details.get("ai_rejection_reason", "")
+                    if single:
+                        reasons = [single.replace("_", " ").title()]
                 if reasons:
                     summary_lines.append(f"  Reasons:")
-                    for reason in reasons[:3]:  # Show max 3
+                    for reason in reasons[:3]:
                         summary_lines.append(f"    - {reason}")
                 else:
-                    summary_lines.append(f"  No specific reasons logged")
+                    summary_lines.append(f"  Signal blocked by AI filter")
 
             # Check for errors
             if ai_details.get("error"):
                 summary_lines.append(f"\n[ERROR]")
                 summary_lines.append(f"  {ai_details['error'][:40]}")
+
+            # ── Engine context (trade type, ADX, regime, council score) ──
+            summary_lines.append("")
+            summary_lines.append("[ENGINE CONTEXT]")
+
+            agg_mode   = details.get("aggregator_mode", "performance")
+            trade_type = details.get("trade_type", "")
+            adx_val    = details.get("adx", None)
+            regime_str = details.get("regime", "")
+
+            summary_lines.append(f"  Engine: {'COUNCIL' if agg_mode == 'council' else 'PERF-WEIGHTED'}")
+
+            if trade_type:
+                risk_map = {"TREND": "2.0% risk", "SCALP": "1.0% risk"}
+                risk_str = risk_map.get(trade_type, "1.5% risk")
+                summary_lines.append(f"  Type:   {trade_type} ({risk_str})")
+
+            if adx_val is not None:
+                adx_label = "Strong" if adx_val >= 40 else "Trending" if adx_val >= 25 else "Weak"
+                summary_lines.append(f"  ADX:    {adx_val:.1f} ({adx_label})")
+
+            if regime_str:
+                summary_lines.append(f"  Regime: {regime_str}")
+
+            # Council score if available
+            if agg_mode == "council":
+                total_score = details.get("total_score")
+                decision    = details.get("decision_type", "")
+                if total_score is not None:
+                    summary_lines.append(f"  Score:  {total_score:.2f}/5.0  [{decision}]")
 
             # Display the summary
             summary_text = "\n".join(summary_lines)
@@ -971,8 +1066,10 @@ class AIVisualizationGenerator:
                     border_color = "yellow"
                 else:
                     border_color = "lime"
+            elif action in ("hold", "none", "ai_disabled"):
+                border_color = "gray"       # HOLD — neutral, not a failure
             else:
-                border_color = "red"
+                border_color = "red"        # REJECTED — AI blocked a real signal
 
             ax.text(
                 0.05,
@@ -1112,9 +1209,12 @@ class TelegramChartSender:
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-            # Send to all admins
+            # Send to all admins — seek(0) before each send so the buffer
+            # is always at the start (a consumed buffer produces a blank image
+            # for the 2nd+ admin if only reset once at the end)
             for admin_id in self.telegram_bot.admin_ids:
                 try:
+                    chart_buffer.seek(0)
                     await self.telegram_bot.application.bot.send_photo(
                         chat_id=admin_id,
                         photo=chart_buffer,
@@ -1124,9 +1224,6 @@ class TelegramChartSender:
                     logger.info(f"[TELEGRAM] Chart sent to admin {admin_id}")
                 except Exception as e:
                     logger.error(f"[TELEGRAM] Failed to send to {admin_id}: {e}")
-
-            # Reset buffer for next use
-            chart_buffer.seek(0)
 
         except Exception as e:
             logger.error(f"[TELEGRAM] Chart sending error: {e}", exc_info=True)

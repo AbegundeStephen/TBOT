@@ -131,6 +131,13 @@ class HybridSignalValidator:
         # Threshold adjustment history
         self.threshold_history = deque(maxlen=100)
 
+        # AI-5: Within-cycle pattern result cache.
+        # _check_pattern() runs the TF neural net — expensive. In the council path it
+        # gets called up to 3× per signal (sniper penalty, validate_signal, format_viz).
+        # Cache keyed on (last_close_hash, signal) so identical evaluations hit memory.
+        # Cache is cleared at the start of each validate_signal() call via clear_pattern_cache().
+        self._pattern_cache: dict = {}
+
         self._log_initialization()
 
     def _log_initialization(self):
@@ -230,30 +237,71 @@ class HybridSignalValidator:
             asset, df, current_price, signal, threshold=self.current_sr_threshold
         )
 
-        if not sr_result["near_level"]:
-            result = self._reject_signal(
-                signal_details, sr_result, None, reason="no_sr_level", strategy=strategy
-            )
-            self.stats["rejected_no_sr"] += 1
-            self.rejection_reasons["no_sr_level"] += 1
-            self.strategy_stats[strategy]["rejected"] += 1
-            return result
-
         # Layer 4: Pattern Confirmation
         pattern_result = self._check_pattern(
             df, signal, min_confidence=self.current_pattern_threshold, strategy=strategy
         )
 
-        if not pattern_result["pattern_confirmed"]:
-            result = self._reject_signal(
-                signal_details,
-                sr_result,
-                pattern_result,
-                reason=pattern_result["reason"],
-                strategy=strategy,
+        sr_passed = sr_result["near_level"]
+        pattern_passed = pattern_result["pattern_confirmed"]
+        model_uncertain = pattern_result.get("model_uncertain", False)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Weighted-OR Gate (replaces hard AND gate)
+        #
+        # Old: BOTH S/R AND Pattern required → killed every mid-trend signal
+        # where price had moved past historical levels (no S/R) or market was
+        # in a momentum phase (no clean pattern).
+        #
+        # New logic:
+        #   Both pass                       → full approval + boost
+        #   One passes, other uncertain/miss → soft approval, −0.05 quality
+        #   Both fail                        → reject (as before)
+        #
+        # "Regime-aligned" means the signal direction matches the macro bias
+        # (bull+buy or bear+sell). Counter-trend signals keep the hard AND gate
+        # because they need every confirmation available.
+        # ─────────────────────────────────────────────────────────────────────
+        regime = signal_details.get("regime", "NEUTRAL")
+        is_bull_regime = "BULL" in regime.upper() or "BULLISH" in regime.upper()
+        is_bear_regime = "BEAR" in regime.upper() or "BEARISH" in regime.upper()
+        regime_aligned = (signal == 1 and is_bull_regime) or (signal == -1 and is_bear_regime)
+
+        if sr_passed and pattern_passed:
+            # Full approval — both layers confirmed
+            pass  # fall through to _approve_signal
+        elif sr_passed and not pattern_passed and regime_aligned and not model_uncertain:
+            # S/R confirmed, no clean pattern, but we're with the trend → soft pass
+            logger.info(
+                f"[AI] Soft-pass: S/R ✓ | Pattern ✗ ({pattern_result.get('reason','?')}) "
+                f"| regime-aligned → approve with quality penalty"
             )
-            self.stats["rejected_no_pattern"] += 1
-            self.rejection_reasons[pattern_result["reason"]] += 1
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+        elif pattern_passed and not sr_passed and regime_aligned:
+            # Pattern confirmed, no nearby S/R level, but trend-aligned → soft pass
+            logger.info(
+                f"[AI] Soft-pass: Pattern ✓ ({pattern_result.get('pattern_name','?')}) "
+                f"| S/R ✗ ({sr_result.get('reason','?')}) | regime-aligned → approve with quality penalty"
+            )
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+        elif model_uncertain and sr_passed:
+            # Model couldn't read the candle (uncertain output) but S/R is solid → soft pass
+            logger.info(f"[AI] Soft-pass: S/R ✓ | Model uncertain → approve with quality penalty")
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+        else:
+            # Hard reject — either both failed, or counter-trend with one missing
+            rejection_reason = "both_gates_failed" if (not sr_passed and not pattern_passed) else \
+                ("no_sr_level" if not sr_passed else pattern_result.get("reason", "no_pattern"))
+            result = self._reject_signal(
+                signal_details, sr_result, pattern_result,
+                reason=rejection_reason, strategy=strategy,
+            )
+            if not sr_passed:
+                self.stats["rejected_no_sr"] += 1
+                self.rejection_reasons["no_sr_level"] += 1
+            else:
+                self.stats["rejected_no_pattern"] += 1
+                self.rejection_reasons[pattern_result.get("reason", "no_pattern")] += 1
             self.strategy_stats[strategy]["rejected"] += 1
             return result
 
@@ -366,8 +414,12 @@ class HybridSignalValidator:
             except Exception:
                 _atr = current_price * 0.01  # 1% fallback if TA-Lib unavailable
 
-            # Max distance allowed: 0.25x ATR from the 20 EMA
-            max_dist = 0.25 * _atr
+            # AI-3 Fix: widened from 0.25×ATR to 0.5×ATR for EMA fallback.
+            # Old 0.25×ATR only allowed price hugging the EMA (range-bound behaviour).
+            # In trending markets price legitimately sits 0.5–1.0×ATR from the EMA;
+            # the fallback would always fail, causing a chain of "dynamic_ema_too_far"
+            # rejections even when the trend was clear.
+            max_dist = 0.5 * _atr
 
             if signal == 1 and current_price > current_ema and current_ema > prev_ema:
                 if abs(current_price - current_ema) <= max_dist:
@@ -378,6 +430,19 @@ class HybridSignalValidator:
                         "distance_pct": ((current_price - current_ema) / current_price) * 100,
                         "reason": "riding_dynamic_20_ema"
                     }
+                # AI-3 Fix: trending continuation check — 3 consecutive closes above rising EMA
+                # confirms price is in a sustained uptrend even beyond 0.5×ATR from EMA.
+                if len(df) >= 4:
+                    last_3_closes = df["close"].iloc[-4:-1]
+                    last_3_emas = ema_20_series.iloc[-4:-1]
+                    if all(last_3_closes.values > last_3_emas.values):
+                        return {
+                            "near_level": True,
+                            "level_type": "trending_continuation_support",
+                            "nearest_level": current_ema,
+                            "distance_pct": ((current_price - current_ema) / current_price) * 100,
+                            "reason": "3bar_trending_continuation_above_ema"
+                        }
                 return {
                     "near_level": False,
                     "reason": "dynamic_ema_too_far",
@@ -393,6 +458,18 @@ class HybridSignalValidator:
                         "distance_pct": ((current_ema - current_price) / current_price) * 100,
                         "reason": "riding_dynamic_20_ema"
                     }
+                # AI-3 Fix: trending continuation check — 3 consecutive closes below falling EMA
+                if len(df) >= 4:
+                    last_3_closes = df["close"].iloc[-4:-1]
+                    last_3_emas = ema_20_series.iloc[-4:-1]
+                    if all(last_3_closes.values < last_3_emas.values):
+                        return {
+                            "near_level": True,
+                            "level_type": "trending_continuation_resistance",
+                            "nearest_level": current_ema,
+                            "distance_pct": ((current_ema - current_price) / current_price) * 100,
+                            "reason": "3bar_trending_continuation_below_ema"
+                        }
                 return {
                     "near_level": False,
                     "reason": "dynamic_ema_too_far",
@@ -473,10 +550,27 @@ class HybridSignalValidator:
             logger.error(f"[AVWAP] Error: {e}")
             return {}
 
+    def clear_pattern_cache(self):
+        """Clear the within-cycle pattern cache. Call at the start of each evaluation cycle."""
+        self._pattern_cache.clear()
+
     def _check_pattern(self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60, strategy: str = "UNKNOWN") -> dict:
         try:
             if len(df) < 15: return {"pattern_confirmed": False, "reason": "insufficient_data"}
-            
+
+            # AI-5: Cache check — avoid triple neural net inference per council signal.
+            # Key: last close price (proxy for df identity) + signal direction.
+            try:
+                cache_key = (round(float(df["close"].iloc[-1]), 6), signal)
+                if cache_key in self._pattern_cache:
+                    cached = self._pattern_cache[cache_key]
+                    # Re-apply min_confidence gate since different callers may use different thresholds
+                    if cached.get("pattern_confirmed") and cached.get("confidence", 0) < min_confidence:
+                        return {**cached, "pattern_confirmed": False, "reason": "low_confidence_recalc"}
+                    return cached
+            except Exception:
+                cache_key = None  # Cache miss — proceed normally
+
             snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
             if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
             snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
@@ -492,7 +586,15 @@ class HybridSignalValidator:
                 }
 
             if predicted_id == 0:
-                return {"pattern_confirmed": confidence < 0.70, "reason": "no_pattern_detected", "pattern_name": "Noise", "confidence": confidence}
+                # Fix: old code returned pattern_confirmed=True when confidence < 0.70 —
+                # inverse logic (uncertain "no pattern" = confirmed pattern). Corrected:
+                # - High confidence no-pattern (≥ 0.70): model is sure there's nothing → fail
+                # - Low confidence no-pattern (< 0.70): model is uncertain → soft-pass with flag
+                #   so validate_signal() can use S/R-only approval path instead of hard-failing.
+                if confidence >= 0.70:
+                    return {"pattern_confirmed": False, "reason": "no_pattern_detected", "pattern_name": "Noise", "confidence": confidence, "model_uncertain": False}
+                else:
+                    return {"pattern_confirmed": False, "reason": "model_uncertain_no_pattern", "pattern_name": "Uncertain", "confidence": confidence, "model_uncertain": True}
 
             # Alignment check
             is_bullish = pattern_name in self.BULLISH_PATTERNS
@@ -502,27 +604,38 @@ class HybridSignalValidator:
             if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
 
             # ================================================================
-            # MR PATTERN CONFIRMATION: Strict Institutional Entry Rules
+            # MR PATTERN CONFIRMATION: Institutional Reversal Pattern List
+            # AI-4 Fix: expanded from 3 to 7 per direction. Original list blocked
+            # valid reversal patterns (Harami, Piercing, Inverted Hammer, Dragonfly
+            # Doji) that are established in institutional reversal playbooks.
             # ================================================================
             if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
-                allowed_long = ["hammer", "morning_star", "bullish_engulfing"]
-                allowed_short = ["shooting_star", "evening_star", "bearish_engulfing"]
-                
+                allowed_long = [
+                    "hammer", "morning_star", "bullish_engulfing",
+                    "harami", "bullish_harami", "piercing",
+                    "inverted_hammer", "dragonfly_doji", "three_inside",
+                ]
+                allowed_short = [
+                    "shooting_star", "evening_star", "bearish_engulfing",
+                    "bearish_harami", "dark_cloud", "dark_cloud_cover",
+                    "gravestone_doji", "hanging_man", "three_outside",
+                ]
+
                 # Normalize for matching
                 norm_pattern = pattern_name.lower().replace(" ", "_")
-                
+
                 if signal == 1 and norm_pattern not in allowed_long:
                     logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for LONG.")
                     return {
-                        "pattern_confirmed": False, 
+                        "pattern_confirmed": False,
                         "confidence": 0.0,
                         "reason": f"unsupported_mr_pattern_{norm_pattern}"
                     }
-                
+
                 if signal == -1 and norm_pattern not in allowed_short:
                     logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for SHORT.")
                     return {
-                        "pattern_confirmed": False, 
+                        "pattern_confirmed": False,
                         "confidence": 0.0,
                         "reason": f"unsupported_mr_pattern_{norm_pattern}"
                     }
@@ -535,13 +648,15 @@ class HybridSignalValidator:
                     min_confidence = max(0.45, min_confidence - 0.20)
 
             if confidence < min_confidence:
-                return {
-                    "pattern_confirmed": False,
-                    "reason": "low_confidence",
-                    "confidence": confidence
-                }
-            
-            return {"pattern_confirmed": True, "pattern_name": pattern_name, "confidence": confidence}
+                result = {"pattern_confirmed": False, "reason": "low_confidence", "confidence": confidence}
+                if cache_key:
+                    self._pattern_cache[cache_key] = result
+                return result
+
+            result = {"pattern_confirmed": True, "pattern_name": pattern_name, "confidence": confidence}
+            if cache_key:
+                self._pattern_cache[cache_key] = result
+            return result
         except Exception as e:
             logger.error(f"[PATTERN] Error: {e}")
             return {"pattern_confirmed": False, "reason": "error"}
@@ -607,7 +722,11 @@ class HybridSignalValidator:
         if len(self.rejection_window) < 30: return
         if sum(self.rejection_window) / len(self.rejection_window) > self.bypass_threshold:
             self.bypass_mode = True
-            self.bypass_cooldown = 15
+            # AI-4 Fix: raised from 15 to 30 cycles (was 75 min, now 150 min).
+            # At 15 cycles the circuit breaker reset too quickly — the model would
+            # re-enter rejection mode within the same session if the root cause
+            # (bad market regime, stale model) hadn't been resolved.
+            self.bypass_cooldown = 30
 
     def _reset_circuit_breaker(self):
         self.bypass_mode = False
