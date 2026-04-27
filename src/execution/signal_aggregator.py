@@ -175,6 +175,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # CONFIGURATION MERGE (Safety Fix)
         # ================================================================
         # 1. Define Defaults first (guarantees all keys exist)
+        _is_fx_asset = any(
+            fx in self.asset_type.upper()
+            for fx in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")
+        ) and "BTC" not in self.asset_type.upper()
+
         if self.asset_type == "BTC":
             self.config = {
                 "buy_threshold": 0.30,
@@ -190,7 +195,31 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "hold_contribution_pct": 0.0,
                 "opposition_penalty": 0.40,
             }
-        else:  # GOLD (Default)
+        elif _is_fx_asset:
+            # FX pairs (EURUSD, EURJPY, GBPUSD, etc.) move in smaller, more
+            # gradual increments than BTC or GOLD. Lowering thresholds prevents
+            # valid setups from being blocked by score calculations tuned for
+            # higher-volatility assets.
+            # single_override_threshold 0.60 vs 0.72: FX strategies are configured
+            # with min_confidence=0.45 — a 0.72 bar for independent firing almost
+            # never gets reached, silently killing solo TF/EMA signals.
+            self.config = {
+                "buy_threshold": 0.26,
+                "sell_threshold": 0.22,
+                "two_strategy_bonus": 0.22,
+                "three_strategy_bonus": 0.28,
+                "bull_buy_boost": 0.20,
+                "bull_sell_penalty": 0.12,
+                "bear_sell_boost": 0.20,
+                "bear_buy_penalty": 0.22,
+                "min_confidence_to_use": 0.05,
+                "min_signal_quality": 0.22,
+                "hold_contribution_pct": 0.0,
+                "opposition_penalty": 0.35,
+                "single_override_threshold": 0.60,
+                "allow_single_override": True,
+            }
+        else:  # GOLD, USTEC, indices (Default)
             self.config = {
                 "buy_threshold": 0.30,
                 "sell_threshold": 0.24,
@@ -1351,9 +1380,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # TF signals at NY open: 53% WR, -21.2% P&L (stop-hunting territory).
             # Trades 1–2 hours later: 60% WR, +101.5% P&L.
             # BTC trades 24/7 — only block market-hours assets.
+            # NOTE: FX pairs (EURUSD, EURJPY) are intentionally excluded.
+            # 13:00 UTC = London/NY overlap — the highest-liquidity, most
+            # directional hour of the FX session. Blocking it kills best entries.
+            # The stop-hunt data that justified this block was from USTEC/GOLD.
             # ═══════════════════════════════════════════════════════════════
             _hour_utc = _dt.utcnow().hour
-            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD", "EURJPY", "EURUSD"):
+            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD"):
                 logger.info(
                     f"[SESSION] ⏸️ NY open hour block — no new entries for {self.asset_type}"
                 )
@@ -1617,18 +1650,25 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         regime_aligned=_trap_aligned,
                     ):
                         logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
+                        # Pass the REAL strategy signals through so the shadow trader
+                        # can record and learn from trap-filter blocks (Bug 2 fix).
+                        # Zeroing these out was hiding ~47 signals/cycle from the
+                        # gate scorecard (76.6% WR, +13.3% P&L invisible to ML labels).
                         return 0, {
                             "timestamp": timestamp,
                             "regime": regime_name,
                             "reasoning": "blocked_by_trap_filter",
                             "final_signal": 0,
                             "signal_quality": 0.0,
-                            "mr_signal": 0,
-                            "mr_confidence": 0.0,
-                            "tf_signal": 0,
-                            "tf_confidence": 0.0,
-                            "ema_signal": 0,
-                            "ema_confidence": 0.0
+                            "mr_signal": mr_signal,
+                            "mr_confidence": mr_conf,
+                            "tf_signal": tf_signal,
+                            "tf_confidence": tf_conf,
+                            "ema_signal": ema_signal,
+                            "ema_confidence": ema_conf,
+                            # Raw pre-gatekeeper values for shadow trader gate scoring
+                            "mr_signal_raw": mr_original,
+                            "tf_signal_raw": tf_original,
                         }
 
                 # STEP 3: PRE-SCORE AI VALIDATION — DISABLED (T2.2)
@@ -1765,8 +1805,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     logger.error(f"[AGGREGATOR] AI formatting failed: {e}")
 
             # STEP 9: Final Response update
+            # Derive the ai_validated boolean from the action field so the DB
+            # and dashboard always have a correct True/False value.
+            # "approved"/"bypassed*" → AI allowed the signal through.
+            # "rejected" → AI blocked it.
+            # "skipped*"/"none"/"ai_disabled"/"hold" → AI was not in the loop.
+            _ai_action = ai_validation_details.get("action", "") if isinstance(ai_validation_details, dict) else ""
+            _ai_validated = _ai_action == "approved" or _ai_action.startswith("bypassed")
+
             details.update({
                 "ai_validation": ai_validation_details,
+                "ai_validated": _ai_validated,
                 "mr_signal_raw": mr_original,  # Ensure originals are present
                 "tf_signal_raw": tf_original,
             })
@@ -1800,41 +1849,3 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "ema_signal": 0,
                 "ema_confidence": 0.0,
             }
-
-    def _calculate_ai_impact(self, ai_stats: dict) -> dict:
-        """Calculate AI validation impact on trading"""
-        total_checks = ai_stats.get("total_checks", 0)
-        if total_checks == 0:
-            return {"message": "No AI checks performed"}
-
-        approved = ai_stats.get("approved", 0)
-        rejected = ai_stats.get("rejected", 0)
-        bypassed_strong = ai_stats.get("bypassed_strong_signal", 0)
-        bypassed_breaker = ai_stats.get("bypassed_circuit_breaker", 0)
-
-        effective_signals = approved + bypassed_strong + bypassed_breaker
-        filter_rate = (rejected / total_checks) * 100 if total_checks > 0 else 0
-
-        return {
-            "total_signals_checked": total_checks,
-            "effective_signals": effective_signals,
-            "filtered_signals": rejected,
-            "filter_rate": f"{filter_rate:.1f}%",
-            "strong_signal_bypasses": bypassed_strong,
-            "circuit_breaker_bypasses": bypassed_breaker,
-            "net_approval_rate": f"{(effective_signals/total_checks)*100:.1f}%",
-            "assessment": self._assess_ai_performance(filter_rate),
-        }
-
-    def _assess_ai_performance(self, filter_rate: float) -> str:
-        """Assess if AI filtering is appropriate"""
-        if filter_rate > 75:
-            return "⚠️ OVER-FILTERING: AI rejecting too many signals"
-        elif filter_rate > 50:
-            return "⚠️ HIGH FILTERING: AI may be too strict"
-        elif filter_rate > 25:
-            return "✓ BALANCED: AI filtering is reasonable"
-        elif filter_rate > 10:
-            return "✓ LIGHT FILTERING: AI approving most signals"
-        else:
-            return "ℹ️ MINIMAL FILTERING: AI rarely rejecting signals"

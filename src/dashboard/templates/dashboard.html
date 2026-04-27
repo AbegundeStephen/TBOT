@@ -1795,12 +1795,21 @@ async function loadSignalHistory(page=1, asset='') {
 function getSignalOutcome(s) {
     if (s.executed) return { cls:'outcome-taken', text:'✅ Executed' };
     if (s.signal === 0) return { cls:'outcome-hold', text:'⚪ Hold' };
+    // Parse ai_details once so we can branch on action
+    let aiAction = null;
     if (s.ai_details) {
         try {
             const ai = typeof s.ai_details==='string' ? JSON.parse(s.ai_details) : s.ai_details;
-            if (ai.action==='rejected') return { cls:'outcome-filtered', text:'❌ AI: '+(ai.reason||ai.rejection_reason||'rejected') };
+            aiAction = ai.action || null;
+            if (aiAction === 'rejected') return { cls:'outcome-filtered', text:'❌ AI: '+(ai.reason||ai.rejection_reason||'rejected') };
+            if (aiAction === 'approved' || (aiAction && aiAction.startsWith('bypassed'))) {
+                // Signal was approved by AI but not executed — something else gated it
+                return { cls:'outcome-conflict', text:'⚠️ AI ✅ not executed' };
+            }
         } catch(e){}
     }
+    // Fallback: use the stored boolean
+    if (s.ai_validated) return { cls:'outcome-conflict', text:'⚠️ AI ✅ not executed' };
     if (!s.ai_validated) return { cls:'outcome-filtered', text:'❌ AI not validated' };
     const strats=[s.mr_signal,s.tf_signal,s.ema_signal].filter(x=>x!=null&&x!==0);
     if (strats.length && strats.every(x=>x!==s.signal)) return { cls:'outcome-conflict', text:'⚠️ Strategy conflict' };

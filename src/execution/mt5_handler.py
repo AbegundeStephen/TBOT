@@ -523,11 +523,55 @@ class MT5ExecutionHandler:
                 stop_distance_pct = stop_distance / current_price
                 position_size_usd = risk_amount_usd / stop_distance_pct
 
+                # ── Asset-weight scaling (config["assets"][asset]["weight"]) ──────
+                # portfolio_manager.calculate_position_size() applies this weight but
+                # mt5_handler does its own sizing and was never calling that function,
+                # so the weight was silently ignored for all MT5 assets.
+                asset_weight = asset_cfg.get("weight", 1.0)
+                position_size_usd *= asset_weight
+
+                # ── Config-level USD cap (max_position_usd) ──────────────────────
+                # Same issue — the per-asset cap lived only in portfolio_manager.
+                max_pos_usd = asset_cfg.get("max_position_usd")
+                if max_pos_usd and position_size_usd > max_pos_usd:
+                    logger.info(
+                        f"[SIZING] Capping ${position_size_usd:,.2f} at "
+                        f"max_position_usd=${max_pos_usd:,.2f} for {asset}"
+                    )
+                    position_size_usd = max_pos_usd
+
+                # ── Minimum SL distance floor (prevents tiny-SL → huge-notional) ─
+                # When ATR is small (quiet session) a 2×ATR SL can be <0.3%, which
+                # inflates position_size_usd explosively.  Floor: 0.8% for indices,
+                # 0.5% for FX pairs, 0.6% for commodities.
+                asset_type_upper = asset.upper()
+                if asset_type_upper in ("USTEC", "US100", "NAS100"):
+                    min_sl_pct = 0.008   # 0.8%
+                elif asset_type_upper in ("EURUSD", "EURJPY"):
+                    min_sl_pct = 0.005   # 0.5%
+                else:
+                    min_sl_pct = 0.006   # 0.6% (GOLD, others)
+                min_sl_dist = current_price * min_sl_pct
+                if initial_sl_dist < min_sl_dist:
+                    capped_stop_distance_pct = min_sl_pct
+                    capped_size = risk_amount_usd / capped_stop_distance_pct
+                    capped_size *= asset_weight
+                    if max_pos_usd:
+                        capped_size = min(capped_size, max_pos_usd)
+                    logger.warning(
+                        f"[SIZING] {asset}: SL distance {initial_sl_dist:.2f} "
+                        f"({stop_distance_pct:.3%}) below min floor {min_sl_pct:.1%}. "
+                        f"Capping position from ${position_size_usd:,.2f} "
+                        f"→ ${capped_size:,.2f}"
+                    )
+                    position_size_usd = capped_size
+
                 logger.info(
                     f"[SIZING] Calculation:\n"
                     f"  Account Balance: ${account_balance:,.2f}\n"
                     f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
                     f"  Stop Distance:   {stop_distance_pct:.3%}\n"
+                    f"  Asset Weight:    {asset_weight:.1f}x\n"
                     f"  Position Size:   ${position_size_usd:,.2f}"
                 )
                 if position_size_usd <= 0:
@@ -551,13 +595,22 @@ class MT5ExecutionHandler:
 
                 if volume_lots < symbol_info.volume_min:
                     volume_lots = symbol_info.volume_min
-                
+
                 # ✅ NEW: Enable protocol safety bypasses if we are at min lot
                 if is_small_account_mode and volume_lots <= symbol_info.volume_min:
                     if signal_details is None:
                         signal_details = {}
                     signal_details["small_account_protocol_active"] = True
                     logger.info("[MARGIN] 🛡️ Small Account Protocol: Min-lot trade detected, enabling safety bypasses.")
+
+                # Config-level per-asset max lot ceiling (harder than broker's volume_max)
+                config_max_lots = asset_cfg.get("max_lots")
+                if config_max_lots and volume_lots > config_max_lots:
+                    logger.warning(
+                        f"[SIZING] {asset}: lots {volume_lots:.2f} exceeds "
+                        f"config max_lots={config_max_lots}. Capping."
+                    )
+                    volume_lots = config_max_lots
 
                 volume_lots = min(symbol_info.volume_max, volume_lots)
                 actual_usd = volume_lots * current_price * contract_size

@@ -1159,8 +1159,17 @@ class PortfolioManager:
             if is_futures:
                 logger.info("[BINANCE] Fetching FUTURES account info...")
                 try:
-                    account = self.binance_client.futures_account()
-                    
+                    try:
+                        account = self.binance_client.futures_account()
+                    except Exception as _e1021:
+                        if "-1021" in str(_e1021):
+                            logger.warning("[BINANCE] Clock drift detected (-1021), re-syncing time offset...")
+                            from src.data.data_manager import _sync_time_offset
+                            _sync_time_offset(self.binance_client)
+                            account = self.binance_client.futures_account()  # one retry
+                        else:
+                            raise
+
                     # Log raw keys for debugging (safely)
                     available_keys = list(account.keys()) if isinstance(account, dict) else "None"
                     logger.debug(f"[BINANCE] Futures account keys found: {available_keys}")
@@ -1407,7 +1416,16 @@ class PortfolioManager:
                     is_futures = self.config.get("assets", {}).get(asset, {}).get("enable_futures", False)
                     
                     if is_futures:
-                        account = self.binance_client.futures_account()
+                        try:
+                            account = self.binance_client.futures_account()
+                        except Exception as _e1021:
+                            if "-1021" in str(_e1021):
+                                logger.warning("[PORTFOLIO] Clock drift detected (-1021), re-syncing time offset...")
+                                from src.data.data_manager import _sync_time_offset
+                                _sync_time_offset(self.binance_client)
+                                account = self.binance_client.futures_account()  # one retry
+                            else:
+                                raise
                         local_free_margin = float(account.get("availableBalance", 0))
                     else:
                         # For spot, available USDT
