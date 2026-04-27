@@ -26,6 +26,7 @@ data/*.parquet
 
 
 logs/
+config/economic_calendar.json
 
 # IDE
 .vscode/
