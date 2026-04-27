@@ -244,7 +244,7 @@ class TradingBot:
             ai_sr_threshold=0.020,
             ai_pattern_confidence=0.50,
             ai_enable_adaptive=True,
-            ai_strong_signal_bypass=0.70,
+            ai_strong_signal_bypass=0.55,  # Lowered from 0.70 — high-conviction signals were still being blocked
         )
         self.detailed_logging = True
 

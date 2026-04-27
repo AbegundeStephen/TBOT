@@ -17,7 +17,29 @@ from typing import Optional, Dict, Tuple
 from tenacity import retry, stop_after_attempt, wait_exponential
 from src.market.price_cache import price_cache
 
+import time as _time_module
+
 logger = logging.getLogger(__name__)
+
+
+def _sync_time_offset(client: Client) -> None:
+    """
+    Correct the client's timestamp by comparing local clock to Binance server time.
+    Fixes APIError -1021 (timestamp outside recvWindow) caused by clock drift.
+    Sets client.timestamp_offset (milliseconds) which python-binance adds to every request.
+    """
+    try:
+        local_before = int(_time_module.time() * 1000)
+        server_time  = client.get_server_time()["serverTime"]
+        local_after  = int(_time_module.time() * 1000)
+        # Use midpoint of the round-trip to reduce network-latency bias
+        local_mid = (local_before + local_after) // 2
+        offset = server_time - local_mid
+        client.timestamp_offset = offset
+        logger.info(f"[TIME SYNC] Clock offset corrected: {offset:+d} ms")
+    except Exception as e:
+        logger.warning(f"[TIME SYNC] Failed to sync Binance time offset: {e}")
+
 
 CLOUDFRONT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -68,6 +90,7 @@ class DataManager:
             # Always create a live client for data (no keys needed = public access)
             self.live_data_client = Client("", "", requests_params={'timeout': 10})
             self.live_data_client.session.headers.update(CLOUDFRONT_HEADERS)
+            _sync_time_offset(self.live_data_client)
             logger.info(
                 f"   [User-Agent] Live Data Client: {self.live_data_client.session.headers.get('User-Agent')}"
             )
@@ -120,6 +143,7 @@ class DataManager:
                 )
                 logger.info("   Endpoint: https://api.binance.com (LIVE)")
                 logger.warning("   ⚠️  WARNING: LIVE TRADING MODE - REAL MONEY AT RISK")
+            _sync_time_offset(self.binance_client)
 
             # Test primary connection
             self.binance_client.ping()
@@ -160,6 +184,8 @@ class DataManager:
                         self.futures_client.API_URL = "https://fapi.binance.com"
                         logger.info("   Endpoint: https://fapi.binance.com (LIVE)")
                         logger.warning("   ⚠️  LIVE FUTURES TRADING - HIGH RISK")
+
+                    _sync_time_offset(self.futures_client)
 
                     # Test Futures connection
                     try:

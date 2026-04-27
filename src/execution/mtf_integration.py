@@ -286,6 +286,8 @@ class MTFRegimeIntegration:
             # Institutional Rule: NO counter-trend allowed in Phase 1-5
             allow_counter_trend = False
 
+            # Pull 1H session momentum from the new timeframe_data fields
+            _h1_tf = regime_status.timeframe_data.get("1h", {})
             regime_data = {
                 "regime": regime_status.consensus_regime,
                 "regime_score": regime_status.score,
@@ -306,11 +308,21 @@ class MTFRegimeIntegration:
                 "df_4h": regime_status.df_4h, # ✨ ADDED: 4H context for strategies
                 "governor": regime_status, # ✨ ADDED: For Council & Performance Aggregators
                 "full_regime_status": regime_status,
+                # ── 1H Session Momentum (new) ────────────────────────────────
+                # "UP" / "DOWN" / "FLAT" — slope of last 6 1H closes.
+                # Used by AI validator to confirm or contradict a signal direction
+                # without changing the 4H-based structural regime label.
+                "h1_momentum_dir": _h1_tf.get("momentum_dir", "FLAT"),
+                "h1_momentum_pct": _h1_tf.get("momentum_pct", 0.0),
+                "h1_lower_highs": _h1_tf.get("lower_highs", False),
+                "h1_higher_lows": _h1_tf.get("higher_lows", False),
+                # Legacy alias so existing code that reads is_bull still works
+                "is_bull": regime_status.is_bullish,
             }
-            
+
             # ✅ Cache for aggregators
             self._current_regime_data[asset_name] = regime_data
-            
+
             return regime_data
 
         except Exception as e:

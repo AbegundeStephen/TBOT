@@ -398,6 +398,34 @@ class MultiTimeFrameRegimeDetector:
 
         final_reasoning = f"Institutional {consensus_regime} regime. " + ", ".join(reasons)
 
+        # ── 1H Session Momentum ─────────────────────────────────────────────────
+        # Captures INTRADAY direction (last 6 closes on 1H), separate from the
+        # structural above_1h_50 check.  Used by the AI validator to soft-pass
+        # SELL signals when 1H is actively declining even inside a bullish 4H
+        # regime, and to BLOCK BUY signals when 1H is rolling over.
+        # Values: "UP" (rising), "DOWN" (falling), "FLAT" (< 0.1% change)
+        try:
+            _h1_closes = df_1h_with_ema["close"].iloc[-6:]
+            _h1_raw_mom = (_h1_closes.iloc[-1] - _h1_closes.iloc[0]) / max(_h1_closes.iloc[0], 1e-9)
+            h1_momentum_pct = float(_h1_raw_mom)
+            if _h1_raw_mom > 0.001:
+                h1_momentum_dir = "UP"
+            elif _h1_raw_mom < -0.001:
+                h1_momentum_dir = "DOWN"
+            else:
+                h1_momentum_dir = "FLAT"
+            # Also compute whether 1H is making lower highs over the last 4 bars
+            # (more reliable bearish filter than just close slope)
+            _h1_highs = df_1h_with_ema["high"].iloc[-4:]
+            h1_lower_highs = bool(_h1_highs.iloc[-1] < _h1_highs.iloc[-2] < _h1_highs.iloc[-3])
+            _h1_lows = df_1h_with_ema["low"].iloc[-4:]
+            h1_higher_lows = bool(_h1_lows.iloc[-1] > _h1_lows.iloc[-2] > _h1_lows.iloc[-3])
+        except Exception:
+            h1_momentum_pct = 0.0
+            h1_momentum_dir = "FLAT"
+            h1_lower_highs = False
+            h1_higher_lows = False
+
         # ✨ NEW: Populate granular timeframe data for database/dashboard
         timeframe_data = {
             "1h": {
@@ -405,7 +433,11 @@ class MultiTimeFrameRegimeDetector:
                 "confidence": abs(score),
                 "adx": float(latest_1h["adx"]) if "adx" in latest_1h else None,
                 "rsi": float(latest_1h["rsi"]) if "rsi" in latest_1h else None,
-                "trend_direction": latest_1h["trend_dir"] if "trend_dir" in latest_1h else "N/A"
+                "trend_direction": latest_1h["trend_dir"] if "trend_dir" in latest_1h else "N/A",
+                "momentum_dir": h1_momentum_dir,
+                "momentum_pct": round(h1_momentum_pct * 100, 3),
+                "lower_highs": h1_lower_highs,
+                "higher_lows": h1_higher_lows,
             },
             "4h": {
                 "regime": consensus_regime if above_4h_200 == is_bullish else "NEUTRAL",

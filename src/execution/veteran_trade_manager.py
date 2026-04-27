@@ -1088,23 +1088,33 @@ class VeteranTradeManager:
         """
         Manually override the current stop loss level via Telegram command.
 
-        Validates the new SL is on the correct side of entry price to prevent
-        accidental inversions (e.g. setting a long SL above entry).
+        Validates the new SL is on the correct side of the CURRENT PRICE (not
+        entry price) to allow profit-locking moves (e.g. setting a long SL
+        above entry after a rally). Only rejects if the SL would trigger
+        immediately against the current price.
 
         Returns a human-readable status string for the Telegram reply.
         """
         if new_sl <= 0:
             return f"❌ Invalid SL: {new_sl} — must be > 0"
 
-        if self.side == "long" and new_sl >= self.entry_price:
+        # Use current mark price for the sanity check; fall back to entry if
+        # live price isn't available yet (position still being opened).
+        current_price = getattr(self, "current_price", None) or self.entry_price
+
+        # Reject only when the SL would fire against the current price
+        # (i.e. it's already beyond where the market is right now).
+        if self.side == "long" and new_sl >= current_price:
             return (
-                f"❌ Rejected: SL {new_sl:.5f} is above entry {self.entry_price:.5f} "
-                f"for a LONG position. Use /set_tp to move take profit instead."
+                f"❌ Rejected: SL {new_sl:.5f} is at or above current price "
+                f"{current_price:.5f} — it would trigger immediately. "
+                f"Use /set_tp to move take profit instead."
             )
-        if self.side == "short" and new_sl <= self.entry_price:
+        if self.side == "short" and new_sl <= current_price:
             return (
-                f"❌ Rejected: SL {new_sl:.5f} is below entry {self.entry_price:.5f} "
-                f"for a SHORT position. Use /set_tp to move take profit instead."
+                f"❌ Rejected: SL {new_sl:.5f} is at or below current price "
+                f"{current_price:.5f} — it would trigger immediately. "
+                f"Use /set_tp to move take profit instead."
             )
 
         old_sl = self.current_stop_loss
