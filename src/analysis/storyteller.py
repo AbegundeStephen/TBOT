@@ -46,11 +46,22 @@ class TradeStoryteller:
             if story:
                 recap_data.append(story)
 
+        closed = [t for t in recap_data if t["exit_time"]]
+        wins = [t for t in closed if t["pnl"] > 0]
+        losses = [t for t in closed if t["pnl"] <= 0]
+        total_pnl = sum(t["pnl"] for t in closed)
+        win_rate = (len(wins) / len(closed) * 100) if closed else 0.0
+
         return {
             "period_type": mode,
             "start_date": start_dt.strftime("%Y-%m-%d"),
             "end_date": end_dt.strftime("%Y-%m-%d"),
             "total_trades": len(recap_data),
+            "closed_trades": len(closed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(win_rate, 1),
+            "total_pnl": round(total_pnl, 2),
             "trades": recap_data,
         }
 
@@ -225,14 +236,31 @@ class TradeStoryteller:
             trade.get("pnl_pct") if trade.get("pnl_pct") is not None else 0.0
         )
 
+        # Duration
+        duration_str = "Open"
+        if trade.get("exit_time"):
+            try:
+                dur = exit_dt - entry_dt
+                h, rem = divmod(int(dur.total_seconds()), 3600)
+                m = rem // 60
+                duration_str = f"{h}h {m}m" if h else f"{m}m"
+            except Exception:
+                duration_str = "N/A"
+
         return {
             "id": trade_id,
             "asset": asset,
             "side": trade["side"],
             "entry_time": trade["entry_time"],
             "exit_time": trade.get("exit_time"),
-            "pnl": pnl_val,  # ✅ FIXED
-            "pnl_pct": pnl_pct_val,  # ✅ FIXED
+            "pnl": pnl_val,
+            "pnl_pct": pnl_pct_val,
+            "duration": duration_str,
+            "entry_price": trade.get("entry_price"),
+            "exit_price": trade.get("exit_price"),
+            "lot_size": trade.get("lot_size"),
+            "stop_loss": trade.get("stop_loss"),
+            "take_profit": trade.get("take_profit"),
             "chart_data_start": chart_start,
             "chart_data_end": chart_end,
             "narrative": {

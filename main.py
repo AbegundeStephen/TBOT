@@ -2968,14 +2968,32 @@ class TradingBot:
         return True
 
     def check_min_time_between_trades(self, asset_name: str) -> bool:
-        """Check minimum time between trades"""
-        min_minutes = self.config["trading"].get("min_time_between_trades_minutes", 60)
+        """Check minimum time between trades.
+
+        Per-asset override wins if set in config (min_time_between_trades_minutes
+        under the asset key).  Falls back to the global trading setting (default 60).
+        In strongly-trending regimes (BEARISH/BULLISH) a 0.5× multiplier is applied
+        so the bot can re-enter faster when the move is still clearly intact.
+        """
+        global_default = self.config["trading"].get("min_time_between_trades_minutes", 60)
+
+        # Per-asset override (e.g. GOLD: min_time_between_trades_minutes: 30)
+        asset_cfg = self.config.get("assets", {}).get(asset_name, {})
+        min_minutes = asset_cfg.get("min_time_between_trades_minutes", global_default)
+
+        # Regime-aware reduction: if the MTF regime is strongly directional,
+        # halve the cooldown so re-entries are faster after manual closes or TP hits.
+        regime_data = getattr(self, "_current_regime_data", {}).get(asset_name, {})
+        regime = regime_data.get("regime", "NEUTRAL")
+        regime_conf = regime_data.get("confidence", 0.0)
+        if regime in ("BULLISH", "BEARISH") and regime_conf >= 0.7:
+            min_minutes = max(15, min_minutes * 0.5)
 
         if asset_name in self.last_trade_times:
             elapsed = datetime.now() - self.last_trade_times[asset_name]
             if elapsed.total_seconds() < min_minutes * 60:
                 remaining = min_minutes - (elapsed.total_seconds() / 60)
-                logger.debug(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining")
+                logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min, regime={regime})")
                 return False
 
         return True
@@ -3327,6 +3345,31 @@ class TradingBot:
                     details=details,
                     price=details.get("price"),
                 )
+                # Log to DB so dashboard shows "⏸ Cooldown" instead of "AI not validated"
+                if self.db_manager and self._log_all_signals:
+                    details["reasoning"] = "cooldown_block"
+                    self.db_manager.insert_signal_smart(
+                        asset=asset_name,
+                        signal=signal,
+                        signal_quality=details.get("signal_quality", 0),
+                        regime=details.get("regime", "UNKNOWN"),
+                        regime_confidence=details.get("regime_confidence", 0),
+                        mr_signal=details.get("mr_signal", 0),
+                        mr_confidence=details.get("mr_confidence", 0),
+                        tf_signal=details.get("tf_signal", 0),
+                        tf_confidence=details.get("tf_confidence", 0),
+                        ema_signal=details.get("ema_signal"),
+                        ema_confidence=details.get("ema_confidence"),
+                        buy_score=details.get("buy_score"),
+                        sell_score=details.get("sell_score"),
+                        reasoning="cooldown_block",
+                        price=current_price,
+                        ai_validated=details.get("ai_validated", False),
+                        ai_modified=details.get("ai_modified", False),
+                        ai_details=details.get("ai_validation"),
+                        executed=False,
+                        force_insert=True,
+                    )
                 return
 
             # Store BEFORE state
@@ -4546,74 +4589,26 @@ def main():
         print("⚠️  AI MODEL NOT FOUND (Optional)")
         print("=" * 70)
         print(f"  Missing: {ai_model}")
-        print("\nBot will run WITHOUT AI validation.")
-        print("To enable AI:")
-        print("  1. Run: python model_diagnostic.py")
-        print("  2. Then: python train_dual_timeframe.py")
+        print("\nBot will run without AI validation (pattern detection disabled)")
+
+
+
+        print("Train AI: python train_ai.py")
         print("=" * 70)
-        time.sleep(3)
 
-    # ✨ NEW: Start dashboard server
-    server_process = None
-    server_thread = None
-
-    if config.get("dashboard", {}).get("enabled", True):
-        # Try subprocess first
-        server_process = start_dashboard_server()
-
-        # If subprocess fails, try threaded approach
-        if not server_process:
-            logger.warning("[DASHBOARD] Subprocess failed, trying thread mode...")
-            server_thread = start_dashboard_server_threaded()
-    
-    bot = None
-
-    def shutdown_handler(sig, frame):
-        """Handle shutdown signals safely"""
-        logger.warning(f"\n[!] Signal {sig} received. Shutting down safely...")
-        if bot:
-            bot.stop()
-        sys.exit(0)
-
-    # Register signal handlers
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
+    # Create and run the trading bot
     try:
-        # Initialize and start the main bot.
-        # The bot's constructor and start() method handle the entire lifecycle,
-        # including the auto-trainer.
-        bot = TradingBot()
+        bot = TradingBot("config/config.json")
         bot.start()
-
     except KeyboardInterrupt:
-        logger.info("\n[!] KeyboardInterrupt received in main. Bot's internal signal handler will manage shutdown.")
+        logger.info("Bot stopped by user (KeyboardInterrupt)")
+        print("\n[STOPPED] Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"[FATAL] Unhandled exception in main: {e}", exc_info=True)
-        if bot:
-            bot.stop() # Attempt graceful stop
+        logger.exception(f"Fatal error in bot: {e}")
+        print(f"\n[FATAL] Bot crashed: {e}")
         sys.exit(1)
-    finally:
-        # The bot's stop() method is called by its signal handler.
-        # This is a fallback for unexpected exits.
-        if bot and hasattr(bot, '_shutdown_in_progress') and not bot._shutdown_in_progress:
-            logger.info("[MAIN] Main function finished, initiating final cleanup.")
-            if bot.is_running:
-                 bot.stop()
-        
-        # Stop dashboard server on exit
-        if server_process:
-            logger.info("[DASHBOARD] Stopping web server...")
-            server_process.terminate()
-            try:
-                server_process.wait(timeout=5)
-                logger.info("[DASHBOARD] ✅ Server stopped")
-            except subprocess.TimeoutExpired:
-                logger.warning("[DASHBOARD] Force killing server...")
-                server_process.kill()
 
-        if server_thread:
-            logger.info("[DASHBOARD] Thread will terminate with main process")
+
 
 
 if __name__ == "__main__":
