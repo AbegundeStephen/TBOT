@@ -57,8 +57,9 @@ db_manager = TradingDatabaseManager(SUPABASE_URL, SUPABASE_KEY)
 def index():
     """Serve the main dashboard"""
     try:
-        # Read the HTML dashboard file
-        with open("templates/dashboard.html", "r", encoding="utf-8") as f:
+        # Read the HTML dashboard file (absolute path, CWD-independent)
+        _dashboard_path = os.path.join(current_dir, "templates", "dashboard.html")
+        with open(_dashboard_path, "r", encoding="utf-8") as f:
             dashboard_html = f.read()
 
         # Inject Supabase credentials (client-safe anon key)
@@ -705,11 +706,18 @@ def get_audit_events():
             lines = f.readlines()
 
         for line in lines:
-            if "[TRADE_EVENT]" not in line:
+            line = line.strip()
+            if not line:
                 continue
             try:
-                ev = json.loads(line.split("[TRADE_EVENT]", 1)[1].strip())
-                events.append(ev)
+                # Format 1: raw JSON line in trade_audit.log
+                if line.startswith("{"):
+                    ev = json.loads(line)
+                    events.append(ev)
+                # Format 2: trading_bot.log with [TRADE_EVENT] prefix
+                elif "[TRADE_EVENT]" in line:
+                    ev = json.loads(line.split("[TRADE_EVENT]", 1)[1].strip())
+                    events.append(ev)
             except Exception:
                 continue
 
