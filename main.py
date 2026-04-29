@@ -4258,7 +4258,10 @@ class TradingBot:
             )
             self.vtm_thread.start()
             logger.info("[VTM] ✅ VTM management thread started.")
-            
+
+            # Start dashboard server
+            self.dashboard_server = start_dashboard_server()
+
             # Setup periodic tasks
             schedule.every(30).minutes.do(self.run_mtf_regime_analysis)
 
@@ -4415,29 +4418,27 @@ import requests
 
 def start_dashboard_server():
     """
-    ✅  Start dashboard server without blocking
+    Start dashboard server as a subprocess (most reliable approach).
+    Runs server.py with the project root as CWD so .env and imports resolve correctly.
     """
     try:
         logger.info("\n" + "=" * 70)
         logger.info("[DASHBOARD] Starting web dashboard...")
         logger.info("=" * 70)
 
-        # Use the absolute path to server.py
-        server_path = Path("src/dashboard/server.py").resolve()
+        # Resolve paths from main.py's location (project root)
+        project_root = Path(__file__).resolve().parent
+        server_path = project_root / "src" / "dashboard" / "server.py"
 
         if not server_path.exists():
             logger.error(f"[DASHBOARD] Server file not found: {server_path}")
             return None
 
-        # ✅ FIX 1: Don't capture stdout/stderr - let it write to console
-        # This prevents the subprocess from hanging when buffers fill
         server_process = subprocess.Popen(
             [sys.executable, str(server_path)],
-            # ✅  Use None instead of PIPE to prevent blocking
-            stdout=None,  # Inherits parent's stdout
-            stderr=None,  # Inherits parent's stderr
-            cwd=Path("src/dashboard").resolve(),
-            # ✅ FIX 2: Start new process group (optional, for better isolation)
+            stdout=None,   # Inherit parent stdout (visible in console)
+            stderr=None,   # Inherit parent stderr
+            cwd=str(project_root),  # ← project root so .env + imports work
             start_new_session=True if sys.platform != "win32" else False,
         )
 
@@ -4485,32 +4486,54 @@ def start_dashboard_server():
 
 def start_dashboard_server_threaded():
     """
-    Alternative: Run Flask in thread instead of subprocess
-    More reliable for development, no subprocess buffering issues
+    Start Flask dashboard in a background thread.
+    Uses absolute project-root import so it works regardless of CWD.
     """
+    import importlib.util as _ilu
+    import traceback as _tb
 
     def run_flask():
-        import sys
-
-        sys.path.insert(0, str(Path("src/dashboard").resolve()))
-
         try:
-            from server import app
+            # Resolve server.py from the project root (same dir as main.py)
+            _root = Path(__file__).resolve().parent
+            _server_path = _root / "src" / "dashboard" / "server.py"
 
+            if not _server_path.exists():
+                logger.error(f"[DASHBOARD] server.py not found at {_server_path}")
+                return
+
+            # Insert project root so server.py's own imports work
+            import sys as _sys
+            if str(_root) not in _sys.path:
+                _sys.path.insert(0, str(_root))
+
+            # Load server module from absolute path
+            _spec = _ilu.spec_from_file_location("tbot_dashboard_server", str(_server_path))
+            _mod  = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+
+            _app = _mod.app
             logger.info("=" * 70)
-            logger.info("🚀 Dashboard Server (Thread Mode)")
-            logger.info("📊 http://localhost:5000")
+            logger.info("[DASHBOARD] 🚀 Starting Flask server on port 5000")
+            logger.info("[DASHBOARD] 📊 http://localhost:5000")
             logger.info("=" * 70)
 
-            app.run(
+            _app.run(
                 host="0.0.0.0",
                 port=5000,
                 debug=False,
                 threaded=True,
                 use_reloader=False,
             )
+        except OSError as e:
+            if "address already in use" in str(e).lower() or "10048" in str(e):
+                logger.warning("[DASHBOARD] ⚠️ Port 5000 already in use — dashboard may already be running")
+            else:
+                logger.error(f"[DASHBOARD] OSError: {e}")
+                logger.error(_tb.format_exc())
         except Exception as e:
-            logger.error(f"[DASHBOARD] Error: {e}")
+            logger.error(f"[DASHBOARD] Failed to start: {e}")
+            logger.error(_tb.format_exc())
 
     try:
         dashboard_thread = threading.Thread(
@@ -4518,19 +4541,24 @@ def start_dashboard_server_threaded():
         )
         dashboard_thread.start()
 
-        time.sleep(3)
+        # Give Flask time to bind the port
+        time.sleep(4)
 
         try:
-            response = requests.get("http://localhost:5000/api/health", timeout=2)
+            response = requests.get("http://localhost:5000/api/health", timeout=3)
             if response.status_code == 200:
                 logger.info("[DASHBOARD] ✅ Server ready at http://localhost:5000")
-        except:
-            logger.info("[DASHBOARD] Starting... check http://localhost:5000")
+            else:
+                logger.warning(f"[DASHBOARD] Health check returned {response.status_code}")
+        except requests.exceptions.ConnectionError:
+            logger.error("[DASHBOARD] ❌ Could not connect to dashboard on port 5000 — check logs above")
+        except Exception as e:
+            logger.warning(f"[DASHBOARD] Health check failed: {e}")
 
         return dashboard_thread
 
     except Exception as e:
-        logger.error(f"[DASHBOARD] Error: {e}")
+        logger.error(f"[DASHBOARD] Thread start error: {e}")
         return None
 
 
@@ -4566,6 +4594,11 @@ def main():
 
             if strategies.get("trend_following", {}).get("enabled", False):
                 required_models.append(
+                    f"models/mean_reversion_{asset_name.lower()}.pkl"
+                )
+
+            if strategies.get("trend_following", {}).get("enabled", False):
+                required_models.append(
                     f"models/trend_following_{asset_name.lower()}.pkl"
                 )
 
@@ -4586,13 +4619,10 @@ def main():
     ai_model = Path("models/ai/sniper_dual_timeframe_v1.weights.h5")
     if not ai_model.exists():
         print("=" * 70)
-        print("⚠️  AI MODEL NOT FOUND (Optional)")
+        print("\u26a0\ufe0f  AI MODEL NOT FOUND (Optional)")
         print("=" * 70)
         print(f"  Missing: {ai_model}")
         print("\nBot will run without AI validation (pattern detection disabled)")
-
-
-
         print("Train AI: python train_ai.py")
         print("=" * 70)
 
@@ -4607,8 +4637,6 @@ def main():
         logger.exception(f"Fatal error in bot: {e}")
         print(f"\n[FATAL] Bot crashed: {e}")
         sys.exit(1)
-
-
 
 
 if __name__ == "__main__":
