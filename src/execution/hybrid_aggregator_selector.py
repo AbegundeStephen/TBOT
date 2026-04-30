@@ -656,7 +656,7 @@ class HybridAggregatorSelector:
                 # Check cooldown
                 if self._can_switch(asset_name):
                     # Only switch if confidence is high enough
-                    if confidence >= 0.55:
+                    if confidence >= 0.85:  # Raised from 0.55 — council only activates in very strong trending markets
                         self._execute_mode_switch(
                             asset=asset_name,
                             old_mode=current_mode,
