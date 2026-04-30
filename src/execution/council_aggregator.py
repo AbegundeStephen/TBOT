@@ -127,11 +127,20 @@ class InstitutionalCouncilAggregator:
         
         # Decision history
         self.decision_history = deque(maxlen=100)
-        
+
         # Regime tracking
         self.previous_regime = None
         self.regime_initialized = False
-        
+
+        # T1.5: Stale price detection — tracks (last_price, last_change_time) per asset
+        self._last_prices = {}
+        self._stale_threshold_minutes = 30
+
+        # T3.4: Economic calendar — loaded at startup, hot-reloadable
+        self._econ_cal_path = "config/economic_calendar.json"
+        self._econ_events = []
+        self._load_calendar_file()
+
         self._log_initialization()
     
     def _get_default_config(self) -> Dict:
@@ -182,6 +191,26 @@ class InstitutionalCouncilAggregator:
         logger.info("")
 
     # ========================================================================
+    # T3.4: Economic Calendar helpers
+    # ========================================================================
+
+    def _load_calendar_file(self):
+        """Load economic events from the JSON calendar file."""
+        try:
+            import json as _json
+            with open(self._econ_cal_path, encoding="utf-8") as _f:
+                self._econ_events = _json.load(_f).get("events", [])
+            logger.info(f"[CALENDAR] Loaded {len(self._econ_events)} events from {self._econ_cal_path}")
+        except Exception as _e:
+            logger.warning(f"[CALENDAR] Could not load {self._econ_cal_path}: {_e}")
+            self._econ_events = []
+
+    def reload_calendar(self):
+        """Hot-reload the economic calendar (called by CalendarUpdater after each write)."""
+        self._load_calendar_file()
+        logger.info(f"[CALENDAR] 🔄 Hot-reloaded — {len(self._econ_events)} active events in memory")
+
+    # ========================================================================
     # ✨ WORLD-CLASS FILTERS (Asymmetric Logic)
     # ========================================================================
 
@@ -207,10 +236,13 @@ class InstitutionalCouncilAggregator:
             is_bullish = getattr(governor, 'is_bullish', governor_data.get('is_bullish', False))
             is_bearish = getattr(governor, 'is_bearish', governor_data.get('is_bearish', False))
 
-            # 2. Block neutral or mixed markets (Except for REVERSION)
+            # 2. T2.1: NEUTRAL → TRANSITION (allow at raised score threshold, not full block)
+            # Previously hard-blocked all TREND signals in NEUTRAL regime, which
+            # killed every signal during consolidation periods. Now passes through
+            # with trade_type="TRANSITION" so the caller can raise required_score.
             if regime_name == "NEUTRAL" and preset_trade_type == "TREND":
-                logger.info(f"[GOV] ❌ BLOCKED - Market is Neutral/Mixed (Institutional Caution)")
-                return False, "NEUTRAL"
+                logger.info(f"[GOV] ⚠️ TRANSITION - Neutral/Mixed market. Allowing at higher score threshold.")
+                return True, "TRANSITION"
 
             # 3. ASSET-DNA Gating & Trade Alignment
             asset = self.asset_type.upper()
@@ -517,6 +549,87 @@ class InstitutionalCouncilAggregator:
         if self.ai_validator and hasattr(self.ai_validator, 'clear_pattern_cache'):
             self.ai_validator.clear_pattern_cache()
 
+        # ════════════════════════════════════════════════════════════════════
+        # T1.5: STALE PRICE DETECTION
+        # Blocks evaluation when price has not moved by even 1 pip in >30 min.
+        # ════════════════════════════════════════════════════════════════════
+        from datetime import datetime as _dt
+        _current_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+        _now = _dt.now()
+        _last = self._last_prices.get(self.asset_type)
+        if _last:
+            _last_price, _last_time = _last
+            _minutes_since_move = (_now - _last_time).total_seconds() / 60
+            _price_moved = abs(_current_price - _last_price) / max(_last_price, 1) > 0.00001
+            if not _price_moved and _minutes_since_move > self._stale_threshold_minutes:
+                logger.warning(
+                    f"[COUNCIL] ⏸️ Stale price: {self.asset_type} frozen at "
+                    f"{_current_price} for {_minutes_since_move:.0f}min — blocking"
+                )
+                return 0, {
+                    "timestamp": timestamp, "signal": 0, "asset": self.asset_type,
+                    "reasoning": f"stale_price_{_minutes_since_move:.0f}min",
+                    "final_signal": 0, "signal_quality": 0.0,
+                    "mr_signal": 0, "mr_confidence": 0.0,
+                    "tf_signal": 0, "tf_confidence": 0.0,
+                    "ema_signal": 0, "ema_confidence": 0.0,
+                }
+        if not _last or abs(_current_price - _last[0]) / max(_last[0], 1) > 0.00001:
+            self._last_prices[self.asset_type] = (_current_price, _now)
+
+        # ════════════════════════════════════════════════════════════════════
+        # T3.3: NY OPEN HOUR BLOCK (13:00–13:59 UTC)
+        # USTEC/GOLD only — FX pairs excluded (13:00 UTC is their best hour).
+        # ════════════════════════════════════════════════════════════════════
+        _hour_utc = _dt.utcnow().hour
+        if _hour_utc == 13 and self.asset_type in ("USTEC", "US100", "NAS100", "GOLD", "XAUUSD"):
+            logger.info(f"[COUNCIL] ⏸️ NY open hour block — no new entries for {self.asset_type}")
+            return 0, {
+                "timestamp": timestamp, "signal": 0, "asset": self.asset_type,
+                "reasoning": "ny_open_block", "final_signal": 0, "signal_quality": 0.0,
+                "mr_signal": 0, "mr_confidence": 0.0,
+                "tf_signal": 0, "tf_confidence": 0.0,
+                "ema_signal": 0, "ema_confidence": 0.0,
+            }
+
+        # ════════════════════════════════════════════════════════════════════
+        # T3.4: ECONOMIC CALENDAR BLOCK
+        # Block N hours before each high-impact event that affects this asset.
+        # ════════════════════════════════════════════════════════════════════
+        if self._econ_events:
+            from datetime import timezone as _tz, timedelta as _td
+            _utc_now = _dt.now(_tz.utc)
+            for _evt in self._econ_events:
+                try:
+                    _evt_time = _dt.fromisoformat(_evt["datetime"].replace("Z", "+00:00"))
+                    _hours_before = _evt.get("block_hours_before", 2)
+                    _block_start = _evt_time - _td(hours=_hours_before)
+                    if _block_start <= _utc_now < _evt_time:
+                        _affected = _evt.get("currencies", [])
+                        _blocked = (
+                            (self.asset_type in ("BTC", "BTCUSDT") and "USD" in _affected) or
+                            (self.asset_type in ("GOLD", "XAUUSD") and "USD" in _affected) or
+                            (self.asset_type == "EURUSD" and ("EUR" in _affected or "USD" in _affected)) or
+                            (self.asset_type == "EURJPY" and ("EUR" in _affected or "JPY" in _affected)) or
+                            (self.asset_type in ("USTEC", "US100", "NAS100") and "USD" in _affected)
+                        )
+                        if _blocked:
+                            _mins_to_evt = (_evt_time - _utc_now).total_seconds() / 60
+                            logger.warning(
+                                f"[COUNCIL] ⛔ Calendar block: {_evt.get('event', 'HIGH IMPACT')} "
+                                f"in {_mins_to_evt:.0f}min"
+                            )
+                            return 0, {
+                                "timestamp": timestamp, "signal": 0, "asset": self.asset_type,
+                                "reasoning": f"econ_calendar_{_evt.get('event','').replace(' ','_')}",
+                                "final_signal": 0, "signal_quality": 0.0,
+                                "mr_signal": 0, "mr_confidence": 0.0,
+                                "tf_signal": 0, "tf_confidence": 0.0,
+                                "ema_signal": 0, "ema_confidence": 0.0,
+                            }
+                except Exception:
+                    continue
+
         # ====================================================================
         # ⚡ THE FLASH VETO: Volatility Circuit Breaker
         # ====================================================================
@@ -568,41 +681,15 @@ class InstitutionalCouncilAggregator:
                 # We use a fast, low-compute check of the Trend Following strategy
                 prelim_signal, _ = self.s_trend_following.generate_signal(df, silent=True)
                 
+                # T1.3: Smart Gatekeeper — preliminary TF check is advisory only.
+                # The authoritative regime gate is _check_governor_filter() called
+                # after full council scoring. Hard-vetoing here based on a single
+                # strategy's prelim signal was blocking valid counter-trend signals
+                # that the full scorecard would have rejected anyway.
                 if macro_regime == "BEARISH" and prelim_signal == 1:
-                    logger.info("[COUNCIL] Governor VETO: Bearish regime blocks LONG.")
-                    return 0, {
-                        'timestamp': timestamp, 
-                        'reasoning': "governor_veto_bearish", 
-                        'signal': 0,
-                        'asset': self.asset_type,
-                        'decision_type': "VETOED (Macro Bearish)",
-                        'final_signal': 0,
-                        'signal_quality': 0.0,
-                        'mr_signal': 0,
-                        'mr_confidence': 0.0,
-                        'tf_signal': 0,
-                        'tf_confidence': 0.0,
-                        'ema_signal': 0,
-                        'ema_confidence': 0.0,
-                    }
-
+                    logger.info("[COUNCIL] ⚠️ Governor pre-check: Bearish regime vs LONG prelim — proceeding to full scoring.")
                 if macro_regime == "BULLISH" and prelim_signal == -1:
-                    logger.info("[COUNCIL] Governor VETO: Bullish regime blocks SHORT.")
-                    return 0, {
-                        'timestamp': timestamp, 
-                        'reasoning': "governor_veto_bullish", 
-                        'signal': 0,
-                        'asset': self.asset_type,
-                        'decision_type': "VETOED (Macro Bullish)",
-                        'final_signal': 0,
-                        'signal_quality': 0.0,
-                        'mr_signal': 0,
-                        'mr_confidence': 0.0,
-                        'tf_signal': 0,
-                        'tf_confidence': 0.0,
-                        'ema_signal': 0,
-                        'ema_confidence': 0.0,
-                    }
+                    logger.info("[COUNCIL] ⚠️ Governor pre-check: Bullish regime vs SHORT prelim — proceeding to full scoring.")
             except Exception as e:
                 logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
 
@@ -743,7 +830,88 @@ class InstitutionalCouncilAggregator:
             buy_scores['volume'], sell_scores['volume'], volume_exp = self._judge_volume_bidirectional(df, w_volume)
             buy_explanations.append(volume_exp['buy'])
             sell_explanations.append(volume_exp['sell'])
-            
+
+            # ════════════════════════════════════════════════════════════════
+            # T2.6: CONSECUTIVE CANDLE COUNTER + ADX GUARD
+            # Applied as a momentum score modifier after all judges run.
+            # BTC: 3+ consecutive same-direction bars + ADX < 25 → MR setup
+            # GOLD/USTEC: 5+ consecutive bars → trend continuation boost
+            # ════════════════════════════════════════════════════════════════
+            try:
+                _closes = df['close'].values
+                _consec = 0
+                for _ci in range(len(_closes) - 1, max(len(_closes) - 10, 0), -1):
+                    if _ci == 0:
+                        break
+                    if _closes[_ci] > _closes[_ci - 1]:
+                        if _consec >= 0:
+                            _consec += 1
+                        else:
+                            break
+                    else:
+                        if _consec <= 0:
+                            _consec -= 1
+                        else:
+                            break
+
+                if self.asset_type in ("BTC", "BTCUSDT") and abs(_consec) >= 3 and adx < 25:
+                    # Bearish streak → MR long signal; bullish streak → MR short
+                    _boost = min(0.15 * w_momentum, 0.25)
+                    if _consec < 0:  # consecutive bearish → boost BUY momentum
+                        buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                        logger.debug(f"[CANDLE] BTC {abs(_consec)}-bar bear streak + ADX={adx:.1f}<25: BUY momentum +{_boost:.2f}")
+                    elif _consec > 0:  # consecutive bullish → boost SELL momentum
+                        sell_scores['momentum'] = min(w_momentum, sell_scores['momentum'] + _boost)
+                        logger.debug(f"[CANDLE] BTC {_consec}-bar bull streak + ADX={adx:.1f}<25: SELL momentum +{_boost:.2f}")
+
+                if self.asset_type in ("GOLD", "XAUUSD", "USTEC", "US100", "NAS100") and abs(_consec) >= 5:
+                    _boost = min(0.2 * w_momentum, 0.3)
+                    if _consec > 0:
+                        buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                        logger.debug(f"[CANDLE] {self.asset_type} {_consec}-bar bull streak: BUY momentum +{_boost:.2f}")
+                    elif _consec < 0:
+                        sell_scores['momentum'] = min(w_momentum, sell_scores['momentum'] + _boost)
+                        logger.debug(f"[CANDLE] {self.asset_type} {abs(_consec)}-bar bear streak: SELL momentum +{_boost:.2f}")
+            except Exception:
+                pass  # Bonus only — never block on failure
+
+            # ════════════════════════════════════════════════════════════════
+            # T3.5: BTC FUNDING RATE Z-SCORE MOMENTUM MODIFIER
+            # Extreme funding rates (|Z| >= 2.0) → crowded positioning → MR edge
+            # ════════════════════════════════════════════════════════════════
+            _funding_z = governor_data.get("funding_rate_zscore", 0.0) if governor_data else 0.0
+            if self.asset_type in ("BTC", "BTCUSDT") and abs(_funding_z) >= 2.0:
+                _boost = min(0.15 * w_momentum, 0.25)
+                if _funding_z > 0:  # over-leveraged longs → MR short is high prob
+                    sell_scores['momentum'] = min(w_momentum, sell_scores['momentum'] + _boost)
+                    logger.info(f"[FUNDING] Extreme long positioning (Z={_funding_z:+.1f}): SELL momentum +{_boost:.2f}")
+                else:  # over-leveraged shorts → MR long is high prob
+                    buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                    logger.info(f"[FUNDING] Extreme short positioning (Z={_funding_z:+.1f}): BUY momentum +{_boost:.2f}")
+
+            # ════════════════════════════════════════════════════════════════
+            # T3.6: DXY PROXY MOMENTUM MODIFIER
+            # Rising EUR/USD = falling dollar = tailwind for GOLD/USTEC/EURJPY
+            # ════════════════════════════════════════════════════════════════
+            _dxy_falling = governor_data.get("dxy_falling") if governor_data else None
+            if _dxy_falling is not None:
+                _boost = min(0.10 * w_momentum, 0.15)
+                if self.asset_type in ("GOLD", "XAUUSD"):
+                    if _dxy_falling:
+                        buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                        logger.debug(f"[DXY] Weak dollar: GOLD BUY momentum +{_boost:.2f}")
+                    else:
+                        sell_scores['momentum'] = min(w_momentum, sell_scores['momentum'] + _boost)
+                        logger.debug(f"[DXY] Strong dollar: GOLD SELL momentum +{_boost:.2f}")
+                elif self.asset_type in ("USTEC", "US100", "NAS100"):
+                    if _dxy_falling:
+                        buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                        logger.debug(f"[DXY] Weak dollar: USTEC BUY momentum +{_boost:.2f}")
+                elif self.asset_type == "EURJPY":
+                    if _dxy_falling:
+                        buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
+                        logger.debug(f"[DXY] Weak dollar: EURJPY BUY momentum +{_boost:.2f}")
+
             # Calculate total scores
             buy_total = sum(buy_scores.values())
             sell_total = sum(sell_scores.values())
@@ -854,9 +1022,20 @@ class InstitutionalCouncilAggregator:
                             'ema_signal': ema_signal,
                             'ema_confidence': ema_conf,
                         }
+                    # T2.1: TRANSITION — NEUTRAL regime passed, raise required_score
+                    if trade_type == "TRANSITION":
+                        trade_type = "TREND"  # Restore for downstream R/R gates
+                        required_score = min(required_score + 0.75, 4.5)
+                        logger.info(f"[GOV] 🔄 TRANSITION: Neutral market — required score raised to {required_score:.2f}")
 
-                # 2. ATR WICK TRAP (ABSOLUTE VETO)
-                if not validate_candle_structure(df, self.asset_type, direction="long" if signal == 1 else "short"):
+                # 2. ATR WICK TRAP (ABSOLUTE VETO) — T2.3: pass regime context
+                _trap_regime_aligned = (signal == 1 and is_bull) or (signal == -1 and not is_bull)
+                if not validate_candle_structure(
+                    df, self.asset_type,
+                    direction="long" if signal == 1 else "short",
+                    regime_confidence=regime_conf,
+                    regime_aligned=_trap_regime_aligned,
+                ):
                     logger.info(f"[VETO] ❌ BLOCKED - Institutional Wick Trap.")
                     return 0, {
                         'timestamp': timestamp,
@@ -1034,23 +1213,37 @@ class InstitutionalCouncilAggregator:
                 # Apply penalties
                 total_score -= penalty
 
-                # C. SESSION LIQUIDITY PENALTY (Phase 4)
-                # ✅ TASK 23: Refactored Session Gate
-                # Reason: Use institutional-grade session quality check.
+                # C. SESSION LIQUIDITY PENALTY (T2.7 — extended to all asset classes)
                 try:
                     from src.utils.market_hours import MarketHours
-                    
+                    _hour_utc_s = _dt.utcnow().hour
+
                     if "BTC" in self.asset_type:
                         session_quality = MarketHours.get_btc_session_quality()
-                        
                         if session_quality == "LOW":
-                            # Apply +0.5 to required score (Harder to pass)
                             required_score += 0.5
-                            logger.info(
-                                f"[SESSION] ⚠️ Low liquidity session: Required score increased to {required_score:.1f}"
-                            )
+                            logger.info(f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}")
                         else:
-                            if self.detailed_logging: logger.info(f"[SESSION] ✅ High liquidity session (No penalty)")
+                            if self.detailed_logging: logger.info(f"[SESSION] ✅ BTC high liquidity session (No penalty)")
+
+                    elif self.asset_type in ("GOLD", "XAUUSD"):
+                        # GOLD best hours: London open 07-12 UTC, NY 13-17 UTC
+                        if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                            required_score += 0.5
+                            logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+
+                    elif self.asset_type in ("EURUSD", "EURJPY"):
+                        # FX best hours: London 07-12, NY overlap 12-17 UTC
+                        if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                            required_score += 0.5
+                            logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+
+                    elif self.asset_type in ("USTEC", "US100", "NAS100"):
+                        # USTEC best hours: NY session 13-21 UTC
+                        if _hour_utc_s < 13 or _hour_utc_s >= 21:
+                            required_score += 0.5
+                            logger.info(f"[SESSION] ⚠️ USTEC pre-market ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+
                 except Exception as e:
                     logger.warning(f"[SESSION] Gate calculation failed: {e}")
 
