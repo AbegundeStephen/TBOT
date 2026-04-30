@@ -3879,16 +3879,25 @@ class TradingBot:
             else:
                 # SINGLE AGGREGATOR MODE:
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
-                    # ✅ FIXED: Pass context to pure Council mode for monitoring
                     signal, details = aggregator.get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
                         is_bull_market=mtf_regime.get("is_bull", False),
                         governor_data=mtf_regime,
                     )
+                    # Stamp the engine label so charts + Telegram always know the source
+                    details["aggregator_mode"] = "council"
                 else:
-                    # Performance mode
-                    signal, details = aggregator.get_aggregated_signal(df)
+                    # Performance mode — pass full MTF regime context so regime/confidence
+                    # display correctly on the dashboard and gatekeeper has accurate data.
+                    signal, details = aggregator.get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime,
+                    )
+                    # Stamp the engine label so charts + Telegram always know the source
+                    details["aggregator_mode"] = "performance"
             # T3.1: Shadow trade — open virtual position for every blocked signal
             # so we can measure what gates are costing us in real P&L terms.
             try:
