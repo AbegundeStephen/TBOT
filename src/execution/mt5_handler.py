@@ -542,15 +542,17 @@ class MT5ExecutionHandler:
 
                 # ── Minimum SL distance floor (prevents tiny-SL → huge-notional) ─
                 # When ATR is small (quiet session) a 2×ATR SL can be <0.3%, which
-                # inflates position_size_usd explosively.  Floor: 0.8% for indices,
-                # 0.5% for FX pairs, 0.6% for commodities.
+                # inflates position_size_usd explosively.  Per-asset floors:
+                #   USTEC/indices : 0.5% (1H ATR ≈ 0.4-1.5% of price)
+                #   EURUSD/EURJPY : 0.1% (FX ATR stops naturally 0.05-0.25%)
+                #   GOLD/others   : 0.3% (XAU 1H ATR ≈ 0.3-0.9% of price)
                 asset_type_upper = asset.upper()
                 if asset_type_upper in ("USTEC", "US100", "NAS100"):
-                    min_sl_pct = 0.008   # 0.8%
-                elif asset_type_upper in ("EURUSD", "EURJPY"):
                     min_sl_pct = 0.005   # 0.5%
+                elif asset_type_upper in ("EURUSD", "EURJPY"):
+                    min_sl_pct = 0.001   # 0.1% — FX pairs have tight ATR-based stops
                 else:
-                    min_sl_pct = 0.006   # 0.6% (GOLD, others)
+                    min_sl_pct = 0.003   # 0.3% (GOLD, others)
                 min_sl_dist = current_price * min_sl_pct
                 if initial_sl_dist < min_sl_dist:
                     capped_stop_distance_pct = min_sl_pct
@@ -587,21 +589,34 @@ class MT5ExecutionHandler:
                     symbol_info.volume_min * current_price * contract_size
                 )
                 if position_size_usd < min_lot_notional_value:
+                    # ── Small-account fallback: use min lot instead of aborting ──
+                    # Risk-based sizing produced a notional too small for the broker's
+                    # minimum lot.  Rather than blocking the trade entirely, fall back
+                    # to volume_min (the smallest tradeable unit) and let the margin
+                    # check below decide whether the account can actually afford it.
                     logger.warning(
-                        f"[SIZING] ❌ Trade Aborted: Calculated risk-based size (${position_size_usd:,.2f}) "
-                        f"is below broker's minimum lot notional equivalent (${min_lot_notional_value:,.2f})."
+                        f"[SIZING] {asset}: Risk-based size (${position_size_usd:,.2f}) "
+                        f"below min lot notional (${min_lot_notional_value:,.2f}). "
+                        f"Falling back to min lot ({symbol_info.volume_min}) — "
+                        f"Small Account Protocol activated."
                     )
-                    return False
-
-                if volume_lots < symbol_info.volume_min:
                     volume_lots = symbol_info.volume_min
-
-                # ✅ NEW: Enable protocol safety bypasses if we are at min lot
-                if is_small_account_mode and volume_lots <= symbol_info.volume_min:
                     if signal_details is None:
                         signal_details = {}
                     signal_details["small_account_protocol_active"] = True
-                    logger.info("[MARGIN] 🛡️ Small Account Protocol: Min-lot trade detected, enabling safety bypasses.")
+                else:
+                    if volume_lots < symbol_info.volume_min:
+                        volume_lots = symbol_info.volume_min
+
+                    # Activate small-account protocol whenever we land at min lot
+                    if volume_lots <= symbol_info.volume_min:
+                        if signal_details is None:
+                            signal_details = {}
+                        signal_details["small_account_protocol_active"] = True
+                        logger.info(
+                            f"[MARGIN] 🛡️ Small Account Protocol: {asset} sized to min lot "
+                            f"({symbol_info.volume_min}), enabling margin bypass."
+                        )
 
                 # Config-level per-asset max lot ceiling (harder than broker's volume_max)
                 config_max_lots = asset_cfg.get("max_lots")
