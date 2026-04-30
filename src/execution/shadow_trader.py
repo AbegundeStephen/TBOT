@@ -153,9 +153,12 @@ class ShadowPosition:
         if self._profit_pct(self.current_price) >= self.mfe_pct:
             self.peak_profit_bar = self.bars_open
 
-        # Time-based exit: close after 72 bars (~3 days on 1H) if still open
-        if self.bars_open >= 72:
-            self._close(self.current_price, "time_stop")
+        # Time-based exit: close after 72 wall-clock hours (3 days) if still open.
+        # Wall-clock comparison is used instead of bar count because candle_update()
+        # is called every 5-min bot loop — 72 bars would only be 6 hours, not 3 days.
+        elapsed_hours = (datetime.now(timezone.utc) - self.entry_time).total_seconds() / 3600.0
+        if elapsed_hours >= 72.0:
+            self._close(self.current_price, "time_stop_72h")
 
     def _close(self, price: float, reason: str) -> bool:
         """Record the final outcome including friction-adjusted net P&L."""
@@ -183,6 +186,8 @@ class ShadowPosition:
             "strategy_source":  self.strategy_source,
             "gate_blocked_by":  self.gate_blocked_by,
             "entry_price":      self.entry_price,
+            "stop_loss":        self.stop_loss,
+            "take_profit":      self.take_profit,
             "entry_time":       self.entry_time.isoformat() if self.entry_time else None,
             "close_price":      self.close_price,
             "close_time":       self.close_time.isoformat() if self.close_time else None,
@@ -223,33 +228,18 @@ class ShadowTradingEngine:
 
     def __init__(
         self,
-        max_positions: int = 50,
-        max_closed: int = 5000,
-        cooldown_hours: float = 4.0,
-        max_per_asset: int = 2,
+        max_positions: int = 500,
+        max_closed: int = 10000,
     ):
         self.open_positions: List[ShadowPosition] = []
         self.closed_results: List[dict] = []
-        self._max_positions  = max_positions
-        self._max_closed     = max_closed
-
-        # ── Cooldown / throttle controls ──────────────────────────────────
-        # cooldown_hours : minimum wall-clock hours between opening a NEW
-        #                  shadow position on the same asset.
-        #                  4h ≈ one full 1H candle session block — mirrors
-        #                  the real bot's natural signal spacing.
-        # max_per_asset  : hard cap on concurrent open shadow positions for
-        #                  a single asset so one volatile period can't flood
-        #                  the scorecard with correlated trades.
-        self._cooldown_hours = cooldown_hours
-        self._max_per_asset  = max_per_asset
-        # { asset_key: datetime of last open_position() call that succeeded }
-        self._last_open_time: Dict[str, datetime] = {}
+        self._max_positions = max_positions
+        self._max_closed    = max_closed
 
         logger.info(
             f"[SHADOW] ShadowTradingEngine initialised "
             f"(max_open={max_positions}, max_closed={max_closed}, "
-            f"cooldown={cooldown_hours}h, max_per_asset={max_per_asset})"
+            f"no cooldown, no per-asset cap)"
         )
 
     def open_position(
@@ -284,28 +274,6 @@ class ShadowTradingEngine:
 
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
-
-        # ── Per-asset cooldown check ───────────────────────────────────────
-        last_open = self._last_open_time.get(asset_key)
-        if last_open is not None:
-            elapsed_h = (now - last_open).total_seconds() / 3600.0
-            if elapsed_h < self._cooldown_hours:
-                remaining_m = int((self._cooldown_hours - elapsed_h) * 60)
-                logger.debug(
-                    f"[SHADOW] {asset_key} cooldown — {remaining_m}m remaining, skipping"
-                )
-                return None
-
-        # ── Per-asset concurrent cap ───────────────────────────────────────
-        open_for_asset = sum(
-            1 for p in self.open_positions if p.asset.upper() == asset_key
-        )
-        if open_for_asset >= self._max_per_asset:
-            logger.debug(
-                f"[SHADOW] {asset_key} already has {open_for_asset} open shadow "
-                f"positions (max={self._max_per_asset}), skipping"
-            )
-            return None
 
         # Estimate stop loss and take profit from ATR if available
         _stop_loss = 0.0
@@ -347,11 +315,9 @@ class ShadowTradingEngine:
         )
 
         self.open_positions.append(pos)
-        self._last_open_time[asset_key] = now   # start cooldown clock
         logger.info(
             f"[SHADOW] Opened {side.upper()} {asset} @ {entry_price:.5f} "
-            f"(src={strategy_source}, gate={gate_blocked_by}) "
-            f"— next open available in {self._cooldown_hours}h"
+            f"(src={strategy_source}, gate={gate_blocked_by})"
         )
         return pos
 
@@ -465,18 +431,6 @@ class ShadowTradingEngine:
                 d["live_pnl_pct"] = 0.0
             open_list.append(d)
 
-        # Build per-asset cooldown info for dashboard
-        cooldown_info = {}
-        _now = datetime.now(timezone.utc)
-        for _asset, _last in self._last_open_time.items():
-            _elapsed_h = (_now - _last).total_seconds() / 3600.0
-            _remaining_h = max(0.0, self._cooldown_hours - _elapsed_h)
-            cooldown_info[_asset] = {
-                "last_open": _last.isoformat(),
-                "remaining_h": round(_remaining_h, 2),
-                "ready": _remaining_h == 0.0,
-            }
-
         state = {
             "open_positions": open_list,
             "closed_results": self.closed_results[-200:],   # last 200 for dashboard
@@ -485,11 +439,6 @@ class ShadowTradingEngine:
             "summary": {
                 "open_count": len(self.open_positions),
                 "closed_count": len(self.closed_results),
-            },
-            "cooldown": {
-                "hours": self._cooldown_hours,
-                "max_per_asset": self._max_per_asset,
-                "per_asset": cooldown_info,
             },
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }

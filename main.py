@@ -4193,7 +4193,7 @@ class TradingBot:
             self.calendar_updater.start_background_thread()
 
             # T3.1: Initialise shadow trading engine after exchanges are ready
-            self.shadow_trader = ShadowTradingEngine(max_positions=50, max_closed=5000)
+            self.shadow_trader = ShadowTradingEngine()  # defaults: max_positions=500, max_closed=10000
             logger.info("[SHADOW] Shadow trading engine started")
 
             # ✅ FIXED: Initialize selectors AFTER exchanges are connected

@@ -1553,9 +1553,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 pass  # Bonus only — never block execution on failure
 
             # Extract regime score for Gatekeeper (Phase 3)
-            regime_score = governor_data.get("regime_score", 0.0)
-            regime_is_bullish = governor_data.get("is_bullish", False)
-            regime_is_bearish = governor_data.get("is_bearish", False)
+            regime_score = governor_data.get("regime_score", 0.0) if governor_data else 0.0
+            regime_is_bullish = governor_data.get("is_bullish", False) if governor_data else False
+            regime_is_bearish = governor_data.get("is_bearish", False) if governor_data else False
 
             # ═══════════════════════════════════════════════════════════════
             # SMART GATEKEEPER — Strategy-Aware Routing (T1.3 fix)

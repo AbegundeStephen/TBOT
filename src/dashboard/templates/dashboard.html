@@ -500,6 +500,58 @@
         .shadow-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #a78bfa; }
         .shadow-meta  { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
 
+        /* ── Shadow asset accordion ─────────────── */
+        .shadow-asset-block { border-bottom: 1px solid var(--border); }
+        .shadow-asset-block:last-child { border-bottom: none; }
+
+        .shadow-asset-hdr {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            user-select: none;
+            transition: background .12s;
+        }
+        .shadow-asset-hdr:hover { background: rgba(255,255,255,0.03); }
+
+        .shadow-asset-pill {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .07em;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 4px;
+            min-width: 52px;
+            text-align: center;
+        }
+        .pill-btc    { background: rgba(247,147,26,.15);  color: #f7931a; border: 1px solid rgba(247,147,26,.35); }
+        .pill-gold   { background: rgba(255,196,0,.12);   color: #ffc400; border: 1px solid rgba(255,196,0,.3);  }
+        .pill-ustec  { background: rgba(139,92,246,.15);  color: #a78bfa; border: 1px solid rgba(139,92,246,.3); }
+        .pill-eurusd { background: rgba(59,130,246,.15);  color: #60a5fa; border: 1px solid rgba(59,130,246,.3); }
+        .pill-eurjpy { background: rgba(16,185,129,.15);  color: #34d399; border: 1px solid rgba(16,185,129,.3); }
+        .pill-other  { background: rgba(156,163,175,.12); color: #9ca3af; border: 1px solid rgba(156,163,175,.3);}
+
+        .shadow-asset-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            flex: 1;
+        }
+        .shadow-asset-meta {
+            font-size: 11px;
+            color: var(--muted);
+            font-family: var(--font-mono);
+        }
+        .shadow-asset-chevron {
+            font-size: 10px;
+            color: var(--muted);
+            transition: transform .2s;
+            margin-left: 4px;
+        }
+        .shadow-asset-body { overflow-x: auto; }
+        .shadow-asset-body table { border-radius: 0; }
+
         /* ── Config panel ──────────────────────── */
         .config-section { padding: 14px; border-bottom: 1px solid var(--border); }
         .config-section:last-child { border-bottom: none; }
@@ -1452,55 +1504,140 @@ function renderShadowPanel(tab) {
     if (tab === 'strats') renderShadowStrats(shadowState.strategy_scorecard || {});
 }
 
+/* ── Shadow accordion helpers ──────────────────────────── */
+function shadowAssetPillClass(asset) {
+    const a = (asset || '').toUpperCase();
+    if (a.includes('BTC'))    return 'pill-btc';
+    if (a.includes('GOLD') || a.includes('XAU')) return 'pill-gold';
+    if (a.includes('USTEC') || a.includes('US100') || a.includes('NAS')) return 'pill-ustec';
+    if (a.includes('EURUSD')) return 'pill-eurusd';
+    if (a.includes('EURJPY')) return 'pill-eurjpy';
+    return 'pill-other';
+}
+
+function groupByAsset(arr) {
+    const map = {};
+    arr.forEach(item => {
+        const a = item.asset || 'UNKNOWN';
+        if (!map[a]) map[a] = [];
+        map[a].push(item);
+    });
+    return map;
+}
+
+function toggleShadowAsset(id) {
+    const body = document.getElementById(id);
+    const chevron = document.getElementById(id + '-ch');
+    if (!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if (chevron) chevron.style.transform = open ? '' : 'rotate(90deg)';
+}
+
 function renderShadowOpen(positions) {
     const el = document.getElementById('shadow-open-panel');
     if (!positions.length) { el.innerHTML = emptyState('🔮','No open shadow positions — signals are flowing'); return; }
-    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>';
-    h += '<th>Asset</th><th>Side</th><th>Entry</th><th>Current</th><th>Live P&L%</th><th>MFE%</th><th>MAE%</th><th>Bars</th><th>Blocked By</th><th>Strategy</th></tr>';
-    h += '</thead><tbody>';
-    positions.forEach(p => {
-        const live = p.live_pnl_pct ?? 0;
-        const pc   = live >= 0 ? 'pos' : 'neg';
-        h += `<tr>
-            <td><strong>${p.asset}</strong></td>
-            <td><span class="badge badge-${p.side}">${p.side.toUpperCase()}</span></td>
-            <td>$${fmt(p.entry_price, 4)}</td>
-            <td>$${fmt(p.current_price || p.entry_price, 4)}</td>
-            <td class="${pc}">${live >= 0 ? '+' : ''}${live.toFixed(3)}%</td>
-            <td class="pos">+${(p.mfe_pct||0).toFixed(3)}%</td>
-            <td class="neg">${(p.mae_pct||0).toFixed(3)}%</td>
-            <td>${p.bars_open||0}</td>
-            <td style="font-size:10px;color:var(--yellow2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(p.gate_blocked_by)}">${esc(p.gate_blocked_by)}</td>
-            <td><span class="badge badge-shadow">${p.strategy_source||'—'}</span></td>
-        </tr>`;
+
+    const grouped = groupByAsset(positions);
+    const assets  = Object.keys(grouped).sort();
+    let h = '';
+
+    assets.forEach((asset, idx) => {
+        const rows  = grouped[asset];
+        const pnlSum = rows.reduce((s, p) => s + (p.live_pnl_pct ?? 0), 0);
+        const pc    = pnlSum >= 0 ? 'pos' : 'neg';
+        const pnlStr = (pnlSum >= 0 ? '+' : '') + pnlSum.toFixed(3) + '%';
+        const pill  = shadowAssetPillClass(asset);
+        const bodyId = 'sh-open-' + asset.replace(/[^a-z0-9]/gi,'_');
+        // First asset open by default
+        const startOpen = idx === 0;
+
+        h += `<div class="shadow-asset-block">
+          <div class="shadow-asset-hdr" onclick="toggleShadowAsset('${bodyId}')">
+            <span class="shadow-asset-pill ${pill}">${esc(asset)}</span>
+            <span class="shadow-asset-label">${rows.length} position${rows.length !== 1 ? 's' : ''}</span>
+            <span class="shadow-asset-meta ${pc}">${pnlStr} live P&amp;L</span>
+            <span class="shadow-asset-chevron" id="${bodyId}-ch" style="transform:${startOpen ? 'rotate(90deg)' : ''}">▶</span>
+          </div>
+          <div class="shadow-asset-body" id="${bodyId}" style="display:${startOpen ? 'block' : 'none'}">
+            <table class="data-table"><thead><tr>
+              <th>Side</th><th>Entry</th><th>Stop Loss</th><th>Take Profit</th><th>Current</th><th>Live P&L%</th><th>Bars</th><th>Blocked By</th><th>Strategy</th>
+            </tr></thead><tbody>`;
+
+        rows.forEach(p => {
+            const live = p.live_pnl_pct ?? 0;
+            const rpc  = live >= 0 ? 'pos' : 'neg';
+            h += `<tr>
+              <td><span class="badge badge-${p.side}">${p.side.toUpperCase()}</span></td>
+              <td>$${fmt(p.entry_price, 4)}</td>
+              <td style="color:var(--red2);">${p.stop_loss  ? '$' + fmt(p.stop_loss,  4) : '—'}</td>
+              <td style="color:var(--green2);">${p.take_profit ? '$' + fmt(p.take_profit, 4) : '—'}</td>
+              <td>$${fmt(p.current_price || p.entry_price, 4)}</td>
+              <td class="${rpc}">${live >= 0 ? '+' : ''}${live.toFixed(3)}%</td>
+              <td style="color:var(--muted2);">${p.bars_open||0}</td>
+              <td style="font-size:10px;color:var(--yellow2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(p.gate_blocked_by)}">${esc(p.gate_blocked_by)}</td>
+              <td><span class="badge badge-shadow">${p.strategy_source||'—'}</span></td>
+            </tr>`;
+        });
+
+        h += `</tbody></table></div></div>`;
     });
-    h += '</tbody></table></div>';
+
     el.innerHTML = h;
 }
 
 function renderShadowClosed(results) {
     const el = document.getElementById('shadow-closed-panel');
     if (!results.length) { el.innerHTML = emptyState('📦','No closed shadow trades yet'); return; }
-    const sorted = [...results].reverse().slice(0, 50);
-    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>';
-    h += '<th>Asset</th><th>Side</th><th>Net P&L%</th><th>Gross%</th><th>MFE%</th><th>MAE%</th><th>Bars</th><th>Close Reason</th><th>Blocked By</th><th>Regime</th></tr>';
-    h += '</thead><tbody>';
-    sorted.forEach(r => {
-        const pc = r.net_pnl_pct >= 0 ? 'pos' : 'neg';
-        h += `<tr>
-            <td><strong>${r.asset}</strong></td>
-            <td><span class="badge badge-${r.side}">${r.side.toUpperCase()}</span></td>
-            <td class="${pc}" style="font-weight:700;">${r.net_pnl_pct >= 0 ? '+' : ''}${(r.net_pnl_pct||0).toFixed(3)}%</td>
-            <td class="${pc}">${r.gross_pnl_pct >= 0 ? '+' : ''}${(r.gross_pnl_pct||0).toFixed(3)}%</td>
-            <td class="pos">+${(r.mfe_pct||0).toFixed(3)}%</td>
-            <td class="neg">${(r.mae_pct||0).toFixed(3)}%</td>
-            <td>${r.bars_open||0}</td>
-            <td style="font-size:11px;color:var(--muted2);">${r.close_reason||'—'}</td>
-            <td style="font-size:10px;color:var(--yellow2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.gate_blocked_by)}">${esc(r.gate_blocked_by)}</td>
-            <td style="font-size:11px;color:var(--muted2);">${r.regime_name||'—'}</td>
-        </tr>`;
+
+    // Most recent first, cap per asset at 30
+    const sorted  = [...results].reverse();
+    const grouped = groupByAsset(sorted);
+    const assets  = Object.keys(grouped).sort();
+    let h = '';
+
+    assets.forEach((asset, idx) => {
+        const rows   = grouped[asset].slice(0, 30);
+        const wins   = rows.filter(r => (r.net_pnl_pct || 0) >= 0).length;
+        const pnlSum = rows.reduce((s, r) => s + (r.net_pnl_pct ?? 0), 0);
+        const pc     = pnlSum >= 0 ? 'pos' : 'neg';
+        const pnlStr = (pnlSum >= 0 ? '+' : '') + pnlSum.toFixed(2) + '%';
+        const wr     = rows.length ? Math.round(wins / rows.length * 100) : 0;
+        const pill   = shadowAssetPillClass(asset);
+        const bodyId = 'sh-closed-' + asset.replace(/[^a-z0-9]/gi,'_');
+        const startOpen = idx === 0;
+
+        h += `<div class="shadow-asset-block">
+          <div class="shadow-asset-hdr" onclick="toggleShadowAsset('${bodyId}')">
+            <span class="shadow-asset-pill ${pill}">${esc(asset)}</span>
+            <span class="shadow-asset-label">${rows.length} trade${rows.length !== 1 ? 's' : ''}</span>
+            <span class="shadow-asset-meta">WR <strong style="color:${wr>=50?'var(--green)':'var(--red)'};">${wr}%</strong></span>
+            <span class="shadow-asset-meta ${pc}" style="margin-left:8px;">${pnlStr} net</span>
+            <span class="shadow-asset-chevron" id="${bodyId}-ch" style="transform:${startOpen ? 'rotate(90deg)' : ''}">▶</span>
+          </div>
+          <div class="shadow-asset-body" id="${bodyId}" style="display:${startOpen ? 'block' : 'none'}">
+            <table class="data-table"><thead><tr>
+              <th>Side</th><th>Entry</th><th>Stop Loss</th><th>Take Profit</th><th>Net P&L%</th><th>Bars</th><th>Close Reason</th><th>Blocked By</th><th>Regime</th>
+            </tr></thead><tbody>`;
+
+        rows.forEach(r => {
+            const rpc = (r.net_pnl_pct || 0) >= 0 ? 'pos' : 'neg';
+            h += `<tr>
+              <td><span class="badge badge-${r.side}">${r.side.toUpperCase()}</span></td>
+              <td>$${fmt(r.entry_price, 4)}</td>
+              <td style="color:var(--red2);">${r.stop_loss  ? '$' + fmt(r.stop_loss,  4) : '—'}</td>
+              <td style="color:var(--green2);">${r.take_profit ? '$' + fmt(r.take_profit, 4) : '—'}</td>
+              <td class="${rpc}" style="font-weight:700;">${(r.net_pnl_pct||0) >= 0 ? '+' : ''}${(r.net_pnl_pct||0).toFixed(3)}%</td>
+              <td style="color:var(--muted2);">${r.bars_open||0}</td>
+              <td style="font-size:11px;color:var(--muted2);">${r.close_reason||'—'}</td>
+              <td style="font-size:10px;color:var(--yellow2);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.gate_blocked_by)}">${esc(r.gate_blocked_by)}</td>
+              <td style="font-size:11px;color:var(--muted2);">${r.regime_name||'—'}</td>
+            </tr>`;
+        });
+
+        h += `</tbody></table></div></div>`;
     });
-    h += '</tbody></table></div>';
+
     el.innerHTML = h;
 }
 
