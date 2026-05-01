@@ -251,6 +251,8 @@ class ShadowTradingEngine:
         gate_blocked_by: str,
         signal_details: dict,
         atr: Optional[float] = None,
+        atr_multiplier: float = 1.8,
+        tp_multiples: list = None,
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -263,7 +265,9 @@ class ShadowTradingEngine:
         strategy_source  : "TF", "MR", "EMA", or "consensus"
         gate_blocked_by  : The reasoning string from signal_details
         signal_details   : Full details dict from get_aggregated_signal
-        atr              : Optional ATR value for stop/target estimation
+        atr              : Regime-adaptive ATR value (VTM-style ATR7/14/28)
+        atr_multiplier   : SL distance = atr × multiplier (from asset risk_config)
+        tp_multiples     : TP ATR multiples [tp1, tp2, tp3] — first entry used for TP1
         """
         if len(self.open_positions) >= self._max_positions:
             logger.debug("[SHADOW] Max positions reached, skipping")
@@ -275,17 +279,24 @@ class ShadowTradingEngine:
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
 
-        # Estimate stop loss and take profit from ATR if available
+        # Compute SL/TP using VTM's formula:
+        #   SL distance = atr × atr_multiplier  (clamped: min 0.5×atr, max 5.0×atr)
+        #   TP1          = entry ± atr × first partial_target multiple
         _stop_loss = 0.0
         _take_profit = 0.0
         if atr and atr > 0:
-            sl_dist = 1.8 * atr
-            tp_dist = 3.0 * atr
+            _tp_mults = tp_multiples if tp_multiples else [2.5]
+            _first_tp = float(_tp_mults[0]) if _tp_mults else 2.5
+
+            # Match VTM clamp: min 0.5×atr, max 5.0×atr
+            sl_dist = max(0.5 * atr, min(5.0 * atr, atr_multiplier * atr))
+            tp_dist = _first_tp * atr
+
             if side == "long":
-                _stop_loss = entry_price - sl_dist
+                _stop_loss   = entry_price - sl_dist
                 _take_profit = entry_price + tp_dist
             else:
-                _stop_loss = entry_price + sl_dist
+                _stop_loss   = entry_price + sl_dist
                 _take_profit = entry_price - tp_dist
 
         pos = ShadowPosition(
