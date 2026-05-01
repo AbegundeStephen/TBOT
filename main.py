@@ -604,6 +604,39 @@ class TradingBot:
                     )
             except Exception as _re:
                 logger.warning(f"[RECONCILE] Startup reconcile failed (non-fatal): {_re}")
+        # STEP 4.6: Restore cooldown clock from DB
+        # ============================================================
+        # last_trade_times is in-memory only; a restart resets it to {},
+        # which makes check_min_time_between_trades() always pass on the
+        # first cycle even if a trade was opened seconds before the crash.
+        # Fix: seed it from the most-recent entry_time per asset in the DB.
+        if self.db_manager:
+            try:
+                logger.info("\n" + "-" * 70)
+                logger.info("STEP 4.6: Restoring cooldown clock from trade history")
+                logger.info("-" * 70)
+                # Look back far enough to cover the longest possible cooldown
+                max_cooldown_h = max(
+                    self.config.get("trading", {}).get(
+                        "min_time_between_trades_minutes", 60
+                    ),
+                    120,          # hard floor: never look back less than 2 hours
+                ) / 60.0 * 1.2   # 20 % buffer
+                restored = self.db_manager.get_last_trade_times(
+                    lookback_hours=int(max_cooldown_h) + 1
+                )
+                if restored:
+                    self.last_trade_times.update(restored)
+                    for asset, ts in restored.items():
+                        elapsed_min = (datetime.now() - ts).total_seconds() / 60
+                        logger.info(
+                            f"[COOLDOWN] {asset}: last trade {elapsed_min:.0f} min ago "
+                            f"(restored from DB)"
+                        )
+                else:
+                    logger.info("[COOLDOWN] No recent trades found — cooldown clock starts fresh")
+            except Exception as _ce:
+                logger.warning(f"[COOLDOWN] Cooldown restore failed (non-fatal): {_ce}")
 
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
@@ -2107,6 +2140,70 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
 
+    # ------------------------------------------------------------------ #
+    #  Shadow-trade helper — call at every gate that blocks a real signal #
+    # ------------------------------------------------------------------ #
+    def _shadow_open_blocked(
+        self,
+        asset_name: str,
+        signal: int,
+        details: dict,
+        df,
+        current_price: float,
+        gate_label: str,
+        asset_cfg: dict,
+    ):
+        """
+        Open a shadow (virtual) position for any signal that was blocked
+        before reaching the execution layer.  Safe to call from every gate;
+        no-ops when shadow_trader is absent or signal is 0.
+        """
+        try:
+            if not self.shadow_trader or signal == 0 or current_price <= 0:
+                return
+            _side = "long" if signal > 0 else "short"
+            # VTM-style regime-adaptive ATR (same logic used in the main shadow block)
+            _atr = None
+            try:
+                import numpy as _np_s
+                if df is not None and len(df) >= 30:
+                    def _ratr(n):
+                        hi = df["high"].values
+                        lo = df["low"].values
+                        cl = df["close"].values
+                        tr = _np_s.maximum(
+                            hi[-n-1:] - lo[-n-1:],
+                            _np_s.abs(hi[-n-1:] - _np_s.roll(cl, 1)[-n-1:]),
+                            _np_s.abs(lo[-n-1:]  - _np_s.roll(cl, 1)[-n-1:]),
+                        )
+                        return float(_np_s.nanmean(tr[-n:]))
+                    _a7, _a14, _a28 = _ratr(7), _ratr(14), _ratr(28)
+                    if _a28 > 0:
+                        _r = _a7 / _a28
+                        _atr = _a7 if _r > 1.30 else (_a28 if _r < 0.70 else _a14)
+                    else:
+                        _atr = _a14
+            except Exception:
+                _atr = None
+            _risk_cfg = asset_cfg.get("risk_management", asset_cfg)
+            _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
+            _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
+            _src = details.get("aggregator_mode", "PERF").upper()
+            self.shadow_trader.open_position(
+                asset=asset_name,
+                side=_side,
+                entry_price=current_price,
+                strategy_source=_src,
+                gate_blocked_by=gate_label[:60],
+                signal_details=details,
+                atr=float(_atr) if _atr else None,
+                atr_multiplier=_atr_mult,
+                tp_multiples=_tp_mults,
+            )
+            logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
+        except Exception as _e:
+            logger.debug(f"[SHADOW] _shadow_open_blocked failed: {_e}")
+
     def _notify_blocked(
         self,
         asset: str,
@@ -3252,6 +3349,10 @@ class TradingBot:
                             details=details,
                             price=details.get("price"),
                         )
+                        self._shadow_open_blocked(
+                            asset_name, signal, details, df, current_price,
+                            "mtf_counter_trend", asset_cfg,
+                        )
                         return  # ← Block the trade
 
                 # --------------------------------------------------------
@@ -3278,6 +3379,10 @@ class TradingBot:
                         ),
                         details=details,
                         price=details.get("price"),
+                    )
+                    self._shadow_open_blocked(
+                        asset_name, signal, details, df, current_price,
+                        "mtf_max_positions", asset_cfg,
                     )
                     return  # ← Block the trade
 
@@ -3356,6 +3461,10 @@ class TradingBot:
                     details=details,
                     price=details.get("price"),
                 )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "trading_limits", asset_cfg,
+                )
                 return
 
             if not self.check_min_time_between_trades(asset_name):
@@ -3393,6 +3502,11 @@ class TradingBot:
                         executed=False,
                         force_insert=True,
                     )
+                # Shadow-track so the engine can measure cooldown opportunity cost
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "cooldown_block", asset_cfg,
+                )
                 return
 
             # Store BEFORE state
@@ -3413,6 +3527,10 @@ class TradingBot:
                     details=details,
                     price=details.get("price"),
                 )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "system_health_veto", asset_cfg,
+                )
                 return
 
             # B. Circuit Breaker Check (Last Second)
@@ -3426,6 +3544,10 @@ class TradingBot:
                     block_reason=str(reason),
                     details=details,
                     price=details.get("price"),
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "circuit_breaker", asset_cfg,
                 )
                 return
 
@@ -3443,6 +3565,10 @@ class TradingBot:
                     ),
                     details=details,
                     price=details.get("price"),
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "quality_gate", asset_cfg,
                 )
                 return
 

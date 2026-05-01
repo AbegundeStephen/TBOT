@@ -786,6 +786,42 @@ class TradingDatabaseManager:
     # QUERY METHODS
     # ========================================================================
 
+    def get_last_trade_times(self, lookback_hours: int = 6) -> dict:
+        """
+        Return {asset: datetime} for the most-recent trade entry per asset
+        within the last `lookback_hours` hours.  Used on startup to restore
+        the in-memory cooldown clock so the bot never ignores cooldown after
+        a restart.
+        """
+        try:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+            ).isoformat()
+            result = (
+                self.supabase.table("trades")
+                .select("asset, entry_time")
+                .gte("entry_time", cutoff)
+                .order("entry_time", desc=True)
+                .execute()
+            )
+            rows = result.data or []
+            seen: dict = {}
+            for row in rows:
+                asset = row.get("asset")
+                ts_str = row.get("entry_time")
+                if asset and ts_str and asset not in seen:
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if dt.tzinfo is not None:
+                            dt = dt.astimezone().replace(tzinfo=None)
+                        seen[asset] = dt
+                    except Exception:
+                        pass
+            return seen
+        except Exception as e:
+            logger.error(f"[DB] get_last_trade_times failed: {e}")
+            return {}
+
     def get_open_trades(self, asset: Optional[str] = None) -> List[Dict]:
         """Get all open trades"""
         try:
