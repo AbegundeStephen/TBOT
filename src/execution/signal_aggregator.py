@@ -285,8 +285,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # T1.5: Stale price detection state
         # Tracks (last_price, last_change_time) per asset to catch frozen data feeds.
+        # MT5 assets trade market hours only — 90 min avoids false stale alerts
+        # across the overnight close gap. Crypto is 24/7 so 30 min is tight enough.
         self._last_prices = {}
-        self._stale_threshold_minutes = 30
+        self._stale_threshold_minutes = 30   # default (crypto / Binance)
+        self._stale_thresholds = {           # per-asset overrides
+            "GOLD":   90,
+            "USTEC":  90,
+            "EURUSD": 90,
+            "EURJPY": 90,
+        }
 
         # T3.4: Economic calendar — loaded at startup, hot-reloaded by CalendarUpdater
         self._econ_cal_path = "config/economic_calendar.json"
@@ -1356,7 +1364,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _last_price, _last_time = _last
                 _minutes_since_move = (_now - _last_time).total_seconds() / 60
                 _price_moved = abs(_current_price - _last_price) / max(_last_price, 1) > 0.00001
-                if not _price_moved and _minutes_since_move > self._stale_threshold_minutes:
+                _stale_limit = self._stale_thresholds.get(
+                    self.asset_type, self._stale_threshold_minutes
+                )
+                if not _price_moved and _minutes_since_move > _stale_limit:
                     logger.warning(
                         f"[STALE] ❌ {self.asset_type} price frozen at {_current_price} "
                         f"for {_minutes_since_move:.0f}min — blocking signal evaluation"
@@ -1376,6 +1387,51 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 self._last_prices[self.asset_type] = (_current_price, _now)
 
             # ═══════════════════════════════════════════════════════════════
+            # FLASH VETO — abnormal candle body detection
+            # A candle body > 3× ATR14 signals a news spike / stop-hunt.
+            # Hard-block above 5×; soft-discount (−40% quality) at 3–5×.
+            # ═══════════════════════════════════════════════════════════════
+            _flash_discount = 1.0
+            try:
+                if len(df) >= 15:
+                    import numpy as _fnp
+                    _hi = df["high"].values
+                    _lo = df["low"].values
+                    _cl = df["close"].values
+                    _op = df["open"].values
+                    _tr = _fnp.maximum(
+                        _hi[1:] - _lo[1:],
+                        _fnp.abs(_hi[1:] - _cl[:-1]),
+                        _fnp.abs(_lo[1:] - _cl[:-1]),
+                    )
+                    _atr14 = float(_fnp.nanmean(_tr[-14:])) if len(_tr) >= 14 else 0.0
+                    _last_body = abs(float(_cl[-1]) - float(_op[-1]))
+                    if _atr14 > 0:
+                        _body_ratio = _last_body / _atr14
+                        if _body_ratio > 5.0:
+                            logger.warning(
+                                f"[FLASH] ⛔ Hard-veto: candle body {_body_ratio:.1f}× ATR "
+                                f"— news spike detected, blocking signal"
+                            )
+                            return 0, {
+                                "timestamp": timestamp,
+                                "regime": "UNKNOWN",
+                                "reasoning": f"flash_veto_{_body_ratio:.1f}x_atr",
+                                "final_signal": 0, "signal_quality": 0.0,
+                                "mr_signal": 0, "mr_confidence": 0.0,
+                                "tf_signal": 0, "tf_confidence": 0.0,
+                                "ema_signal": 0, "ema_confidence": 0.0,
+                            }
+                        elif _body_ratio > 3.0:
+                            logger.warning(
+                                f"[FLASH] ⚠️ Soft-veto: candle body {_body_ratio:.1f}× ATR "
+                                f"— quality discounted 40%"
+                            )
+                            _flash_discount = 0.60
+            except Exception:
+                _flash_discount = 1.0
+
+                        # ═══════════════════════════════════════════════════════════════
             # T3.3: NY OPEN HOUR BLOCK (13:00–13:59 UTC)
             # TF signals at NY open: 53% WR, -21.2% P&L (stop-hunting territory).
             # Trades 1–2 hours later: 60% WR, +101.5% P&L.
@@ -1769,6 +1825,30 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             else:
                                 atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
                                 if not atr_exp_passed: final_signal = 0; reasoning = "insufficient_trend_strength"
+                                else:
+                                    # Error 7: Profit Economics Monitor (non-blocking log)
+                                    try:
+                                        if final_signal != 0 and len(df) >= 14:
+                                            import numpy as _pm_np
+                                            _pm_tr = _pm_np.maximum(
+                                                df["high"].values[1:] - df["low"].values[1:],
+                                                _pm_np.abs(df["high"].values[1:] - df["close"].values[:-1]),
+                                                _pm_np.abs(df["low"].values[1:]  - df["close"].values[:-1]),
+                                            )
+                                            _pm_atr = float(_pm_np.nanmean(_pm_tr[-14:]))
+                                            if _pm_atr > 0:
+                                                _pm_rr = (2.5 * _pm_atr) / (1.5 * _pm_atr)
+                                                if _pm_rr < 1.5:
+                                                    logger.warning(
+                                                        f"[PROFIT] ⚠️ Low R:R {_pm_rr:.2f} — monitor only"
+                                                    )
+                                    except Exception:
+                                        pass
+
+                # Apply flash veto soft-discount to final quality score
+                if _flash_discount < 1.0 and final_signal != 0:
+                    signal_quality = round(signal_quality * _flash_discount, 4)
+                    reasoning += f" [flash_discount:{_flash_discount:.0%}]"
             
             # STEP 7: Build base response
             details = {
