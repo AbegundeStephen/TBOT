@@ -295,15 +295,21 @@ class DynamicPresetSelector:
             if adx > 25: market_regime_type = "TREND"
             elif adx < 20: market_regime_type = "RANGE"
             
-            # A. Trend Veto: No MR in a trending market
+            # A. Trend Veto: No MR in a trending market — redirect to conservative
             if market_regime_type == "TREND" and new_preset == "mr":
-                logger.warning(f"[SELECTOR] 🛡️ ALIGNMENT VETO: Blocking MR preset in TREND regime (ADX: {adx:.1f})")
-                return None
-                
-            # B. Range Veto: No high-conviction trend presets in a ranging market
+                logger.warning(
+                    f"[SELECTOR] 🛡️ ALIGNMENT VETO: MR blocked in TREND (ADX: {adx:.1f})"
+                    f" — redirecting to conservative"
+                )
+                return "conservative"
+
+            # B. Range Veto: No high-conviction trend presets in ranging market — redirect to MR
             if market_regime_type == "RANGE" and new_preset in ["balanced", "aggressive"]:
-                logger.warning(f"[SELECTOR] 🛡️ ALIGNMENT VETO: Blocking Trend preset ({new_preset}) in RANGE regime (ADX: {adx:.1f})")
-                return None
+                logger.warning(
+                    f"[SELECTOR] 🛡️ ALIGNMENT VETO: {new_preset} blocked in RANGE "
+                    f"(ADX: {adx:.1f}) — redirecting to mr"
+                )
+                return "mr"
             
             # ================================================================
             # 🛡️ ASSET-DNA HARD LOCKS (Gating)

@@ -142,7 +142,7 @@ class MTFRegimeIntegration:
                         "risk_level": "low" if confidence > 0.5 else "high",
                         "volatility_regime": "normal" if confidence > 0.5 else "high",
                         "recommended_mode": "council",
-                        "allow_counter_trend": False,
+                        "allow_counter_trend": True,  # fallback: be permissive
                         "suggested_max_positions": 3,
                         # Scores
                         "bullish_score": bullish_score,
@@ -283,8 +283,12 @@ class MTFRegimeIntegration:
             if regime_status.consensus_regime == "NEUTRAL":
                 volatility = "high" # Neutral often means high uncertainty/chop
 
-            # Institutional Rule: NO counter-trend allowed in Phase 1-5
-            allow_counter_trend = False
+            # Allow counter-trend in NEUTRAL (MR best regime: 71% WR, +159% P&L).
+            # Block only in confirmed trending regimes.
+            if regime_status.consensus_regime == "NEUTRAL":
+                allow_counter_trend = True
+            else:
+                allow_counter_trend = False
 
             # Pull 1H session momentum from the new timeframe_data fields
             _h1_tf = regime_status.timeframe_data.get("1h", {})
@@ -338,7 +342,7 @@ class MTFRegimeIntegration:
                 "recommended_mode": "council",
                 "risk_level": "high",
                 "volatility": "high",
-                "allow_counter_trend": False,
+                "allow_counter_trend": True,  # error fallback: be permissive
                 "max_positions": 0,
                 "reasoning": f"Error: {str(e)}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),

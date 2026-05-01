@@ -1713,7 +1713,13 @@ class TradingBot:
                 hasattr(self, "_current_regime_data")
                 and asset_name in self._current_regime_data
             ):
-                mtf_regime = self._current_regime_data[asset_name]
+                mtf_regime = self._current_regime_data[asset_name].copy()
+
+            # Error 9 fix: inject T3.5/T3.6 enrichments into the council hybrid fork
+            if asset_name in ("BTC", "BTCUSDT"):
+                mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+            if hasattr(self, "_dxy_falling"):
+                mtf_regime["dxy_falling"] = self._dxy_falling
 
             # ✅ FIXED: Pass full market context to the Institutional Council
             signal, details = aggregator.get_aggregated_signal(
@@ -1736,7 +1742,13 @@ class TradingBot:
                 hasattr(self, "_current_regime_data")
                 and asset_name in self._current_regime_data
             ):
-                mtf_regime = self._current_regime_data[asset_name]
+                mtf_regime = self._current_regime_data[asset_name].copy()
+
+            # Error 9 fix: inject T3.5/T3.6 enrichments into the performance hybrid fork
+            if asset_name in ("BTC", "BTCUSDT"):
+                mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+            if hasattr(self, "_dxy_falling"):
+                mtf_regime["dxy_falling"] = self._dxy_falling
 
             signal, details = aggregator.get_aggregated_signal(
                 df,
@@ -4013,7 +4025,10 @@ class TradingBot:
                     if _eu_df is not None and len(_eu_df) >= 20:
                         _eu_sma = _eu_df["close"].iloc[-20:].mean()
                         _eu_now = _eu_df["close"].iloc[-1]
-                        mtf_regime["dxy_falling"] = bool(_eu_now > _eu_sma)
+                        _dxy_val = bool(_eu_now > _eu_sma)
+                        mtf_regime["dxy_falling"] = _dxy_val
+                        # Error 9 fix: cache globally so hybrid path can inject it too
+                        self._dxy_falling = _dxy_val
             except Exception:
                 pass  # DXY proxy is a bonus — never block execution
 
