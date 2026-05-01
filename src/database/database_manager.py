@@ -333,6 +333,103 @@ class TradingDatabaseManager:
             logger.error(f"[DB] Error updating trade exit: {e}")
             return False
 
+    def reconcile_open_positions(
+        self,
+        mt5_handler=None,
+        binance_handler=None,
+    ) -> int:
+        """
+        Startup reconciliation — mark Supabase 'open' rows as 'closed_offline'
+        when the corresponding broker position no longer exists.
+
+        Called once after execution handlers are initialized.
+        Returns the number of rows corrected.
+        """
+        corrected = 0
+        try:
+            result = (
+                self.supabase.table("trades")
+                .select("id, asset, exchange, mt5_ticket, binance_order_id, position_id, entry_price")
+                .eq("status", "open")
+                .execute()
+            )
+            open_rows = result.data or []
+            if not open_rows:
+                logger.info("[RECONCILE] No open DB rows to check.")
+                return 0
+
+            logger.info(f"[RECONCILE] Checking {len(open_rows)} open DB rows against brokers …")
+
+            # Build live MT5 ticket set once (avoid one API call per row)
+            live_mt5_tickets: set = set()
+            if mt5_handler:
+                try:
+                    import MetaTrader5 as _mt5
+                    all_pos = _mt5.positions_get()
+                    if all_pos:
+                        live_mt5_tickets = {p.ticket for p in all_pos}
+                except Exception as _e:
+                    logger.warning(f"[RECONCILE] MT5 positions_get failed: {_e}")
+
+            # Build live Binance position set — non-zero position amounts
+            live_binance_symbols: set = set()
+            if binance_handler:
+                try:
+                    positions = binance_handler.client.futures_position_information()
+                    live_binance_symbols = {
+                        p["symbol"] for p in positions
+                        if float(p.get("positionAmt", 0)) != 0
+                    }
+                except Exception as _e:
+                    logger.warning(f"[RECONCILE] Binance position fetch failed: {_e}")
+
+            for row in open_rows:
+                trade_id  = row["id"]
+                exchange  = (row.get("exchange") or "").lower()
+                mt5_ticket = row.get("mt5_ticket")
+                binance_oid = row.get("binance_order_id")
+                asset = row.get("asset", "")
+
+                still_live = True  # assume open unless proven otherwise
+
+                if exchange == "mt5" or mt5_ticket:
+                    if mt5_handler and live_mt5_tickets is not None:
+                        # If we got a valid ticket set from MT5, check membership
+                        still_live = (mt5_ticket in live_mt5_tickets) if mt5_ticket else False
+                    # If MT5 handler not available, leave as-is (can't verify)
+
+                elif exchange == "binance" or binance_oid:
+                    if binance_handler and live_binance_symbols is not None:
+                        # Map asset name to Binance symbol format
+                        symbol = row.get("asset", "").upper()
+                        if not symbol.endswith("USDT"):
+                            symbol = symbol + "USDT"
+                        still_live = symbol in live_binance_symbols
+                    # If Binance handler not available, leave as-is
+
+                if not still_live:
+                    try:
+                        self.supabase.table("trades").update({
+                            "status":      "closed",
+                            "exit_reason": "closed_offline",
+                            "exit_time":   datetime.now(timezone.utc).isoformat(),
+                            "pnl":         0.0,
+                            "pnl_pct":     0.0,
+                        }).eq("id", trade_id).execute()
+                        corrected += 1
+                        logger.info(
+                            f"[RECONCILE] ⚠ Trade ID={trade_id} ({asset}) "
+                            f"not found on broker — marked closed_offline"
+                        )
+                    except Exception as _ue:
+                        logger.warning(f"[RECONCILE] Failed to update ID={trade_id}: {_ue}")
+
+            logger.info(f"[RECONCILE] Done — {corrected}/{len(open_rows)} rows corrected.")
+        except Exception as e:
+            logger.error(f"[RECONCILE] Error: {e}", exc_info=True)
+
+        return corrected
+
     def update_trade_vtm_event(
         self,
         trade_id: int,

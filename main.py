@@ -582,6 +582,29 @@ class TradingBot:
 
         logger.info("[OK] Portfolio can now close positions on exchanges")
 
+        # ============================================================
+        # STEP 4.5: Reconcile DB open positions against live brokers
+        # ============================================================
+        # Positions closed manually while the bot was offline remain
+        # stuck as status="open" in Supabase. Fix them now before the
+        # bot loop starts so the dashboard only shows truly live trades.
+        if self.db_manager:
+            try:
+                logger.info("\n" + "-" * 70)
+                logger.info("STEP 4.5: Reconciling open DB positions against brokers")
+                logger.info("-" * 70)
+                corrected = self.db_manager.reconcile_open_positions(
+                    mt5_handler=self.mt5_handler,
+                    binance_handler=self.binance_handler,
+                )
+                if corrected:
+                    logger.info(
+                        f"[RECONCILE] ✅ {corrected} offline-closed position(s) "
+                        f"cleaned up from database"
+                    )
+            except Exception as _re:
+                logger.warning(f"[RECONCILE] Startup reconcile failed (non-fatal): {_re}")
+
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
         if hasattr(self, 'telegram_bot') and self.telegram_bot:
@@ -3911,7 +3934,35 @@ class TradingBot:
                         _side = "long" if _intended > 0 else "short"
                         _src = ("TF" if _raw_tf != 0 else
                                 "EMA" if _raw_ema != 0 else "MR")
-                        _atr = details.get("atr_fast") or details.get("atr")
+                        # Compute VTM-style regime-adaptive ATR from df.
+                        # Mirrors VTM._calculate_atr(): ATR7/14/28 ratio decides which to use.
+                        _atr = None
+                        try:
+                            import numpy as _np_atr
+                            if df is not None and len(df) >= 30:
+                                def _rolling_atr(n):
+                                    tr = _np_atr.maximum(
+                                        df["high"].values[-n-1:] - df["low"].values[-n-1:],
+                                        _np_atr.abs(df["high"].values[-n-1:] - df["close"].shift(1).values[-n-1:]),
+                                        _np_atr.abs(df["low"].values[-n-1:]  - df["close"].shift(1).values[-n-1:]),
+                                    )
+                                    return float(_np_atr.nanmean(tr[-n:]))
+                                _atr7  = _rolling_atr(7)
+                                _atr14 = _rolling_atr(14)
+                                _atr28 = _rolling_atr(28)
+                                if _atr28 > 0:
+                                    _ratio = _atr7 / _atr28
+                                    _atr = _atr7 if _ratio > 1.30 else (_atr28 if _ratio < 0.70 else _atr14)
+                                else:
+                                    _atr = _atr14
+                        except Exception:
+                            _atr = None
+
+                        # Read VTM multipliers from asset config risk block
+                        _risk_cfg   = asset_cfg.get("risk_management", asset_cfg)
+                        _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
+                        _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
+
                         self.shadow_trader.open_position(
                             asset=asset_name,
                             side=_side,
@@ -3920,6 +3971,8 @@ class TradingBot:
                             gate_blocked_by=_reasoning[:60],
                             signal_details=details,
                             atr=float(_atr) if _atr else None,
+                            atr_multiplier=_atr_mult,
+                            tp_multiples=_tp_mults,
                         )
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")
