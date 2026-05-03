@@ -99,6 +99,20 @@ class ShadowPosition:
     # Strategy vote snapshot at entry (for ML feature construction)
     strategy_votes: Dict = field(default_factory=dict)
 
+    # J2.1: CompositeState snapshot at entry
+    composite_state: Dict = field(default_factory=dict)
+
+    # J2.2: VTM-lite trailing stop (standardized — same for every shadow trade)
+    trailing_active: bool = False
+    trailing_distance: float = 0.0        # Set at open from ATR × 1.5
+    trailing_activation_pct: float = 0.0  # Set at open from ATR × 1.0 / entry
+    highest_price: float = 0.0            # For longs
+    lowest_price: float = 0.0             # For shorts
+
+    # J2.3: Breakeven after TP1
+    tp1_reached: bool = False
+    tp1_price: float = 0.0               # First partial target: entry ± 1.5 × ATR
+
     def _profit_pct(self, price: float) -> float:
         """Current unrealised P&L as a fraction of entry price."""
         if self.entry_price == 0:
@@ -125,6 +139,35 @@ class ShadowPosition:
         # Track MAE
         if pnl < self.mae_pct:
             self.mae_pct = pnl
+
+        # J2.3: Breakeven after TP1 — simulates VTM's partial exit + BE lock
+        if not self.tp1_reached and self.tp1_price > 0:
+            if (self.side == "long" and current_price >= self.tp1_price) or \
+               (self.side == "short" and current_price <= self.tp1_price):
+                self.tp1_reached = True
+                # Move SL to breakeven (side-aware, matching T1.4 fix)
+                if self.side == "long" and self.stop_loss < self.entry_price:
+                    self.stop_loss = self.entry_price
+                elif self.side == "short" and self.stop_loss > self.entry_price:
+                    self.stop_loss = self.entry_price
+
+        # J2.2: VTM-lite trailing stop
+        # Activate trailing after 1.0× ATR favorable move
+        if not self.trailing_active and self.trailing_activation_pct > 0:
+            if pnl > self.trailing_activation_pct:
+                self.trailing_active = True
+
+        if self.trailing_active and self.trailing_distance > 0:
+            if self.side == "long":
+                self.highest_price = max(self.highest_price, current_price)
+                _trail_sl = self.highest_price - self.trailing_distance
+                if _trail_sl > self.stop_loss:
+                    self.stop_loss = _trail_sl
+            else:
+                self.lowest_price = min(self.lowest_price, current_price)
+                _trail_sl = self.lowest_price + self.trailing_distance
+                if _trail_sl < self.stop_loss:
+                    self.stop_loss = _trail_sl
 
         # Check stop loss hit
         if self.stop_loss > 0:
@@ -202,6 +245,7 @@ class ShadowPosition:
             "friction_pct":     round(self.friction_pct, 4),
             "net_pnl_pct":      round(self.net_pnl_pct, 4),
             "strategy_votes":   self.strategy_votes,
+            "composite_state":  self.composite_state,
         }
 
 
@@ -253,6 +297,7 @@ class ShadowTradingEngine:
         atr: Optional[float] = None,
         atr_multiplier: float = 1.8,
         tp_multiples: list = None,
+        composite_state: dict = None,   # J2.1 — from CompositeState.to_dict()
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -299,6 +344,19 @@ class ShadowTradingEngine:
                 _stop_loss   = entry_price + sl_dist
                 _take_profit = entry_price - tp_dist
 
+        # J2.2 + J2.3: Compute standardized trailing and TP1 params at entry time
+        _trailing_distance = 0.0
+        _trailing_activation_pct = 0.0
+        _tp1_price = 0.0
+        if atr and atr > 0 and entry_price > 0:
+            _trailing_distance = atr * 1.5
+            _trailing_activation_pct = atr / entry_price * 1.0  # 1.0× ATR
+            _tp1_dist = 1.5 * atr
+            if side == "long":
+                _tp1_price = entry_price + _tp1_dist
+            else:
+                _tp1_price = entry_price - _tp1_dist
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
@@ -323,6 +381,16 @@ class ShadowTradingEngine:
                 "ema_conf":     signal_details.get("ema_confidence", 0.0),
                 "signal_quality": signal_details.get("signal_quality", 0.0),
             },
+            # J2.1: CompositeState snapshot
+            composite_state=composite_state or {},
+            # J2.2: Standardized trailing stop (same for every shadow trade)
+            trailing_active=False,
+            trailing_distance=_trailing_distance,
+            trailing_activation_pct=_trailing_activation_pct,
+            highest_price=entry_price,
+            lowest_price=entry_price,
+            # J2.3: Breakeven after TP1
+            tp1_price=_tp1_price,
         )
 
         self.open_positions.append(pos)

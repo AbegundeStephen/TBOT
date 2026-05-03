@@ -294,12 +294,50 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             "USTEC":  90,
             "EURUSD": 90,
             "EURJPY": 90,
+        }   # default (crypto / Binance)
+        self._stale_thresholds = {           # per-asset overrides
+            "GOLD":   90,
+            "USTEC":  90,
+            "EURUSD": 90,
+            "EURJPY": 90,
         }
 
         # T3.4: Economic calendar — loaded at startup, hot-reloaded by CalendarUpdater
         self._econ_cal_path = "config/economic_calendar.json"
         self._econ_events = []
         self._load_calendar_file()
+
+        # ── CONTEXT ENGINE: new infrastructure ──────────────────────────────
+        # B.3: Dynamic thresholds
+        from src.utils.dynamic_thresholds import DynamicThresholds
+        self.dynamic_thresholds = DynamicThresholds(lookback=100, min_samples=20)
+
+        # D.1: Trend Lifecycle tracking
+        self._previous_regime = {}    # {asset: regime_name}
+        self._regime_start_time = {}  # {asset: datetime}
+        self._regime_durations = {}   # {asset: [list of durations in hours]}
+        self._transition_counts = {}  # {asset: {(from, to): count}}
+
+        # E.2: MTF Structure Memory
+        self._structure_levels = {}   # {asset: [{price, tf, type, age_hours, tests}]}
+
+        # G.1: Liquidity sweep tracking
+        self._pdh = {}         # {asset: price}
+        self._pdl = {}         # {asset: price}
+        self._asian_high = {}  # {asset: price}
+        self._asian_low = {}   # {asset: price}
+        self._pdh_date = None
+
+        # G.5: Last loss tracking (populated externally by trade result callback)
+        self._last_loss_time = {}  # {asset: datetime}
+
+        # E.5: Squeeze state tracking
+        self._squeeze_was_active = {}  # {asset: bool}
+
+        # B.2: State cache slots (populated in get_aggregated_signal)
+        self._cached_composite = None
+        self._last_state_candle_time = None
+        # ────────────────────────────────────────────────────────────────────
 
         self._log_initialization()
 
@@ -346,6 +384,591 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             f"[CALENDAR] 🔄 Hot-reloaded — "
             f"{len(self._econ_events)} active events in memory"
         )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CONTEXT ENGINE — Build composite state (called once per candle close)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _build_composite_state(self, df, df_4h, governor_data: dict):
+        """Build a fresh CompositeState from closed-candle data."""
+        from src.execution.composite_state import CompositeState
+        import talib as ta
+        from datetime import datetime
+        state = CompositeState()
+
+        if df is None or len(df) < 20:
+            return state
+
+        # ── D.3: Session Context ──────────────────────────────────────────
+        try:
+            _hour = datetime.utcnow().hour
+            _dow = datetime.utcnow().weekday()
+            if 0 <= _hour < 8:
+                state.session_name = "ASIAN"
+            elif 8 <= _hour < 12:
+                state.session_name = "LONDON"
+            elif 12 <= _hour < 17:
+                state.session_name = "OVERLAP"
+            elif 17 <= _hour < 21:
+                state.session_name = "NY_CLOSE"
+            else:
+                state.session_name = "OFF_HOURS"
+            state.is_friday_pm = (_dow == 4 and _hour >= 15)
+        except Exception:
+            pass
+
+        # ── D.2: MTF Slope Agreement ──────────────────────────────────────
+        try:
+            _ema50_1h = df['close'].ewm(span=50, adjust=False).mean()
+            _slope_1h = (_ema50_1h.iloc[-1] - _ema50_1h.iloc[-6]) / max(_ema50_1h.iloc[-6], 1)
+
+            if df_4h is not None and len(df_4h) >= 10:
+                _ema50_4h = df_4h['close'].ewm(span=50, adjust=False).mean()
+                _slope_4h = (_ema50_4h.iloc[-1] - _ema50_4h.iloc[-6]) / max(_ema50_4h.iloc[-6], 1)
+
+                state.slopes_aligned = (_slope_1h > 0 and _slope_4h > 0) or \
+                                       (_slope_1h < 0 and _slope_4h < 0)
+                state.slope_diverging = not state.slopes_aligned
+
+            # Structural decay = old regime + slopes fighting
+            if state.regime_age_ratio > 1.5 and state.slope_diverging:
+                state.structural_decay = True
+        except Exception:
+            pass
+
+        # ── Shared ATR (used by multiple sub-modules) ─────────────────────
+        _atr = 0.0
+        try:
+            _atr_arr = ta.ATR(df['high'].values, df['low'].values,
+                              df['close'].values, timeperiod=14)
+            _atr = float(_atr_arr[-1]) if not np.isnan(_atr_arr[-1]) else 0.0
+        except Exception:
+            pass
+
+        # ── E.1: ChoCh / BOS Detection ────────────────────────────────────
+        self._update_structure(state, df)
+
+        # ── E.2: MTF Structure Memory ─────────────────────────────────────
+        self._update_structure_memory(state, df, df_4h)
+
+        # ── E.3: MA Defense Validator ─────────────────────────────────────
+        self._update_ma_defense(state, df)
+
+        # ── E.4: Parabolic Space (Dynamic Z-Score) ────────────────────────
+        try:
+            _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            _price = df['close'].iloc[-1]
+            _distance = abs(_price - _ema50) / max(_atr, 0.0001)
+
+            _extreme, _z, _thresh = self.dynamic_thresholds.check(
+                self.asset_type, "ema50_distance", _distance,
+                z_threshold=2.5, fallback=3.5
+            )
+            state.is_parabolic = _extreme
+            state.distance_zscore = _z
+        except Exception:
+            pass
+
+        # ── E.5: EMA Squeeze (ATR-Normalized) ────────────────────────────
+        try:
+            if _atr > 0:
+                _ema20 = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
+                _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+                _ema200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+                _spread = (max(_ema20, _ema50, _ema200) - min(_ema20, _ema50, _ema200)) / max(_atr, 0.0001)
+
+                state.squeeze_active = _spread < 0.5
+                state.squeeze_strength = max(0.0, 1.0 - _spread)
+
+                _prev_squeeze = self._squeeze_was_active.get(self.asset_type, False)
+                if _prev_squeeze and not state.squeeze_active and _spread > 1.0:
+                    state.coiled_spring = True
+                self._squeeze_was_active[self.asset_type] = state.squeeze_active
+        except Exception:
+            pass
+
+        # ── E.6: Inside/Outside Bar + Failed Breakout ─────────────────────
+        try:
+            if len(df) >= 4:
+                _prev_h = df['high'].iloc[-2]
+                _prev_l = df['low'].iloc[-2]
+                _curr_h = df['high'].iloc[-1]
+                _curr_l = df['low'].iloc[-1]
+                _curr_c = df['close'].iloc[-1]
+
+                state.inside_bar = _curr_h <= _prev_h and _curr_l >= _prev_l
+                state.outside_bar = _curr_h > _prev_h and _curr_l < _prev_l
+
+                if state.squeeze_active and state.inside_bar:
+                    state.coiled_spring = True
+
+                _recent_high = df['high'].iloc[-4:-1].max()
+                if _curr_h > _recent_high and _curr_c < _recent_high:
+                    state.failed_breakout = True
+        except Exception:
+            pass
+
+        # ── F.1: Effort vs Result (All Assets) ────────────────────────────
+        try:
+            _tick_vol = df['volume'].iloc[-1]
+            _body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+            _er = _tick_vol / max(_body, 0.0001)
+
+            _extreme, _z, _ = self.dynamic_thresholds.check(
+                self.asset_type, "effort_result", _er,
+                z_threshold=2.0, fallback=None
+            )
+            state.effort_result_zscore = _z
+            if _extreme and _z > 2.0 and abs(governor_data.get("regime_score", 0)) >= 0.5:
+                state.absorption_detected = True
+        except Exception:
+            pass
+
+        # ── F.2: Candle Body Ratio Trend ─────────────────────────────────
+        try:
+            _bodies = abs(df['close'] - df['open']).tail(10).values
+            if len(_bodies) >= 8:
+                _recent = _bodies[-3:].mean()
+                _older = _bodies[:5].mean()
+                state.body_trend_ratio = _recent / max(_older, 0.0001)
+                state.conviction_dying = state.body_trend_ratio < 0.5
+        except Exception:
+            pass
+
+        # ── F.5: BTC VPD (Volume-Price Divergence) ────────────────────────
+        if self.asset_type == "BTC" and 'volume' in df.columns:
+            try:
+                _vol = df['volume'].iloc[-1]
+                _vol_sma = df['volume'].tail(20).mean()
+                _regime_score = governor_data.get("regime_score", 0)
+
+                if abs(_regime_score) >= 1.0 and _vol < _vol_sma * 0.80:
+                    state.vpd_diverging = True
+            except Exception:
+                pass
+
+        # ── G.1: Unified Liquidity Sweeps ─────────────────────────────────
+        self._update_sweeps(state, df)
+
+        # ── G.2: Rejection Profiling ──────────────────────────────────────
+        try:
+            if _atr > 0:
+                _o = df['open'].iloc[-1]
+                _h = df['high'].iloc[-1]
+                _l = df['low'].iloc[-1]
+                _c = df['close'].iloc[-1]
+                _total = _h - _l
+                if _total > 0:
+                    _upper_wick = _h - max(_o, _c)
+                    _lower_wick = min(_o, _c) - _l
+                    _wick_ratio = max(_upper_wick, _lower_wick) / _total
+
+                    if _wick_ratio > 0.75 and state.nearby_4h_level is not None:
+                        _dist_to_level = abs(_c - state.nearby_4h_level) / max(_atr, 0.001)
+                        if _dist_to_level < 0.5:
+                            state.rejection_at_level = True
+                            state.rejection_strength = _wick_ratio
+                            state.level_defended = True
+        except Exception:
+            pass
+
+        # ── G.3: Session VWAP ─────────────────────────────────────────────
+        try:
+            if 'volume' in df.columns and _atr > 0:
+                _midnight_mask = df.index.hour == 0
+                if _midnight_mask.any():
+                    _session_start = df[_midnight_mask].index[-1]
+                else:
+                    _session_start = df.index[0]
+                _session = df[df.index >= _session_start]
+                if len(_session) > 1:
+                    _vwap = (_session['close'] * _session['volume']).cumsum() / \
+                            _session['volume'].cumsum()
+                    state.vwap_price = float(_vwap.iloc[-1])
+                    state.distance_to_vwap_atr = abs(df['close'].iloc[-1] - state.vwap_price) / max(_atr, 0.001)
+        except Exception:
+            pass
+
+        # ── G.5: Time since last loss ─────────────────────────────────────
+        _last_loss = self._last_loss_time.get(self.asset_type)
+        if _last_loss:
+            from datetime import datetime as _dt2
+            state.time_since_last_loss_hours = (_dt2.now() - _last_loss).total_seconds() / 3600
+
+        return state
+
+    # ── D.1: Trend Lifecycle Modifier ────────────────────────────────────
+
+    def _update_trend_lifecycle(self, state, regime_name: str):
+        """Classify where in the trend lifecycle this asset sits."""
+        from datetime import datetime
+        asset = self.asset_type
+        now = datetime.now()
+
+        prev = self._previous_regime.get(asset)
+
+        # Detect transition
+        if prev and prev != regime_name:
+            duration = (now - self._regime_start_time.get(asset, now)).total_seconds() / 3600
+            if asset not in self._regime_durations:
+                self._regime_durations[asset] = []
+            self._regime_durations[asset].append(duration)
+            if len(self._regime_durations[asset]) > 50:
+                self._regime_durations[asset] = self._regime_durations[asset][-50:]
+
+            trans_key = (prev, regime_name)
+            if asset not in self._transition_counts:
+                self._transition_counts[asset] = {}
+            self._transition_counts[asset][trans_key] = \
+                self._transition_counts[asset].get(trans_key, 0) + 1
+
+            self._regime_start_time[asset] = now
+            state.transition_type = f"{prev}→{regime_name}"
+
+            if "NEUTRAL" in prev and "SLIGHTLY" in regime_name:
+                state.lifecycle_phase = "PICKUP"
+            elif "SLIGHTLY" in prev and regime_name in ("BULLISH", "BEARISH"):
+                state.lifecycle_phase = "CONFIRMATION"
+            elif regime_name in ("BULLISH", "BEARISH") and prev in ("BULLISH", "BEARISH"):
+                state.lifecycle_phase = "ESTABLISHED"
+            elif prev in ("BULLISH", "BEARISH") and "SLIGHTLY" in regime_name:
+                state.lifecycle_phase = "FADING"
+            elif prev in ("BULLISH", "BEARISH", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH") \
+                 and regime_name == "NEUTRAL":
+                state.lifecycle_phase = "EXHAUSTION"
+            else:
+                state.lifecycle_phase = "ESTABLISHED"
+        elif prev == regime_name:
+            pass  # Same regime — keep current phase, just update age
+        else:
+            # First observation
+            self._regime_start_time[asset] = now
+
+        self._previous_regime[asset] = regime_name
+
+        # Regime age
+        start = self._regime_start_time.get(asset, now)
+        state.regime_age_hours = (now - start).total_seconds() / 3600
+
+        # Median regime duration (dynamic per asset)
+        durations = self._regime_durations.get(asset, [])
+        state.median_regime_duration = float(np.median(durations)) if len(durations) >= 5 else 12.0
+        state.regime_age_ratio = state.regime_age_hours / max(state.median_regime_duration, 1.0)
+
+        # Transition probability (Markov)
+        if state.transition_type and asset in self._transition_counts:
+            total_from_current = sum(
+                c for (f, t), c in self._transition_counts[asset].items()
+                if f == regime_name
+            )
+            continues = sum(
+                c for (f, t), c in self._transition_counts[asset].items()
+                if f == regime_name and t == regime_name
+            )
+            if total_from_current >= 3:
+                state.transition_probability = continues / total_from_current
+            else:
+                state.transition_probability = 0.5
+
+    # ── E.1: ChoCh / BOS Detection ───────────────────────────────────────
+
+    def _update_structure(self, state, df):
+        """Detect Break of Structure and Change of Character using 5-bar swing pivots."""
+        try:
+            if len(df) < 15:
+                return
+            highs = df['high'].values
+            lows = df['low'].values
+
+            swing_highs = []
+            swing_lows = []
+            for i in range(len(highs) - 3, 4, -1):
+                if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+                   highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                    swing_highs.append(highs[i])
+                    if len(swing_highs) >= 2:
+                        break
+
+            for i in range(len(lows) - 3, 4, -1):
+                if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+                   lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                    swing_lows.append(lows[i])
+                    if len(swing_lows) >= 2:
+                        break
+
+            if len(swing_highs) >= 2:
+                if swing_highs[0] > swing_highs[1]:
+                    state.bos_detected = True    # Higher high = trend continuing
+                elif swing_highs[0] < swing_highs[1]:
+                    state.choch_detected = True  # Lower high = trend may be ending
+
+            if len(swing_lows) >= 2:
+                if swing_lows[0] < swing_lows[1] and not state.bos_detected:
+                    state.bos_detected = True    # Lower low in downtrend = continuation
+                elif swing_lows[0] > swing_lows[1] and not state.choch_detected:
+                    state.choch_detected = True  # Higher low in downtrend = reversal
+        except Exception:
+            pass
+
+    # ── E.2: MTF Structure Memory ─────────────────────────────────────────
+
+    def _update_structure_memory(self, state, df, df_4h):
+        """Track 4H swing levels. Delete broken ones. Link to state."""
+        import talib as ta
+        asset = self.asset_type
+        if asset not in self._structure_levels:
+            self._structure_levels[asset] = []
+
+        try:
+            current_price = df['close'].iloc[-1]
+            _atr_arr = ta.ATR(df['high'].values, df['low'].values,
+                              df['close'].values, timeperiod=14)
+            _atr = float(_atr_arr[-1])
+            if np.isnan(_atr) or _atr <= 0:
+                return
+
+            # Garbage collection: remove broken and stale levels
+            self._structure_levels[asset] = [
+                lvl for lvl in self._structure_levels[asset]
+                if abs(current_price - lvl["price"]) / _atr <= 0.5
+                and lvl.get("age_hours", 0) < 336
+            ]
+
+            # Age all levels
+            for lvl in self._structure_levels[asset]:
+                lvl["age_hours"] = lvl.get("age_hours", 0) + 1
+
+            # Add new 4H swing points if available
+            if df_4h is not None and len(df_4h) >= 10:
+                _4h_highs = df_4h['high'].values
+                _4h_lows = df_4h['low'].values
+                for i in range(len(_4h_highs) - 3, 4, -1):
+                    if _4h_highs[i] > _4h_highs[i-1] and _4h_highs[i] > _4h_highs[i+1]:
+                        _exists = any(
+                            abs(lvl["price"] - _4h_highs[i]) / _atr < 0.3
+                            for lvl in self._structure_levels[asset]
+                        )
+                        if not _exists:
+                            self._structure_levels[asset].append({
+                                "price": _4h_highs[i], "tf": "4H",
+                                "type": "swing_high", "tests": 0, "age_hours": 0
+                            })
+                        break
+
+            # Find nearest level to current price
+            nearest = None
+            nearest_dist = float('inf')
+            for lvl in self._structure_levels[asset]:
+                dist = abs(current_price - lvl["price"]) / _atr
+                if dist < nearest_dist and dist < 2.0:
+                    nearest = lvl
+                    nearest_dist = dist
+
+            if nearest:
+                state.nearby_4h_level = nearest["price"]
+                state.level_test_count = nearest.get("tests", 0)
+                if nearest_dist < 0.3:
+                    nearest["tests"] = nearest.get("tests", 0) + 1
+        except Exception:
+            pass
+
+    # ── E.3: MA Defense Validator ─────────────────────────────────────────
+
+    def _update_ma_defense(self, state, df):
+        """Check if key EMAs were tested and defended on this closed candle."""
+        try:
+            candle = df.iloc[-1]
+            _o = candle['open']
+            _h = candle['high']
+            _l = candle['low']
+            _c = candle['close']
+            _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+
+            _pierced_from_above = _l < _ema50 < _c  # Wick below, closed above
+            _broke_down = _c < _ema50 and _o > _ema50
+
+            if _pierced_from_above:
+                state.ema_50_status = "DEFENDED"
+                _wick = _ema50 - _l
+                _body = abs(_c - _o)
+                state.defense_strength = min(1.0, _wick / max(_body, 0.0001) / 3.0)
+
+                if state.defense_strength > 0.5 and state.effort_result_zscore > 1.5:
+                    state.ema_50_reclassified = "SUPPORT"
+                    state.absorption_detected = True
+                else:
+                    state.ema_50_reclassified = "LINE"
+            elif _broke_down:
+                state.ema_50_status = "BROKEN"
+                state.ema_50_reclassified = "RESISTANCE"
+            else:
+                state.ema_50_status = "UNTESTED"
+        except Exception:
+            pass
+
+    # ── G.1: Unified Liquidity Sweeps ────────────────────────────────────
+
+    def _update_sweeps(self, state, df):
+        """Check for PDH/PDL or Asian range sweeps (wicked through, closed back)."""
+        asset = self.asset_type
+        try:
+            from datetime import datetime
+            _h = df['high'].iloc[-1]
+            _l = df['low'].iloc[-1]
+            _c = df['close'].iloc[-1]
+            _hour = datetime.utcnow().hour
+
+            # Update Asian range (00:00-08:00 UTC)
+            if 0 <= _hour < 8:
+                self._asian_high[asset] = max(self._asian_high.get(asset, 0), _h)
+                self._asian_low[asset] = min(self._asian_low.get(asset, float('inf')), _l)
+
+            # Update PDH/PDL daily
+            _today = datetime.utcnow().date()
+            if self._pdh_date != _today:
+                if len(df) > 24:
+                    _yesterday = df.iloc[-25:-1]
+                    self._pdh[asset] = _yesterday['high'].max()
+                    self._pdl[asset] = _yesterday['low'].min()
+                self._pdh_date = _today
+
+            _asian_h = self._asian_high.get(asset)
+            _asian_l = self._asian_low.get(asset)
+            _pdh_val = self._pdh.get(asset)
+            _pdl_val = self._pdl.get(asset)
+
+            # Swept high = wicked above, closed below
+            if _pdh_val and _h > _pdh_val and _c < _pdh_val:
+                state.sweep_detected = True
+                state.sweep_direction = 1
+                state.sweep_level = _pdh_val
+            elif _pdl_val and _l < _pdl_val and _c > _pdl_val:
+                state.sweep_detected = True
+                state.sweep_direction = -1
+                state.sweep_level = _pdl_val
+            elif _asian_h and 8 <= _hour <= 10 and _h > _asian_h and _c < _asian_h:
+                state.sweep_detected = True
+                state.sweep_direction = 1
+                state.sweep_level = _asian_h
+            elif _asian_l and 8 <= _hour <= 10 and _l < _asian_l and _c > _asian_l:
+                state.sweep_detected = True
+                state.sweep_direction = -1
+                state.sweep_level = _asian_l
+        except Exception:
+            pass
+
+    # ── Section I: Confluence Engine ─────────────────────────────────────
+
+    def _score_confluence(self, state, tf_conf: float, mr_conf: float):
+        """
+        The Brain. Reads the complete state and applies adjustments
+        based on PATTERNS first, individual evidence second.
+        """
+
+        # ─── STEP 1: INSTITUTIONAL PATTERN RECOGNITION ───────────────────
+
+        # PATTERN A: Institutional Distribution
+        if (state.lifecycle_phase in ("ESTABLISHED", "FADING") and
+            state.regime_age_ratio > 1.3 and
+            (state.choch_detected or state.structural_decay) and
+            (state.absorption_detected or state.conviction_dying) and
+            state.distance_zscore > 1.5):
+            tf_conf *= 0.45
+            mr_conf *= 1.25
+            state.institutional_pattern = "DISTRIBUTION"
+
+        # PATTERN B: Institutional Accumulation
+        elif (state.lifecycle_phase in ("PICKUP", "CONFIRMATION") and
+              state.regime_age_ratio < 0.8 and
+              state.bos_detected and
+              state.slopes_aligned and
+              not state.absorption_detected):
+            tf_conf *= 1.30
+            mr_conf *= 0.65
+            state.institutional_pattern = "ACCUMULATION"
+
+        # PATTERN C: Liquidity Hunt → Reversal
+        elif (state.sweep_detected and
+              state.rejection_at_level and
+              state.effort_result_zscore > 2.0 and
+              (state.outside_bar or state.failed_breakout)):
+            mr_conf *= 1.35
+            tf_conf *= 0.60
+            state.institutional_pattern = "LIQUIDITY_HUNT"
+
+        # PATTERN D: Coiled Spring Breakout
+        elif (state.coiled_spring and state.bos_detected and state.slopes_aligned):
+            tf_conf *= 1.25
+            mr_conf *= 0.70
+            state.institutional_pattern = "SPRING_BREAKOUT"
+
+        # PATTERN E: MA Defense → Continuation
+        elif (state.ema_50_status == "DEFENDED" and
+              state.ema_50_reclassified == "SUPPORT" and
+              state.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED") and
+              state.regime_age_ratio < 1.5):
+            tf_conf *= 1.20
+            state.institutional_pattern = "MA_DEFENSE"
+
+        # ─── STEP 2: ADDITIVE CONFLUENCE (fallback if no pattern matched) ─
+        else:
+            state.institutional_pattern = None
+
+            _exhaust = 0.0
+            if state.choch_detected:            _exhaust += 2.0
+            if state.is_parabolic:              _exhaust += 1.5
+            if state.divergence_detected:       _exhaust += state.divergence_strength * 2
+            if state.regime_age_ratio > 1.5:    _exhaust += min(2.0, state.regime_age_ratio - 1.5)
+            if state.conviction_dying:          _exhaust += 1.0
+            if state.structural_decay:          _exhaust += 1.5
+            if state.absorption_detected:       _exhaust += 1.0
+            if state.vpd_diverging:             _exhaust += 1.5
+            if state.ai_reversal_probability > 0.75: _exhaust += 2.0
+            if state.outside_bar:               _exhaust += 0.5
+
+            _confirm = 0.0
+            if state.bos_detected:              _confirm += 2.0
+            if state.slopes_aligned:            _confirm += 1.0
+            if state.lifecycle_phase == "PICKUP":        _confirm += 1.5
+            if state.lifecycle_phase == "CONFIRMATION":  _confirm += 1.0
+            if state.squeeze_active:            _confirm += 0.5
+            if state.ema_50_status == "DEFENDED":        _confirm += 1.0
+            if state.cvd_trend != 0 and not state.cvd_stale: _confirm += 1.0
+            if state.level_defended:            _confirm += 1.5
+
+            state.exhaustion_score = _exhaust
+            state.confirmation_score = _confirm
+            _net = _confirm - _exhaust
+            state.net_conviction = _net
+
+            if _net > 0:
+                _boost = min(1.35, 1.0 + (_net * 0.05))
+                tf_conf *= _boost
+            elif _net < 0:
+                _discount = max(0.40, 1.0 + (_net * 0.07))
+                tf_conf *= _discount
+                if _net < -3:
+                    mr_conf *= min(1.30, 1.0 + (abs(_net) - 3) * 0.08)
+
+        # ─── STEP 3: TRANSITION PROBABILITY MODIFIER ─────────────────────
+        if state.transition_probability < 0.35:
+            tf_conf *= 0.85
+            mr_conf *= 0.85
+        elif state.transition_probability > 0.70:
+            tf_conf *= 1.10
+
+        # Friday PM flag for VTM
+        state.friday_tighten = state.is_friday_pm
+
+        logger.info(
+            f"[CONFLUENCE] {self.asset_type}: Phase={state.lifecycle_phase} "
+            f"Pattern={state.institutional_pattern} "
+            f"Exhaust={state.exhaustion_score:.1f} Confirm={state.confirmation_score:.1f} "
+            f"Net={state.net_conviction:.1f} "
+            f"TF={tf_conf:.3f} MR={mr_conf:.3f}"
+        )
+
+        return tf_conf, mr_conf, state
 
     def get_statistics(self) -> Dict:
         """Return comprehensive statistics"""
@@ -1387,6 +2010,25 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 self._last_prices[self.asset_type] = (_current_price, _now)
 
             # ═══════════════════════════════════════════════════════════════
+            # B.2: STATE CACHE — Heavy calculations run ONCE per candle close.
+            # The 5-second loop reads the cached state for micro-execution checks only.
+            # ═══════════════════════════════════════════════════════════════
+            _candle_time = df.index[-1] if not df.empty else None
+            _state_is_fresh = (
+                _candle_time is not None and
+                getattr(self, '_last_state_candle_time', None) == _candle_time
+            )
+
+            if not _state_is_fresh and _candle_time is not None:
+                # New candle closed — rebuild the full composite state
+                self._cached_composite = self._build_composite_state(df, governor_data.get('df_4h') if governor_data else None, governor_data or {})
+                self._last_state_candle_time = _candle_time
+                logger.debug(f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}")
+
+            # Use cached state for all downstream logic
+            state = getattr(self, '_cached_composite', None)
+
+            # ═══════════════════════════════════════════════════════════════
             # FLASH VETO — abnormal candle body detection
             # A candle body > 3× ATR14 signals a news spike / stop-hunt.
             # Hard-block above 5×; soft-discount (−40% quality) at 3–5×.
@@ -1432,6 +2074,47 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _flash_discount = 1.0
 
                         # ═══════════════════════════════════════════════════════════════
+            # FLASH VETO — abnormal candle body detection
+            # Hard-block above 5× ATR14; soft-discount (−40% quality) at 3–5×.
+            # ═══════════════════════════════════════════════════════════════
+            _flash_discount = 1.0
+            try:
+                if len(df) >= 15:
+                    import numpy as _fnp
+                    _hi = df["high"].values; _lo = df["low"].values
+                    _cl = df["close"].values; _op = df["open"].values
+                    _tr = _fnp.maximum(
+                        _hi[1:] - _lo[1:],
+                        _fnp.abs(_hi[1:] - _cl[:-1]),
+                        _fnp.abs(_lo[1:] - _cl[:-1]),
+                    )
+                    _atr14 = float(_fnp.nanmean(_tr[-14:])) if len(_tr) >= 14 else 0.0
+                    _last_body = abs(float(_cl[-1]) - float(_op[-1]))
+                    if _atr14 > 0:
+                        _body_ratio = _last_body / _atr14
+                        if _body_ratio > 5.0:
+                            logger.warning(
+                                f"[FLASH] ⛔ Hard-veto: candle body {_body_ratio:.1f}× ATR "
+                                f"— news spike detected, blocking signal"
+                            )
+                            return 0, {
+                                "timestamp": timestamp, "regime": "UNKNOWN",
+                                "reasoning": f"flash_veto_{_body_ratio:.1f}x_atr",
+                                "final_signal": 0, "signal_quality": 0.0,
+                                "mr_signal": 0, "mr_confidence": 0.0,
+                                "tf_signal": 0, "tf_confidence": 0.0,
+                                "ema_signal": 0, "ema_confidence": 0.0,
+                            }
+                        elif _body_ratio > 3.0:
+                            logger.warning(
+                                f"[FLASH] ⚠️ Soft-veto: candle body {_body_ratio:.1f}× ATR "
+                                f"— quality discounted 40%"
+                            )
+                            _flash_discount = 0.60
+            except Exception:
+                _flash_discount = 1.0
+
+            # ═══════════════════════════════════════════════════════════════
             # T3.3: NY OPEN HOUR BLOCK (13:00–13:59 UTC)
             # TF signals at NY open: 53% WR, -21.2% P&L (stop-hunting territory).
             # Trades 1–2 hours later: 60% WR, +101.5% P&L.
@@ -1464,26 +2147,37 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if self._econ_events:
                 from datetime import timezone as _tz, timedelta as _td
                 _utc_now = _dt.now(_tz.utc)
+                _asset = self.asset_type
                 for _evt in self._econ_events:
                     try:
                         _evt_time = _dt.fromisoformat(_evt["datetime"].replace("Z", "+00:00"))
                         _hours_before = _evt.get("block_hours_before", 2)
                         _block_start = _evt_time - _td(hours=_hours_before)
                         if _block_start <= _utc_now < _evt_time:
-                            _mins_to_evt = (_evt_time - _utc_now).total_seconds() / 60
-                            logger.warning(
-                                f"[CALENDAR] ⏸️ Blocking — {_evt['event']} in "
-                                f"{_mins_to_evt:.0f}min"
+                            _affected = _evt.get("currencies", [])
+                            _blocked = (
+                                (_asset in ("BTC", "BTCUSDT") and "USD" in _affected) or
+                                (_asset in ("GOLD", "XAUUSD") and "USD" in _affected) or
+                                (_asset == "EURUSD" and ("EUR" in _affected or "USD" in _affected)) or
+                                (_asset == "EURJPY" and ("EUR" in _affected or "JPY" in _affected)) or
+                                (_asset in ("USTEC", "US100", "NAS100") and "USD" in _affected) or
+                                (not _affected)  # fallback: block all if no currencies listed
                             )
-                            return 0, {
-                                "timestamp": timestamp,
-                                "regime": "UNKNOWN",
-                                "reasoning": f"econ_calendar_{_evt['event'].replace(' ', '_')}",
-                                "final_signal": 0, "signal_quality": 0.0,
-                                "mr_signal": 0, "mr_confidence": 0.0,
-                                "tf_signal": 0, "tf_confidence": 0.0,
-                                "ema_signal": 0, "ema_confidence": 0.0,
-                            }
+                            if _blocked:
+                                _mins_to_evt = (_evt_time - _utc_now).total_seconds() / 60
+                                logger.warning(
+                                    f"[CALENDAR] ⏸️ Blocking {_asset} — "
+                                    f"{_evt['event']} in {_mins_to_evt:.0f}min"
+                                )
+                                return 0, {
+                                    "timestamp": timestamp,
+                                    "regime": "UNKNOWN",
+                                    "reasoning": f"econ_calendar_{_evt['event'].replace(' ', '_')}",
+                                    "final_signal": 0, "signal_quality": 0.0,
+                                    "mr_signal": 0, "mr_confidence": 0.0,
+                                    "tf_signal": 0, "tf_confidence": 0.0,
+                                    "ema_signal": 0, "ema_confidence": 0.0,
+                                }
                     except Exception:
                         continue
 
@@ -1491,7 +2185,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             is_bull = is_bull_market
             regime_conf = governor_data.get('confidence', 0.5) if governor_data else 0.5
             regime_name = governor_data.get('regime', 'NEUTRAL') if governor_data else "NEUTRAL"
-            
+
+            # D.1: Update trend lifecycle in composite state
+            if state is not None:
+                self._update_trend_lifecycle(state, regime_name)
+
             # Update stats based on provided regime
             if self.previous_regime is not None and self.previous_regime != is_bull:
                 self.stats["regime_changes"] += 1
@@ -1849,7 +2547,46 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if _flash_discount < 1.0 and final_signal != 0:
                     signal_quality = round(signal_quality * _flash_discount, 4)
                     reasoning += f" [flash_discount:{_flash_discount:.0%}]"
-            
+
+            # ── CONTEXT ENGINE WIRING ─────────────────────────────────────
+            # F.3: MR Divergence Cross-Signal (reads from MR strategy if available)
+            if state is not None:
+                try:
+                    _mr_details = {}
+                    if hasattr(self.s_mean_reversion, '_last_divergence_info'):
+                        _mr_details = self.s_mean_reversion._last_divergence_info or {}
+                    if _mr_details.get("divergence_detected"):
+                        state.divergence_detected = True
+                        state.divergence_strength = float(_mr_details.get("divergence_strength", 0.5))
+                    if state.is_parabolic and state.divergence_detected:
+                        state.reversal_imminent = True
+                except Exception:
+                    pass
+
+                # H.1: Feed AI Sniper output into composite state
+                try:
+                    _ai_data = ai_validation_details if isinstance(ai_validation_details, dict) else {}
+                    if _ai_data:
+                        state.ai_pattern_name = _ai_data.get("pattern_name")
+                        state.ai_pattern_confidence = float(_ai_data.get("confidence", 0.0))
+                        _reversal_patterns = [
+                            "Evening Star", "Bearish Engulfing", "Shooting Star",
+                            "Morning Star", "Bullish Engulfing", "Hammer"
+                        ]
+                        if state.ai_pattern_name in _reversal_patterns and \
+                           state.ai_pattern_confidence > 0.75:
+                            state.ai_reversal_probability = state.ai_pattern_confidence
+                except Exception:
+                    pass
+
+                # Section I: Confluence Engine — adjust tf_conf and mr_conf
+                try:
+                    tf_conf, mr_conf, state = self._score_confluence(state, tf_conf, mr_conf)
+                except Exception as _ce:
+                    logger.debug(f"[CONFLUENCE] Scoring failed: {_ce}")
+
+            # ─────────────────────────────────────────────────────────────
+
             # STEP 7: Build base response
             details = {
                 "timestamp": timestamp,
@@ -1898,6 +2635,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "ai_validated": _ai_validated,
                 "mr_signal_raw": mr_original,  # Ensure originals are present
                 "tf_signal_raw": tf_original,
+                # Composite state — used by VTM pattern-aware exits and shadow trader
+                "institutional_pattern": state.institutional_pattern if state else None,
+                "friday_tighten": state.friday_tighten if state else False,
+                "composite_state": state.to_dict() if state else {},
             })
 
             # T2.1: TRANSITION sizing — governor approved but market is neutral.

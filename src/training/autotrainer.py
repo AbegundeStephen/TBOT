@@ -798,3 +798,118 @@ class ContinuousLearningPipeline:
             f"{'✅ APPROVED' if passes else '❌ BLOCKED'}"
         )
         return passes
+
+    # ── J2.5: Adaptive Calibration Guardrail ─────────────────────────────
+
+    def calibrate_thresholds(self):
+        """
+        J2.5: Adaptive threshold calibration with overfitting guardrail.
+
+        SAFETY RULES:
+        - < 200 trades:  no calibration at all
+        - 200-1999:      global firing threshold ONLY (independent_override)
+        - 2000+:         per-pattern weight analysis becomes statistically safe
+
+        Individual confluence weights (ChoCh=2pts, BOS=2pts, etc.) MUST remain
+        hardcoded until 2000+ closed shadow trades. With 26 variables and <200
+        observations, individual weight tuning creates overfitting.
+        """
+        shadow_trader = getattr(self.trading_bot, 'shadow_trader', None)
+        if shadow_trader is None:
+            return
+
+        n_closed = len(shadow_trader.closed_results)
+
+        if n_closed < 200:
+            logger.debug(
+                f"[CALIBRATE] Only {n_closed} shadow trades — "
+                f"minimum 200 required, skipping"
+            )
+            return
+
+        if n_closed < 2000:
+            # GLOBAL THRESHOLD ONLY — no per-pattern weight changes
+            self._calibrate_global_threshold(shadow_trader)
+            return
+
+        # 2000+ trades: per-pattern analysis is now statistically meaningful
+        self._calibrate_global_threshold(shadow_trader)
+        self._calibrate_pattern_weights(shadow_trader)
+
+    def _calibrate_global_threshold(self, shadow_trader):
+        """
+        Adjust the global independent_override threshold based on aggregate
+        shadow trade win rate. Shifts threshold ±0.01 at a time, capped at ±0.05
+        from the original default of 0.72.
+        """
+        try:
+            results = shadow_trader.closed_results
+            if len(results) < 200:
+                return
+
+            # Use last 500 trades for recency weighting
+            recent = results[-500:]
+            wins = sum(1 for r in recent if r.get("net_pnl_pct", 0) > 0)
+            win_rate = wins / len(recent)
+
+            # Target win rate band: 50-60%. Below → raise threshold, above → lower it.
+            for asset_name, agg in self.trading_bot.aggregators.items():
+                current_threshold = agg.independent_thresholds.get("trend_following", 0.72)
+
+                if win_rate < 0.45:
+                    # Too many losers — tighten gate
+                    new_threshold = min(0.77, current_threshold + 0.01)
+                elif win_rate > 0.60:
+                    # Strong edge — loosen slightly to capture more signals
+                    new_threshold = max(0.67, current_threshold - 0.01)
+                else:
+                    return  # In target band, no change
+
+                if new_threshold != current_threshold:
+                    agg.independent_thresholds["trend_following"] = new_threshold
+                    agg.independent_thresholds["mean_reversion"] = new_threshold + 0.03
+                    agg.independent_thresholds["ema"] = new_threshold
+                    logger.info(
+                        f"[CALIBRATE] {asset_name}: WR={win_rate:.1%} → "
+                        f"threshold adjusted {current_threshold:.2f} → {new_threshold:.2f}"
+                    )
+        except Exception as e:
+            logger.error(f"[CALIBRATE] Global threshold calibration failed: {e}")
+
+    def _calibrate_pattern_weights(self, shadow_trader):
+        """
+        Per-pattern analysis — only safe at 2000+ closed trades.
+        Logs pattern performance; does NOT yet modify weights automatically.
+        Human review required before any weight changes.
+        """
+        try:
+            results = shadow_trader.closed_results
+            pattern_stats: dict = {}
+
+            for r in results:
+                cs = r.get("composite_state", {})
+                pattern = cs.get("institutional_pattern") if cs else None
+                if not pattern:
+                    pattern = "NO_PATTERN"
+
+                if pattern not in pattern_stats:
+                    pattern_stats[pattern] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+                pattern_stats[pattern]["trades"] += 1
+                pnl = r.get("net_pnl_pct", 0)
+                if pnl > 0:
+                    pattern_stats[pattern]["wins"] += 1
+                pattern_stats[pattern]["total_pnl"] += pnl
+
+            logger.info("[CALIBRATE] ═══ Pattern Performance Report ═══")
+            for pattern, stats in sorted(pattern_stats.items()):
+                n = stats["trades"]
+                wr = stats["wins"] / n * 100 if n > 0 else 0
+                avg_pnl = stats["total_pnl"] / n if n > 0 else 0
+                logger.info(
+                    f"[CALIBRATE]  {pattern:20s}: "
+                    f"n={n:4d}, WR={wr:.1f}%, avg_pnl={avg_pnl:+.3f}%"
+                )
+            logger.info("[CALIBRATE] ═════════════════════════════════════"
+                        " (human review required before weight changes)")
+        except Exception as e:
+            logger.error(f"[CALIBRATE] Pattern weight analysis failed: {e}")
