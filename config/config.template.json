@@ -331,7 +331,7 @@
       }
     },
     "EURUSD": {
-      "enabled": true,
+      "enabled": false,
       "allow_shorts": true,
       "symbol": "EURUSDm",
       "exchange": "mt5",

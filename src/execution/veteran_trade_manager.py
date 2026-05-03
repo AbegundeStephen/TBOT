@@ -342,6 +342,27 @@ class VeteranTradeManager:
 
         self.partial_sizes = self.risk_config.get("partial_sizes", [0.45, 0.30, 0.25])
 
+        # ── J: Pattern-Aware Exit Management ──────────────────────────────
+        _pattern = self.signal_details.get("institutional_pattern")
+        if _pattern == "LIQUIDITY_HUNT":
+            # Snap-back reversals die fast — tighten everything
+            self.partial_targets = [max(0.8, t * 0.6) for t in self.partial_targets]
+            self.breakeven_profit_threshold = self.risk_config.get(
+                "breakeven_profit_threshold", 0.01) * 0.5
+            logger.info(f"[VTM] LIQUIDITY_HUNT pattern: Tight TPs {self.partial_targets}")
+
+        elif _pattern == "ACCUMULATION":
+            # Generational trend — give it room to breathe
+            self.partial_targets = [t * 1.3 for t in self.partial_targets]
+            self.atr_multiplier *= 1.2
+            logger.info(f"[VTM] ACCUMULATION pattern: Wide targets {self.partial_targets}")
+
+        elif _pattern == "SPRING_BREAKOUT":
+            # Explosive but uncertain — take first TP early, let runner go
+            self.partial_sizes = [0.60, 0.25, 0.15]  # Take 60% at TP1
+            logger.info(f"[VTM] SPRING_BREAKOUT: Heavy first partial")
+        # ──────────────────────────────────────────────────────────────────
+
         self.pivot_lookback = self.risk_config.get("pivot_lookback", 30)
         self.time_stop_bars = self.risk_config.get(
             f'time_stop_{self.trade_type.lower()}',
@@ -758,6 +779,20 @@ class VeteranTradeManager:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
+
+        # ── J: Friday PM trailing tightener ───────────────────────────────
+        try:
+            from datetime import datetime as _dtf
+            _is_friday_pm = self.signal_details.get("friday_tighten") or \
+                            (_dtf.utcnow().weekday() == 4 and _dtf.utcnow().hour >= 15)
+            if _is_friday_pm:
+                if hasattr(self, 'runner_trail_distance') and self.runner_trail_distance:
+                    self.runner_trail_distance *= 0.6  # 40% tighter on Friday PM
+                if hasattr(self, 'runner_trail_atr_multiplier'):
+                    self.runner_trail_atr_multiplier = min(self.runner_trail_atr_multiplier, 1.2)
+        except Exception:
+            pass
+        # ──────────────────────────────────────────────────────────────────
 
         # --- STEP 1: Volatility Break-Even Lock ---
         # Reason: Locks risk to zero once trade proves itself by moving 1.0 * ATR in profit.

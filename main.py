@@ -2201,6 +2201,15 @@ class TradingBot:
             _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
             _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
             _src = details.get("aggregator_mode", "PERF").upper()
+            # J2.1: Pass CompositeState snapshot at entry
+            _aggregator = self.aggregators.get(asset_name)
+            _comp_state_dict = {}
+            if _aggregator and hasattr(_aggregator, '_cached_composite') and \
+               _aggregator._cached_composite is not None:
+                try:
+                    _comp_state_dict = _aggregator._cached_composite.to_dict()
+                except Exception:
+                    pass
             self.shadow_trader.open_position(
                 asset=asset_name,
                 side=_side,
@@ -2211,6 +2220,7 @@ class TradingBot:
                 atr=float(_atr) if _atr else None,
                 atr_multiplier=_atr_mult,
                 tp_multiples=_tp_mults,
+                composite_state=_comp_state_dict,
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -3239,7 +3249,16 @@ class TradingBot:
                 )
 
             df = self.data_manager.clean_data(df)
-            
+
+            # B.1: Drop incomplete (current-hour) candle — signal generation
+            # must only use confirmed, closed candle data. The VTM uses
+            # live tick prices separately via update_with_current_price().
+            if not df.empty:
+                import pandas as pd
+                _now_floor = pd.Timestamp.now(tz='UTC').floor('H')
+                if df.index[-1] >= _now_floor:
+                    df = df.iloc[:-1]
+
             # Fetch and cache 4H data for VTM loop
             self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
 
@@ -3865,7 +3884,15 @@ class TradingBot:
                     end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
 
-            return self.data_manager.clean_data(df)
+            df_4h = self.data_manager.clean_data(df)
+
+            # B.1: Drop incomplete current 4H candle — use only confirmed bars
+            if not df_4h.empty:
+                _now_floor_4h = pd.Timestamp.now(tz='UTC').floor('4H')
+                if df_4h.index[-1] >= _now_floor_4h:
+                    df_4h = df_4h.iloc[:-1]
+
+            return df_4h
 
         except Exception as e:
             logger.error(f"[VIZ] Failed to fetch 4H data: {e}")
@@ -3961,6 +3988,15 @@ class TradingBot:
                 )
 
             df = self.data_manager.clean_data(df)
+
+            # B.1: Drop incomplete (current-hour) candle — signal generation
+            # must only use confirmed, closed candle data. The VTM uses
+            # live tick prices separately via update_with_current_price().
+            if not df.empty:
+                import pandas as pd
+                _now_floor = pd.Timestamp.now(tz='UTC').floor('H')
+                if df.index[-1] >= _now_floor:
+                    df = df.iloc[:-1]
 
             if len(df) < 250:
                 logger.debug(
@@ -4104,6 +4140,15 @@ class TradingBot:
                         _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
                         _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
 
+                        # J2.1: Pass CompositeState snapshot at entry
+                        _aggregator2 = self.aggregators.get(asset_name)
+                        _comp_state_dict2 = {}
+                        if _aggregator2 and hasattr(_aggregator2, '_cached_composite') and \
+                           _aggregator2._cached_composite is not None:
+                            try:
+                                _comp_state_dict2 = _aggregator2._cached_composite.to_dict()
+                            except Exception:
+                                pass
                         self.shadow_trader.open_position(
                             asset=asset_name,
                             side=_side,
@@ -4114,6 +4159,7 @@ class TradingBot:
                             atr=float(_atr) if _atr else None,
                             atr_multiplier=_atr_mult,
                             tp_multiples=_tp_mults,
+                            composite_state=_comp_state_dict2,
                         )
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")
