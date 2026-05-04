@@ -88,6 +88,7 @@ from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
 from src.training.autotrainer import ContinuousLearningPipeline
+from src.execution.cvd_consumer import CVDConsumer
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
 from src.execution.shadow_trader import ShadowTradingEngine  # T3.1
 
@@ -303,6 +304,9 @@ class TradingBot:
 
         # T3.1: Shadow trading engine — tracks blocked signals' outcomes for ML
         self.shadow_trader: Optional[ShadowTradingEngine] = None
+
+        # F.4: CVD WebSocket consumer for BTC order flow
+        self.cvd_consumer: Optional[CVDConsumer] = None
 
         # Initialize components in CORRECT order
         self._initialize_telegram()
@@ -1718,6 +1722,12 @@ class TradingBot:
             # Error 9 fix: inject T3.5/T3.6 enrichments into the council hybrid fork
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+                # F.4: BTC CVD order flow + F.6: L2 order book
+                if self.cvd_consumer:
+                    mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
+                    mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
+                    mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
+                    mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
             if hasattr(self, "_dxy_falling"):
                 mtf_regime["dxy_falling"] = self._dxy_falling
 
@@ -4041,6 +4051,12 @@ class TradingBot:
             # signal_aggregator reads this to boost MR confidence at extremes.
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+                # F.4: Inject BTC CVD order flow + F.6: L2 order book
+                if self.cvd_consumer:
+                    mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
+                    mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
+                    mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
+                    mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
 
             # T3.6: Inject DXY proxy (computed below) into governor_data
             # Computed from EUR/USD 20-SMA vs current close. Zero API cost.
@@ -4067,6 +4083,16 @@ class TradingBot:
                         self._dxy_falling = _dxy_val
             except Exception:
                 pass  # DXY proxy is a bonus — never block execution
+
+            # F.7: Inject MT5 spread for spread velocity detection
+            try:
+                if hasattr(self, 'mt5_handler') and self.mt5_handler:
+                    _spread_data = getattr(self.mt5_handler, '_last_spread', {})
+                    _sym = self.config.get('assets', {}).get(asset_name, {}).get('symbol', '')
+                    if _sym and _sym in _spread_data:
+                        mtf_regime['current_spread'] = _spread_data[_sym]
+            except Exception:
+                pass  # Spread capture is a bonus — never block execution
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 # HYBRID MODE: Use dynamic selector
@@ -4445,6 +4471,15 @@ class TradingBot:
             self.shadow_trader = ShadowTradingEngine()  # defaults: max_positions=500, max_closed=10000
             logger.info("[SHADOW] Shadow trading engine started")
 
+            # F.4: Start CVD WebSocket for BTC real-time order flow
+            try:
+                self.cvd_consumer = CVDConsumer()
+                asyncio.get_event_loop().create_task(self.cvd_consumer.start())
+                logger.info("[CVD] ✅ BTC order flow WebSocket started")
+            except Exception as _cvd_err:
+                logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
+                self.cvd_consumer = None
+
             # ✅ FIXED: Initialize selectors AFTER exchanges are connected
             self.dynamic_selector = DynamicPresetSelector(
                 self.data_manager, self.config, telegram_bot=self.telegram_bot
@@ -4513,6 +4548,13 @@ class TradingBot:
 
             # Setup periodic tasks
             schedule.every(30).minutes.do(self.run_mtf_regime_analysis)
+
+            # F.4: CVD daily reset at 00:00 UTC
+            def _cvd_daily_reset():
+                if self.cvd_consumer:
+                    self.cvd_consumer.daily_reset()
+                    logger.info("[CVD] Daily reset complete")
+            schedule.every().day.at("00:00").do(_cvd_daily_reset)
 
             # Schedule trading cycles
             check_interval = self.config["trading"].get("check_interval_seconds", 300)
@@ -4605,6 +4647,10 @@ class TradingBot:
         # Stop calendar updater background thread
         if self.calendar_updater:
             self.calendar_updater.stop()
+
+        # F.4: Stop CVD WebSocket
+        if self.cvd_consumer:
+            self.cvd_consumer.stop()
 
         self.is_running = False
         self._main_loop_running = False

@@ -294,12 +294,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             "USTEC":  90,
             "EURUSD": 90,
             "EURJPY": 90,
+            "USOIL":  90,
+            "GBPAUD": 90,
         }   # default (crypto / Binance)
         self._stale_thresholds = {           # per-asset overrides
             "GOLD":   90,
             "USTEC":  90,
             "EURUSD": 90,
             "EURJPY": 90,
+            "USOIL":  90,
+            "GBPAUD": 90,
         }
 
         # T3.4: Economic calendar — loaded at startup, hot-reloaded by CalendarUpdater
@@ -337,9 +341,119 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # B.2: State cache slots (populated in get_aggregated_signal)
         self._cached_composite = None
         self._last_state_candle_time = None
+
+        # F.7: Spread history for MT5 assets (per asset, last 20 values)
+        self._spread_history = {}
+
+        # B.4: State persistence — survive restarts
+        self._state_persistence_path = "data/aggregator_state.json"
+        self._load_persisted_state()
         # ────────────────────────────────────────────────────────────────────
 
         self._log_initialization()
+
+    # ── B.4: State Persistence ───────────────────────────────────────────────
+
+    def _load_persisted_state(self):
+        """Load cached state from disk to survive restarts."""
+        try:
+            import json, os
+            if not os.path.exists(self._state_persistence_path):
+                logger.info("[STATE] No persisted state file found — starting fresh.")
+                return
+
+            with open(self._state_persistence_path) as f:
+                saved = json.load(f)
+
+            # Restore dynamic threshold distributions
+            if hasattr(self, 'dynamic_thresholds'):
+                for key_str, values in saved.get("threshold_cache", {}).items():
+                    parts = key_str.split("|")
+                    if len(parts) == 2:
+                        self.dynamic_thresholds._cache[tuple(parts)] = values
+
+            # Restore structure memory
+            self._structure_levels = saved.get("structure_levels", {})
+
+            # Restore regime tracking
+            self._previous_regime = saved.get("previous_regime", {})
+            self._regime_start_time = {}
+            for k, v in saved.get("regime_start_times", {}).items():
+                try:
+                    from datetime import datetime as _dtp
+                    self._regime_start_time[k] = _dtp.fromisoformat(v)
+                except Exception:
+                    pass
+            self._regime_durations = saved.get("regime_durations", {})
+            self._transition_counts = saved.get("transition_counts", {})
+
+            # Restore sweep levels
+            self._pdh = saved.get("pdh", {})
+            self._pdl = saved.get("pdl", {})
+            self._asian_high = saved.get("asian_high", {})
+            self._asian_low = saved.get("asian_low", {})
+
+            # Restore squeeze tracking
+            self._squeeze_was_active = saved.get("squeeze_was_active", {})
+
+            # Restore spread history (F.7)
+            self._spread_history = saved.get("spread_history", {})
+
+            _n_levels = sum(len(v) for v in self._structure_levels.values()
+                            if isinstance(v, (list, dict)))
+            _n_thresh = len(saved.get("threshold_cache", {}))
+            logger.info(
+                f"[STATE] ✅ Loaded persisted state: "
+                f"{_n_levels} structure levels, "
+                f"{_n_thresh} threshold distributions, "
+                f"{len(self._previous_regime)} regime histories"
+            )
+        except Exception as e:
+            logger.warning(f"[STATE] Could not load persisted state: {e}. Starting fresh.")
+
+    def _persist_state(self):
+        """Save critical state to disk. Called once per candle close."""
+        try:
+            import json, os
+
+            # Convert tuple keys to pipe-separated strings for JSON
+            _tc = {}
+            if hasattr(self, 'dynamic_thresholds'):
+                for key_tuple, values in self.dynamic_thresholds._cache.items():
+                    if isinstance(key_tuple, tuple) and len(key_tuple) == 2:
+                        _tc[f"{key_tuple[0]}|{key_tuple[1]}"] = list(values)[-100:]
+
+            from datetime import datetime as _dtj
+            state_data = {
+                "threshold_cache": _tc,
+                "structure_levels": getattr(self, '_structure_levels', {}),
+                "previous_regime": getattr(self, '_previous_regime', {}),
+                "regime_start_times": {
+                    k: v.isoformat()
+                    for k, v in getattr(self, '_regime_start_time', {}).items()
+                },
+                "regime_durations": getattr(self, '_regime_durations', {}),
+                "transition_counts": getattr(self, '_transition_counts', {}),
+                "pdh": getattr(self, '_pdh', {}),
+                "pdl": getattr(self, '_pdl', {}),
+                "asian_high": getattr(self, '_asian_high', {}),
+                "asian_low": getattr(self, '_asian_low', {}),
+                "squeeze_was_active": getattr(self, '_squeeze_was_active', {}),
+                "spread_history": getattr(self, '_spread_history', {}),
+                "saved_at": _dtj.now().isoformat(),
+            }
+
+            os.makedirs(os.path.dirname(os.path.abspath(
+                self._state_persistence_path)), exist_ok=True)
+            tmp = self._state_persistence_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state_data, f, default=str)
+            os.replace(tmp, self._state_persistence_path)
+            logger.debug("[STATE] Persisted state to disk.")
+        except Exception as e:
+            logger.warning(f"[STATE] Persist failed: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _log_initialization(self):
         """Log configuration on startup"""
@@ -594,6 +708,33 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         if _last_loss:
             from datetime import datetime as _dt2
             state.time_since_last_loss_hours = (_dt2.now() - _last_loss).total_seconds() / 3600
+
+        # ── F.4: BTC CVD from WebSocket (injected via governor_data) ─────
+        if self.asset_type in ("BTC", "BTCUSDT") and governor_data:
+            state.cvd_trend = int(governor_data.get("cvd_trend", 0))
+            state.cvd_stale = bool(governor_data.get("cvd_stale", True))
+            # ── F.6: L2 Order Book Imbalance ─────────────────────────────
+            state.order_book_imbalance = float(governor_data.get("order_book_imbalance", 0.0))
+            state.order_book_wall_detected = bool(governor_data.get("order_book_wall_detected", False))
+
+        # ── F.7: MT5 Spread Velocity (synthetic L2 proxy for non-BTC) ────
+        if self.asset_type not in ("BTC", "BTCUSDT") and governor_data:
+            try:
+                _current_spread = governor_data.get("current_spread", 0)
+                if _current_spread and _current_spread > 0:
+                    if self.asset_type not in self._spread_history:
+                        self._spread_history[self.asset_type] = []
+                    self._spread_history[self.asset_type].append(_current_spread)
+                    if len(self._spread_history[self.asset_type]) > 20:
+                        self._spread_history[self.asset_type] =                             self._spread_history[self.asset_type][-20:]
+                    _spreads = self._spread_history[self.asset_type]
+                    if len(_spreads) >= 10:
+                        import numpy as _np
+                        _avg = _np.mean(_spreads)
+                        state.spread_ratio = float(_current_spread) / max(_avg, 0.0001)
+                        state.spread_velocity_spike = state.spread_ratio > 2.5
+            except Exception:
+                pass
 
         return state
 
@@ -923,6 +1064,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if state.structural_decay:          _exhaust += 1.5
             if state.absorption_detected:       _exhaust += 1.0
             if state.vpd_diverging:             _exhaust += 1.5
+            # F.6: Order book wall blocking the signal direction
+            if state.order_book_wall_detected:
+                _tf_signal = 1 if tf_conf > 0 else -1  # approximate direction
+                if (_tf_signal == 1 and state.order_book_imbalance < -0.5):
+                    _exhaust += 1.5   # Sell wall blocking longs
+                elif (_tf_signal == -1 and state.order_book_imbalance > 0.5):
+                    _exhaust += 1.5   # Buy wall blocking shorts
+            # F.7: Widening spread = liquidity withdrawal = volatility warning
+            if state.spread_velocity_spike:
+                _exhaust += 1.0
             if state.ai_reversal_probability > 0.75: _exhaust += 2.0
             if state.outside_bar:               _exhaust += 0.5
 
@@ -2023,6 +2174,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # New candle closed — rebuild the full composite state
                 self._cached_composite = self._build_composite_state(df, governor_data.get('df_4h') if governor_data else None, governor_data or {})
                 self._last_state_candle_time = _candle_time
+                self._persist_state()
                 logger.debug(f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}")
 
             # Use cached state for all downstream logic
@@ -2125,7 +2277,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # The stop-hunt data that justified this block was from USTEC/GOLD.
             # ═══════════════════════════════════════════════════════════════
             _hour_utc = _dt.utcnow().hour
-            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD"):
+            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD", "USOIL", "GBPAUD"):
                 logger.info(
                     f"[SESSION] ⏸️ NY open hour block — no new entries for {self.asset_type}"
                 )
@@ -2233,7 +2385,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Computed from already-traded EUR/USD data — zero API cost.
             # ═══════════════════════════════════════════════════════════════
             _dxy_falling = governor_data.get("dxy_falling") if governor_data else None
-            if _dxy_falling is not None and self.asset_type in ("GOLD", "USTEC", "EURJPY"):
+            if _dxy_falling is not None and self.asset_type in ("GOLD", "USTEC", "EURJPY", "USOIL"):
                 if self.asset_type == "GOLD":
                     # Dollar weakness → gold strength
                     if _dxy_falling and tf_signal == 1:
@@ -2247,6 +2399,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     if _dxy_falling and tf_signal == 1:
                         tf_conf = min(1.0, tf_conf * 1.05)
                         logger.debug(f"[DXY] Weak dollar: USTEC TF BUY conf boosted to {tf_conf:.2f}")
+                elif self.asset_type == "USOIL":
+                    # Dollar weakness = oil strength (inverse correlation)
+                    if _dxy_falling and tf_signal == 1:   # Weak dollar + BUY oil
+                        tf_conf = min(1.0, tf_conf * 1.10)
+                        logger.debug(f"[DXY] Weak dollar: USOIL TF BUY conf boosted to {tf_conf:.2f}")
+                    elif not _dxy_falling and tf_signal == -1:  # Strong dollar + SELL oil
+                        tf_conf = min(1.0, tf_conf * 1.10)
+                        logger.debug(f"[DXY] Strong dollar: USOIL TF SELL conf boosted to {tf_conf:.2f}")
 
             # ═══════════════════════════════════════════════════════════════
             # T2.6: CONSECUTIVE CANDLE CONFIDENCE MULTIPLIER

@@ -285,6 +285,12 @@ class MT5ExecutionHandler:
             if tick:
                 live_price = (tick.ask + tick.bid) / 2
                 price_cache.set(symbol, live_price)  # Update cache
+                # F.7: Capture spread for spread velocity (stored per symbol)
+                _spread = tick.ask - tick.bid
+                if _spread > 0:
+                    if not hasattr(self, '_last_spread'):
+                        self._last_spread = {}
+                    self._last_spread[symbol] = _spread
                 return live_price
             else:
                 # Fallback to last known price if tick fails
@@ -638,8 +644,33 @@ class MT5ExecutionHandler:
             if not self._validate_margin(volume_lots, current_price, symbol_info, small_account_active=small_account_active):
                 return False
 
-            # Execute order
+            # ── PRE-FLIGHT PORTFOLIO LIMITS CHECK ────────────────────────────
+            # This must run BEFORE _execute_mt5_order so we never place a real
+            # order on the exchange only to emergency-close it a millisecond
+            # later because the NET margin limit is already breached.
+            # Previously check_portfolio_limits() was only called inside
+            # add_position() — AFTER the order was on the exchange, causing
+            # ghost fills with no Telegram alert, no VTM, no portfolio tracking.
             side = "long" if signal == 1 else "short"
+            if not small_account_active:
+                if not self.portfolio_manager.check_portfolio_limits(
+                    new_position_usd=actual_usd,
+                    new_side=side,
+                    asset=asset,
+                ):
+                    logger.warning(
+                        f"[PRE-FLIGHT] ❌ {asset} {side.upper()} blocked — "
+                        f"portfolio NET margin limit would be exceeded "
+                        f"(notional ${actual_usd:,.2f}). Order NOT sent to exchange."
+                    )
+                    return False
+                logger.info(
+                    f"[PRE-FLIGHT] ✓ {asset} {side.upper()} passed portfolio "
+                    f"margin check (notional ${actual_usd:,.2f})"
+                )
+            # ─────────────────────────────────────────────────────────────────
+
+            # Execute order
             requested_price = current_price
             
             mt5_ticket, execution_price = self._execute_mt5_order(

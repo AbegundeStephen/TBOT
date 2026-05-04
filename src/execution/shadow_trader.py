@@ -52,6 +52,8 @@ FRICTION_PENALTIES: Dict[str, float] = {
     "USTEC":  0.0005,   # 0.05%
     "EURJPY": 0.0004,   # 0.04%
     "EURUSD": 0.0003,
+    "USOIL":  0.0006,   # 0.06% round-trip (oil has wider spreads)
+    "GBPAUD": 0.0005,   # 0.05% round-trip
 }
 _DEFAULT_FRICTION = 0.0005
 
