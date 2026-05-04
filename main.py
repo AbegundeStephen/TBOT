@@ -4582,7 +4582,43 @@ class TradingBot:
                         os.remove(_restart_flag)
                         logger.info("[CONTROL] 🔄 Restart flag detected — restarting bot now…")
                         self.stop()
-                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                        # ── Windows: task-aware restart with local fallback ──────
+                        if sys.platform == "win32":
+                            import subprocess as _sp
+                            _task_name = self.config.get("trading", {}).get(
+                                "task_scheduler_name", "TBOT"
+                            )
+                            _python  = sys.executable.replace("'", "''")
+                            _script  = str(Path(__file__).resolve()).replace("'", "''")
+                            _workdir = str(Path(__file__).parent.resolve()).replace("'", "''")
+                            # If the scheduled task exists → restart through it (VPS)
+                            # Otherwise → kill orphans and relaunch directly (local dev)
+                            _ps_cmd = (
+                                f"$t = Get-ScheduledTask -TaskName '{_task_name}' "
+                                f"-ErrorAction SilentlyContinue; "
+                                f"if ($t) {{ "
+                                f"  Stop-ScheduledTask -TaskName '{_task_name}' "
+                                f"  -ErrorAction SilentlyContinue; "
+                                f"  Start-Sleep -Seconds 3; "
+                                f"  taskkill /F /IM python.exe 2>$null; "
+                                f"  Start-Sleep -Seconds 1; "
+                                f"  Start-ScheduledTask -TaskName '{_task_name}' "
+                                f"}} else {{ "
+                                f"  Start-Sleep -Seconds 3; "
+                                f"  taskkill /F /IM python.exe 2>$null; "
+                                f"  Start-Sleep -Seconds 1; "
+                                f"  Set-Location '{_workdir}'; "
+                                f"  & '{_python}' '{_script}' "
+                                f"}}"
+                            )
+                            _sp.Popen(
+                                ["powershell", "-WindowStyle", "Hidden", "-Command", _ps_cmd],
+                                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+                            )
+                            logger.info(f"[CONTROL] ✅ Restart scheduled (task={_task_name}) — exiting now")
+                            sys.exit(0)
+                        else:
+                            os.execv(sys.executable, [sys.executable] + sys.argv)
 
                     schedule.run_pending()
                     time.sleep(1)

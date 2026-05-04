@@ -865,9 +865,11 @@ _EDITABLE_FIELDS = [
     # ── Global: Portfolio ────────────────────────────────────────────────────
     ("portfolio.target_risk_per_trade",   "Risk Per Trade",            "pct",   {"min": 0.005, "max": 0.05, "step": 0.005}),
     ("portfolio.max_portfolio_exposure",  "Max Portfolio Exposure (x)","float", {"min": 1.0,   "max": 10.0, "step": 0.5}),
+    # ── Global: VTM Execution ─────────────────────────────────────────────────
+    ("trading.place_vtm_sl_on_exchange",  "Place VTM Stop Loss on Exchange", "bool", {}),
 ]
 
-_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"]
+_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD"]
 _ASSET_FIELDS = [
     # (sub_path,                            label,                           type,    extra)
     ("enabled",                             "Enabled",                       "bool",  {}),
