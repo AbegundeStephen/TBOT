@@ -521,6 +521,7 @@ class PortfolioManager:
         self.realized_pnl_today = 0.0
         self.performance_tracker = PerformanceTracker()  # ✨ NEW: Strategy Performance Tracking
         self.loss_streak = 0  # ✨ NEW: Consecutive Loss Tracking
+        self._loss_streak_alerted = False  # Guard: send alert only ONCE per streak
 
         self.session_start_time = None
         self.session_start_equity = None
@@ -991,10 +992,13 @@ class PortfolioManager:
                 send_alert(reason)
                 return True, reason
 
-        # Consecutive Loss Shield
+        # Consecutive Loss Shield — alert fires ONCE when streak is first hit,
+        # not on every subsequent 5-minute cycle.
         if self.loss_streak >= 3:
             reason = f'Consecutive loss streak of {self.loss_streak} trades'
-            send_alert(reason)
+            if not self._loss_streak_alerted:
+                send_alert(reason)
+                self._loss_streak_alerted = True
             return True, reason
 
         return False, ''
@@ -2312,6 +2316,7 @@ class PortfolioManager:
             if self.loss_streak > 0:
                 logger.info(f"[STREAK] Loss streak of {self.loss_streak} reset to 0.")
             self.loss_streak = 0
+            self._loss_streak_alerted = False  # Reset alert guard when streak clears
 
         # Update capital
         if self.is_paper_mode:
