@@ -142,7 +142,7 @@
       "weight": 0.5,
       "force_min_lot": false,
       "allow_scalps": false,
-      "backtest_slippage_pct": 0.00005,
+      "backtest_slippage_pct": 5e-05,
       "min_position_usd": 4000,
       "max_position_usd": 50000,
       "lot_size": 0.01,
@@ -209,7 +209,7 @@
       "weight": 0.4,
       "force_min_lot": false,
       "allow_scalps": false,
-      "backtest_slippage_pct": 0.00005,
+      "backtest_slippage_pct": 5e-05,
       "min_position_usd": 2000,
       "max_position_usd": 30000,
       "lot_size": 0.02,
@@ -274,7 +274,7 @@
       "weight": 0.3,
       "force_min_lot": false,
       "allow_scalps": false,
-      "backtest_slippage_pct": 0.00005,
+      "backtest_slippage_pct": 5e-05,
       "min_position_usd": 1000,
       "max_position_usd": 20000,
       "lot_size": 0.02,
@@ -341,7 +341,7 @@
       "weight": 0.3,
       "force_min_lot": false,
       "allow_scalps": true,
-      "backtest_slippage_pct": 0.00005,
+      "backtest_slippage_pct": 5e-05,
       "min_position_usd": 1000,
       "max_position_usd": 20000,
       "lot_size": 0.02,
@@ -385,6 +385,140 @@
         "time_stop_bars": 48,
         "time_stop_trend": 72,
         "time_stop_reversion": 48
+      }
+    },
+    "USOIL": {
+      "enabled": true,
+      "allow_shorts": true,
+      "symbol": "USOILm",
+      "exchange": "mt5",
+      "timeframe": "H1",
+      "min_bars_training": 5000,
+      "lookback_days": 730,
+      "weight": 0.5,
+      "force_min_lot": false,
+      "allow_scalps": false,
+      "backtest_slippage_pct": 0.0001,
+      "min_position_usd": 500,
+      "max_position_usd": 10000,
+      "lot_size": 0.01,
+      "lot_step": 0.01,
+      "leverage": 100,
+      "strategies": {
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "trend_following": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "exponential_moving_averages": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        }
+      },
+      "risk": {
+        "stop_loss_pct": 0.015,
+        "take_profit_pct": 0.025,
+        "trailing_stop_pct": 0.012,
+        "max_holding_hours": 72,
+        "atr_multiplier": 1.5,
+        "pivot_lookback": 25,
+        "partial_targets": [
+          1.5,
+          2.5,
+          4.0
+        ],
+        "partial_sizes": [
+          0.45,
+          0.3,
+          0.25
+        ],
+        "runner_trail_pct": 0.015,
+        "time_stop_bars": 90,
+        "time_stop_trend": 90,
+        "time_stop_reversion": 24,
+        "use_ema_structure": true,
+        "use_structure_targets": true,
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 8,
+        "breakeven_profit_threshold": 0.012,
+        "early_scale_enabled": true,
+        "early_scale_threshold": 0.018,
+        "early_scale_bars": 4,
+        "early_lock_atr_multiplier": 0.5,
+        "runner_trail_atr_multiplier": 2.0
+      }
+    },
+    "GBPAUD": {
+      "enabled": true,
+      "allow_shorts": true,
+      "symbol": "GBPAUDm",
+      "exchange": "mt5",
+      "timeframe": "H1",
+      "min_bars_training": 5000,
+      "lookback_days": 730,
+      "weight": 0.5,
+      "force_min_lot": false,
+      "allow_scalps": false,
+      "backtest_slippage_pct": 5e-05,
+      "min_position_usd": 1000,
+      "max_position_usd": 20000,
+      "lot_size": 0.01,
+      "lot_step": 0.01,
+      "leverage": 100,
+      "strategies": {
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "trend_following": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "exponential_moving_averages": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        }
+      },
+      "risk": {
+        "stop_loss_pct": 0.008,
+        "take_profit_pct": 0.012,
+        "trailing_stop_pct": 0.007,
+        "max_holding_hours": 72,
+        "atr_multiplier": 1.5,
+        "pivot_lookback": 25,
+        "partial_targets": [
+          1.5,
+          2.5,
+          4.0
+        ],
+        "partial_sizes": [
+          0.45,
+          0.3,
+          0.25
+        ],
+        "runner_trail_pct": 0.012,
+        "time_stop_bars": 90,
+        "time_stop_trend": 90,
+        "time_stop_reversion": 24,
+        "use_ema_structure": true,
+        "use_structure_targets": true,
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 8,
+        "breakeven_profit_threshold": 0.008,
+        "early_scale_enabled": true,
+        "early_scale_threshold": 0.012,
+        "early_scale_bars": 4,
+        "early_lock_atr_multiplier": 0.5,
+        "runner_trail_atr_multiplier": 2.0
       }
     }
   },

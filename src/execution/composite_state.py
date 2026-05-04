@@ -56,6 +56,10 @@ class CompositeState:
     # ══════════════════════════════════════
     cvd_trend: int = 0                        # +1 buyers, -1 sellers, 0 neutral (BTC only)
     cvd_stale: bool = True                    # True if WebSocket disconnected
+    order_book_imbalance: float = 0.0         # +1 bid heavy, -1 ask heavy (BTC only)
+    order_book_wall_detected: bool = False    # Large imbalance at best bid/ask
+    spread_velocity_spike: bool = False       # MT5 spread > 2.5x normal
+    spread_ratio: float = 1.0                 # Current spread / rolling average
     vpd_diverging: bool = False               # Volume dying on new extreme (BTC only)
     body_trend_ratio: float = 1.0             # <0.5 = bodies shrinking = conviction dying
     conviction_dying: bool = False
