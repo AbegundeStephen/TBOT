@@ -680,6 +680,70 @@
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
         }
+      },
+      "USOIL": {
+        "bb_period": 20,
+        "bb_std": 2.0,
+        "rsi_period": 14,
+        "rsi_overbought": 68,
+        "rsi_oversold": 32,
+        "bb_lower_threshold": 0.25,
+        "bb_upper_threshold": 0.75,
+        "adx_threshold": 10,
+        "require_adx_check": false,
+        "reversion_window": 18,
+        "min_conditions": 3.0,
+        "min_score": 3.0,
+        "min_adx": 10,
+        "min_return_threshold": 0.001,
+        "stoch_k": 12,
+        "stoch_d": 3,
+        "remove_outliers": true,
+        "outlier_std": 4.5,
+        "min_confidence": 0.55,
+        "stop_loss_pct": 0.022,
+        "take_profit_pct": 0.04,
+        "max_holding_bars": 30,
+        "use_4h_context": true,
+        "h4_reversion_mode": "smart",
+        "h4_extreme_weight": 1.2,
+        "h4_trend_penalty": 0.1,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "GBPAUD": {
+        "bb_period": 20,
+        "bb_std": 1.8,
+        "rsi_period": 14,
+        "rsi_overbought": 65,
+        "rsi_oversold": 35,
+        "bb_lower_threshold": 0.25,
+        "bb_upper_threshold": 0.75,
+        "adx_threshold": 10,
+        "require_adx_check": false,
+        "reversion_window": 12,
+        "min_conditions": 3.0,
+        "min_score": 3.0,
+        "min_adx": 10,
+        "min_return_threshold": 0.0005,
+        "stoch_k": 12,
+        "stoch_d": 3,
+        "remove_outliers": true,
+        "outlier_std": 4.5,
+        "min_confidence": 0.55,
+        "stop_loss_pct": 0.018,
+        "take_profit_pct": 0.032,
+        "max_holding_bars": 36,
+        "use_4h_context": true,
+        "h4_reversion_mode": "smart",
+        "h4_extreme_weight": 1.2,
+        "h4_trend_penalty": 0.1,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
       }
     },
     "trend_following": {
@@ -802,6 +866,54 @@
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
         }
+      },
+      "USOIL": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 22,
+        "adx_required": false,
+        "min_return_threshold": 0.0015,
+        "min_return_pct": 0.002,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 0.3,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "GBPAUD": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 20,
+        "adx_required": false,
+        "min_return_threshold": 0.001,
+        "min_return_pct": 0.0015,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 0.3,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
       }
     },
     "exponential_moving_averages": {
@@ -897,6 +1009,52 @@
         }
       },
       "EURUSD": {
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "min_distance_pct": 0.001,
+        "min_return_threshold": 0.0025,
+        "min_conditions": 3,
+        "min_score": 1,
+        "use_price_confirmation": true,
+        "use_volume_filter": false,
+        "min_confidence": 0.55,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "n_estimators": 300,
+          "max_depth": 7,
+          "min_samples_split": 30,
+          "max_features": "sqrt",
+          "min_samples_leaf": 15,
+          "class_weight": "balanced"
+        }
+      },
+      "USOIL": {
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "min_distance_pct": 0.001,
+        "min_return_threshold": 0.003,
+        "min_conditions": 3,
+        "min_score": 1,
+        "use_price_confirmation": true,
+        "use_volume_filter": false,
+        "min_confidence": 0.55,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "n_estimators": 300,
+          "max_depth": 7,
+          "min_samples_split": 30,
+          "max_features": "sqrt",
+          "min_samples_leaf": 15,
+          "class_weight": "balanced"
+        }
+      },
+      "GBPAUD": {
         "ema_fast": 50,
         "ema_slow": 200,
         "min_distance_pct": 0.001,
