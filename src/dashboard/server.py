@@ -162,12 +162,14 @@ def get_history(asset):
 
     # Map friendly names to CSV filenames
     filename_map = {
-        "BTC": "BTCUSDT_1h.csv",
-        "GOLD": "XAUUSDm_1h.csv",
-        "XAU": "XAUUSDm_1h.csv",
-        "USTEC": "USTEC_1h.csv",
-        "EURJPY": "EURJPY_1h.csv",
-        "EURUSD": "EURUSD_1h.csv",
+        "BTC":    "BTCUSDT_1h.csv",
+        "GOLD":   "XAUUSDm_1h.csv",
+        "XAU":    "XAUUSDm_1h.csv",
+        "USTEC":  "USTECm_1h.csv",
+        "EURJPY": "EURJPYm_1h.csv",
+        "EURUSD": "EURUSDm_1h.csv",
+        "USOIL":  "USOILm_1h.csv",
+        "GBPAUD": "GBPAUDm_1h.csv",
     }
 
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -792,8 +794,8 @@ def get_config_overview():
 
         # Extract the most useful slices for the dashboard
         assets_cfg = {}
-        for asset in ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"]:
-            if asset in safe:
+        for asset in safe.keys():
+            if isinstance(safe[asset], dict) and "exchange" in safe[asset]:
                 assets_cfg[asset] = safe[asset]
 
         # Economic calendar: config.json may not have this key — read the

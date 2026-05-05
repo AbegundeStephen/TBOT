@@ -1343,6 +1343,95 @@ class MT5ExecutionHandler:
             logger.error(f"Error closing position: {e}", exc_info=True)
             return False
 
+    def _partial_close_position(
+        self, position, partial_qty: float, current_price: float, asset_name: str, reason: str
+    ) -> bool:
+        """
+        Partially close an MT5 position by sending a reduce-only order for `partial_qty`
+        (in base-asset units, e.g. oz for GOLD). Converts to lots using contract_size.
+        The position ticket stays open with the remaining volume on the broker side.
+        """
+        try:
+            if not position.mt5_ticket:
+                logger.warning(f"[PARTIAL-MT5] No ticket for {asset_name} — cannot partial close")
+                return False
+
+            symbol = self.config["assets"].get(asset_name, {}).get("symbol")
+            if not symbol:
+                logger.error(f"[PARTIAL-MT5] Symbol not found for {asset_name}")
+                return False
+
+            # Paper mode simulation
+            if self.mode.lower() == "paper":
+                logger.info(f"[PARTIAL-MT5] [PAPER] Simulated partial close {partial_qty:.6f} units for {asset_name}")
+                return True
+
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                logger.error(f"[PARTIAL-MT5] symbol_info not available for {symbol}")
+                return False
+
+            contract_size = symbol_info.trade_contract_size
+            raw_lots = partial_qty / contract_size
+            volume_step = symbol_info.volume_step
+            partial_lots = round(raw_lots / volume_step) * volume_step
+            partial_lots = max(symbol_info.volume_min, round(partial_lots, 8))
+
+            is_open, market_msg = self._is_market_open_for_closing(symbol)
+            if not is_open:
+                logger.error(f"[PARTIAL-MT5] Market closed for {asset_name}: {market_msg}")
+                return False
+
+            mt5_positions = mt5.positions_get(ticket=position.mt5_ticket)
+            if not mt5_positions:
+                logger.warning(f"[PARTIAL-MT5] Ticket {position.mt5_ticket} not found on broker")
+                return True  # Already closed externally
+
+            mt5_pos = mt5_positions[0]
+            order_type = mt5.ORDER_TYPE_SELL if mt5_pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                logger.error(f"[PARTIAL-MT5] No tick data for {symbol}")
+                return False
+
+            close_price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+            # Cap to remaining broker volume to avoid INVALID_VOLUME errors
+            partial_lots = min(partial_lots, mt5_pos.volume)
+
+            request = {
+                "action":      mt5.TRADE_ACTION_DEAL,
+                "symbol":      symbol,
+                "volume":      partial_lots,
+                "type":        order_type,
+                "position":    position.mt5_ticket,
+                "price":       close_price,
+                "deviation":   20,
+                "magic":       234000,
+                "comment":     f"PartialTP_{asset_name}",
+                "type_time":   mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+
+            result = mt5.order_send(request)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(
+                    f"[PARTIAL-MT5] ✓ Partial close {partial_lots:.4f} lots for {asset_name} "
+                    f"@ ${close_price:,.2f} (ticket {position.mt5_ticket})"
+                )
+                return True
+            else:
+                error_msg  = result.comment if result else "No result"
+                error_code = result.retcode if result else "N/A"
+                logger.error(
+                    f"[PARTIAL-MT5] ✗ Failed for {asset_name}: {error_msg} (code: {error_code})"
+                )
+                return False
+
+        except Exception as e:
+            logger.error(f"[PARTIAL-MT5] Exception for {asset_name}: {e}", exc_info=True)
+            return False
+
     def _close_mt5_order(self, ticket: int, asset: str, side: str) -> bool:
         """
         ✅ FIXED: Close MT5 order with dynamic symbol lookup

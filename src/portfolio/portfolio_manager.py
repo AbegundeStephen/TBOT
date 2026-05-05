@@ -238,27 +238,32 @@ class Position:
                         logger.info(f"[VTM] {self.asset} action triggered: {action}")
                         return exit_info # Return the whole dict to the caller
 
-                    # ✅ Handle standard exits
+                    # ✅ Handle standard exits — preserve size so caller can do partial close
                     reason = exit_info.get("reason")
-                    self.db_manager.update_trade_vtm_event(
-                        trade_id=self.db_trade_id,
-                        event_type=reason.value if hasattr(reason, "value") else str(reason),
-                        current_price=exit_info.get("price", close),
-                        metadata={"size": exit_info.get("size", 0)},
-                    )
+                    if self.db_manager and self.db_trade_id:
+                        self.db_manager.update_trade_vtm_event(
+                            trade_id=self.db_trade_id,
+                            event_type=reason.value if hasattr(reason, "value") else str(reason),
+                            current_price=exit_info.get("price", close),
+                            metadata={"size": exit_info.get("size", 1.0)},
+                        )
 
                     # Convert enum to string for compatibility
                     from src.execution.veteran_trade_manager import ExitReason
                     if isinstance(reason, ExitReason):
-                        exit_signal = reason.value
+                        reason_str = reason.value
                     else:
-                        exit_signal = str(reason)
+                        reason_str = str(reason)
+
+                    exit_size = exit_info.get("size", 1.0)  # fraction of position (0–1)
+                    exit_price_actual = exit_info.get("price", close)
 
                     logger.info(
-                        f"[VTM] {self.asset} exit triggered: {exit_signal} "
-                        f"@ ${exit_info.get('price', close):,.2f}"
+                        f"[VTM] {self.asset} exit triggered: {reason_str} "
+                        f"@ ${exit_price_actual:,.2f} (size={exit_size:.0%})"
                     )
-                    return exit_signal
+                    # Return dict so PortfolioManager can route partial vs full close
+                    return {"reason": reason_str, "size": exit_size, "price": exit_price_actual}
 
                 # ✅ Update position's SL/TP with VTM's current levels
                 # (VTM may trail stops or move to break-even)
@@ -283,15 +288,14 @@ class Position:
 
                 if exit_info:
                     reason = exit_info["reason"]
-                    exit_signal = (
-                        reason.value if isinstance(reason, ExitReason) else str(reason)
-                    )
+                    reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
+                    exit_size = exit_info.get("size", 1.0)
 
                     logger.info(
-                        f"[VTM] {self.asset} real-time exit: {exit_signal} "
-                        f"@ ${current_price:,.2f}"
+                        f"[VTM] {self.asset} real-time exit: {reason_str} "
+                        f"@ ${current_price:,.2f} (size={exit_size:.0%})"
                     )
-                    return exit_signal
+                    return {"reason": reason_str, "size": exit_size, "price": current_price}
 
                 # Update position's stop loss (may have trailed)
                 self.stop_loss = self.trade_manager.current_stop_loss
@@ -362,14 +366,15 @@ class Position:
 
             # Calculate absolute P&L (Prioritize exchange-reported profit)
             exchange_pnl = self.get_exchange_pnl()
+            position_notional = self.entry_price * self.quantity
             if exchange_pnl != 0.0:
+                # Broker P&L includes swap/commission — keep abs and pct consistent
                 pnl_abs = exchange_pnl
+                pnl_pct = (exchange_pnl / position_notional * 100) if position_notional > 0 else levels["pnl_pct"]
             else:
                 pnl_abs = (current_price - self.entry_price) * self.quantity if self.side == "long" else \
                           (self.entry_price - current_price) * self.quantity
-            
-            # P&L Percentage should always represent the price move percentage for better visibility
-            pnl_pct = levels["pnl_pct"]
+                pnl_pct = levels["pnl_pct"]
 
             return {
                 "side": self.side,
@@ -1969,9 +1974,9 @@ class PortfolioManager:
                 'GOLD': {'high': 2050, 'low': 2045, 'close': 2048}
             })
         """
-        positions_to_close = []
+        positions_to_close = []   # (asset, exit_price, reason, size)
 
-        for asset, position in self.positions.items():
+        for asset, position in list(self.positions.items()):
             if asset not in ohlc_data_dict:
                 continue
 
@@ -1988,10 +1993,10 @@ class PortfolioManager:
                     # ✅ T29: Handle Pyramid routing
                     if isinstance(exit_signal, dict) and exit_signal.get('action') == 'pyramid':
                         logger.info(f"[PYRAMID] 🗼 Triggered for {asset} {position.side}")
-                        
+
                         entry_price = ohlc['close']
                         position_size_usd = exit_signal['new_size'] * entry_price
-                        
+
                         # Inherit critical context from parent position
                         parent_ohlc = {
                             "high": position.trade_manager.high,
@@ -1999,7 +2004,7 @@ class PortfolioManager:
                             "close": position.trade_manager.close,
                             "volume": position.trade_manager.volume
                         }
-                        
+
                         self.add_position(
                             asset=asset,
                             symbol=position.symbol,
@@ -2019,21 +2024,38 @@ class PortfolioManager:
                         )
                         continue # Do NOT close the current position
 
-                    # Standard exit logic
-                    signal_str = str(exit_signal)
-                    positions_to_close.append((asset, ohlc["close"], signal_str))
+                    # ✅ Partial vs full exit routing
+                    if isinstance(exit_signal, dict):
+                        reason_str = exit_signal.get("reason", "unknown")
+                        exit_price  = exit_signal.get("price", ohlc["close"])
+                        exit_size   = exit_signal.get("size", 1.0)
+                    else:
+                        # Legacy string signal (fallback) — treat as full exit
+                        reason_str  = str(exit_signal)
+                        exit_price  = ohlc["close"]
+                        exit_size   = 1.0
+
                     logger.info(
-                        f"[VTM] {asset} triggered {signal_str.upper()} @ ${ohlc['close']:,.2f}"
+                        f"[VTM] {asset} triggered {reason_str.upper()} "
+                        f"@ ${exit_price:,.2f} (size={exit_size:.0%})"
                     )
+                    positions_to_close.append((asset, exit_price, reason_str, exit_size))
 
             except Exception as e:
                 logger.error(f"[VTM] Error updating {asset}: {e}")
 
-        # Close positions that received exit signals
-        for asset, exit_price, reason in positions_to_close:
-            self.close_position(
-                asset=asset, exit_price=exit_price, reason=f"VTM_{reason}"
-            )
+        # Close / partially-close positions that received exit signals
+        for asset, exit_price, reason, exit_size in positions_to_close:
+            if exit_size < 0.999:
+                # Partial exit — close fraction, keep position alive
+                self.partial_close_position(
+                    asset=asset, partial_fraction=exit_size,
+                    exit_price=exit_price, reason=f"VTM_{reason}"
+                )
+            else:
+                self.close_position(
+                    asset=asset, exit_price=exit_price, reason=f"VTM_{reason}"
+                )
 
         return len(positions_to_close)
 
@@ -2194,6 +2216,141 @@ class PortfolioManager:
             f"Successfully closed {len(results)}/{len(positions_to_close)} positions for {asset}"
         )
         return results
+
+    def partial_close_position(
+        self,
+        asset: str,
+        partial_fraction: float,
+        exit_price: float,
+        reason: str = "VTM_take_profit",
+    ) -> Optional[Dict]:
+        """
+        Close a fractional portion of a position (VTM partial TP exits).
+
+        Closes `partial_fraction` (e.g. 0.45) of the current quantity on the exchange,
+        reduces position.quantity accordingly, and records the partial P&L — without
+        removing the position from the portfolio so VTM can continue managing the remainder.
+        """
+        positions = self.get_asset_positions(asset)
+        if not positions:
+            logger.warning(f"[PARTIAL] No open position for {asset}")
+            return None
+
+        position = positions[0]
+
+        if partial_fraction <= 0 or partial_fraction >= 1.0:
+            logger.warning(f"[PARTIAL] Invalid fraction {partial_fraction:.2%} for {asset} — doing full close")
+            return self.close_position(asset=asset, exit_price=exit_price, reason=reason)
+
+        partial_qty  = position.quantity * partial_fraction
+        partial_pnl  = (exit_price - position.entry_price) * partial_qty if position.side == "long" \
+                       else (position.entry_price - exit_price) * partial_qty
+        partial_pnl_pct = partial_pnl / (position.entry_price * position.quantity) if position.entry_price * position.quantity > 0 else 0
+
+        # ── Send partial close to exchange ──────────────────────────────────
+        exchange_ok = False
+        if not self.is_paper_mode:
+            asset_cfg  = self.config["assets"].get(position.asset, {})
+            exchange   = asset_cfg.get("exchange", "binance")
+            handler    = self.execution_handlers.get(exchange)
+
+            if handler and hasattr(handler, "_partial_close_position"):
+                try:
+                    exchange_ok = handler._partial_close_position(
+                        position=position,
+                        partial_qty=partial_qty,
+                        current_price=exit_price,
+                        asset_name=asset,
+                        reason=reason,
+                    )
+                except Exception as e:
+                    logger.error(f"[PARTIAL] Handler error for {asset}: {e}", exc_info=True)
+            else:
+                logger.warning(f"[PARTIAL] Handler for {exchange} has no _partial_close_position — falling back to full close")
+                return self.close_position(asset=asset, exit_price=exit_price, reason=reason)
+        else:
+            exchange_ok = True  # Paper mode always succeeds
+
+        if not exchange_ok:
+            logger.error(f"[PARTIAL] Exchange rejected partial close for {asset} — position unchanged")
+            return None
+
+        # ── Update portfolio position ────────────────────────��───────────────
+        position.quantity -= partial_qty
+        logger.info(
+            f"[PARTIAL] {asset} {position.side.upper()} — closed {partial_fraction:.0%} "
+            f"@ ${exit_price:,.2f} | P&L: ${partial_pnl:,.2f} | "
+            f"Remaining qty: {position.quantity:.6f}"
+        )
+
+        # ── Record partial P&L ───────────────────────────────────────────────
+        self.realized_pnl_today += partial_pnl
+        if partial_pnl < 0:
+            self.loss_streak += 1
+        else:
+            self.loss_streak = 0
+            self._loss_streak_alerted = False
+
+        trade_type = getattr(position, 'trade_type', 'TREND')
+        self.performance_tracker.record_trade(trade_type, partial_pnl)
+
+        # ── DB log ──────────────────────────────────────────���────────────────
+        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+            try:
+                self.db_manager.update_trade_vtm_event(
+                    trade_id=position.db_trade_id,
+                    event_type="partial_close",
+                    current_price=exit_price,
+                    metadata={
+                        "partial_fraction": partial_fraction,
+                        "partial_qty": partial_qty,
+                        "partial_pnl": partial_pnl,
+                        "reason": reason,
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"[PARTIAL] DB log failed for {asset}: {e}")
+
+        log_trade_event("TP_HIT", {
+            "symbol": position.symbol,
+            "asset": position.asset,
+            "side": position.side,
+            "price": exit_price,
+            "quantity": partial_qty,
+            "trade_type": trade_type,
+            "reason": reason,
+            "pnl": partial_pnl,
+            "pnl_pct": partial_pnl_pct,
+            "partial_fraction": partial_fraction,
+            "position_id": position.position_id,
+        })
+
+        if self.telegram_bot and self.telegram_bot._current_loop:
+            try:
+                import asyncio
+                side_emoji = "🟢" if partial_pnl >= 0 else "🔴"
+                msg = (
+                    f"{side_emoji} *PARTIAL TP — {asset}*\n"
+                    f"Side: {position.side.upper()} | Closed: {partial_fraction:.0%}\n"
+                    f"Price: ${exit_price:,.2f} | P&L: ${partial_pnl:+,.2f} ({partial_pnl_pct:+.2%})\n"
+                    f"Remaining: {(1 - partial_fraction):.0%} position still active"
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self.telegram_bot.send_message(msg),
+                    self.telegram_bot._current_loop
+                )
+            except Exception:
+                pass
+
+        return {
+            "asset": asset,
+            "side": position.side,
+            "exit_price": exit_price,
+            "partial_fraction": partial_fraction,
+            "partial_pnl": partial_pnl,
+            "partial_pnl_pct": partial_pnl_pct,
+            "reason": reason,
+        }
 
     @handle_errors(
         component="portfolio_manager",
@@ -2402,12 +2559,6 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "position_id": position_id
         })
-
-        # ✨ NEW: Record performance for Council weighting (Phase 2 Task 10)
-        if hasattr(self, 'performance_tracker') and self.performance_tracker:
-            t_type = getattr(position, 'trade_type', 'UNKNOWN')
-            if t_type != 'UNKNOWN':
-                self.performance_tracker.record_trade(t_type, pnl)
 
         logger.info(
             f"✓ Position closed successfully:\n"

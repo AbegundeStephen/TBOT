@@ -1018,8 +1018,22 @@ class VeteranTradeManager:
         next_target_idx = len(self.partials_hit)
         next_target = self.take_profit_levels[next_target_idx] if next_target_idx < len(self.take_profit_levels) else None
         
-        distance_to_sl_pct = (current_price - self.current_stop_loss) / self.current_stop_loss * 100 if self.current_stop_loss > 0 else 0
-        distance_to_tp_pct = (next_target - current_price) / current_price * 100 if next_target and current_price > 0 else 0
+        # Directional distance — always positive = "buffer remaining before level"
+        if self.current_stop_loss > 0:
+            if self.side == "long":
+                distance_to_sl_pct = (current_price - self.current_stop_loss) / self.current_stop_loss * 100
+            else:
+                distance_to_sl_pct = (self.current_stop_loss - current_price) / self.current_stop_loss * 100
+        else:
+            distance_to_sl_pct = 0
+
+        if next_target and current_price > 0:
+            if self.side == "long":
+                distance_to_tp_pct = (next_target - current_price) / current_price * 100
+            else:
+                distance_to_tp_pct = (current_price - next_target) / current_price * 100
+        else:
+            distance_to_tp_pct = 0
         
         return {
             "entry_price": self.entry_price,
