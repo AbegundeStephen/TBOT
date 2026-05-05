@@ -503,8 +503,13 @@ def main():
 
     asset_data = {}
 
-    # Asset configs to process
-    assets_to_train = ["BTC", "GOLD", "USTEC", "EURJPY", "EURUSD"]
+    # Asset configs to process — derived from config so new assets are picked up automatically
+    assets_to_train = [
+        a for a, cfg in config.get("assets", {}).items()
+        if cfg.get("enabled", False)
+        and a in config.get("strategy_configs", {}).get("mean_reversion", {})
+    ]
+    logger.info(f"Assets to train: {assets_to_train}")
     
     for asset_key in assets_to_train:
         if asset_key not in config["assets"]:
