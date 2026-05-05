@@ -194,9 +194,15 @@ def main():
         tasks.append({"asset": "BTC", "source": "Binance", "tf": "4h", "file": data_dir / "BTCUSDT_4h.csv"})
         tasks.append({"asset": "BTC", "source": "Binance", "tf": "1d", "file": data_dir / "BTCUSDT_1d.csv"})
 
-    # MT5 Tasks
+    # MT5 Tasks — derived from config so new assets are picked up automatically
     if mt5_ok:
-        mt5_assets = ["XAUUSDm", "USTECm", "EURJPYm", "EURUSDm"]
+        mt5_assets = [
+            cfg["symbol"]
+            for name, cfg in config.get("assets", {}).items()
+            if cfg.get("exchange", "") == "mt5"
+            and cfg.get("symbol", "")
+        ]
+        logger.info(f"MT5 assets to download: {mt5_assets}")
         for asset in mt5_assets:
             tasks.append({"asset": asset, "source": "MT5", "tf": "M15", "file": data_dir / f"{asset}_15m.csv"})
             tasks.append({"asset": asset, "source": "MT5", "tf": "H1", "file": data_dir / f"{asset}_1h.csv"})
