@@ -3265,7 +3265,7 @@ class TradingBot:
             # live tick prices separately via update_with_current_price().
             if not df.empty:
                 import pandas as pd
-                _now_floor = pd.Timestamp.now(tz='UTC').floor('H')
+                _now_floor = pd.Timestamp.now(tz='UTC').floor('h')
                 if df.index[-1] >= _now_floor:
                     df = df.iloc[:-1]
 
@@ -3898,7 +3898,7 @@ class TradingBot:
 
             # B.1: Drop incomplete current 4H candle — use only confirmed bars
             if not df_4h.empty:
-                _now_floor_4h = pd.Timestamp.now(tz='UTC').floor('4H')
+                _now_floor_4h = pd.Timestamp.now(tz='UTC').floor('4h')
                 if df_4h.index[-1] >= _now_floor_4h:
                     df_4h = df_4h.iloc[:-1]
 
@@ -4004,7 +4004,7 @@ class TradingBot:
             # live tick prices separately via update_with_current_price().
             if not df.empty:
                 import pandas as pd
-                _now_floor = pd.Timestamp.now(tz='UTC').floor('H')
+                _now_floor = pd.Timestamp.now(tz='UTC').floor('h')
                 if df.index[-1] >= _now_floor:
                     df = df.iloc[:-1]
 
