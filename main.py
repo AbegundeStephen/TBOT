@@ -2498,6 +2498,11 @@ class TradingBot:
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
+            # Global trading toggle check
+            if not self.config.get("trading", {}).get("enabled", True):
+                logger.info("[CYCLE] ⏸ Trading is GLOBALLY DISABLED. Skipping cycle.")
+                return
+
             # T3.5: Refresh BTC funding rate (self-throttles to every 8 hours)
             try:
                 self._update_funding_rate()
@@ -3075,11 +3080,22 @@ class TradingBot:
                     logger.debug(f"[TELEGRAM] Daily summary error: {e}")
 
     def check_trading_limits(self) -> bool:
-        """Check if trading limits are reached"""
-        risk_cfg = self.config.get("risk_management", {})
+        """Check if trading limits are reached.
 
-        max_daily_trades = risk_cfg.get("max_daily_trades", 10)
+        Side-effect: when a limit is hit, populates self._last_limit_reason with a
+        specific human-readable reason (e.g. 'Daily trade cap reached (30/30)').
+        This is consumed by the Telegram block-notification so users can tell
+        WHICH limit fired instead of seeing the generic 'count or loss' string.
+        """
+        risk_cfg = self.config.get("risk_management", {})
+        self._last_limit_reason = None
+
+        max_daily_trades = risk_cfg.get("max_daily_trades", 30)
         if self.trade_count_today >= max_daily_trades:
+            self._last_limit_reason = (
+                f"Daily trade cap reached ({self.trade_count_today}/{max_daily_trades}). "
+                f"Resets at next UTC day rollover."
+            )
             logger.warning(
                 f"[LIMIT] Daily trades ({self.trade_count_today}/{max_daily_trades})"
             )
@@ -3087,6 +3103,9 @@ class TradingBot:
 
         max_daily_loss = risk_cfg.get("max_daily_loss_pct", 0.05)
         if self.daily_loss >= max_daily_loss:
+            self._last_limit_reason = (
+                f"Daily loss limit reached ({self.daily_loss:.2%} ≥ {max_daily_loss:.2%})"
+            )
             logger.warning(f"[LIMIT] Daily loss ({self.daily_loss:.2%})")
             return False
 
@@ -3097,6 +3116,9 @@ class TradingBot:
             else 0
         )
         if loss_pct >= circuit_breaker:
+            self._last_limit_reason = (
+                f"Circuit breaker tripped: drawdown {loss_pct:.2%} ≥ {circuit_breaker:.2%}"
+            )
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
             if self.telegram_bot and self._telegram_ready.is_set():
                 try:
@@ -3114,6 +3136,9 @@ class TradingBot:
             max_positions = trading_cfg.get("max_simultaneous_positions", 2)
             current = self.portfolio_manager.get_open_positions_count()
             if current >= max_positions:
+                self._last_limit_reason = (
+                    f"Max simultaneous positions reached ({current}/{max_positions})"
+                )
                 logger.info(f"[LIMIT] Max positions ({current}/{max_positions})")
                 return False
 
@@ -3498,7 +3523,10 @@ class TradingBot:
                     asset=asset_name,
                     signal=signal,
                     block_source="Trading Limits",
-                    block_reason="Daily trade count or loss limit reached — trading paused",
+                    block_reason=(
+                        getattr(self, "_last_limit_reason", None)
+                        or "Daily trade count or loss limit reached — trading paused"
+                    ),
                     details=details,
                     price=details.get("price"),
                 )
@@ -4582,40 +4610,40 @@ class TradingBot:
                         os.remove(_restart_flag)
                         logger.info("[CONTROL] 🔄 Restart flag detected — restarting bot now…")
                         self.stop()
+                        
                         # ── Windows: task-aware restart with local fallback ──────
                         if sys.platform == "win32":
                             import subprocess as _sp
                             _task_name = self.config.get("trading", {}).get(
                                 "task_scheduler_name", "TBOT"
                             )
-                            _python  = sys.executable.replace("'", "''")
-                            _script  = str(Path(__file__).resolve()).replace("'", "''")
-                            _workdir = str(Path(__file__).parent.resolve()).replace("'", "''")
-                            # If the scheduled task exists → restart through it (VPS)
-                            # Otherwise → kill orphans and relaunch directly (local dev)
+                            _python  = sys.executable
+                            _script  = str(Path(__file__).resolve())
+                            _workdir = str(Path(__file__).parent.resolve())
+                            
+                            # Reverted to structure similar to initial setup but with robust taskkill
                             _ps_cmd = (
-                                f"$t = Get-ScheduledTask -TaskName '{_task_name}' "
-                                f"-ErrorAction SilentlyContinue; "
+                                f"$t = Get-ScheduledTask -TaskName '{_task_name}' -ErrorAction SilentlyContinue; "
                                 f"if ($t) {{ "
-                                f"  Stop-ScheduledTask -TaskName '{_task_name}' "
-                                f"  -ErrorAction SilentlyContinue; "
-                                f"  Start-Sleep -Seconds 3; "
+                                f"  Stop-ScheduledTask -TaskName '{_task_name}' -ErrorAction SilentlyContinue; "
+                                f"  Start-Sleep -Seconds 2; "
                                 f"  taskkill /F /IM python.exe 2>$null; "
-                                f"  Start-Sleep -Seconds 1; "
+                                f"  Start-Sleep -Seconds 2; "
                                 f"  Start-ScheduledTask -TaskName '{_task_name}' "
                                 f"}} else {{ "
-                                f"  Start-Sleep -Seconds 3; "
+                                f"  Start-Sleep -Seconds 2; "
                                 f"  taskkill /F /IM python.exe 2>$null; "
-                                f"  Start-Sleep -Seconds 1; "
+                                f"  Start-Sleep -Seconds 2; "
                                 f"  Set-Location '{_workdir}'; "
-                                f"  & '{_python}' '{_script}' "
+                                f"  cmd.exe /c \"start python main.py\" "
                                 f"}}"
                             )
+
                             _sp.Popen(
-                                ["powershell", "-WindowStyle", "Hidden", "-Command", _ps_cmd],
+                                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", _ps_cmd],
                                 creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
                             )
-                            logger.info(f"[CONTROL] ✅ Restart scheduled (task={_task_name}) — exiting now")
+                            logger.info(f"[CONTROL] ✅ Restart scheduled — exiting now")
                             sys.exit(0)
                         else:
                             os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -4731,6 +4759,18 @@ class TradingBot:
                 logger.warning("[TELEGRAM] Thread did not terminate.")
             else:
                 logger.info("[TELEGRAM] Thread terminated.")
+
+        # ✨  Shutdown Dashboard
+        if hasattr(self, 'dashboard_server') and self.dashboard_server:
+            logger.info("[DASHBOARD] Shutting down...")
+            try:
+                if sys.platform == "win32":
+                    subprocess.call(["taskkill", "/F", "/T", "/PID", str(self.dashboard_server.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    self.dashboard_server.terminate()
+                logger.info("[DASHBOARD] Process terminated.")
+            except Exception as e:
+                logger.error(f"[DASHBOARD] Error during shutdown: {e}")
 
         # Shutdown data manager
         try:

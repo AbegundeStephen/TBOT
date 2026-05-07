@@ -526,23 +526,78 @@ class MT5ExecutionHandler:
                 logger.info(f"\n{'='*80}")
                 logger.info(f"[SIZING] Calculating position size for {asset}")
                 logger.info(f"{'='*80}")
-                account_balance = self.portfolio_manager.current_capital
-                risk_amount_usd = account_balance * risk_pct
-                stop_distance = abs(current_price - initial_stop)
-                stop_distance_pct = stop_distance / current_price
-                position_size_usd = risk_amount_usd / stop_distance_pct
+
+                # ── VENUE-SCOPED BALANCE ─────────────────────────────────────────
+                # MT5 trades must be sized against the MT5/Exness account balance,
+                # NOT the combined portfolio capital. Otherwise a $50 Exness account
+                # can be told to open $11k notional because Binance has $14.9k —
+                # which blows the free-margin budget on the first adverse tick.
+                portfolio_balance = self.portfolio_manager.current_capital
+                mt5_balance = portfolio_balance  # safe fallback
+                try:
+                    # mt5 is already imported at module scope — do NOT re-import
+                    # locally, that creates an UnboundLocalError on the earlier
+                    # mt5.symbol_info(symbol) call at the top of this function.
+                    _ai = mt5.account_info()
+                    if _ai is not None and _ai.balance is not None and float(_ai.balance) > 0:
+                        mt5_balance = float(_ai.balance)
+                except Exception as _e:
+                    logger.debug(f"[SIZING] MT5 account_info fetch failed: {_e}")
+
+                # Always size MT5 orders against MT5 equity. Cross-venue capital
+                # cannot back an Exness margin call.
+                account_balance = mt5_balance
+                if abs(mt5_balance - portfolio_balance) > 1.0:
+                    logger.info(
+                        f"[SIZING] Using MT5 venue balance ${mt5_balance:,.2f} "
+                        f"(portfolio combined: ${portfolio_balance:,.2f})"
+                    )
+
+                # ── SMALL-ACCOUNT GUARD (sub-$200 MT5 balance) ───────────────────
+                # On a tiny Exness account, force min lot regardless of what the
+                # risk-budget math says. Below the configured threshold we never
+                # trust the risk calc — go straight to broker minimum lot.
+                small_account_threshold = float(
+                    self.trading_config.get("mt5_small_account_threshold_usd", 200.0)
+                )
+                force_small_account = mt5_balance < small_account_threshold
+
+                if force_small_account:
+                    logger.warning(
+                        f"[SIZING] 🛡️ MT5 balance ${mt5_balance:,.2f} below "
+                        f"${small_account_threshold:,.0f} threshold — "
+                        f"forcing min lot for {asset}."
+                    )
+                    # Use min lot directly; downstream code will pick this up.
+                    forced_lots = symbol_info.volume_min
+                    position_size_usd = (
+                        forced_lots * current_price * symbol_info.trade_contract_size
+                    )
+                    risk_amount_usd = position_size_usd  # for log clarity
+                    stop_distance = abs(current_price - initial_stop)
+                    stop_distance_pct = stop_distance / current_price if current_price else 0.0
+                    if signal_details is None:
+                        signal_details = {}
+                    signal_details["small_account_protocol_active"] = True
+                    signal_details["forced_min_lot"] = True
+                else:
+                    risk_amount_usd = account_balance * risk_pct
+                    stop_distance = abs(current_price - initial_stop)
+                    stop_distance_pct = stop_distance / current_price
+                    position_size_usd = risk_amount_usd / stop_distance_pct
 
                 # ── Asset-weight scaling (config["assets"][asset]["weight"]) ──────
                 # portfolio_manager.calculate_position_size() applies this weight but
                 # mt5_handler does its own sizing and was never calling that function,
                 # so the weight was silently ignored for all MT5 assets.
                 asset_weight = asset_cfg.get("weight", 1.0)
-                position_size_usd *= asset_weight
+                if not force_small_account:
+                    position_size_usd *= asset_weight
 
                 # ── Config-level USD cap (max_position_usd) ──────────────────────
                 # Same issue — the per-asset cap lived only in portfolio_manager.
                 max_pos_usd = asset_cfg.get("max_position_usd")
-                if max_pos_usd and position_size_usd > max_pos_usd:
+                if not force_small_account and max_pos_usd and position_size_usd > max_pos_usd:
                     logger.info(
                         f"[SIZING] Capping ${position_size_usd:,.2f} at "
                         f"max_position_usd=${max_pos_usd:,.2f} for {asset}"
@@ -563,7 +618,7 @@ class MT5ExecutionHandler:
                 else:
                     min_sl_pct = 0.003   # 0.3% (GOLD, others)
                 min_sl_dist = current_price * min_sl_pct
-                if initial_sl_dist < min_sl_dist:
+                if not force_small_account and initial_sl_dist < min_sl_dist:
                     capped_stop_distance_pct = min_sl_pct
                     capped_size = risk_amount_usd / capped_stop_distance_pct
                     capped_size *= asset_weight
@@ -579,25 +634,30 @@ class MT5ExecutionHandler:
 
                 logger.info(
                     f"[SIZING] Calculation:\n"
-                    f"  Account Balance: ${account_balance:,.2f}\n"
+                    f"  Account Balance: ${account_balance:,.2f}{' (MT5 venue)' if force_small_account or abs(mt5_balance - portfolio_balance) > 1.0 else ''}\n"
                     f"  Risk Budget:     {risk_pct:.3%} = ${risk_amount_usd:.2f}\n"
                     f"  Stop Distance:   {stop_distance_pct:.3%}\n"
-                    f"  Asset Weight:    {asset_weight:.1f}x\n"
+                    f"  Asset Weight:    {asset_weight:.1f}x{' (bypassed: small-account)' if force_small_account else ''}\n"
                     f"  Position Size:   ${position_size_usd:,.2f}"
+                    f"{'  [SMALL ACCOUNT — min lot forced]' if force_small_account else ''}"
                 )
                 if position_size_usd <= 0:
                     return False
 
                 # Convert USD to MT5 lots
                 contract_size = symbol_info.trade_contract_size
-                raw_volume_lots = position_size_usd / (current_price * contract_size)
-                volume_step = symbol_info.volume_step
-                volume_lots = round(raw_volume_lots / volume_step) * volume_step
+                if force_small_account:
+                    # Already chose min lot; do not re-derive from notional.
+                    volume_lots = symbol_info.volume_min
+                else:
+                    raw_volume_lots = position_size_usd / (current_price * contract_size)
+                    volume_step = symbol_info.volume_step
+                    volume_lots = round(raw_volume_lots / volume_step) * volume_step
 
                 min_lot_notional_value = (
                     symbol_info.volume_min * current_price * contract_size
                 )
-                if position_size_usd < min_lot_notional_value:
+                if not force_small_account and position_size_usd < min_lot_notional_value:
                     # ── Small-account fallback: use min lot instead of aborting ──
                     # Risk-based sizing produced a notional too small for the broker's
                     # minimum lot.  Rather than blocking the trade entirely, fall back
@@ -1296,48 +1356,68 @@ class MT5ExecutionHandler:
     )
     def _close_position(
         self, position, current_price: float, asset_name: str, reason: str
-    ) -> bool:
+    ):
         """
-        Close a single position
-        Returns True if successful, False otherwise
+        Close a single position.
+
+        Returns
+        -------
+        dict | bool
+            On success returns a dict with broker-authoritative fill data so the
+            portfolio manager can use the *actual* fill price + broker P&L
+            (including swap and commission) instead of computing P&L from a
+            stale cached price.
+
+            For backward compatibility, return value is still truthy on success
+            and falsy on failure.
         """
         try:
             entry_price = position.entry_price
             quantity = position.quantity
             side = position.side
             position_id = position.position_id
-            mt5_ticket = position.mt5_ticket
 
-            position_size_usd = quantity * entry_price
-
+            # Local pre-close estimate (kept for the log line only — the real
+            # numbers come from the broker after the fill)
+            est_size_usd = quantity * entry_price
             if side == "long":
-                pnl = (current_price - entry_price) * quantity
+                est_pnl = (current_price - entry_price) * quantity
             else:
-                pnl = (entry_price - current_price) * quantity
-
-            pnl_pct = (pnl / position_size_usd) * 100 if position_size_usd > 0 else 0
+                est_pnl = (entry_price - current_price) * quantity
+            est_pnl_pct = (est_pnl / est_size_usd) * 100 if est_size_usd > 0 else 0
 
             logger.info(
-                f"[CLOSE] {asset_name} {side.upper()} ({position_id})\n"
-                f"  Entry: ${entry_price:,.2f} → Exit: ${current_price:,.2f}\n"
-                f"  P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+                f"[CLOSE] {asset_name} {side.upper()} ({position_id}) — submitting close…\n"
+                f"  Entry: ${entry_price:,.5f} → Pre-close cache: ${current_price:,.5f}\n"
+                f"  Est P&L (pre-fill): ${est_pnl:,.2f} ({est_pnl_pct:+.2f}%)\n"
                 f"  Reason: {reason}"
             )
 
             # Close on MT5 first (if live mode)
-            mt5_closed = False
             if position.mt5_ticket:
-                mt5_closed = self._close_mt5_order(
+                close_result = self._close_mt5_order(
                     position.mt5_ticket, asset_name, position.side
                 )
             else:
-                mt5_closed = True  # No MT5 ticket, so no need to close on exchange
+                close_result = True  # No MT5 ticket, so no need to close on exchange
 
-            # If MT5 closed successfully, then indicate success
-            if mt5_closed:
-                return True
-            else:
+            if not close_result:
                 return False
+
+            # If we got a dict back, surface the broker fill data to the caller
+            if isinstance(close_result, dict):
+                fill_price = close_result.get("fill_price")
+                broker_profit = close_result.get("profit")
+                if fill_price is not None and broker_profit is not None:
+                    logger.info(
+                        f"[CLOSE] {asset_name} broker fill: ${fill_price:,.5f} | "
+                        f"broker P&L: ${broker_profit:,.2f} "
+                        f"(swap ${close_result.get('swap', 0):,.2f}, "
+                        f"comm ${close_result.get('commission', 0):,.2f})"
+                    )
+                return close_result
+
+            return True  # legacy True path (paper mode, no-ticket case)
 
         except Exception as e:
             logger.error(f"Error closing position: {e}", exc_info=True)
@@ -1432,14 +1512,31 @@ class MT5ExecutionHandler:
             logger.error(f"[PARTIAL-MT5] Exception for {asset_name}: {e}", exc_info=True)
             return False
 
-    def _close_mt5_order(self, ticket: int, asset: str, side: str) -> bool:
+    def _close_mt5_order(self, ticket: int, asset: str, side: str):
         """
-        ✅ FIXED: Close MT5 order with dynamic symbol lookup
+        Close an MT5 order and return the broker's authoritative fill data.
+
+        Returns
+        -------
+        dict | bool
+            On success: {
+                "ok": True,
+                "fill_price": float,         # actual broker fill price
+                "profit": float | None,      # broker P&L (incl. swap+commission) if available
+                "swap": float,
+                "commission": float,
+                "deal_ticket": int | None,
+                "volume_closed": float,      # in lots
+            }
+            On failure: False
+            For backward compatibility, callers that only check truthiness still work.
         """
         # In paper mode, simulate successful closure
         if self.mode.lower() == "paper":
             logger.info(f"[MT5] [PAPER MODE] ✓ Simulated close of ticket {ticket}")
-            return True
+            return {"ok": True, "fill_price": None, "profit": None,
+                    "swap": 0.0, "commission": 0.0,
+                    "deal_ticket": None, "volume_closed": 0.0}
 
         try:
             # Dynamic symbol lookup
@@ -1466,9 +1563,18 @@ class MT5ExecutionHandler:
 
             if mt5_positions is None or len(mt5_positions) == 0:
                 logger.warning(f"[MT5] Position ticket {ticket} not found on exchange. Clearing local record.")
-                return True
+                # Position already gone — try to look up the closing deal in history
+                # so the caller still gets authoritative profit numbers.
+                hist_data = self._fetch_broker_close_data(ticket)
+                if hist_data:
+                    return {"ok": True, **hist_data}
+                return True  # legacy: missing position is treated as "already closed"
 
             mt5_position = mt5_positions[0]
+
+            # Capture pre-close broker numbers as a sanity baseline
+            pre_close_profit = float(getattr(mt5_position, "profit", 0.0) or 0.0)
+            pre_close_swap = float(getattr(mt5_position, "swap", 0.0) or 0.0)
 
             # Determine close order type
             order_type = (
@@ -1506,8 +1612,28 @@ class MT5ExecutionHandler:
             result = mt5.order_send(request)
 
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"[MT5] ✓ Closed ticket {ticket} @ ${close_price:,.2f}")
-                return True
+                # ── AUTHORITATIVE FILL DATA ─────────────────────────────────
+                # result.price is the *actual* fill, not the snapshot we sent.
+                actual_fill = float(getattr(result, "price", close_price) or close_price)
+
+                # Pull the closing deal from history for true profit (incl. swap
+                # & commission). MT5 server may take a moment; retry briefly.
+                hist_data = self._fetch_broker_close_data(ticket, deal_id=getattr(result, "deal", None))
+
+                logger.info(
+                    f"[MT5] ✓ Closed ticket {ticket} @ ${actual_fill:,.5f} "
+                    f"(req: ${close_price:,.5f})"
+                )
+
+                return {
+                    "ok": True,
+                    "fill_price": actual_fill,
+                    "profit": (hist_data or {}).get("profit", pre_close_profit),
+                    "swap": (hist_data or {}).get("swap", pre_close_swap),
+                    "commission": (hist_data or {}).get("commission", 0.0),
+                    "deal_ticket": getattr(result, "deal", None),
+                    "volume_closed": float(mt5_position.volume),
+                }
             else:
                 error_msg = result.comment if result else "No result"
                 error_code = result.retcode if result else "N/A"
@@ -1528,6 +1654,66 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[MT5] Error closing ticket {ticket}: {e}", exc_info=True)
             return False
+
+    def _fetch_broker_close_data(self, ticket: int, deal_id=None, max_attempts: int = 6):
+        """Look up the closing deal in MT5 history to read authoritative P&L.
+
+        MT5's history is sometimes briefly behind the order_send response, so we
+        poll a few times. Returns dict with profit/swap/commission/fill_price, or
+        None if we couldn't read it (caller falls back to local calc).
+        """
+        try:
+            import time as _time
+            from datetime import datetime as _dt, timedelta as _td
+
+            for attempt in range(max_attempts):
+                deals = None
+                # Prefer fetching the specific deal if we have its id
+                if deal_id:
+                    try:
+                        deals = mt5.history_deals_get(ticket=deal_id)
+                    except Exception:
+                        deals = None
+                if not deals:
+                    # Fall back to all deals for this position
+                    try:
+                        deals = mt5.history_deals_get(position=ticket)
+                    except Exception:
+                        deals = None
+                if not deals:
+                    # Last resort: scan a small recent window
+                    try:
+                        end = _dt.now()
+                        start = end - _td(minutes=10)
+                        deals = mt5.history_deals_get(start, end)
+                        if deals:
+                            deals = [d for d in deals if getattr(d, "position_id", None) == ticket]
+                    except Exception:
+                        deals = None
+
+                if deals:
+                    # Pick the deal with the largest |volume| that closed this
+                    # position (entry deals have profit==0; exit deals carry it).
+                    closing = [d for d in deals if float(getattr(d, "profit", 0.0) or 0.0) != 0.0]
+                    if not closing:
+                        # No profit-carrying deal yet (still settling); take last by time
+                        closing = sorted(deals, key=lambda d: getattr(d, "time", 0))
+                    if closing:
+                        d = closing[-1]
+                        return {
+                            "profit": float(getattr(d, "profit", 0.0) or 0.0),
+                            "swap": float(getattr(d, "swap", 0.0) or 0.0),
+                            "commission": float(getattr(d, "commission", 0.0) or 0.0),
+                            "fill_price": float(getattr(d, "price", 0.0) or 0.0) or None,
+                        }
+
+                _time.sleep(0.25)  # brief backoff before retry
+
+            logger.debug(f"[MT5] Could not fetch closing deal for ticket {ticket} after {max_attempts} attempts")
+            return None
+        except Exception as e:
+            logger.debug(f"[MT5] _fetch_broker_close_data error for ticket {ticket}: {e}")
+            return None
 
     def _check_stop_loss_take_profit(
         self, position, current_price: float
