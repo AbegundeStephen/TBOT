@@ -782,8 +782,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         elif prev == regime_name:
             pass  # Same regime — keep current phase, just update age
         else:
-            # First observation
+            # First observation (after restart or new asset)
             self._regime_start_time[asset] = now
+            # ✅ FIX: Default to ESTABLISHED so pattern layer is active immediately
+            state.lifecycle_phase = "ESTABLISHED"
+            logger.info(f"[LIFECYCLE] {asset} initialized to ESTABLISHED (Startup)")
 
         self._previous_regime[asset] = regime_name
 
