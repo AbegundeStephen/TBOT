@@ -14,7 +14,7 @@ class CompositeState:
     # ══════════════════════════════════════
     # LAYER 1: MACRO STATE
     # ══════════════════════════════════════
-    lifecycle_phase: str = "UNKNOWN"          # PICKUP / CONFIRMATION / ESTABLISHED / FADING / EXHAUSTION
+    lifecycle_phase: str = "ESTABLISHED"          # PICKUP / CONFIRMATION / ESTABLISHED / FADING / EXHAUSTION
     transition_type: Optional[str] = None     # e.g. "NEUTRAL→SLIGHTLY_BULL"
     regime_age_hours: float = 0.0
     regime_age_ratio: float = 0.0             # 1.0 = median duration for this asset

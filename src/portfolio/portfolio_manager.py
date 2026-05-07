@@ -876,34 +876,40 @@ class PortfolioManager:
             
             # ================================================================
             # STEP 5: Total Risk Limit (Aggregate Cap)
+            # ✅ IMPROVED: Use Dollar Risk at SL (not notional exposure)
             # ================================================================
             max_total_risk_pct = self.risk_cfg.get("max_total_open_risk", 0.10)
             
-            # Calculate current total risk
-            current_total_risk = 0.0
+            # Calculate current total risk (Dollar amount at risk across all positions)
+            current_total_risk_usd = 0.0
             for position in self.positions.values():
                 if position.stop_loss:
+                    # Risk = |Entry - SL| * Quantity
                     pos_risk = abs(position.entry_price - position.stop_loss) * position.quantity
-                    current_total_risk += pos_risk
+                    current_total_risk_usd += pos_risk
+                else:
+                    # Fallback if no SL (risky but must be counted)
+                    # Estimate 5% risk if no SL found
+                    current_total_risk_usd += (position.entry_price * position.quantity * 0.05)
             
             current_total_risk_pct = (
-                current_total_risk / self.current_capital 
+                current_total_risk_usd / self.current_capital 
                 if self.current_capital > 0 
                 else 0
             )
             
             # Check if adding new trade would exceed limit
-            remaining_risk_budget = max_total_risk_pct - current_total_risk_pct
+            remaining_risk_budget_pct = max_total_risk_pct - current_total_risk_pct
             
-            if risk_pct > remaining_risk_budget:
+            if risk_pct > remaining_risk_budget_pct:
                 logger.warning(
                     f"  ⚠️ Total Risk Limit: Current {current_total_risk_pct:.2%}, "
                     f"Max {max_total_risk_pct:.2%}"
                 )
                 logger.info(
-                    f"  Risk capped from {risk_pct:.3%} to {remaining_risk_budget:.3%}"
+                    f"  Risk capped from {risk_pct:.3%} to {max(0, remaining_risk_budget_pct):.3%}"
                 )
-                risk_pct = max(0, remaining_risk_budget)
+                risk_pct = max(0, remaining_risk_budget_pct)
             
             # ================================================================
             # STEP 5.5: Risk Floor (Enforce Minimum Risk USD)
