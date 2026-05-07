@@ -26,6 +26,11 @@ class ExitReason(Enum):
     MANUAL = "manual"
     TIME_STOP = "time_stop"
     EARLY_SCALE = "early_scale"
+    # Smart market-condition exits
+    VOLATILITY_SPIKE     = "volatility_spike"      # ATR explodes 2× → risk model invalid
+    REVERSAL_CANDLE      = "reversal_candle"        # Strong engulfing bar against trade
+    TREND_INVALIDATION   = "trend_invalidation"     # 3 bars against + ADX < 20
+    MOMENTUM_EXHAUSTION  = "momentum_exhaustion"    # RSI extreme + MACD dying + ADX falling
 
 
 def find_resistance_levels(
@@ -866,6 +871,117 @@ class VeteranTradeManager:
         except Exception as e:
             logger.error(f"[VTM] SL check error: {e}")
 
+        # ══════════════════════════════════════════════════════════════════
+        # SMART MARKET-CONDITION EXITS  (Steps 2.5 – 2.7)
+        # Fire AFTER the hard SL (highest priority) but BEFORE mechanical TPs,
+        # so deteriorating market conditions are caught before price grinds to
+        # the original stop.  Each check is one-shot (gate flag prevents repeat).
+        # ══════════════════════════════════════════════════════════════════
+
+        # --- STEP 2.5: Volatility Spike Exit ---
+        # If ATR has suddenly doubled vs its 100-bar baseline the entire risk model
+        # used at entry is now wrong.  The SL is too tight for the new noise level,
+        # and a continued adverse move could be far larger than anticipated.
+        # Action: take 75 % of the remaining position off immediately; keep a 25 %
+        # runner so we don't fully exit a trade that might still be going our way.
+        # Guard: skip if trade is already up > 2× ATR (it's proving itself).
+        if not getattr(self, "_vol_spike_exited", False):
+            try:
+                is_winning = (
+                    (self.side == "long"  and current_price > self.entry_price + 2 * atr_value) or
+                    (self.side == "short" and current_price < self.entry_price - 2 * atr_value)
+                )
+                if atr_value > 2.0 * atr_slow and not is_winning:
+                    self._vol_spike_exited = True
+                    vol_exit_size = min(0.75, self.remaining_position)
+                    if vol_exit_size > 0:
+                        self.remaining_position = max(0.0, self.remaining_position - vol_exit_size)
+                        logger.warning(
+                            f"[VTM] ⚡ VOLATILITY SPIKE: {self.asset} — "
+                            f"ATR {atr_value:.5f} > 2× slow-ATR {atr_slow:.5f}. "
+                            f"Reducing {vol_exit_size:.0%}, keeping runner."
+                        )
+                        return {"reason": ExitReason.VOLATILITY_SPIKE, "price": current_price, "size": vol_exit_size}
+            except Exception as _e:
+                logger.debug(f"[VTM] Vol-spike check skipped: {_e}")
+
+        # --- STEP 2.6: Reversal Candle Exit ---
+        # A bar whose range > 1.5× ATR that closes in the lower 40 % of its own
+        # range on a long (upper 40 % on a short) is the price-action equivalent
+        # of a counter-signal: conviction reversed and fast.
+        # Action: close 50 %, tighten remaining SL to entry ± 0.3×ATR.
+        # Only fires after bar 2 (needs at least one prior close to compare).
+        if not getattr(self, "_reversal_candle_exited", False) and len(self.close) >= 3 and self.bars_in_trade >= 2:
+            try:
+                bar_range  = self.high[-1] - self.low[-1]
+                bar_mid    = (self.high[-1] + self.low[-1]) / 2
+                prev_close = self.close[-2]
+
+                bearish_reversal = (
+                    self.side == "long"
+                    and bar_range > 1.5 * atr_value          # wide, high-conviction bar
+                    and current_price < bar_mid               # closes in lower half
+                    and current_price < prev_close            # closes below prior close
+                )
+                bullish_reversal = (
+                    self.side == "short"
+                    and bar_range > 1.5 * atr_value
+                    and current_price > bar_mid               # closes in upper half
+                    and current_price > prev_close
+                )
+
+                if bearish_reversal or bullish_reversal:
+                    self._reversal_candle_exited = True
+                    rev_size = min(0.50, self.remaining_position)
+                    if rev_size > 0:
+                        self.remaining_position = max(0.0, self.remaining_position - rev_size)
+                        # Tighten SL on the runner to just inside break-even
+                        if self.side == "long":
+                            tight_sl = self.entry_price - 0.3 * atr_value
+                            if tight_sl > self.current_stop_loss:
+                                self.current_stop_loss = tight_sl
+                        else:
+                            tight_sl = self.entry_price + 0.3 * atr_value
+                            if tight_sl < self.current_stop_loss:
+                                self.current_stop_loss = tight_sl
+                        logger.warning(
+                            f"[VTM] 🕯️ REVERSAL CANDLE: {self.asset} {self.side.upper()} — "
+                            f"Range={bar_range:.5f} (1.5×ATR={1.5*atr_value:.5f}), "
+                            f"close={current_price:.5f} vs mid={bar_mid:.5f}. "
+                            f"Closing {rev_size:.0%}, SL tightened to ${self.current_stop_loss:,.5f}."
+                        )
+                        return {"reason": ExitReason.REVERSAL_CANDLE, "price": current_price, "size": rev_size}
+            except Exception as _e:
+                logger.debug(f"[VTM] Reversal-candle check skipped: {_e}")
+
+        # --- STEP 2.7: Trend Invalidation Exit ---
+        # 3 consecutive bars closing against the trade direction AND ADX < 20
+        # means the market has lost its trend entirely — the edge that opened this
+        # trade no longer exists.  Close the full remaining position rather than
+        # waiting for the original SL to be hit bar by bar.
+        # Guard: only fires when we have ≥ 4 bars (need 3 prior closes to compare)
+        # and the position has been open at least 3 bars to avoid day-1 noise.
+        if not getattr(self, "_trend_invalidated", False) and len(self.close) >= 5 and self.bars_in_trade >= 3:
+            try:
+                bars_against = sum(
+                    1 for k in range(-3, 0)
+                    if (self.side == "long"  and self.close[k] < self.close[k - 1]) or
+                       (self.side == "short" and self.close[k] > self.close[k - 1])
+                )
+                if bars_against >= 3 and adx_value < 20:
+                    self._trend_invalidated = True
+                    ti_size = self.remaining_position
+                    if ti_size > 0:
+                        self.remaining_position = 0.0
+                        logger.warning(
+                            f"[VTM] ❌ TREND INVALIDATION: {self.asset} {self.side.upper()} — "
+                            f"3 consecutive bars against + ADX={adx_value:.1f} < 20. "
+                            f"Full close ({ti_size:.0%})."
+                        )
+                        return {"reason": ExitReason.TREND_INVALIDATION, "price": current_price, "size": ti_size}
+            except Exception as _e:
+                logger.debug(f"[VTM] Trend-invalidation check skipped: {_e}")
+
         # --- STEP 3: Greed Mode Accelerator ---
         # During extreme trends/volatility, collapse early targets so the runner
         # trail captures the full move. One-shot: _greed_mode_activated prevents
@@ -950,6 +1066,61 @@ class VeteranTradeManager:
                     self.cancel_take_profit()
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
+
+        # --- STEP 5.5: Momentum Exhaustion Exit ---
+        # Three simultaneous conditions must hold:
+        #   1. RSI is in the exhaustion zone (> 75 long / < 25 short) — price stretched
+        #   2. MACD histogram declining 3 consecutive bars — momentum dying
+        #   3. ADX falling over last 2 bars — trend weakening / losing steam
+        # When all three align, the move is likely spent.  Close 50 % and lock the
+        # runner to break-even so any remaining profit is protected, not gambled.
+        # Guards: trade must be in profit and open ≥ 5 bars; needs 26 bars for MACD.
+        if not getattr(self, "_momentum_exhausted", False) and len(self.close) >= 26 and self.bars_in_trade >= 5:
+            try:
+                _in_profit = (
+                    (self.side == "long"  and current_price > self.entry_price) or
+                    (self.side == "short" and current_price < self.entry_price)
+                )
+                if _in_profit:
+                    rsi_arr  = talib.RSI(self.close, timeperiod=14)
+                    _, _, macd_hist = talib.MACD(self.close, fastperiod=12, slowperiod=26, signalperiod=9)
+                    adx_arr  = talib.ADX(self.high, self.low, self.close, timeperiod=14)
+
+                    rsi_val = rsi_arr[-1] if not np.isnan(rsi_arr[-1]) else 50.0
+                    rsi_exhausted = (self.side == "long" and rsi_val > 75) or \
+                                    (self.side == "short" and rsi_val < 25)
+
+                    h1, h2, h3 = macd_hist[-1], macd_hist[-2], macd_hist[-3]
+                    macd_dying = (
+                        not any(np.isnan(v) for v in [h1, h2, h3]) and (
+                            (self.side == "long"  and h1 < h2 < h3) or
+                            (self.side == "short" and h1 > h2 > h3)
+                        )
+                    )
+
+                    adx_weakening = (
+                        not np.isnan(adx_arr[-1]) and not np.isnan(adx_arr[-2])
+                        and adx_arr[-1] < adx_arr[-2]
+                    )
+
+                    if rsi_exhausted and macd_dying and adx_weakening:
+                        self._momentum_exhausted = True
+                        exhaust_size = min(0.50, self.remaining_position)
+                        if exhaust_size > 0:
+                            self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
+                            # Lock SL to break-even so runner can only win or scratch
+                            if self.side == "long" and self.current_stop_loss < self.entry_price:
+                                self.current_stop_loss = self.entry_price
+                            elif self.side == "short" and self.current_stop_loss > self.entry_price:
+                                self.current_stop_loss = self.entry_price
+                            logger.warning(
+                                f"[VTM] 📉 MOMENTUM EXHAUSTION: {self.asset} {self.side.upper()} — "
+                                f"RSI={rsi_val:.1f}, MACD hist declining, ADX={adx_arr[-1]:.1f}↓. "
+                                f"Closing {exhaust_size:.0%}, SL locked to break-even ${self.entry_price:,.5f}."
+                            )
+                            return {"reason": ExitReason.MOMENTUM_EXHAUSTION, "price": current_price, "size": exhaust_size}
+            except Exception as _e:
+                logger.debug(f"[VTM] Momentum-exhaustion check skipped: {_e}")
 
         # --- STEP 6: Time Decay Protection (T4.2 — dynamic extension when in profit) ---
         # Objective: Prevent stale trades turning into long-term losses.

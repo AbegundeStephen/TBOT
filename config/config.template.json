@@ -1096,6 +1096,7 @@
     "counter_trend_threshold": 3.5
   },
   "trading": {
+    "enabled": true,
     "mode": "live",
     "allow_short_positions": true,
     "allow_simultaneous_long_short": true,

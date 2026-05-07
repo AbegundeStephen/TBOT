@@ -578,6 +578,7 @@ class PortfolioManager:
                 "peak_equity": self.peak_equity,
                 "loss_streak": self.loss_streak,
                 "realized_pnl_today": self.realized_pnl_today,
+                "mode": self.mode,  # Save the mode (live/paper)
                 "timestamp": datetime.now().isoformat()
             }
             save_system_state(system_metrics)
@@ -617,13 +618,22 @@ class PortfolioManager:
             # ✨ NEW: Restore non-picklable system metrics from JSON
             system_state = load_system_state()
             if system_state:
-                self.peak_equity = system_state.get("peak_equity", self.peak_equity)
-                self.loss_streak = system_state.get("loss_streak", 0)
-                self.realized_pnl_today = system_state.get("realized_pnl_today", 0.0)
-                logger.info(
-                    f"[STATE] Metrics restored: Peak Equity=${self.peak_equity:,.2f}, "
-                    f"Loss Streak={self.loss_streak}, Today's P&L=${self.realized_pnl_today:,.2f}"
-                )
+                saved_mode = system_state.get("mode")
+                
+                # Only restore metrics if the mode matches
+                if saved_mode == self.mode:
+                    self.peak_equity = system_state.get("peak_equity", self.peak_equity)
+                    self.loss_streak = system_state.get("loss_streak", 0)
+                    self.realized_pnl_today = system_state.get("realized_pnl_today", 0.0)
+                    logger.info(
+                        f"[STATE] Metrics restored for {self.mode.upper()} mode: "
+                        f"Peak Equity=${self.peak_equity:,.2f}, Loss Streak={self.loss_streak}"
+                    )
+                else:
+                    logger.warning(
+                        f"[STATE] Skipping metrics restore: Mode mismatch "
+                        f"(Current: {self.mode.upper()}, Saved: {str(saved_mode).upper()})"
+                    )
 
             for position_id, position in loaded_positions.items():
                 logger.info(f"[STATE] Reloading position: {position_id} ({position.asset} {position.side})")
@@ -2328,15 +2338,16 @@ class PortfolioManager:
         if self.telegram_bot and self.telegram_bot._current_loop:
             try:
                 import asyncio
-                side_emoji = "🟢" if partial_pnl >= 0 else "🔴"
-                msg = (
-                    f"{side_emoji} *PARTIAL TP — {asset}*\n"
-                    f"Side: {position.side.upper()} | Closed: {partial_fraction:.0%}\n"
-                    f"Price: ${exit_price:,.2f} | P&L: ${partial_pnl:+,.2f} ({partial_pnl_pct:+.2%})\n"
-                    f"Remaining: {(1 - partial_fraction):.0%} position still active"
-                )
                 asyncio.run_coroutine_threadsafe(
-                    self.telegram_bot.send_message(msg),
+                    self.telegram_bot.notify_trade_closed(
+                        asset=asset,
+                        side=position.side,
+                        pnl=partial_pnl,
+                        pnl_pct=partial_pnl_pct * 100,
+                        reason=reason,
+                        partial=True,
+                        partial_pct=partial_fraction * 100,
+                    ),
                     self.telegram_bot._current_loop
                 )
             except Exception:
@@ -2412,6 +2423,7 @@ class PortfolioManager:
         # ================================================================
         exchange_closed = False
         close_error_msg = "Unknown handler error" # Default error message
+        broker_close_data = None  # holds dict with authoritative fill+profit
 
         if not self.is_paper_mode:
             asset_cfg = self.config["assets"].get(position.asset, {})
@@ -2423,12 +2435,19 @@ class PortfolioManager:
             else:
                 try:
                     logger.info(f"[{exchange.upper()}] Attempting to close position {position.position_id}...")
-                    exchange_closed = handler._close_position(
+                    handler_result = handler._close_position(
                         position=position,
                         current_price=exit_price,
                         asset_name=position.asset,
                         reason=reason,
                     )
+                    # Handler may now return a dict with broker fill data, or a
+                    # bare True/False for legacy/paper paths.
+                    if isinstance(handler_result, dict):
+                        broker_close_data = handler_result
+                        exchange_closed = bool(handler_result.get("ok", True))
+                    else:
+                        exchange_closed = bool(handler_result)
                     if not exchange_closed:
                         close_error_msg = f"{exchange.upper()} order was rejected or failed. Check handler logs."
 
@@ -2456,9 +2475,605 @@ class PortfolioManager:
 
         # ================================================================
         # ✅ STEP 3: CALCULATE P&L (Only if exchange close succeeded)
+        # ────────────────────────────────────────────────────────────────
+        # Prefer the broker's authoritative numbers when we have them. The
+        # local Python calc uses a cached/stale `exit_price` that can diverge
+        # significantly from the actual fill (we've seen 50¢ on USOIL = $5+
+        # under-reported), and it ignores swap + commission entirely.
         # ================================================================
-        pnl = position.get_pnl(exit_price)
-        pnl_pct = position.get_pnl_pct(exit_price)
+        broker_fill_price = None
+        broker_profit = None
+        broker_swap = 0.0
+        broker_commission = 0.0
+        if broker_close_data:
+            broker_fill_price = broker_close_data.get("fill_price")
+            broker_profit = broker_close_data.get("profit")
+            broker_swap = broker_close_data.get("swap", 0.0) or 0.0
+            broker_commission = broker_close_data.get("commission", 0.0) or 0.0
+
+        # If broker reported an actual fill price, use it as the canonical exit_price.
+        if broker_fill_price is not None and broker_fill_price > 0:
+            if exit_price and abs(broker_fill_price - exit_price) / max(abs(exit_price), 1e-9) > 0.0005:
+                logger.warning(
+                    f"[CLOSE] Stale-cache exit drift detected for {position.asset}: "
+                    f"cached ${exit_price:,.5f} vs broker fill ${broker_fill_price:,.5f}. "
+                    f"Using broker fill for P&L."
+                )
+            exit_price = broker_fill_price
+
+        if broker_profit is not None:
+            pnl = float(broker_profit) + float(broker_swap) + float(broker_commission)
+            # Derive % from broker profit against the entry notional we tracked
+            entry_notional = position.entry_price * position.quantity if position.entry_price else 0.0
+            pnl_pct = (pnl / entry_notional) if entry_notional > 0 else 0.0
+            logger.info(
+                f"[CLOSE] Using BROKER P&L for {position.asset}: "
+                f"${pnl:,.2f} (profit ${broker_profit:,.2f}, swap ${broker_swap:,.2f}, "
+                f"commission ${broker_commission:,.2f})"
+            )
+        else:
+            pnl = position.get_pnl(exit_price)
+            pnl_pct = position.get_pnl_pct(exit_price)
+            logger.debug(
+                f"[CLOSE] Broker P&L unavailable for {position.asset}; "
+                f"falling back to local calc using exit ${exit_price:,.5f}"
+            )
+
+        self.realized_pnl_today += pnl
+
+        # ✨ NEW: Record strategy performance
+        trade_type = getattr(position, 'trade_type', 'TREND')
+        self.performance_tracker.record_trade(trade_type, pnl)
+
+        # ✨ NEW: Track consecutive losses
+        if pnl < 0:
+            self.loss_streak += 1
+            logger.warning(f"[STREAK] Loss streak incremented: {self.loss_streak}")
+        else:
+            if self.loss_streak > 0:
+                logger.info(f"[STREAK] Loss streak of {self.loss_streak} reset to 0.")
+            self.loss_streak = 0
+            self._loss_streak_alerted = False  # Reset alert guard when streak clears
+
+        # Update capital
+        if self.is_paper_mode:
+            self.current_capital += pnl
+            self.equity = self.current_capital
+        else:
+            self.refresh_capital()
+
+        if self.equity > self.peak_equity:
+            self.peak_equity = self.equity
+
+        # ================================================================
+        # ✅ STEP 4: CREATE TRADE RESULT
+        # ================================================================
+        trade_result = {
+            "asset": asset or position.asset,
+            "position_id": position_id,
+            "symbol": position.symbol,
+            "side": position.side,
+            "entry_price": position.entry_price,
+            "exit_price": exit_price,
+            "quantity": position.quantity,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "entry_time": position.entry_time,
+            "exit_time": datetime.now(),
+            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
+            "reason": reason,
+            "mt5_ticket": position.mt5_ticket,
+            "binance_order_id": position.binance_order_id,
+            "exchange_closed": exchange_closed,
+        }
+
+        # ================================================================
+        # ✅ STEP 5: LOG TO DATABASE
+        # ================================================================
+        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+            try:
+                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
+                self.db_manager.update_trade_exit(
+                    trade_id=position.db_trade_id,
+                    exit_price=exit_price,
+                    exit_reason=reason,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                    holding_time_hours=holding_time,
+                    final_quantity=position.quantity,
+                    metadata={"exit_time": datetime.now().isoformat(), "exchange_closed": exchange_closed},
+                )
+                logger.debug(f"[DB] Trade exit logged: {position.db_trade_id}")
+            except Exception as e:
+                logger.error(f"[DB] Error logging trade exit: {e}")
+
+        # ================================================================
+        # ✅ STEP 6: REMOVE FROM PORTFOLIO
+        # ================================================================
+        self.closed_positions.append(trade_result)
+        # ✨ MEMORY MANAGEMENT: Limit to 100 entries
+        if len(self.closed_positions) > 100:
+            self.closed_positions.pop(0)
+            
+        del self.positions[position_id]
+
+        remaining_count = self.get_asset_position_count(position.asset, position.side)
+
+        # Standardize exit reason for logger
+        exit_event_type = "EXIT"
+        if "stop_loss" in str(reason).lower():
+            exit_event_type = "SL_HIT"
+        elif "take_profit" in str(reason).lower():
+            exit_event_type = "TP_HIT"
+
+        # ✅ Standardized Log
+        log_trade_event(exit_event_type, {
+            "symbol": position.symbol,
+            "asset": position.asset,
+            "side": position.side,
+            "price": exit_price,
+            "quantity": position.quantity,
+            "trade_type": getattr(position, 'trade_type', 'UNKNOWN'),
+            "reason": reason,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "position_id": position_id
+        })
+
+        logger.info(
+            f"✓ Position closed successfully:\n"
+            f"  Asset:     {position.asset} {position.side.upper()}\n"
+            f"  Exit:      ${exit_price:,.2f}\n"
+            f"  P&L:       ${pnl:,.2f} ({pnl_pct:.2%})\n"
+            f"  Remaining: {remaining_count}/{self.max_positions_per_asset}"
+        )
+
+        # Send notification
+        if self.telegram_bot and self.telegram_bot._current_loop:
+            try:
+                # Use a thread-safe method to call the async notification
+                asyncio.run_coroutine_threadsafe(
+                    self.telegram_bot.notify_trade_closed(
+                        asset=trade_result["asset"],
+                        side=trade_result["side"],
+                        pnl=trade_result["pnl"],
+                        pnl_pct=trade_result["pnl_pct"] * 100, # Convert to percentage points
+                        reason=trade_result["reason"],
+                    ),
+                    self.telegram_bot._current_loop
+                )
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Failed to send close notification from PM: {e}")
+
+        return trade_result
+
+    def reconcile_positions(self, asset: str, broker_positions: List[Dict]):
+        """
+        ✅ RECONCILIATION: Ensure local positions match broker reality.
+        Syncs local state if mismatches are detected.
+        """
+        local_positions = self.get_asset_positions(asset)
+        
+        # 1. Check for orphaned local positions (exist here but not on broker)
+        # We check by specific exchange ID if available
+        broker_ids = [str(p.get('id')) for p in broker_positions if p.get('id')]
+        
+        for pos in list(local_positions):
+            # A. If we have a specific exchange ID, use it for exact matching
+            local_exchange_id = str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
+            
+            if local_exchange_id != "None" and broker_ids:
+                if local_exchange_id not in broker_ids:
+                    logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
+                    self.positions.pop(pos.position_id, None)
+                    continue
+
+            # B. If no IDs (rare) or for Binance where positions are aggregated by side
+            # Check if at least one broker position exists for this side
+            broker_sides = [p.get('side').lower() for p in broker_positions if p.get('side')]
+            if pos.side.lower() not in broker_sides:
+                logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
+                self.positions.pop(pos.position_id, None)
+
+        # 2. Final check: If broker has 0 positions but we still have local ones, clear them
+        if not broker_positions and local_positions:
+            logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
+            for pos in local_positions:
+                self.positions.pop(pos.position_id, None)
+
+    @handle_errors(
+        component="portfolio_manager",
+        severity=ErrorSeverity.WARNING,
+        notify=False,  # Don't notify for update errors
+        reraise=False,
+        default_return=None,
+    )
+    def update_positions(self, prices: Dict[str, float] = None):
+        """Update all positions with current prices and exchange profit"""
+        # Update exchange positions with real-time profit
+        if not self.is_paper_mode:
+            self.update_mt5_positions_profit()
+            self.update_binance_positions_profit()
+
+        if prices:
+            for asset, price in prices.items():
+                if asset in self.price_history:
+                    self.price_history[asset].append(price)
+                    # ✨ MEMORY MANAGEMENT: Limit to 500 entries (Safe for 200 EMA + buffer)
+                    if len(self.price_history[asset]) > 500:
+                        self.price_history[asset].pop(0)
+
+        # Calculate unrealized P&L
+        total_unrealized_pnl = 0.0
+        for pos in self.positions.values():
+            # Prioritize exchange-reported profit
+            if pos.mt5_ticket and pos.mt5_profit != 0.0:
+                # Use MT5 profit for MT5 positions
+                total_unrealized_pnl += pos.mt5_profit
+            elif pos.binance_order_id and pos.binance_profit != 0.0:
+                # Use Binance profit for Binance positions
+                total_unrealized_pnl += pos.binance_profit
+            elif prices and pos.asset in prices:
+                # Calculate for positions without exchange tracking
+                total_unrealized_pnl += pos.get_pnl(prices[pos.asset])
+
+        if self.is_paper_mode:
+            # In paper mode: equity = cash + unrealized P&L
+            self.equity = self.current_capital + total_unrealized_pnl
+        else:
+            # In live mode: periodically refresh from exchanges
+            pass
+
+        if self.equity > self.peak_equity:
+            self.peak_equity = self.equity
+
+    def get_open_positions_count(self) -> int:
+        """Get number of open positions"""
+        return len(self.positions)
+
+    def get_position(self, asset: str, position_id: str = None) -> Optional[Position]:
+        """
+        Get position(s) for an asset
+
+        Args:
+            asset: Asset name
+            position_id: Optional specific position ID
+
+        Returns:
+            Position object if position_id provided, otherwise first position for asset
+        """
+        if position_id:
+            return self.positions.get(position_id)
+
+        # Return first position for asset (for backward compatibility)
+        positions = self.get_asset_positions(asset)
+        return positions[0] if positions else None
+
+    def has_position(self, asset: str, side: str = None) -> bool:
+        """
+        Check if we have any open positions for an asset
+
+        Args:
+            asset: Asset symbol
+            side: Optional side filter ('long' or 'short')
+        """
+        return self.get_asset_position_count(asset, side) > 0
+
+    def reset_daily_pnl(self):
+        """Reset realized P&L tracker (call this at start of each trading day)"""
+        self.realized_pnl_today = 0.0
+        logger.info("Daily P&L tracker reset")
+
+    def start_trading_session(self):
+        """Start trading session"""
+        self.session_start_time = datetime.now()
+        self.session_start_equity = self.equity
+        self.session_start_capital = self.current_capital
+        self.realized_pnl_today = 0.0
+        logger.info(f"Trading session started at {self.session_start_time}")
+
+    def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
+        """
+        ✅ FIX: Auto-refresh balances when getting status
+        """
+        # ✅ Refresh if stale (respects time interval)
+        self.refresh_capital(force=False)
+
+        if current_prices is None:
+            current_prices = {
+                pos.asset: pos.entry_price for pos in self.positions.values()
+            }
+
+        total_exposure = 0.0
+        total_unrealized_pnl = 0.0
+        
+        total_notional_value = 0.0
+        total_margin_used = 0.0
+
+        # ✅  Count positions per asset correctly
+        asset_position_counts = {}
+        asset_positions_detail = {}
+
+        # Get all enabled assets from config
+        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
+
+        for asset in enabled_assets:
+            # Get all positions for this asset
+            long_positions = [
+                p
+                for p in self.positions.values()
+                if p.asset == asset and p.side == "long"
+            ]
+            short_positions = [
+                p
+                for p in self.positions.values()
+                if p.asset == asset and p.side == "short"
+            ]
+
+            asset_position_counts[asset] = {
+                "long": len(long_positions),
+                "short": len(short_positions),
+                "total": len(long_positions) + len(short_positions),
+            }
+
+            # Detailed info for debugging
+            asset_positions_detail[asset] = {
+                "long_ids": [p.position_id for p in long_positions],
+                "short_ids": [p.position_id for p in short_positions],
+                "long_tickets": [p.mt5_ticket for p in long_positions if p.mt5_ticket],
+                "short_tickets": [
+                    p.mt5_ticket for p in short_positions if p.mt5_ticket
+                ],
+            }
+
+        # Calculate exposures and P&L
+        for pos in self.positions.values():
+            current_price = current_prices.get(pos.asset, pos.entry_price)
+            notional_value = pos.quantity * current_price
+            
+            # Get leverage (defaults to 1 for spot trading)
+            leverage = getattr(pos, 'leverage', 1)
+            
+            # ✅ CORRECT: Actual margin used = notional / leverage
+            # This represents your REAL capital at risk
+            margin_used = notional_value / leverage
+            
+            # Accumulate
+            total_notional_value += notional_value
+            total_margin_used += margin_used
+            total_exposure += margin_used  # ← Use margin, not notional
+            
+            # Calculate P&L (unchanged)
+            if pos.mt5_ticket and pos.mt5_profit != 0.0:
+                total_unrealized_pnl += pos.mt5_profit
+            elif pos.binance_order_id and pos.binance_profit != 0.0:
+                total_unrealized_pnl += pos.binance_profit
+            else:
+                total_unrealized_pnl += pos.get_pnl(current_price)
+        
+        if self.is_paper_mode:
+            total_value = self.current_capital + total_unrealized_pnl
+        else:
+            total_value = self.current_capital
+
+        # Calculate daily P&L
+        if self.session_start_equity is not None:
+            current_equity = self.current_capital + total_unrealized_pnl
+            daily_pnl = current_equity - self.session_start_equity
+        else:
+            daily_pnl = self.realized_pnl_today + total_unrealized_pnl
+
+        return {
+        "mode": self.mode,
+        "total_value": total_value,
+        "capital": self.current_capital,
+        "equity": self.equity,
+        "cash": self.current_capital,
+        
+        # ✅ NEW: Separate notional vs actual exposure
+        "total_notional_value": total_notional_value,      # For information
+        "total_margin_used": total_margin_used,            # For risk limits
+        "total_exposure": total_exposure,                  # ← This is margin_used
+        
+        "open_positions": len(self.positions),
+        "daily_pnl": daily_pnl,
+        "realized_pnl_today": self.realized_pnl_today,
+        "total_unrealized_pnl": total_unrealized_pnl,
+        "asset_position_counts": asset_position_counts,
+        "asset_positions_detail": asset_positions_detail,
+        "max_positions_per_asset": self.max_positions_per_asset,
+        
+        # Individual positions...
+        "positions": {
+            pos.position_id: {
+                "asset": pos.asset,
+                "side": pos.side,
+                "entry_price": pos.entry_price,
+                "quantity": pos.quantity,
+                "current_price": current_prices.get(pos.asset, pos.entry_price),
+                "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
+                
+                # ✅ NEW: Add leverage info to position details
+                "leverage": getattr(pos, 'leverage', 1),
+                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
+                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price)) / getattr(pos, 'leverage', 1),
+                
+                "pnl": (
+                    pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
+                    else pos.binance_profit if (pos.binance_order_id and pos.binance_profit != 0.0)
+                    else pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
+                ),
+                "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "mt5_ticket": pos.mt5_ticket,
+                "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
+                "binance_order_id": pos.binance_order_id,
+                "binance_profit": pos.binance_profit if pos.binance_order_id else None,
+                "leverage": getattr(pos, "leverage", 1),
+                "margin_type": getattr(pos, "margin_type", "SPOT"),
+                "is_futures": getattr(pos, "is_futures", False),
+            }
+            for pos in self.positions.values()
+        },
+        }
+
+    @handle_errors(
+        component="portfolio_manager",
+        severity=ErrorSeverity.ERROR,
+        notify=True,
+        reraise=False,
+        default_return=None,
+    )
+    def close_position(
+        self,
+        asset: str = None,
+        position_id: str = None,
+        exit_price: float = None,
+        reason: str = "manual",
+    ) -> Optional[Dict]:
+        """
+        ✅ FIXED: Close position - Validates exchange close before removing from portfolio
+        """
+        # Find position to close
+        if position_id:
+            position = self.positions.get(position_id)
+            if not position:
+                logger.warning(f"Position {position_id} not found in portfolio")
+                return None
+        elif asset:
+            positions = self.get_asset_positions(asset)
+            if not positions:
+                logger.warning(f"No positions to close for {asset}")
+                return None
+            position = positions[0]
+            position_id = position.position_id
+        else:
+            logger.error("Must provide either asset or position_id")
+            return None
+
+        # Check if position is already being closed
+        now = datetime.now()
+        if position.closing:
+            # If it's been "closing" for more than 60 seconds, assume it's stuck and allow retry
+            if position.last_close_attempt and (now - position.last_close_attempt).total_seconds() > 60:
+                logger.warning(f"Position {position_id} stuck in 'closing' for >60s. Overriding to allow retry.")
+            else:
+                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
+                return None
+        
+        if position.last_close_attempt:
+            # Add a 30-second cooldown to prevent hammer on failing close attempts
+            # (Unless we just overrode the "stuck" status above)
+            if not position.closing and (now - position.last_close_attempt).total_seconds() < 30:
+                logger.debug(f"Position {position_id} close attempt on cooldown. Skipping.")
+                return None
+            
+        # Mark the position as closing and record attempt time
+        position.closing = True
+        position.last_close_attempt = now
+
+        # ================================================================
+        # ✅ STEP 1: CLOSE ON EXCHANGE FIRST (MT5 or Binance)
+        # ================================================================
+        exchange_closed = False
+        close_error_msg = "Unknown handler error" # Default error message
+        broker_close_data = None  # holds dict with authoritative fill+profit
+
+        if not self.is_paper_mode:
+            asset_cfg = self.config["assets"].get(position.asset, {})
+            exchange = asset_cfg.get("exchange", "binance")
+            handler = self.execution_handlers.get(exchange)
+
+            if not handler:
+                close_error_msg = f"{exchange.upper()} handler not available"
+            else:
+                try:
+                    logger.info(f"[{exchange.upper()}] Attempting to close position {position.position_id}...")
+                    handler_result = handler._close_position(
+                        position=position,
+                        current_price=exit_price,
+                        asset_name=position.asset,
+                        reason=reason,
+                    )
+                    # Handler may now return a dict with broker fill data, or a
+                    # bare True/False for legacy/paper paths.
+                    if isinstance(handler_result, dict):
+                        broker_close_data = handler_result
+                        exchange_closed = bool(handler_result.get("ok", True))
+                    else:
+                        exchange_closed = bool(handler_result)
+                    if not exchange_closed:
+                        close_error_msg = f"{exchange.upper()} order was rejected or failed. Check handler logs."
+
+                except Exception as e:
+                    close_error_msg = f"Handler exception: {str(e)}"
+                    logger.error(f"[{exchange.upper()}] Error closing position: {e}", exc_info=True)
+        else:
+            # Paper mode always succeeds
+            exchange_closed = True
+
+        # ================================================================
+        # ✅ STEP 2: ABORT OR PROCEED
+        # ================================================================
+        if not exchange_closed:
+            logger.error(
+                f"[CRITICAL] Position close failed on exchange!\n"
+                f"  Position ID: {position_id}\n"
+                f"  Asset:       {position.asset}\n"
+                f"  Error:       {close_error_msg}\n"
+                f"  ⚠️  Resetting 'closing' flag to allow future attempts."
+            )
+            # RESET THE FLAG so we can try again later
+            position.closing = False
+            return None
+
+        # ================================================================
+        # ✅ STEP 3: CALCULATE P&L (Only if exchange close succeeded)
+        # ────────────────────────────────────────────────────────────────
+        # Prefer the broker's authoritative numbers when we have them. The
+        # local Python calc uses a cached/stale `exit_price` that can diverge
+        # significantly from the actual fill (we've seen 50¢ on USOIL = $5+
+        # under-reported), and it ignores swap + commission entirely.
+        # ================================================================
+        broker_fill_price = None
+        broker_profit = None
+        broker_swap = 0.0
+        broker_commission = 0.0
+        if broker_close_data:
+            broker_fill_price = broker_close_data.get("fill_price")
+            broker_profit = broker_close_data.get("profit")
+            broker_swap = broker_close_data.get("swap", 0.0) or 0.0
+            broker_commission = broker_close_data.get("commission", 0.0) or 0.0
+
+        # If broker reported an actual fill price, use it as the canonical exit_price.
+        if broker_fill_price is not None and broker_fill_price > 0:
+            if exit_price and abs(broker_fill_price - exit_price) / max(abs(exit_price), 1e-9) > 0.0005:
+                logger.warning(
+                    f"[CLOSE] Stale-cache exit drift detected for {position.asset}: "
+                    f"cached ${exit_price:,.5f} vs broker fill ${broker_fill_price:,.5f}. "
+                    f"Using broker fill for P&L."
+                )
+            exit_price = broker_fill_price
+
+        if broker_profit is not None:
+            pnl = float(broker_profit) + float(broker_swap) + float(broker_commission)
+            # Derive % from broker profit against the entry notional we tracked
+            entry_notional = position.entry_price * position.quantity if position.entry_price else 0.0
+            pnl_pct = (pnl / entry_notional) if entry_notional > 0 else 0.0
+            logger.info(
+                f"[CLOSE] Using BROKER P&L for {position.asset}: "
+                f"${pnl:,.2f} (profit ${broker_profit:,.2f}, swap ${broker_swap:,.2f}, "
+                f"commission ${broker_commission:,.2f})"
+            )
+        else:
+            pnl = position.get_pnl(exit_price)
+            pnl_pct = position.get_pnl_pct(exit_price)
+            logger.debug(
+                f"[CLOSE] Broker P&L unavailable for {position.asset}; "
+                f"falling back to local calc using exit ${exit_price:,.5f}"
+            )
+
         self.realized_pnl_today += pnl
 
         # ✨ NEW: Record strategy performance

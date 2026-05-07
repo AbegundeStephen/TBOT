@@ -2491,11 +2491,52 @@ function renderCC() {
         </div>
     </div>
     <div class="cc-feedback" id="cc-feedback"></div>
-    <div class="cc-body">`;
+    <div class="cc-body">
+        <!-- ── Quick Trading Control ────────────────────────────────────────── -->
+        <div class="cc-section" style="border-color: var(--accent);">
+            <div class="cc-section-hdr" style="background: rgba(59,130,246,0.1); color: var(--accent2);">
+                ⚡ Quick Trading Control
+            </div>
+            <div class="cc-grid" style="grid-template-columns: 1fr;">
+                <div class="cc-field" style="background: rgba(59,130,246,0.05); border-bottom: 1px solid var(--border);">
+                    <div class="cc-toggle-row">
+                        <div>
+                            <div style="font-weight: 700; color: var(--text); font-size: 13px;">Global Trading System</div>
+                            <div style="font-size: 11px; color: var(--muted2);">Master switch for all automated execution</div>
+                        </div>
+                        <button class="cc-toggle ${(ccDirty['trading.enabled'] ?? ccSchema.global?.trading?.['trading.enabled']?.value) ? 'on' : ''} ${'trading.enabled' in ccDirty ? 'dirty' : ''}"
+                            data-path="trading.enabled"
+                            onclick="ccToggle('trading.enabled', 'trading__enabled')">
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div style="padding: 10px 14px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; background: var(--surface2);">
+                Asset-Specific Toggles
+            </div>
+            <div class="cc-grid" style="grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));">
+                ${CC_ASSETS.map(asset => {
+                    const dotPath = `assets.${asset}.enabled`;
+                    const safePath = dotPath.replace(/\./g, '__');
+                    const isOn = ccDirty[dotPath] ?? ccSchema.assets?.[asset]?.[dotPath]?.value;
+                    return `
+                    <div class="cc-field" style="padding: 10px 14px;">
+                        <div class="cc-toggle-row">
+                            <span class="cc-label ${dotPath in ccDirty ? 'dirty' : ''}" style="font-size: 12px; font-weight: 600;">${asset}</span>
+                            <button class="cc-toggle ${isOn ? 'on' : ''} ${dotPath in ccDirty ? 'dirty' : ''}"
+                                data-path="${dotPath}"
+                                onclick="ccToggle('${dotPath}', '${safePath}')">
+                            </button>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>
+`;
 
     // ── Global sections ──────────────────────────────────────────────
     const globalData = ccSchema.global || {};
-    const sectionOrder = ['aggregator_settings', 'risk_management', 'portfolio'];
+    const sectionOrder = ['aggregator_settings', 'risk_management', 'portfolio', 'trading'];
     sectionOrder.forEach(sec => {
         const fields = globalData[sec];
         if (!fields) return;
@@ -2550,7 +2591,7 @@ function ccFieldHtml(dotPath, field) {
             <div class="cc-toggle-row">
                 <span class="cc-label ${isDirty?'dirty':''}">${field.label}</span>
                 <button class="cc-toggle ${on?'on':''} ${isDirty?'dirty':''}"
-                    id="cc-tog-${safePath}"
+                    data-path="${dotPath}"
                     onclick="ccToggle('${dotPath}', '${safePath}')"
                     title="${on?'Enabled — click to disable':'Disabled — click to enable'}">
                 </button>
@@ -2580,13 +2621,20 @@ function ccFieldHtml(dotPath, field) {
 }
 
 function ccToggle(dotPath, safePath) {
-    const btn = document.getElementById(`cc-tog-${safePath}`);
-    if (!btn) return;
-    const isOn = btn.classList.toggle('on');
-    btn.classList.add('dirty');
-    const label = btn.closest('.cc-field')?.querySelector('.cc-label');
-    if (label) label.classList.add('dirty');
-    ccDirty[dotPath] = isOn;
+    const toggles = document.querySelectorAll(`.cc-toggle[data-path="${dotPath}"]`);
+    if (!toggles.length) return;
+
+    // Use the first toggle to determine the next state
+    const isNowOn = !toggles[0].classList.contains('on');
+
+    toggles.forEach(btn => {
+        btn.classList.toggle('on', isNowOn);
+        btn.classList.add('dirty');
+        const label = btn.closest('.cc-field')?.querySelector('.cc-label');
+        if (label) label.classList.add('dirty');
+    });
+
+    ccDirty[dotPath] = isNowOn;
     ccUpdateBadge();
 }
 

@@ -3078,22 +3078,64 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"[TELEGRAM] notify_signal_blocked failed: {e}", exc_info=True)
 
+    # ── Exit reason registry ─────────────────────────────────────────────────
+    # Maps every VTM exit reason string to (emoji, short label, one-line context).
+    # Prefix "vtm_" is stripped before lookup so "VTM_stop_loss" → "stop_loss".
+    _EXIT_REASON_MAP = {
+        # Mechanical exits
+        "stop_loss":           ("🛑", "Stop Loss Hit",        "Price hit the hard stop."),
+        "trailing_stop":       ("🏃", "Trailing Stop",        "Trailing stop caught the pullback."),
+        "break_even":          ("⚖️",  "Break Even",           "Stopped out at entry — no loss."),
+        "take_profit_1":       ("💰", "TP1 — Partial (45%)",  "First target reached. Runner active."),
+        "take_profit_2":       ("💰", "TP2 — Partial (30%)",  "Second target reached. Runner continues."),
+        "take_profit_3":       ("💰", "TP3 — Final exit",     "All targets hit. Position closed."),
+        "time_stop":           ("⏰", "Time Stop",            "Position held too long without resolution."),
+        "early_scale":         ("⚡", "Early Scale (20%)",    "Quick profit locked in first bars."),
+        # Smart market-condition exits
+        "volatility_spike":    ("🌪️",  "Volatility Spike",    "ATR doubled — original risk model no longer valid. 75% closed, runner kept."),
+        "reversal_candle":     ("🕯️",  "Reversal Candle",     "Strong engulfing bar against position. 50% closed, SL tightened to entry."),
+        "trend_invalidation":  ("❌",  "Trend Invalidated",   "3 bars against + ADX < 20. Market turned flat — full close."),
+        "momentum_exhaustion": ("📉",  "Momentum Exhaustion", "RSI extreme + MACD dying + ADX falling. Move spent — 50% closed, SL at break-even."),
+        # Manual / other
+        "manual":              ("🖐️",  "Manual Close",        "Closed via Telegram command."),
+        "manual_close_asset":  ("🖐️",  "Manual Close",        "Closed via Telegram command."),
+        "manual_telegram_all": ("🖐️",  "Manual Close (All)",  "All positions closed via Telegram."),
+    }
+
     async def notify_trade_closed(
-        self, asset: str, side: str, pnl: float, pnl_pct: float, reason: str
+        self, asset: str, side: str, pnl: float, pnl_pct: float, reason: str,
+        partial: bool = False, partial_pct: float = None
     ):
-        """Notify when a trade is closed"""
+        """Notify when a trade is closed (full or partial)."""
         pnl_icon = "🟢" if pnl >= 0 else "🔴"
         pnl_sign = "+" if pnl >= 0 else ""
 
-        reason_formatted = reason.replace("_", " ").title()
+        # Normalise reason key: strip vtm_ prefix, lowercase
+        key = reason.lower().lstrip("vtm_").lstrip("vtm ")
+        # Handle compound prefixes like "vtm_take_profit_1"
+        if reason.lower().startswith("vtm_"):
+            key = reason[4:].lower()
+
+        entry = self._EXIT_REASON_MAP.get(key)
+        if entry:
+            r_emoji, r_label, r_context = entry
+        else:
+            r_emoji  = "📋"
+            r_label  = reason.replace("_", " ").title()
+            r_context = ""
+
+        close_type = "Partial Close" if partial else "Trade Closed"
+        size_note  = f" ({partial_pct:.0f}% of position)" if partial and partial_pct else ""
 
         msg = (
-            f"{pnl_icon} *Trade Closed: {asset}*\n\n"
-            f"Side: {side.upper()}\n"
-            f"P&L: {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
-            f"Reason: {reason_formatted}\n\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"{pnl_icon} *{close_type}: {asset}*{size_note}\n\n"
+            f"Side    : {side.upper()}\n"
+            f"P&L     : {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
+            f"Exit    : {r_emoji} {r_label}\n"
         )
+        if r_context:
+            msg += f"Context : _{r_context}_\n"
+        msg += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         await self.send_notification(msg)
 

@@ -6,7 +6,7 @@ Captures comprehensive trade metrics, signals, and performance data
 
 import logging
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import json
 from decimal import Decimal
