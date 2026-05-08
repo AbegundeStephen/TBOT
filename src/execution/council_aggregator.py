@@ -12,6 +12,8 @@ from typing import Dict, Tuple, Optional
 from collections import deque
 from datetime import datetime
 from src.utils.trap_filter import validate_candle_structure
+from src.indicators.divergence import RSIDivergenceDetector
+from src.analysis.break_retest import BreakRetestValidator
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +142,10 @@ class InstitutionalCouncilAggregator:
         self._econ_cal_path = "config/economic_calendar.json"
         self._econ_events = []
         self._load_calendar_file()
+
+        # ✨ NEW: Advanced Confluence Engines
+        self.divergence_detector = RSIDivergenceDetector(pivot_window=5)
+        self.break_retest_validator = BreakRetestValidator(lookback=50)
 
         self._log_initialization()
     
@@ -283,11 +289,13 @@ class InstitutionalCouncilAggregator:
 
             else:
                 # --- TREND GATING (STRICT) ---
-                if is_bullish and signal == -1:
-                    logger.info(f"[GOV] ❌ BLOCKED - Short attempt in Macro BULLISH regime ({regime_name})")
-                    return False, "TREND"
-                if is_bearish and signal == 1:
-                    logger.info(f"[GOV] ❌ BLOCKED - Long attempt in Macro BEARISH regime ({regime_name})")
+                if (is_bullish and signal == -1) or (is_bearish and signal == 1):
+                    # ✨ NEW: Explosive Momentum Overrule (V-Shape Reversal)
+                    if self._is_explosive_momentum(df, signal):
+                        logger.info(f"[GOV] 🚀 EXPLOSIVE MOMENTUM - Overruling Macro Veto ({regime_name})")
+                        return True, "V_SHAPE"
+                    
+                    logger.info(f"[GOV] ❌ BLOCKED - {('Short' if signal == -1 else 'Long')} attempt in Macro {('BULLISH' if is_bullish else 'BEARISH')} regime ({regime_name})")
                     return False, "TREND"
 
                 return True, "TREND"
@@ -529,6 +537,48 @@ class InstitutionalCouncilAggregator:
                     if getattr(governor, 'is_bullish', False): return "BULLISH"
                     if getattr(governor, 'is_bearish', False): return "BEARISH"
         return "NEUTRAL"
+
+    def _is_explosive_momentum(self, df: pd.DataFrame, signal: int) -> bool:
+        """
+        Detects 'V-Shape' or 'Parabolic' price action that overrules macro bias.
+        Criteria:
+        1. ADX > 30 (Strong immediate trend)
+        2. Velocity: Last 6 bars move > 2.0 * ATR14
+        3. Alignment: Price > EMA20 > EMA50 (for Longs)
+        """
+        try:
+            if len(df) < 50: return False
+            
+            close = df['close'].values
+            high = df['high'].values
+            low = df['low'].values
+            
+            # 1. Trend Strength
+            adx = ta.ADX(high, low, close, timeperiod=14)[-1]
+            if adx < 30: return False
+            
+            # 2. ATR-Scaled Velocity
+            atr = ta.ATR(high, low, close, timeperiod=14)[-1]
+            move = close[-1] - close[-6]
+            velocity_ratio = abs(move) / (atr if atr > 0 else 1)
+            
+            if velocity_ratio < 2.0: return False
+            
+            # 3. Local Alignment
+            ema20 = ta.EMA(close, timeperiod=20)[-1]
+            ema50 = ta.EMA(close, timeperiod=50)[-1]
+            
+            if signal == 1: # Buying into a bear regime
+                if move > 0 and close[-1] > ema20 > ema50:
+                    return True
+            elif signal == -1: # Selling into a bull regime
+                if move < 0 and close[-1] < ema20 < ema50:
+                    return True
+                    
+            return False
+        except Exception as e:
+            logger.debug(f"[MOMENTUM] Overrule check error: {e}")
+            return False
 
     def get_aggregated_signal(
         self, 
@@ -1386,6 +1436,17 @@ class InstitutionalCouncilAggregator:
             signal_quality = base_quality * (0.8 + 0.2 * judge_agreement)
             signal_quality = min(signal_quality, 1.0)
             
+            # Enhance reasoning with specific bonuses
+            main_reasoning = f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})"
+            bonus_tags = []
+            for exp in chosen_explanations.values():
+                if "✨" in exp or "🚀" in exp:
+                    tag = exp.split(":")[-1].split("(")[0].strip()
+                    bonus_tags.append(tag)
+            
+            if bonus_tags:
+                main_reasoning += " | " + " | ".join(bonus_tags[:2])
+
             # Build details dict
             details = {
                 'timestamp': timestamp,
@@ -1405,7 +1466,7 @@ class InstitutionalCouncilAggregator:
                 'regime_confidence': regime_conf,
                 'explanations': chosen_explanations,
                 'signal_quality': signal_quality,
-                'reasoning': f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})",
+                'reasoning': main_reasoning,
                 'mr_signal': mr_signal,
                 'mr_confidence': mr_conf,
                 'tf_signal': tf_signal,
@@ -1418,7 +1479,12 @@ class InstitutionalCouncilAggregator:
                 'judge_agreement': judge_agreement,
                 'atr_fast': atr_fast,
                 'atr_slow': atr_slow,
-                'governor_data': governor_data
+                'governor_data': governor_data,
+                'viz_overlay': {
+                    'divergence': self.divergence_detector.analyze(df) if hasattr(self, 'divergence_detector') else None,
+                    'break_retest': self.break_retest_validator.validate(df, self.asset_type) if hasattr(self, 'break_retest_validator') else None,
+                    'adx': adx
+                }
             }
             
             # Log decision
@@ -1570,6 +1636,16 @@ class InstitutionalCouncilAggregator:
             buy_score, sell_score = 0.0, 0.0
             buy_exp, sell_exp = "STRUCT BUY: ❌ No signal", "STRUCT SELL: ❌ No signal"
 
+            # ✨ NEW: Break-and-Retest Engine
+            br_res = self.break_retest_validator.validate(df, self.asset_type)
+            if br_res.is_valid:
+                if br_res.type == "BULLISH_RETEST":
+                    buy_score = min(buy_score + 0.4 * weight, weight)
+                    buy_exp = f"STRUCT BUY: ✨ {br_res.explanation} (Bonus)"
+                elif br_res.type == "BEARISH_RETEST":
+                    sell_score = min(sell_score + 0.4 * weight, weight)
+                    sell_exp = f"STRUCT SELL: ✨ {br_res.explanation} (Bonus)"
+
             if is_breakout_mode:
                 # --- BREAKOUT LOGIC: Has structure been broken? ---
                 if len(df) < 21:
@@ -1661,6 +1737,22 @@ class InstitutionalCouncilAggregator:
             sell_score = 0.0
             buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
             sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
+
+            # ✨ NEW: RSI Divergence Engine
+            div_res = self.divergence_detector.analyze(df)
+            if div_res.type != "NONE":
+                if div_res.type == "BULLISH":
+                    buy_score = min(buy_score + 0.3 * weight, weight)
+                    buy_exp += f" | ✨ {div_res.explanation}"
+                elif div_res.type == "BEARISH":
+                    sell_score = min(sell_score + 0.3 * weight, weight)
+                    sell_exp += f" | ✨ {div_res.explanation}"
+                elif div_res.type == "HIDDEN_BULLISH":
+                    buy_score = min(buy_score + 0.2 * weight, weight)
+                    buy_exp += f" | 🚀 {div_res.explanation}"
+                elif div_res.type == "HIDDEN_BEARISH":
+                    sell_score = min(sell_score + 0.2 * weight, weight)
+                    sell_exp += f" | 🚀 {div_res.explanation}"
 
             if is_breakout_mode:
                 # --- BREAKOUT LOGIC (Momentum Continuation) ---
