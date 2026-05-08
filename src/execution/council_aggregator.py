@@ -1297,36 +1297,50 @@ class InstitutionalCouncilAggregator:
                 # Apply penalties
                 total_score -= penalty
 
-                # C. SESSION LIQUIDITY PENALTY (T2.7 — extended to all asset classes)
+                # C. SESSION LIQUIDITY PENALTY (Extended to all MT5 Assets)
                 try:
                     from src.utils.market_hours import MarketHours
                     _hour_utc_s = _dt.utcnow().hour
 
+                    # 1. BTC (Binance) is 24/7 - only check for global liquidity lows
                     if "BTC" in self.asset_type:
                         session_quality = MarketHours.get_btc_session_quality()
                         if session_quality == "LOW":
                             required_score += 0.5
                             logger.info(f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}")
-                        else:
-                            if self.detailed_logging: logger.info(f"[SESSION] ✅ BTC high liquidity session (No penalty)")
 
-                    elif self.asset_type in ("GOLD", "XAUUSD"):
-                        # GOLD best hours: London open 07-12 UTC, NY 13-17 UTC
-                        if _hour_utc_s < 7 or _hour_utc_s >= 20:
-                            required_score += 0.5
-                            logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+                    # 2. MT5/Exness Assets - Apply Session Penalties
+                    else:
+                        is_off_session = False
+                        asset = self.asset_type.upper()
 
-                    elif self.asset_type in ("EURUSD", "EURJPY"):
-                        # FX best hours: London 07-12, NY overlap 12-17 UTC
-                        if _hour_utc_s < 7 or _hour_utc_s >= 20:
-                            required_score += 0.5
-                            logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+                        if any(x in asset for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")):
+                            # FX Pairs: Best during London (07-12) and NY (13-17)
+                            if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                                is_off_session = True
+                                logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC)")
 
-                    elif self.asset_type in ("USTEC", "US100", "NAS100"):
-                        # USTEC best hours: NY session 13-21 UTC
-                        if _hour_utc_s < 13 or _hour_utc_s >= 21:
+                        elif "GOLD" in asset or "XAU" in asset:
+                            # GOLD: Best 07-12 and 13-17 UTC
+                            if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                                is_off_session = True
+                                logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC)")
+
+                        elif any(x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
+                            # Indices: Best 13-21 UTC (NY Session)
+                            if _hour_utc_s < 13 or _hour_utc_s >= 21:
+                                is_off_session = True
+                                logger.info(f"[SESSION] ⚠️ INDEX off-session ({_hour_utc_s}:00 UTC)")
+
+                        elif "OIL" in asset:
+                            # OIL: Best 13-19 UTC
+                            if _hour_utc_s < 13 or _hour_utc_s >= 19:
+                                is_off_session = True
+                                logger.info(f"[SESSION] ⚠️ OIL off-session ({_hour_utc_s}:00 UTC)")
+
+                        if is_off_session:
                             required_score += 0.5
-                            logger.info(f"[SESSION] ⚠️ USTEC pre-market ({_hour_utc_s}:00 UTC): required score +0.5 → {required_score:.1f}")
+                            logger.info(f"[SESSION] Required score +0.5 → {required_score:.1f}")
 
                 except Exception as e:
                     logger.warning(f"[SESSION] Gate calculation failed: {e}")
@@ -1439,7 +1453,7 @@ class InstitutionalCouncilAggregator:
             # Enhance reasoning with specific bonuses
             main_reasoning = f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})"
             bonus_tags = []
-            for exp in chosen_explanations.values():
+            for exp in chosen_explanations:
                 if "✨" in exp or "🚀" in exp:
                     tag = exp.split(":")[-1].split("(")[0].strip()
                     bonus_tags.append(tag)
