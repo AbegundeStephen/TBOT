@@ -248,7 +248,41 @@ class AIVisualizationGenerator:
                 label=f"Current: ${current_price:,.2f}",
             )
 
-            # Add EMAs if available — try multiple common column naming conventions
+            # ✨ NEW: Advanced Overlays (Divergence, B&R, Liquidity)
+            viz_overlay = details.get("viz_overlay", {})
+            if viz_overlay:
+                # 1. RSI Divergence Overlay
+                div = viz_overlay.get("divergence")
+                if div and div.type != "NONE":
+                    color = "lime" if "BULLISH" in div.type else "red"
+                    marker = "^" if "BULLISH" in div.type else "v"
+                    ax.annotate(
+                        f"DIV: {div.type}",
+                        xy=(len(df_plot)-1, current_price),
+                        xytext=(len(df_plot)-10, current_price * (1.005 if color == "lime" else 0.995)),
+                        arrowprops=dict(facecolor=color, shrink=0.05, width=1, headwidth=5),
+                        fontsize=9, color=color, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="black", ec=color, alpha=0.7)
+                    )
+
+                # 2. Break-and-Retest Overlay
+                br = viz_overlay.get("break_retest")
+                if br and br.is_valid:
+                    ax.axhline(y=br.level, color="cyan", linestyle=":", alpha=0.6)
+                    ax.scatter(len(df_plot)-1, br.level, color="cyan", s=100, marker="*", label="Retest Zone", zorder=5)
+
+                # 3. Liquidity Sweep Marker (Wick Trap)
+                latest = df_plot.iloc[-1]
+                body = abs(latest['close'] - latest['open'])
+                high_wick = latest['high'] - max(latest['open'], latest['close'])
+                low_wick = min(latest['open'], latest['close']) - latest['low']
+
+                if (high_wick > 2.0 * body) or (low_wick > 2.0 * body):
+                    ax.scatter(len(df_plot)-1, latest['high'] if high_wick > low_wick else latest['low'], 
+                               color="orange", s=150, facecolors='none', edgecolors='orange', 
+                               linewidth=2, label="Liquidity Sweep")
+
+            # Add EMAs if available - try multiple common column naming conventions
             ema_defs = [
                 (["ema_20", "EMA_20", "EMA20", "ema20"], "yellow",   1.2, "EMA 20"),
                 (["ema_50", "EMA_50", "EMA50", "ema50"], "cyan",     1.5, "EMA 50"),

@@ -10,12 +10,14 @@ IMPROVEMENTS:
 """
 
 import pandas as pd
-from src.utils.trap_filter import validate_candle_structure
 import logging
-from typing import Dict, Tuple, Optional
 import numpy as np
+from typing import Dict, Tuple, Optional
 from collections import deque
 from datetime import datetime, timedelta
+from src.utils.trap_filter import validate_candle_structure
+from src.indicators.divergence import RSIDivergenceDetector
+from src.analysis.break_retest import BreakRetestValidator
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.info(
                 f"[AGGREGATOR] Detailed logging: {'ENABLED' if self.detailed_logging else 'DISABLED'}"
             )
+
+        # ✨ NEW: Advanced Confluence Engines
+        self.divergence_detector = RSIDivergenceDetector(pivot_window=5)
+        self.break_retest_validator = BreakRetestValidator(lookback=50)
 
         # Strategy weights — read from config, used for priority when multiple strategies fire
         # NOT for consensus voting. Hardcoded 0.50/0.50 was ignoring mean_reversion_weight: 0.0
@@ -1742,6 +1748,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
     def _calculate_score(
         self,
+        df: pd.DataFrame,
         target_signal: int,
         mr_signal: int,
         mr_conf: float,
@@ -1840,14 +1847,26 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 total_score += regime_adj
                 explanation += f" + bull({regime_adj:.2f})"
             else:
-                regime_adj = -self.config["bear_buy_penalty"]
-                total_score = max(0.0, total_score + regime_adj)
-                explanation += f" - bear({abs(regime_adj):.2f})"
+                # ✨ NEW: Explosive Momentum Overrule
+                if self._is_explosive_momentum(df, target_signal):
+                    logger.info("[MOMENTUM] Skipping bear-regime penalty due to explosive BUY momentum")
+                    regime_adj = 0
+                    explanation += " + V-Shape Overrule"
+                else:
+                    regime_adj = -self.config["bear_buy_penalty"]
+                    total_score = max(0.0, total_score + regime_adj)
+                    explanation += f" - bear({abs(regime_adj):.2f})"
         else:  # SELL
             if is_bull:
-                regime_adj = -self.config["bull_sell_penalty"]
-                total_score = max(0.0, total_score + regime_adj)
-                explanation += f" - bull({abs(regime_adj):.2f})"
+                # ✨ NEW: Explosive Momentum Overrule
+                if self._is_explosive_momentum(df, target_signal):
+                    logger.info("[MOMENTUM] Skipping bull-regime penalty due to explosive SELL momentum")
+                    regime_adj = 0
+                    explanation += " + V-Shape Overrule"
+                else:
+                    regime_adj = -self.config["bull_sell_penalty"]
+                    total_score = max(0.0, total_score + regime_adj)
+                    explanation += f" - bull({abs(regime_adj):.2f})"
             else:
                 regime_adj = self.config["bear_sell_boost"]
                 total_score += regime_adj
@@ -1856,7 +1875,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         total_score = max(0.0, total_score)
         return total_score, explanation, agreement_count
     
-    def _check_governor_filter(self, signal: int) -> Tuple[bool, Optional[str]]:
+    def _check_governor_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Optional[str]]:
         """
         Filter 1: Governor (Daily 200 EMA) Check
         
@@ -2214,6 +2233,48 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.error(f"[ADX_TREND] Error: {e}")
             return True  # Fail-open
 
+    def _is_explosive_momentum(self, df: pd.DataFrame, signal: int) -> bool:
+        """
+        Detects 'V-Shape' or 'Parabolic' price action that overrules macro bias.
+        Criteria:
+        1. ADX > 30 (Strong immediate trend)
+        2. Velocity: Last 6 bars move > 2.0 * ATR14
+        3. Alignment: Price > EMA20 > EMA50 (for Longs)
+        """
+        try:
+            if len(df) < 50: return False
+            
+            close = df['close'].values
+            high = df['high'].values
+            low = df['low'].values
+            
+            # 1. Trend Strength
+            adx = ta.ADX(high, low, close, timeperiod=14)[-1]
+            if adx < 30: return False
+            
+            # 2. ATR-Scaled Velocity
+            atr = ta.ATR(high, low, close, timeperiod=14)[-1]
+            move = close[-1] - close[-6]
+            velocity_ratio = abs(move) / (atr if atr > 0 else 1)
+            
+            if velocity_ratio < 2.0: return False
+            
+            # 3. Local Alignment
+            ema20 = ta.EMA(close, timeperiod=20)[-1]
+            ema50 = ta.EMA(close, timeperiod=50)[-1]
+            
+            if signal == 1: # Buying into a bear regime
+                if move > 0 and close[-1] > ema20 > ema50:
+                    return True
+            elif signal == -1: # Selling into a bull regime
+                if move < 0 and close[-1] < ema20 < ema50:
+                    return True
+                    
+            return False
+        except Exception as e:
+            logger.debug(f"[MOMENTUM] Overrule check error: {e}")
+            return False
+
     def get_aggregated_signal(
         self,
         df: pd.DataFrame,
@@ -2443,10 +2504,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     except Exception:
                         continue
 
-            # STEP 1: Use EXTERNAL regime context, not internal detection
+            # Step 1: Prepare context
             is_bull = is_bull_market
             regime_conf = governor_data.get('confidence', 0.5) if governor_data else 0.5
             regime_name = governor_data.get('regime', 'NEUTRAL') if governor_data else "NEUTRAL"
+
+            # ✨ NEW: Advanced Confluence Overlays
+            div_res = self.divergence_detector.analyze(df)
+            br_res = self.break_retest_validator.validate(df, self.asset_type)
 
             # D.1: Update trend lifecycle in composite state
             if state is not None:
@@ -2715,8 +2780,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 ai_validation_details = {}
 
                 # STEP 4: Calculate scores (MR + TF + EMA all contribute)
-                buy_score, buy_explanation, buy_agreement = self._calculate_score(1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
-                sell_score, sell_explanation, sell_agreement = self._calculate_score(-1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
+                buy_score, buy_explanation, buy_agreement = self._calculate_score(df, 1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
+                sell_score, sell_explanation, sell_agreement = self._calculate_score(df, -1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
 
                 # STEP 5: Dynamic thresholds
                 adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
@@ -2796,7 +2861,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # valid signals in low-ATR trending regimes (e.g. GOLD steady grind moves).
                 # Fix C: ATR expansion filter replaced with ADX trend confirmation (see method).
                 if final_signal != 0 and self.enable_filters:
-                    gov_passed, trade_type = self._check_governor_filter(final_signal)
+                    gov_passed, trade_type = self._check_governor_filter(df, final_signal)
                     if not gov_passed: final_signal = 0; reasoning = "blocked_by_governor"
                     else:
                         vol_passed, _ = self._check_volatility_filter(df)
@@ -2872,6 +2937,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ─────────────────────────────────────────────────────────────
 
             # STEP 7: Build base response
+            # ✨ NEW: Confluence Reasoning Enhancement
+            bonus_tags = []
+            if div_res and div_res.type != "NONE":
+                # Only add if aligned with signal
+                if (final_signal == 1 and "BULLISH" in div_res.type) or (final_signal == -1 and "BEARISH" in div_res.type):
+                    tag = div_res.explanation.split(":")[-1].split("(")[0].strip()
+                    bonus_tags.append(f"✨ {tag}")
+            
+            if br_res and br_res.is_valid:
+                if (final_signal == 1 and br_res.type == "BULLISH_RETEST") or (final_signal == -1 and br_res.type == "BEARISH_RETEST"):
+                    bonus_tags.append(f"🚀 {br_res.type.replace('_', ' ').title()}")
+
+            if bonus_tags:
+                reasoning += " | " + " | ".join(bonus_tags[:2])
+
             details = {
                 "timestamp": timestamp,
                 "regime": regime_name,
@@ -2891,6 +2971,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "governor_data": governor_data, # Pass governor data through
                 "ai_validation": ai_validation_details,
                 "trade_type": trade_type,
+                "viz_overlay": {
+                    "divergence": div_res,
+                    "break_retest": br_res
+                }
             }
 
             # STEP 8: Format AI validation for visualization
