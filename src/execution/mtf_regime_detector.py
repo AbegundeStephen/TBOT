@@ -169,6 +169,23 @@ class MultiTimeFrameRegimeDetector:
                 logger.info(f"[CSV]   Range: {df.index[0].strftime('%Y-%m-%d %H:%M')} to {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
                 logger.info(f"[CSV]   Age: {hours_old:.1f} hours old")
 
+                # ✨ B.1: Drop incomplete current-period candle (Consistency fix)
+                # Reason: Prevents regime "jitter" and repainting.
+                if not df.empty:
+                    _now = datetime.now(timezone.utc)
+                    if timeframe_str == "1h":
+                        _floor = _now.replace(minute=0, second=0, microsecond=0)
+                    elif timeframe_str == "4h":
+                        _h = (_now.hour // 4) * 4
+                        _floor = _now.replace(hour=_h, minute=0, second=0, microsecond=0)
+                    elif timeframe_str == "1d":
+                        _floor = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    else:
+                        _floor = _now
+                    
+                    if df.index[-1] >= _floor:
+                        df = df.iloc[:-1]
+
                 return df
 
             except Exception as e:
@@ -217,7 +234,29 @@ class MultiTimeFrameRegimeDetector:
                 start_date=start_time.strftime("%Y-%m-%d"),
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
-        return self.data_manager.clean_data(df)
+        
+        df = self.data_manager.clean_data(df)
+
+        # ✨ B.1: Drop incomplete current-period candle (Consistency fix)
+        # Reason: Prevents regime "jitter" and repainting. Ensures we only
+        # analyze CONFIRMED market structures, identical to the signal logic.
+        if not df.empty:
+            _now = datetime.now(timezone.utc)
+            if timeframe_str == "1h":
+                _floor = _now.replace(minute=0, second=0, microsecond=0)
+            elif timeframe_str == "4h":
+                # MT5/Binance 4H bars start at 0, 4, 8, 12, 16, 20 UTC
+                _h = (_now.hour // 4) * 4
+                _floor = _now.replace(hour=_h, minute=0, second=0, microsecond=0)
+            elif timeframe_str == "1d":
+                _floor = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                _floor = _now # fallback
+                
+            if df.index[-1] >= _floor:
+                df = df.iloc[:-1]
+                
+        return df
 
 
     def _analyze_governor(self, symbol: str, exchange: str) -> GovernorStatus:

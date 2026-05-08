@@ -535,7 +535,8 @@ class InstitutionalCouncilAggregator:
         df: pd.DataFrame,
         current_regime: str = "NEUTRAL",  # ✨ NEW: Accepted from main.py
         is_bull_market: bool = True,      # ✨ NEW: Accepted from main.py
-        governor_data: Optional[Dict] = None # ✨ NEW: Accepted from main.py
+        governor_data: Optional[Dict] = None, # ✨ NEW: Accepted from main.py
+        live_price: Optional[float] = None     # ✨ NEW: For accurate staleness check
     ) -> Tuple[int, Dict]:
         """
         Main council decision logic with bidirectional support
@@ -554,7 +555,8 @@ class InstitutionalCouncilAggregator:
         # Blocks evaluation when price has not moved by even 1 pip in >30 min.
         # ════════════════════════════════════════════════════════════════════
         from datetime import datetime as _dt
-        _current_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+        # Use live_price if provided (from exchange), fallback to last closed bar
+        _current_price = live_price if live_price is not None else (float(df["close"].iloc[-1]) if len(df) > 0 else 0.0)
         _now = _dt.now()
         _last = self._last_prices.get(self.asset_type)
         if _last:

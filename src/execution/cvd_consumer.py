@@ -14,10 +14,15 @@ class CVDConsumer:
         self._cvd = 0.0
         self._last_update = datetime.min
         self._running = False
+        self._last_price = 0.0  # ✨ NEW: Real-time BTC price
         # F.6: L2 Order Book Imbalance
         self._best_bid_qty = 0.0
         self._best_ask_qty = 0.0
         self._book_last_update = datetime.min
+        # ✨ NEW: L2 depth tracking
+        self._bids = []  # [[price, qty], ...]
+        self._asks = []
+        self._depth_last_update = datetime.min
 
     async def start(self):
         """Start the WebSocket consumer in a background task."""
@@ -29,10 +34,14 @@ class CVDConsumer:
 
             async with bm.aggtrade_socket("btcusdt") as stream:
                 asyncio.create_task(self._book_listener(bm))
+                asyncio.create_task(self._depth_listener(bm))
                 async for msg in stream:
                     if not self._running:
                         break
                     qty = float(msg['q'])
+                    price = float(msg['p'])
+                    self._last_price = price
+                    
                     if msg['m']:  # Seller was maker = buyer aggressed
                         self._cvd += qty
                     else:
@@ -55,6 +64,19 @@ class CVDConsumer:
         except Exception as e:
             logger.debug(f"[L2] Book ticker error: {e}")
 
+    async def _depth_listener(self, bm):
+        """L2 depth stream — top 20 levels."""
+        try:
+            async with bm.depth_socket("btcusdt", depth=20) as stream:
+                async for msg in stream:
+                    if not self._running:
+                        break
+                    self._bids = msg.get('bids', [])  # [[price, qty], ...]
+                    self._asks = msg.get('asks', [])
+                    self._depth_last_update = datetime.now()
+        except Exception as e:
+            logger.debug(f"[L2] Depth error: {e}")
+
     def get_order_book_imbalance(self) -> float:
         """Returns -1.0 to +1.0. Positive = bid heavy."""
         age = (datetime.now() - self._book_last_update).total_seconds()
@@ -65,12 +87,26 @@ class CVDConsumer:
             return 0.0
         return (self._best_bid_qty - self._best_ask_qty) / total
 
+    def get_depth(self) -> dict:
+        """Returns the most recent L2 depth snapshot."""
+        return {
+            "bids": self._bids,
+            "asks": self._asks,
+            "age": (datetime.now() - self._depth_last_update).total_seconds()
+        }
+
     def is_wall_detected(self, threshold: float = 5.0) -> bool:
         """True if one side has 5x+ more quantity than the other."""
         if self._best_bid_qty < 1e-8 or self._best_ask_qty < 1e-8:
             return False
         ratio = max(self._best_bid_qty, self._best_ask_qty) /                 min(self._best_bid_qty, self._best_ask_qty)
         return ratio > threshold
+
+    def get_last_price(self) -> float:
+        """Returns the most recent trade price from WebSocket."""
+        if self.is_stale():
+            return 0.0
+        return self._last_price
 
     def get_trend(self) -> int:
         """Returns +1 (buyers dominant), -1 (sellers dominant), 0 (neutral/stale)."""

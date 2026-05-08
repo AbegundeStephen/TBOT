@@ -247,6 +247,27 @@ class MarketHours:
         return "HIGH"
 
     @staticmethod
+    def is_rollover_dead_zone() -> bool:
+        """
+        Detects the high-risk 'Rollover' period (21:30 - 23:30 UTC).
+        This is when liquidity is lowest, spreads are highest, and price
+        action is often directionless or prone to gaps.
+        """
+        now = MarketHours.get_gmt_time()
+        hour = now.hour
+        minute = now.minute
+        
+        # 21:30 to 23:30 UTC
+        if hour == 21 and minute >= 30:
+            return True
+        if hour == 22:
+            return True
+        if hour == 23 and minute < 30:
+            return True
+            
+        return False
+
+    @staticmethod
     def should_trade(asset_type: str = "forex") -> bool:
         """
         Simple check: should we be actively trading this asset right now?

@@ -15,6 +15,7 @@ import logging
 from typing import Dict, Tuple, Optional
 import numpy as np
 from collections import deque
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -1026,55 +1027,97 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # ─── STEP 1: INSTITUTIONAL PATTERN RECOGNITION ───────────────────
 
-        # Diagnostic logging for pattern conditions
-        _p_log = f"[PATTERN CHECK] {self.asset_type}: phase={state.lifecycle_phase}"
-        
+        # ─── PATTERN DIAGNOSTICS (Issue 1, Step 1) ──────────────────────
+        # Shows exactly which conditions pass/fail for each pattern.
+        # MISSING fields = upstream module not writing to CompositeState (bug).
+        # ❌ fields = market conditions don't match (working as intended).
+        _diag_fields = {
+            "lifecycle_phase": state.lifecycle_phase,
+            "regime_age_ratio": f"{state.regime_age_ratio:.2f}",
+            "choch_detected": state.choch_detected,
+            "structural_decay": state.structural_decay,
+            "absorption_detected": state.absorption_detected,
+            "conviction_dying": state.conviction_dying,
+            "distance_zscore": f"{state.distance_zscore:.2f}",
+            "bos_detected": state.bos_detected,
+            "slopes_aligned": state.slopes_aligned,
+            "sweep_detected": state.sweep_detected,
+            "rejection_at_level": state.rejection_at_level,
+            "effort_result_zscore": f"{state.effort_result_zscore:.2f}",
+            "outside_bar": state.outside_bar,
+            "failed_breakout": state.failed_breakout,
+            "coiled_spring": state.coiled_spring,
+            "ema_50_status": state.ema_50_status,
+            "ema_50_reclassified": state.ema_50_reclassified,
+        }
+        logger.info(
+            f"[PATTERN DIAG] {self.asset_type} state: "
+            + " | ".join(f"{k}={v}" for k, v in _diag_fields.items())
+        )
+
+        # Evaluate each pattern and log which condition blocks it
+        _dist_checks = {
+            "phase∈ESTABLISHED/FADING": state.lifecycle_phase in ("ESTABLISHED", "FADING"),
+            f"age_ratio>{1.3}": state.regime_age_ratio > 1.3,
+            "choch_or_decay": state.choch_detected or state.structural_decay,
+            "absorption_or_dying": state.absorption_detected or state.conviction_dying,
+            f"dist_z>{1.5}": state.distance_zscore > 1.5,
+        }
+        _accum_checks = {
+            "phase∈PICKUP/CONFIRM": state.lifecycle_phase in ("PICKUP", "CONFIRMATION"),
+            f"age_ratio<{0.8}": state.regime_age_ratio < 0.8,
+            "bos_detected": state.bos_detected,
+            "slopes_aligned": state.slopes_aligned,
+            "no_absorption": not state.absorption_detected,
+        }
+        _liq_checks = {
+            "sweep_detected": state.sweep_detected,
+            "rejection_at_level": state.rejection_at_level,
+            f"effort_z>{2.0}": state.effort_result_zscore > 2.0,
+            "outside_or_failed": state.outside_bar or state.failed_breakout,
+        }
+        _spring_checks = {
+            "coiled_spring": state.coiled_spring,
+            "bos_detected": state.bos_detected,
+            "slopes_aligned": state.slopes_aligned,
+        }
+        _ma_checks = {
+            "ema50=DEFENDED": state.ema_50_status == "DEFENDED",
+            "ema50=SUPPORT": state.ema_50_reclassified == "SUPPORT",
+            "phase∈CONFIRM/ESTAB": state.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED"),
+            f"age_ratio<{1.5}": state.regime_age_ratio < 1.5,
+        }
+
+        for _pname, _pchecks in [
+            ("DISTRIBUTION", _dist_checks),
+            ("ACCUMULATION", _accum_checks),
+            ("LIQUIDITY_HUNT", _liq_checks),
+            ("SPRING_BREAKOUT", _spring_checks),
+            ("MA_DEFENSE", _ma_checks),
+        ]:
+            _passed = sum(_pchecks.values())
+            _total = len(_pchecks)
+            _blocker = next((k for k, v in _pchecks.items() if not v), None)
+            _status = "✅ MATCHED" if all(_pchecks.values()) else f"❌ {_passed}/{_total}"
+            logger.info(
+                f"[PATTERN CHECK] {self.asset_type} {_pname}: {_status}"
+                + (f" — first blocker: {_blocker}" if _blocker else "")
+            )
+
         # PATTERN A: Institutional Distribution
-        dist_conds = {
-            "phase": state.lifecycle_phase in ("ESTABLISHED", "FADING"),
-            "age": state.regime_age_ratio > 1.3,
-            "struct": (state.choch_detected or state.structural_decay),
-            "flow": (state.absorption_detected or state.conviction_dying),
-            "dist": state.distance_zscore > 1.5
-        }
-        
-        # PATTERN B: Institutional Accumulation
-        acc_conds = {
-            "phase": state.lifecycle_phase in ("PICKUP", "CONFIRMATION"),
-            "age": state.regime_age_ratio < 0.8,
-            "bos": state.bos_detected,
-            "slopes": state.slopes_aligned,
-            "no_abs": not state.absorption_detected
-        }
-
-        # PATTERN C: Liquidity Hunt
-        liq_conds = {
-            "sweep": state.sweep_detected,
-            "reject": state.rejection_at_level,
-            "effort": state.effort_result_zscore > 2.0,
-            "bar": (state.outside_bar or state.failed_breakout)
-        }
-
-        if any(dist_conds.values()) or any(acc_conds.values()) or any(liq_conds.values()):
-            _p_log += " | DIST: " + " ".join([f"{k}={'✅' if v else '❌'}" for k, v in dist_conds.items()])
-            _p_log += " | ACC: " + " ".join([f"{k}={'✅' if v else '❌'}" for k, v in acc_conds.items()])
-            _p_log += " | LIQ: " + " ".join([f"{k}={'✅' if v else '❌'}" for k, v in liq_conds.items()])
-            logger.info(_p_log)
-
-        # PATTERN A: Institutional Distribution
-        if all(dist_conds.values()):
+        if all(_dist_checks.values()):
             tf_conf *= 0.45
             mr_conf *= 1.25
             state.institutional_pattern = "DISTRIBUTION"
 
         # PATTERN B: Institutional Accumulation
-        elif all(acc_conds.values()):
+        elif all(_accum_checks.values()):
             tf_conf *= 1.30
             mr_conf *= 0.65
             state.institutional_pattern = "ACCUMULATION"
 
         # PATTERN C: Liquidity Hunt → Reversal
-        elif all(liq_conds.values()):
+        elif all(_liq_checks.values()):
             mr_conf *= 1.35
             tf_conf *= 0.60
             state.institutional_pattern = "LIQUIDITY_HUNT"
@@ -1903,7 +1946,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.error(f"[VOL] Error: {e}")
             return True, 0.005
     
-    def _check_sniper_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Dict]:
+    def _check_sniper_filter(self, df: pd.DataFrame, signal: int, governor_data: Dict = None) -> Tuple[bool, Dict]:
         """
         Filter 3: Sniper Lock - Institutional Edge Confirmation
         =======================================================
@@ -1916,6 +1959,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         3. Turtle Breakout: Price closes above the 20-period Donchian High or below the Low.
         4. Volume Surge: Volume is >= 150% of its 20-period rolling average.
         5. Volatility Breach: Price closes outside the 2.0 standard deviation Bollinger Bands.
+        6. Trend Momentum: Macro regime and 1H momentum are strong and aligned.
         
         Returns:
             (passed, details)
@@ -1964,6 +2008,28 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             'body_ratio': body_ratio,
                         })
 
+            # ================================================================
+            # 3. Trend Momentum (Institutional Continuity)
+            # ================================================================
+            # Reason: If the macro regime and 1H momentum are both strong and 
+            # aligned, we allow entry even without a classic breakout or pattern.
+            if governor_data:
+                _regime = governor_data.get("regime", "NEUTRAL")
+                _is_bull = "BULL" in _regime.upper()
+                _is_bear = "BEAR" in _regime.upper()
+                _h1_dir = governor_data.get("h1_momentum_dir", "FLAT")
+                
+                _regime_aligned = (signal == 1 and _is_bull) or (signal == -1 and _is_bear)
+                _h1_aligned = (signal == 1 and _h1_dir == "UP") or (signal == -1 and _h1_dir == "DOWN")
+                
+                if _regime_aligned and _h1_aligned:
+                    reasons.append({
+                        'passed': True,
+                        'trigger_type': 'TREND_MOMENTUM',
+                        'regime': _regime,
+                        'h1_dir': _h1_dir,
+                    })
+
             # Check if we have enough data for rolling indicators
             if len(df) < 21: # Need 20 periods + current
                 if reasons:
@@ -1974,7 +2040,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     return False, {'trigger_type': None, 'reason': f'Insufficient data for breakouts (have {len(df)})'}
 
             # ================================================================
-            # 3. Turtle Breakout (20-period Donchian Channel)
+            # 4. Turtle Breakout (20-period Donchian Channel)
             # ================================================================
             # Reason: Captures classic institutional breakout entries.
             # We look at the previous 20 candles to define the channel *before* the current candle.
@@ -1997,7 +2063,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 })
 
             # ================================================================
-            # 4. Volume Surge
+            # 5. Volume Surge
             # ================================================================
             # Reason: Confirms institutional participation and conviction behind a move.
             volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
@@ -2011,7 +2077,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 })
 
             # ================================================================
-            # 5. Volatility Breach (Bollinger Bands)
+            # 6. Volatility Breach (Bollinger Bands)
             # ================================================================
             # Reason: Detects that price has moved into a new volatility regime.
             close_rolling_mean = df['close'].iloc[-21:-1].mean()
@@ -2154,6 +2220,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         current_regime: str = "NEUTRAL",
         is_bull_market: bool = True,
         governor_data: Dict = None,
+        live_price: Optional[float] = None # ✨ NEW: For accurate staleness check
     ) -> Tuple[int, Dict]:
         """
         Main aggregation logic with AI validation and external regime context.
@@ -2173,7 +2240,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # moved by even 1 pip in over 30 minutes.
             # ═══════════════════════════════════════════════════════════════
             from datetime import datetime as _dt
-            _current_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+            # Use live_price if provided (from exchange), fallback to last closed bar
+            _current_price = live_price if live_price is not None else (float(df["close"].iloc[-1]) if len(df) > 0 else 0.0)
             _now = _dt.now()
             _last = self._last_prices.get(self.asset_type)
             if _last:
@@ -2383,6 +2451,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # D.1: Update trend lifecycle in composite state
             if state is not None:
                 self._update_trend_lifecycle(state, regime_name)
+                
+                # Ensure regime_age_ratio is always populated (Issue 1, Step 2 fix)
+                _start = self._regime_start_time.get(self.asset_type)
+                if _start:
+                    _age_hours = (datetime.now() - _start).total_seconds() / 3600
+                    state.regime_age_hours = _age_hours
+                    _median = state.median_regime_duration or 12.0
+                    state.regime_age_ratio = _age_hours / _median
 
             # Update stats based on provided regime
             if self.previous_regime is not None and self.previous_regime != is_bull:
@@ -2397,6 +2473,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # STEP 2: Get strategy signals
             # Pass 4H context to strategies if available
             df_4h = governor_data.get('df_4h') if governor_data else None
+            logger.debug(f"[MR INPUT] {self.asset_type}: df_4h={'present, ' + str(len(df_4h)) + ' bars' if df_4h is not None else 'MISSING'}")
             
             mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h)
             tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h)
@@ -2725,7 +2802,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         vol_passed, _ = self._check_volatility_filter(df)
                         if not vol_passed: final_signal = 0; reasoning = "low_volatility"
                         else:
-                            sniper_passed, _ = self._check_sniper_filter(df, final_signal)
+                            sniper_passed, _ = self._check_sniper_filter(df, final_signal, governor_data=governor_data)
                             if not sniper_passed: final_signal = 0; reasoning = "no_sniper_confirmation"
                             else:
                                 atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
