@@ -511,10 +511,17 @@ class MeanReversionStrategy(BaseStrategy):
             score_short = 0
             
             # PILLAR 1: THE STRETCH (2pts)
+            # Full stretch = 2 pts
             stretch_long = (ema_50[-1] - current_close > 2.0 * atr[-1]) or (current_close < bb_lower[-1])
             stretch_short = (current_close - ema_50[-1] > 2.0 * atr[-1]) or (current_close > bb_upper[-1])
             if stretch_long: score_long += 2
             if stretch_short: score_short += 2
+
+            # Half stretch = 1 pt (new — catches moderate pullbacks)
+            if not stretch_long and (ema_50[-1] - current_close > 1.2 * atr[-1]):
+                score_long += 1
+            if not stretch_short and (current_close - ema_50[-1] > 1.2 * atr[-1]):
+                score_short += 1
 
             # PILLAR 2: THE DIVERGENCE (1pt)
             div_long = self._check_divergence(features_df, signal=1, period=60)
@@ -531,6 +538,8 @@ class MeanReversionStrategy(BaseStrategy):
             if sweep_short: score_short += 1
 
             # PILLAR 4: THE EXHAUSTION (1pt)
+            exhaust_long = False
+            exhaust_short = False
             if bb_pos[-1] < 0.15 or bb_pos[-1] > 0.85:
                 patterns_to_check = {
                     'Hammer': ta.CDLHAMMER,
@@ -541,8 +550,26 @@ class MeanReversionStrategy(BaseStrategy):
                 for name, func in patterns_to_check.items():
                     res = func(o, h, l, c)
                     if res[-1] != 0:
-                        if res[-1] > 0: score_long += 1
-                        if res[-1] < 0: score_short += 1
+                        if res[-1] > 0: 
+                            score_long += 1
+                            exhaust_long = True
+                        if res[-1] < 0: 
+                            score_short += 1
+                            exhaust_short = True
+
+            # ================================================================
+            # DIAGNOSTIC: Log scorecard breakdown every cycle (Issue 2, Step 1)
+            # ================================================================
+            logger.info(
+                f"[MR SCORECARD] {self.asset}:\n"
+                f"  STRETCH:   long={stretch_long} short={stretch_short} "
+                f"(dist={abs(ema_50[-1] - current_close):.2f}, 2xATR={2.0 * atr[-1]:.2f}, 1.2xATR={1.2 * atr[-1]:.2f})\n"
+                f"  DIVERGENCE: long={div_long} short={div_short}\n"
+                f"  SWEEP:     long={sweep_long} short={sweep_short} "
+                f"(min={np.min(lookback_100) if len(lookback_100) > 0 else 0:.2f}, max={np.max(highback_100) if len(highback_100) > 0 else 0:.2f})\n"
+                f"  EXHAUSTION: long={exhaust_long} short={exhaust_short} (bb_pos={bb_pos[-1]:.3f})\n"
+                f"  SCORES:    long={score_long}/5 short={score_short}/5 (need ≥3)"
+            )
 
             # ================================================================
             # ✅ MICRO-REVERSION PATH

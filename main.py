@@ -877,8 +877,9 @@ class TradingBot:
 
     def run_mtf_regime_analysis(self):
         """
-        Run multi-timeframe regime analysis for all enabled assets
-        Scheduled to run every 4 hours
+        Run multi-timeframe regime analysis for all enabled assets.
+        Primary use is for initial startup and periodic background logging.
+        Actual trading signals now fetch fresh regime data on-demand (5min cache).
         """
         try:
             if not self.mtf_integration:
@@ -1681,6 +1682,7 @@ class TradingBot:
         df: pd.DataFrame,
         aggregators: Dict,
         hybrid_selector,
+        live_price: Optional[float] = None  # ✨ NEW: Pass through for staleness check
     ) -> Tuple[int, Dict]:
         """
         ✅ FIXED: Ensures AI validation details are ALWAYS populated
@@ -1728,6 +1730,7 @@ class TradingBot:
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
                     mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
+                    mtf_regime["last_trade_price"] = self.cvd_consumer.get_last_price()
             if hasattr(self, "_dxy_falling"):
                 mtf_regime["dxy_falling"] = self._dxy_falling
 
@@ -1737,6 +1740,7 @@ class TradingBot:
                 current_regime=mtf_regime.get("regime", "NEUTRAL"),
                 is_bull_market=mtf_regime.get("is_bull", False),
                 governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
+                live_price=live_price      # ✨ NEW: For accurate staleness check
             )
 
             logger.info(
@@ -1757,6 +1761,13 @@ class TradingBot:
             # Error 9 fix: inject T3.5/T3.6 enrichments into the performance hybrid fork
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
+                # F.4: BTC CVD order flow + F.6: L2 order book
+                if self.cvd_consumer:
+                    mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
+                    mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
+                    mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
+                    mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
+                    mtf_regime["last_trade_price"] = self.cvd_consumer.get_last_price()
             if hasattr(self, "_dxy_falling"):
                 mtf_regime["dxy_falling"] = self._dxy_falling
 
@@ -1765,6 +1776,7 @@ class TradingBot:
                 current_regime=mtf_regime.get("regime", "NEUTRAL"),
                 is_bull_market=mtf_regime.get("is_bull", False),
                 governor_data=mtf_regime,
+                live_price=live_price      # ✨ NEW: For accurate staleness check
             )
 
             logger.info(
@@ -3192,10 +3204,21 @@ class TradingBot:
                 if self.last_market_status_log != current_hour:
                     logger.info(f"[MARKET] {asset_name}: {message}")
                     self.last_market_status_log = current_hour
-            return is_open
+                return False
+            
+            # ✅ TASK 24: Rollover Dead Zone Protection
+            # Reason: Spreads explode and liquidity vanishes during 21:30 - 23:30 UTC.
+            if MarketHours.is_rollover_dead_zone():
+                current_hour = datetime.now().hour
+                if self.last_market_status_log != current_hour:
+                    logger.info(f"[MARKET] {asset_name}: Rollover Dead Zone (21:30-23:30 UTC) — Blocking entry.")
+                    self.last_market_status_log = current_hour
+                return False
+                
+            return True
             
         # Forex (EURJPY, EURUSD) is 24/5
-        if "EUR" in asset_name_upper:
+        if "EUR" in asset_name_upper or "GBP" in asset_name_upper:
             # Simple check for weekend (Saturday/Sunday UTC)
             # Forex typically closes Friday 22:00 UTC and opens Sunday 22:00 UTC
             now = datetime.now(timezone.utc)
@@ -3204,10 +3227,17 @@ class TradingBot:
             if weekday == 5: # Saturday
                 return False
             if weekday == 6: # Sunday
-                # Optional: check if Sunday evening
                 if now.hour < 22:
                     return False
             if weekday == 4 and now.hour >= 22: # Friday evening
+                return False
+            
+            # ✅ TASK 24: Rollover Dead Zone Protection
+            if MarketHours.is_rollover_dead_zone():
+                current_hour = datetime.now().hour
+                if self.last_market_status_log != current_hour:
+                    logger.info(f"[MARKET] {asset_name}: Rollover Dead Zone (21:30-23:30 UTC) — Blocking entry.")
+                    self.last_market_status_log = current_hour
                 return False
                 
             return True
@@ -3309,10 +3339,30 @@ class TradingBot:
                 return
 
             # ============================================================
-            # 2. Generate Signal (Hybrid or Single)
+            # 2. Get Current Price & Generate Signal
             # ============================================================
+            # Fetch live price BEFORE aggregator so it can use it for staleness check
+            try:
+                # ✅ CRITICAL: Force a live price fetch ONLY at the moment of execution
+                current_price = handler.get_current_price(symbol, force_live=True)
+            except Exception as e:
+                logger.debug(f"[TRADE ASSET] Live price fetch failed ({e}), using last close")
+                current_price = float(df["close"].iloc[-1])
+
+            # ✅ RE-CALCULATE REGIME (5min Cache): Ensure we are using fresh regime data
+            # before making any directional decisions. This prevents staying in a stale 
+            # regime for up to 30 mins after a trend flip.
             mtf_regime = {}
-            if (
+            if self.mtf_integration:
+                try:
+                    mtf_regime = self.mtf_integration.get_regime_for_trading(
+                        asset_name=asset_name, symbol=symbol, exchange=exchange
+                    )
+                    self._current_regime_data[asset_name] = mtf_regime
+                except Exception as e:
+                    logger.error(f"[MTF] Failed to update regime for {asset_name}: {e}")
+                    mtf_regime = self._current_regime_data.get(asset_name, {})
+            elif (
                 hasattr(self, "_current_regime_data")
                 and asset_name in self._current_regime_data
             ):
@@ -3324,6 +3374,7 @@ class TradingBot:
                     df,
                     aggregators=aggregator,
                     hybrid_selector=self.hybrid_selector,
+                    live_price=current_price
                 )
             else:
                 # SINGLE AGGREGATOR MODE:
@@ -3333,14 +3384,8 @@ class TradingBot:
                     current_regime=mtf_regime.get("regime", "NEUTRAL"),
                     is_bull_market=mtf_regime.get("is_bull", False),
                     governor_data=mtf_regime,
+                    live_price=current_price
                 )
-
-            # Get current price
-            try:
-                # ✅ CRITICAL: Force a live price fetch ONLY at the moment of execution
-                current_price = handler.get_current_price(symbol, force_live=True)
-            except:
-                current_price = float(df["close"].iloc[-1])
 
             details["price"] = current_price
 
@@ -4155,6 +4200,7 @@ class TradingBot:
                     df=df,
                     aggregators=aggregator,
                     hybrid_selector=self.hybrid_selector,
+                    live_price=current_price
                 )
             else:
                 # SINGLE AGGREGATOR MODE:
@@ -4164,6 +4210,7 @@ class TradingBot:
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
                         is_bull_market=mtf_regime.get("is_bull", False),
                         governor_data=mtf_regime,
+                        live_price=current_price
                     )
                     # Stamp the engine label so charts + Telegram always know the source
                     details["aggregator_mode"] = "council"
@@ -4175,6 +4222,7 @@ class TradingBot:
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
                         is_bull_market=mtf_regime.get("is_bull", False),
                         governor_data=mtf_regime,
+                        live_price=current_price
                     )
                     # Stamp the engine label so charts + Telegram always know the source
                     details["aggregator_mode"] = "performance"
@@ -4599,9 +4647,6 @@ class TradingBot:
 
             # Start dashboard server
             self.dashboard_server = start_dashboard_server()
-
-            # Setup periodic tasks
-            schedule.every(30).minutes.do(self.run_mtf_regime_analysis)
 
             # F.4: CVD daily reset at 00:00 UTC
             def _cvd_daily_reset():

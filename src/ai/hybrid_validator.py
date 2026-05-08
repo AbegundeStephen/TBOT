@@ -319,6 +319,17 @@ class HybridSignalValidator:
                 f"| regime-aligned → approve with quality penalty"
             )
             signal_details = {**signal_details, "ai_quality_penalty": 0.04, "h1_momentum_pass": True}
+        elif regime_aligned and h1_momentum_confirmed and signal_quality >= 0.65:
+            # ── HIGH CONFIDENCE TREND BYPASS (new) ──────────────────────────
+            # If the 4H trend and 1H momentum are perfectly aligned and signal
+            # quality is high (>65%), we allow entry even if BOTH S/R and 
+            # pattern filters fail. This prevents being 'locked out' of strong
+            # moves that are mid-air (no S/R) and momentum-based (no pattern).
+            logger.info(
+                f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
+                f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
+            )
+            signal_details = {**signal_details, "ai_quality_penalty": 0.08, "trend_bypass": True}
         else:
             # Hard reject — either both failed, or counter-trend with one missing,
             # or 1H momentum contradicts the signal direction.
