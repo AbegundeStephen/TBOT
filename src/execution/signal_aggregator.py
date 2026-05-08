@@ -2897,6 +2897,56 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     signal_quality = round(signal_quality * _flash_discount, 4)
                     reasoning += f" [flash_discount:{_flash_discount:.0%}]"
 
+                # ═══════════════════════════════════════════════════════════
+                # C. SESSION LIQUIDITY PENALTY (Extended to all MT5 Assets)
+                # ═══════════════════════════════════════════════════════════
+                try:
+                    if final_signal != 0:
+                        from src.utils.market_hours import MarketHours
+                        _hour_utc_s = _dt.utcnow().hour
+                        
+                        # 1. BTC (Binance) is 24/7 - only check for global liquidity lows
+                        if "BTC" in self.asset_type:
+                            session_quality = MarketHours.get_btc_session_quality()
+                            if session_quality == "LOW":
+                                signal_quality *= 0.85
+                                reasoning += " [session:LOW_LIQ]"
+                                logger.info(f"[SESSION] ⚠️ BTC low liquidity: quality discounted")
+
+                        # 2. MT5/Exness Assets - Apply Session Penalties
+                        else:
+                            is_off_session = False
+                            asset = self.asset_type.upper()
+
+                            if any(x in asset for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")):
+                                if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                                    is_off_session = True
+                                    logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC)")
+
+                            elif "GOLD" in asset or "XAU" in asset:
+                                if _hour_utc_s < 7 or _hour_utc_s >= 20:
+                                    is_off_session = True
+                                    logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC)")
+
+                            elif any(x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
+                                if _hour_utc_s < 13 or _hour_utc_s >= 21:
+                                    is_off_session = True
+                                    logger.info(f"[SESSION] ⚠️ INDEX off-session ({_hour_utc_s}:00 UTC)")
+
+                            elif "OIL" in asset:
+                                if _hour_utc_s < 13 or _hour_utc_s >= 19:
+                                    is_off_session = True
+                                    logger.info(f"[SESSION] ⚠️ OIL off-session ({_hour_utc_s}:00 UTC)")
+
+                            if is_off_session:
+                                # In Performance mode, we discount the final quality score
+                                signal_quality *= 0.80
+                                reasoning += " [session:OFF]"
+                                logger.info(f"[SESSION] Off-session discount applied to {asset}")
+
+                except Exception as e:
+                    logger.warning(f"[SESSION] Gate calculation failed: {e}")
+
             # ── CONTEXT ENGINE WIRING ─────────────────────────────────────
             # F.3: MR Divergence Cross-Signal (reads from MR strategy if available)
             if state is not None:
