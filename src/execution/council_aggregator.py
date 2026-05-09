@@ -989,31 +989,44 @@ class InstitutionalCouncilAggregator:
             required_score = self.trend_aligned_threshold
             chosen_scores = {}
             decision_type = "HOLD"
-            
+
             # Determine preliminary trade type from preset
             preset_name = self.config.get('name', 'balanced').lower()
             trade_type = "REVERSION" if preset_name == "mr" else "TREND"
-            
+
+            # SLIGHTLY regime: raise the counter-trend bar to match signal_aggregator's 0.50
+            # confidence penalty, preventing low-conviction counter-trend trades in ambiguous regimes.
+            _is_slightly = consensus_regime in ("SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH")
+            _effective_counter_threshold = (
+                min(self.counter_trend_threshold + 0.50, self.trend_aligned_threshold)
+                if _is_slightly else self.counter_trend_threshold
+            )
+            if _is_slightly and self.detailed_logging:
+                logger.debug(
+                    f"[COUNCIL] SLIGHTLY regime — counter_trend_threshold raised: "
+                    f"{self.counter_trend_threshold:.2f} → {_effective_counter_threshold:.2f}"
+                )
+
             # Determine preliminary signal
             if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
                 total_score = buy_total
                 required_score = self.trend_aligned_threshold
                 chosen_scores = buy_scores
-            elif not is_bull and buy_total >= self.counter_trend_threshold:
+            elif not is_bull and buy_total >= _effective_counter_threshold:
                 signal = 1
                 total_score = buy_total
-                required_score = self.counter_trend_threshold
+                required_score = _effective_counter_threshold
                 chosen_scores = buy_scores
             elif not is_bull and sell_total >= self.trend_aligned_threshold:
                 signal = -1
                 total_score = sell_total
                 required_score = self.trend_aligned_threshold
                 chosen_scores = sell_scores
-            elif is_bull and sell_total >= self.counter_trend_threshold:
+            elif is_bull and sell_total >= _effective_counter_threshold:
                 signal = -1
                 total_score = sell_total
-                required_score = self.counter_trend_threshold
+                required_score = _effective_counter_threshold
                 chosen_scores = sell_scores
 
             # Capture initial consensus before penalties and vetos
@@ -1101,7 +1114,17 @@ class InstitutionalCouncilAggregator:
                         logger.info(f"[GOV] 🔄 TRANSITION: Neutral market — required score raised to {required_score:.2f}")
 
                 # 2. ATR WICK TRAP (ABSOLUTE VETO) — T2.3: pass regime context
-                _trap_regime_aligned = (signal == 1 and is_bull) or (signal == -1 and not is_bull)
+                # Fix #16 (council): Neutral regime SHORT bias — when is_bull=False and regime is NEUTRAL,
+                # counter-trend LONGs were incorrectly flagged as "not regime-aligned", applying tighter
+                # wick-trap thresholds. Neutral means no directional bias; all signals are equally aligned.
+                _regime_is_bullish = governor_data.get('is_bullish', False) if governor_data else False
+                _regime_is_bearish = governor_data.get('is_bearish', False) if governor_data else False
+                _is_neutral_regime = not _regime_is_bullish and not _regime_is_bearish
+                _trap_regime_aligned = (
+                    _is_neutral_regime or
+                    (signal == 1 and is_bull) or
+                    (signal == -1 and not is_bull)
+                )
                 if not validate_candle_structure(
                     df, self.asset_type,
                     direction="long" if signal == 1 else "short",

@@ -766,7 +766,9 @@ class TradingTelegramBot:
             if not found_decisions:
                 msg = "🤷 No trading decisions recorded yet."
 
-            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            await self._send_chunked(
+                update.message.reply_text, msg, parse_mode=ParseMode.HTML
+            )
 
         except Exception as e:
             logger.error(f"Error in cmd_last_decision: {e}", exc_info=True)
@@ -1083,8 +1085,11 @@ class TradingTelegramBot:
             msg += f"🕐 {datetime.now().strftime('%H:%M:%S')}  |  💡 /set_sl /set_tp to adjust"
             keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="positions"),
                          InlineKeyboardButton("🎯 VTM", callback_data="status")]]
-            await update.message.reply_text(msg, parse_mode="HTML",
-                                            reply_markup=InlineKeyboardMarkup(keyboard))
+            await self._send_chunked(
+                update.message.reply_text, msg,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         except Exception as e:
             logger.error(f"[TG] /positions error: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching positions")
@@ -1856,8 +1861,10 @@ class TradingTelegramBot:
             # ✅ Offload to thread
             msg, reply_markup = await asyncio.to_thread(_prepare_modes)
 
-            await update.message.reply_text(
-                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            await self._send_chunked(
+                update.message.reply_text, msg,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup,
             )
 
         except Exception as e:
@@ -2083,8 +2090,10 @@ class TradingTelegramBot:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
-                msg, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            await self._send_chunked(
+                update.message.reply_text, msg,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup,
             )
 
         except Exception as e:
