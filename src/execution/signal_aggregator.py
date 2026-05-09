@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from src.utils.trap_filter import validate_candle_structure
 from src.indicators.divergence import RSIDivergenceDetector
 from src.analysis.break_retest import BreakRetestValidator
+from src.execution.transition_detector import TransitionDetector
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +296,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # MT5 assets trade market hours only — 90 min avoids false stale alerts
         # across the overnight close gap. Crypto is 24/7 so 30 min is tight enough.
         self._last_prices = {}
-        self._stale_threshold_minutes = 30   # default (crypto / Binance)
+        self._stale_threshold_minutes = 65   # default — exceeds 1H candle duration
         self._stale_thresholds = {           # per-asset overrides
             "GOLD":   90,
             "USTEC":  90,
@@ -321,7 +322,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── CONTEXT ENGINE: new infrastructure ──────────────────────────────
         # B.3: Dynamic thresholds
         from src.utils.dynamic_thresholds import DynamicThresholds
-        self.dynamic_thresholds = DynamicThresholds(lookback=100, min_samples=20)
+        self.dynamic_thresholds = DynamicThresholds(lookback=100, min_samples=5)
 
         # D.1: Trend Lifecycle tracking
         self._previous_regime = {}    # {asset: regime_name}
@@ -356,6 +357,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         self._state_persistence_path = "data/aggregator_state.json"
         self._load_persisted_state()
         # ────────────────────────────────────────────────────────────────────
+
+        # Regime transition evidence collector (SLIGHTLY regimes only)
+        self._transition_detector = TransitionDetector()
 
         self._log_initialization()
 
@@ -739,6 +743,29 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             state.order_book_imbalance = float(governor_data.get("order_book_imbalance", 0.0))
             state.order_book_wall_detected = bool(governor_data.get("order_book_wall_detected", False))
 
+        # ── TRANSITION EVIDENCE (SLIGHTLY regimes only) ───────────────────
+        # Must run AFTER CVD/order-book fields are populated above so the
+        # order_flow sub-score has live data. df_4h is already available as
+        # the second parameter of _build_composite_state.
+        state._transition_evidence = None
+        _regime_name = governor_data.get("consensus_regime", "UNKNOWN") if governor_data else "UNKNOWN"
+        if _regime_name in ("SLIGHTLY_BEARISH", "SLIGHTLY_BULLISH"):
+            try:
+                _depth = governor_data.get("depth_data") if governor_data else None
+                state._transition_evidence = self._transition_detector.collect_evidence(
+                    asset=self.asset_type,
+                    regime=_regime_name,
+                    df_4h=df_4h if df_4h is not None else pd.DataFrame(),
+                    df_1h=df,
+                    composite_state=state,
+                    cvd_trend=state.cvd_trend,
+                    order_book_imbalance=state.order_book_imbalance,
+                    depth_data=_depth,
+                )
+            except Exception as _te_err:
+                logger.debug(f"[TRANSITION] Evidence collection error: {_te_err}")
+        # ─────────────────────────────────────────────────────────────────
+
         # ── F.7: MT5 Spread Velocity (synthetic L2 proxy for non-BTC) ────
         if self.asset_type not in ("BTC", "BTCUSDT") and governor_data:
             try:
@@ -969,6 +996,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 state.ema_50_reclassified = "RESISTANCE"
             else:
                 state.ema_50_status = "UNTESTED"
+
+            # Fix #15: MA Defense diagnostics
+            logger.debug(
+                f"[MA_DEFENSE] {self.asset_type}: "
+                f"status={state.ema_50_status} "
+                f"reclassified={state.ema_50_reclassified} "
+                f"dist_to_50={abs(_c - _ema50):.4f} "
+                f"defense_strength={state.defense_strength:.2f}"
+            )
         except Exception:
             pass
 
@@ -2656,68 +2692,127 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             regime_is_bearish = governor_data.get("is_bearish", False) if governor_data else False
 
             # ═══════════════════════════════════════════════════════════════
-            # SMART GATEKEEPER — Strategy-Aware Routing (T1.3 fix)
+            # ENHANCED GATEKEEPER — Confidence Scaling + Transition Evidence
             # ═══════════════════════════════════════════════════════════════
-            # OLD BEHAVIOUR (bug): regime_score == 0.0 (NEUTRAL) killed ALL signals.
-            # MR was treated identically to TF despite being an opposite strategy type.
-            #
-            # NEW RULES (from 30-day simulation data):
-            #   TF/EMA: Block counter-trend ALWAYS. Allow trend-aligned ALWAYS.
-            #   MR: Block counter-trend in BULLISH/BEARISH/SLIGHTLY regimes.
-            #       Allow counter-trend ONLY in NEUTRAL (+159% P&L, 71% WR).
-            #       Allow trend-aligned ALWAYS (+110% in SLIGHTLY_BEAR, 87% WR).
-            #   NEUTRAL (regime_score == 0): All strategies fire freely.
-            #       50% sizing is applied via T2.1 TRANSITION state in governor.
+            # FULL regimes (|regime_score| >= 1.0): hard block counter-trend.
+            # SLIGHTLY regimes (|regime_score| < 1.0): penalise confidence,
+            #   with penalty modulated by TransitionEvidence (2+ conditions
+            #   required before any reduction is applied).
+            # NEUTRAL: all strategies fire freely.
+            # Explosive momentum overrule preserved for full-regime hard blocks.
             # ═══════════════════════════════════════════════════════════════
             if self.use_gatekeeper:
                 is_neutral = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
+                regime_strength = abs(regime_score)  # 0.5 for SLIGHTLY, 1.0 for full
+
+                # Pull transition evidence if available
+                _te = getattr(state, '_transition_evidence', None) if state else None
+                _transition_score = _te.total_score if _te else 0.0
+                _transition_conditions = _te.conditions_met if _te else 0
 
                 if is_neutral:
                     # NEUTRAL: all strategies allowed in any direction
                     logger.debug(f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})")
 
                 elif regime_is_bullish:
-                    # TF/EMA: block shorts (counter-trend in bull)
-                    if tf_signal < 0:
-                        if self._is_explosive_momentum(df, -1):
-                            logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)")
-                        else:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Bullish regime for {self.asset_type}")
-                            tf_signal = 0; tf_conf = 0.0
-                    if ema_signal < 0:
-                        if self._is_explosive_momentum(df, -1):
-                            logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)")
-                        else:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Bullish regime for {self.asset_type}")
+                    if regime_strength >= 1.0:
+                        # FULL BULLISH: hard block counter-trend shorts
+                        if tf_signal < 0:
+                            if self._is_explosive_momentum(df, -1):
+                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)")
+                            else:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Strong bullish for {self.asset_type}")
+                                tf_signal = 0; tf_conf = 0.0
+                        if ema_signal < 0:
+                            if self._is_explosive_momentum(df, -1):
+                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)")
+                            else:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Strong bullish for {self.asset_type}")
+                                ema_signal = 0; ema_conf = 0.0
+                        if mr_signal < 0:
+                            logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in strong Bullish for {self.asset_type}")
+                            mr_signal = 0; mr_conf = 0.0
+                        elif mr_signal > 0:
+                            logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in strong Bullish for {self.asset_type}")
+
+                    else:
+                        # SLIGHTLY BULLISH: penalise shorts, don't kill them
+                        # Bearish reversal evidence in a slightly bullish zone reduces penalty
+                        _penalty = 0.50  # base: halve confidence
+                        if _transition_conditions >= 2 and _transition_score < -0.15:
+                            _penalty = max(0.30, _penalty + _transition_score)
+                            logger.info(
+                                f"[GATEKEEPER] TRANSITION evidence reduces SHORT penalty: "
+                                f"{_penalty:.2f} (score={_transition_score:+.3f}, "
+                                f"conditions={_transition_conditions}/4)"
+                            )
+                        if tf_signal < 0:
+                            tf_conf *= _penalty
+                            logger.info(
+                                f"[GATEKEEPER] ⚠️ PENALIZED SHORT (TF): Slightly bullish — "
+                                f"conf reduced to {tf_conf:.2f}"
+                            )
+                        if ema_signal < 0:
+                            # EMA is a slow-trend follower — still zero in counter trend
                             ema_signal = 0; ema_conf = 0.0
-                    # MR: block counter-trend SELL, allow trend-aligned BUY (dip buying)
-                    if mr_signal < 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in Bullish for {self.asset_type}")
-                        mr_signal = 0; mr_conf = 0.0
-                    elif mr_signal > 0:
-                        logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in Bullish for {self.asset_type}")
+                        if mr_signal < 0:
+                            mr_conf *= min(_penalty + 0.10, 0.80)  # MR slightly less penalised
+                            logger.info(
+                                f"[GATEKEEPER] ⚠️ PENALIZED SHORT (MR): Slightly bullish — "
+                                f"conf reduced to {mr_conf:.2f}"
+                            )
+                        elif mr_signal > 0:
+                            logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in slightly Bullish for {self.asset_type}")
 
                 elif regime_is_bearish:
-                    # TF/EMA: block longs (counter-trend in bear)
-                    if tf_signal > 0:
-                        if self._is_explosive_momentum(df, 1):
-                            logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)")
-                        else:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Bearish regime for {self.asset_type}")
-                            tf_signal = 0; tf_conf = 0.0
-                    if ema_signal > 0:
-                        if self._is_explosive_momentum(df, 1):
-                            logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)")
-                        else:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Bearish regime for {self.asset_type}")
+                    if regime_strength >= 1.0:
+                        # FULL BEARISH: hard block counter-trend longs
+                        if tf_signal > 0:
+                            if self._is_explosive_momentum(df, 1):
+                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)")
+                            else:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Strong bearish for {self.asset_type}")
+                                tf_signal = 0; tf_conf = 0.0
+                        if ema_signal > 0:
+                            if self._is_explosive_momentum(df, 1):
+                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)")
+                            else:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Strong bearish for {self.asset_type}")
+                                ema_signal = 0; ema_conf = 0.0
+                        if mr_signal > 0:
+                            logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in strong Bearish for {self.asset_type}")
+                            mr_signal = 0; mr_conf = 0.0
+                        elif mr_signal < 0:
+                            logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in strong Bearish for {self.asset_type}")
+
+                    else:
+                        # SLIGHTLY BEARISH: penalise longs, don't kill them
+                        # Bullish reversal evidence in a slightly bearish zone reduces penalty
+                        _penalty = 0.50
+                        if _transition_conditions >= 2 and _transition_score > 0.15:
+                            _penalty = max(0.30, _penalty - _transition_score)
+                            logger.info(
+                                f"[GATEKEEPER] TRANSITION evidence reduces LONG penalty: "
+                                f"{_penalty:.2f} (score={_transition_score:+.3f}, "
+                                f"conditions={_transition_conditions}/4)"
+                            )
+                        if tf_signal > 0:
+                            tf_conf *= _penalty
+                            logger.info(
+                                f"[GATEKEEPER] ⚠️ PENALIZED LONG (TF): Slightly bearish — "
+                                f"conf reduced to {tf_conf:.2f}"
+                            )
+                        if ema_signal > 0:
                             ema_signal = 0; ema_conf = 0.0
-                    # MR: block counter-trend BUY (falling knives), allow trend-aligned SELL
-                    if mr_signal > 0:
-                        logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in Bearish for {self.asset_type}")
-                        mr_signal = 0; mr_conf = 0.0
-                    elif mr_signal < 0:
-                        logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in Bearish for {self.asset_type}")
-            # --- End Smart Gatekeeper ---
+                        if mr_signal > 0:
+                            mr_conf *= min(_penalty + 0.10, 0.80)
+                            logger.info(
+                                f"[GATEKEEPER] ⚠️ PENALIZED LONG (MR): Slightly bearish — "
+                                f"conf reduced to {mr_conf:.2f}"
+                            )
+                        elif mr_signal < 0:
+                            logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in slightly Bearish for {self.asset_type}")
+            # --- End Enhanced Gatekeeper ---
             
             # Initialize core variables for details building (prevents UnboundLocalError if we skip)
             buy_score = 0.0
@@ -2748,8 +2843,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # --- Directional Trap Filter Veto (T2.3: regime-aware) ---
                 if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
                     test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
-                    # regime_aligned: signal direction matches macro regime
+                    # regime_aligned: signal direction matches macro regime.
+                    # Fix #16: NEUTRAL regime has no directional opinion — both
+                    # directions are valid so treat as aligned for both sides.
+                    # Without this, LONG signals in NEUTRAL are always "not aligned"
+                    # which triggers the 1.5× BTC volume check that doesn't apply
+                    # to SHORT, creating a permanent short-bias in NEUTRAL.
+                    _is_neutral_regime = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
                     _trap_aligned = (
+                        _is_neutral_regime or
                         (test_direction == "long" and is_bull) or
                         (test_direction == "short" and not is_bull)
                     )
@@ -2812,6 +2914,19 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if buy_agreement < 2 and sell_agreement < 2: raw_quality *= 0.7
                 if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull): raw_quality *= 1.15
                 signal_quality = min(raw_quality, 1.0)
+
+                # Section 2.4B: Boost quality when transition evidence strongly agrees
+                if state and hasattr(state, '_transition_evidence') and state._transition_evidence:
+                    if state._transition_evidence.conditions_met >= 3:
+                        _te_boost = abs(state._transition_evidence.total_score) * 0.15
+                        _te_dir = state._transition_evidence.direction
+                        if (final_signal == 1 and _te_dir == "BULLISH_REVERSAL") or \
+                           (final_signal == -1 and _te_dir == "BEARISH_REVERSAL"):
+                            signal_quality = min(1.0, signal_quality * (1.0 + _te_boost))
+                            logger.debug(
+                                f"[QUALITY] Transition evidence boost: "
+                                f"×{1.0 + _te_boost:.3f} → {signal_quality:.2f}"
+                            )
 
                 if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
                     final_signal = 0

@@ -699,6 +699,7 @@ class TradingBot:
             if strategies_cfg.get("mean_reversion", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
+                    cfg["asset"] = asset_name  # Fix #11: ensure MR knows which asset it trades
                     self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
@@ -1731,6 +1732,8 @@ class TradingBot:
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
                     mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
                     mtf_regime["last_trade_price"] = self.cvd_consumer.get_last_price()
+                    # Section 2.3 Step 3: depth snapshot for TransitionDetector
+                    mtf_regime["depth_data"] = self.cvd_consumer.get_depth()
             if hasattr(self, "_dxy_falling"):
                 mtf_regime["dxy_falling"] = self._dxy_falling
 
@@ -1768,6 +1771,8 @@ class TradingBot:
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
                     mtf_regime["order_book_wall_detected"] = self.cvd_consumer.is_wall_detected()
                     mtf_regime["last_trade_price"] = self.cvd_consumer.get_last_price()
+                    # Section 2.3 Step 3: depth snapshot for TransitionDetector
+                    mtf_regime["depth_data"] = self.cvd_consumer.get_depth()
             if hasattr(self, "_dxy_falling"):
                 mtf_regime["dxy_falling"] = self._dxy_falling
 
@@ -2297,8 +2302,13 @@ class TradingBot:
                 return
 
             # Get preset config
-            asset_type = "BTC" if "BTC" in asset_name.upper() else "GOLD"
-            preset_config = AGGREGATOR_PRESETS.get(asset_type, {}).get(preset)
+            # Fix #9: _preset_key selects which preset bucket to use (BTC vs GOLD/FX),
+            # but asset_type must be the real asset name so aggregators log correctly.
+            # Previously asset_type was set to "GOLD" for ALL non-BTC assets, meaning
+            # GBPAUD, EURUSD, USTEC etc. were all identified as "GOLD" internally.
+            _preset_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
+            preset_config = AGGREGATOR_PRESETS.get(_preset_key, {}).get(preset)
+            asset_type = asset_name  # Pass actual asset name to aggregator
 
             if not preset_config:
                 logger.error(f"[AUTO PRESET] No config for {asset_name} {preset}")
@@ -2469,16 +2479,27 @@ class TradingBot:
                 if new_preset:
                     old_preset = self.selected_presets.get(asset_name)
 
-                    # If preset changed, reinitialize aggregator
+                    # Fix #12: Skip costly reinit when the preset hasn't actually changed.
+                    # The dynamic selector can return the same preset on consecutive cycles.
+                    # Reinitialising resets DynamicThresholds history, discards the cold-start
+                    # warm-up period we need for min_samples=5 to activate.
+                    if not hasattr(self, '_last_applied_preset'):
+                        self._last_applied_preset = {}
+                    if self._last_applied_preset.get(asset_name) == new_preset:
+                        logger.debug(f"[AUTO PRESET] {asset_name}: no change ({new_preset}), skipping reinit")
+                        continue
+
+                    # If preset changed, log and mark as changed
                     if old_preset != new_preset:
                         logger.info(
                             f"[AUTO PRESET] {asset_name}: {old_preset.upper()} → {new_preset.upper()}"
                         )
-
                         self.selected_presets[asset_name] = new_preset
-                        self._reinitialize_aggregator(asset_name, new_preset)
                         preset_changed = True
                         changes.append(f"{asset_name}: {old_preset} → {new_preset}")
+
+                    self._last_applied_preset[asset_name] = new_preset
+                    self._reinitialize_aggregator(asset_name, new_preset)
 
                     if preset_changed:
                         logger.info(f"[AUTO PRESET] ✓ Updated {len(changes)} preset(s)")
@@ -2590,7 +2611,14 @@ class TradingBot:
 
             for asset_name in enabled:
                 try:
-                    # Update signal even if market is closed or can't trade
+                    # Fix #14: Skip signal evaluation for MT5 assets when market is closed.
+                    # Execution is already skipped by check_market_hours() downstream, but
+                    # the evaluation still runs, generating stale price warnings and
+                    # consuming CPU on closed-market weekends. BTC is 24/7 so always runs.
+                    _is_mt5_asset = "BTC" not in asset_name.upper()
+                    if _is_mt5_asset and not self.check_market_hours(asset_name):
+                        logger.debug(f"[SIGNALS] Skipping {asset_name}: market closed")
+                        continue
                     self._update_asset_signal(asset_name)
                 except Exception as e:
                     logger.error(f"[SIGNAL] Error updating {asset_name}: {e}")

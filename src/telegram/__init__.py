@@ -777,6 +777,41 @@ class TradingTelegramBot:
     # ✨ NEW: The "Brain" Visualizer Command
     # ====================================================================
 
+    @staticmethod
+    async def _send_chunked(send_method, msg: str, chunk_size: int = 4000, **kwargs):
+        """
+        Fix #13 — Split messages exceeding Telegram's 4096-char limit.
+        Splits on newlines to avoid breaking HTML tags mid-element.
+        Falls back to truncating a single oversized line.
+        """
+        if len(msg) <= chunk_size:
+            await send_method(msg, **kwargs)
+            return
+
+        chunks = []
+        current = ""
+        for line in msg.split("\n"):
+            candidate = (current + "\n" + line) if current else line
+            if len(candidate) > chunk_size:
+                if current:
+                    chunks.append(current)
+                # If a single line exceeds limit, hard-cut it
+                current = line[:chunk_size]
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+
+        for i, chunk in enumerate(chunks):
+            try:
+                # Only attach reply_markup to the last chunk
+                chunk_kwargs = dict(kwargs)
+                if i < len(chunks) - 1:
+                    chunk_kwargs.pop("reply_markup", None)
+                await send_method(chunk, **chunk_kwargs)
+            except Exception as chunk_err:
+                logger.error(f"[TG] Chunk {i+1}/{len(chunks)} send error: {chunk_err}")
+
     async def cmd_brain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handle /brain command - Visualizes the MTF Governor and Asymmetric Engine State
@@ -914,7 +949,9 @@ class TradingTelegramBot:
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await send_method(msg, parse_mode="HTML", reply_markup=reply_markup)
+            await self._send_chunked(
+                send_method, msg, parse_mode="HTML", reply_markup=reply_markup
+            )
 
         except Exception as e:
             logger.error(f"Error in _send_brain_message: {e}", exc_info=True)
@@ -2239,8 +2276,11 @@ class TradingTelegramBot:
 
             msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
             keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="signals")]]
-            await update.message.reply_text(msg, parse_mode="HTML",
-                                            reply_markup=InlineKeyboardMarkup(keyboard))
+            await self._send_chunked(
+                update.message.reply_text, msg,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         except Exception as e:
             logger.error(f"[TG] /signals error: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching signals")

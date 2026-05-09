@@ -1033,6 +1033,38 @@ class BinanceExecutionHandler:
                 return False
 
             # ================================================================
+            # PRE-FLIGHT PORTFOLIO LIMITS CHECK (Fix #8 — ghost position guard)
+            # ================================================================
+            # This MUST run before placing any order on Binance. Previously the
+            # portfolio_manager.add_position() call (inside register_position) was
+            # the first place limits were checked — AFTER the fill. If the NET
+            # margin check failed there, the position was live on Binance but
+            # invisible to the bot: no VTM, no stop-loss, no Telegram alert.
+            # Mirror of the fix already present in mt5_handler.py L711-734.
+            _small_account_active = False
+            if signal_details and isinstance(signal_details, dict):
+                _small_account_active = signal_details.get("small_account_protocol_active", False)
+            if is_futures and not _small_account_active:
+                _preflight_ok = self.portfolio_manager.check_portfolio_limits(
+                    new_position_usd=position_size_usd,
+                    new_side=side,
+                    asset=asset_name,
+                )
+                if not _preflight_ok:
+                    logger.warning(
+                        f"[PRE-FLIGHT] ❌ {asset_name} {side.upper()} blocked — "
+                        f"portfolio NET margin limit would be exceeded "
+                        f"(notional ${position_size_usd:,.2f}). "
+                        f"Order NOT sent to Binance."
+                    )
+                    return False
+                logger.info(
+                    f"[PRE-FLIGHT] ✓ {asset_name} {side.upper()} passed portfolio "
+                    f"margin check (notional ${position_size_usd:,.2f})"
+                )
+            # ================================================================
+
+            # ================================================================
             # STEP 5: Execute order on exchange (with SAFE RETRY)
             # ================================================================
             order_id = None
