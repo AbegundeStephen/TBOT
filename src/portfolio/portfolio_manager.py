@@ -716,9 +716,58 @@ class PortfolioManager:
             # If loading fails, start with a clean slate to avoid corruption
             self.positions = {}
             
+    def _get_quote_to_usd_rate(self, symbol: str) -> float:
+        """
+        Returns a multiplier to convert a value denominated in the symbol's
+        quote currency into USD.
+
+        • For USD-quoted instruments (EURUSD, XAUUSD, BTCUSDT, …) → 1.0
+        • For JPY-quoted instruments (EURJPY, USDJPY, GBPJPY, …) → 1 / USD_JPY_rate
+
+        Falls back to a hard-coded approximate rate if MT5 is unreachable.
+        Result is cached for 5 minutes to avoid hammering MT5 on every call.
+        """
+        # Normalise: strip broker-specific suffix ('m', 'pro', etc.) before testing
+        base = symbol.upper().replace("M", "").strip()
+
+        # USD-quoted: no conversion needed
+        if base.endswith("USD") or "USDT" in base or base in ("BTC", "GOLD", "USTEC", "USOIL"):
+            return 1.0
+
+        # JPY-quoted: need 1/USDJPY
+        if base.endswith("JPY"):
+            now = datetime.now()
+            cached_rate, cached_ts = getattr(self, "_usdjpy_cache", (None, None))
+            if cached_rate and cached_ts and (now - cached_ts).total_seconds() < 300:
+                return 1.0 / cached_rate
+
+            usdjpy_rate = None
+            try:
+                if self.mt5_handler:
+                    # Try broker-suffixed symbol first, then plain
+                    for sym in ("USDJPYm", "USDJPY"):
+                        price = self.mt5_handler.get_current_price(sym)
+                        if price and price > 50:   # sanity: USDJPY is always > 50
+                            usdjpy_rate = price
+                            break
+            except Exception:
+                pass
+
+            if not usdjpy_rate:
+                usdjpy_rate = 155.0   # fallback approximate rate
+                logger.debug("[CURRENCY] USDJPY rate unavailable — using fallback 155.0")
+
+            self._usdjpy_cache = (usdjpy_rate, now)
+            logger.debug(f"[CURRENCY] USDJPY rate: {usdjpy_rate:.3f} → conversion factor {1/usdjpy_rate:.6f}")
+            return 1.0 / usdjpy_rate
+
+        # Unknown quote currency — assume USD (safe default, logs a warning)
+        logger.warning(f"[CURRENCY] Unknown quote currency for symbol '{symbol}' — assuming USD")
+        return 1.0
+
     def get_risk_budget(
-        self, 
-        asset: str, 
+        self,
+        asset: str,
         strategy_type: str = "TREND",
         confidence_score: Optional[float] = None,
         market_condition: Optional[str] = None
@@ -883,14 +932,15 @@ class PortfolioManager:
             # Calculate current total risk (Dollar amount at risk across all positions)
             current_total_risk_usd = 0.0
             for position in self.positions.values():
+                # Conversion factor: 1.0 for USD-quoted, 1/USDJPY for JPY-quoted, etc.
+                quote_to_usd = self._get_quote_to_usd_rate(position.symbol)
                 if position.stop_loss:
-                    # Risk = |Entry - SL| * Quantity
+                    # Risk = |Entry - SL| * Quantity  (in quote currency) → convert to USD
                     pos_risk = abs(position.entry_price - position.stop_loss) * position.quantity
-                    current_total_risk_usd += pos_risk
+                    current_total_risk_usd += pos_risk * quote_to_usd
                 else:
-                    # Fallback if no SL (risky but must be counted)
-                    # Estimate 5% risk if no SL found
-                    current_total_risk_usd += (position.entry_price * position.quantity * 0.05)
+                    # Fallback: estimate 5% of notional (in quote currency) → convert to USD
+                    current_total_risk_usd += (position.entry_price * position.quantity * 0.05) * quote_to_usd
             
             current_total_risk_pct = (
                 current_total_risk_usd / self.current_capital 
@@ -2861,19 +2911,23 @@ class PortfolioManager:
         for pos in self.positions.values():
             current_price = current_prices.get(pos.asset, pos.entry_price)
             notional_value = pos.quantity * current_price
-            
+
             # Get leverage (defaults to 1 for spot trading)
             leverage = getattr(pos, 'leverage', 1)
-            
-            # ✅ CORRECT: Actual margin used = notional / leverage
-            # This represents your REAL capital at risk
-            margin_used = notional_value / leverage
-            
+
+            # ✅ Convert notional to USD before dividing by leverage.
+            # For USD-quoted symbols this is a no-op (factor = 1.0).
+            # For JPY-quoted symbols (EURJPY, USDJPY, …) this divides by
+            # the current USD/JPY rate so we get a true USD margin figure.
+            quote_to_usd = self._get_quote_to_usd_rate(pos.symbol)
+            notional_usd = notional_value * quote_to_usd
+            margin_used = notional_usd / leverage
+
             # Accumulate
-            total_notional_value += notional_value
+            total_notional_value += notional_usd
             total_margin_used += margin_used
-            total_exposure += margin_used  # ← Use margin, not notional
-            
+            total_exposure += margin_used  # ← Use USD margin, not raw notional
+
             # Calculate P&L (unchanged)
             if pos.mt5_ticket and pos.mt5_profit != 0.0:
                 total_unrealized_pnl += pos.mt5_profit
@@ -2926,8 +2980,8 @@ class PortfolioManager:
                 
                 # ✅ NEW: Add leverage info to position details
                 "leverage": getattr(pos, 'leverage', 1),
-                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
-                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price)) / getattr(pos, 'leverage', 1),
+                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol),
+                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol)) / getattr(pos, 'leverage', 1),
                 
                 "pnl": (
                     pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
@@ -3428,19 +3482,23 @@ class PortfolioManager:
         for pos in self.positions.values():
             current_price = current_prices.get(pos.asset, pos.entry_price)
             notional_value = pos.quantity * current_price
-            
+
             # Get leverage (defaults to 1 for spot trading)
             leverage = getattr(pos, 'leverage', 1)
-            
-            # ✅ CORRECT: Actual margin used = notional / leverage
-            # This represents your REAL capital at risk
-            margin_used = notional_value / leverage
-            
+
+            # ✅ Convert notional to USD before dividing by leverage.
+            # For USD-quoted symbols this is a no-op (factor = 1.0).
+            # For JPY-quoted symbols (EURJPY, USDJPY, …) this divides by
+            # the current USD/JPY rate so we get a true USD margin figure.
+            quote_to_usd = self._get_quote_to_usd_rate(pos.symbol)
+            notional_usd = notional_value * quote_to_usd
+            margin_used = notional_usd / leverage
+
             # Accumulate
-            total_notional_value += notional_value
+            total_notional_value += notional_usd
             total_margin_used += margin_used
-            total_exposure += margin_used  # ← Use margin, not notional
-            
+            total_exposure += margin_used  # ← Use USD margin, not raw notional
+
             # Calculate P&L (unchanged)
             if pos.mt5_ticket and pos.mt5_profit != 0.0:
                 total_unrealized_pnl += pos.mt5_profit
@@ -3493,8 +3551,8 @@ class PortfolioManager:
                 
                 # ✅ NEW: Add leverage info to position details
                 "leverage": getattr(pos, 'leverage', 1),
-                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
-                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price)) / getattr(pos, 'leverage', 1),
+                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol),
+                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol)) / getattr(pos, 'leverage', 1),
                 
                 "pnl": (
                     pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
