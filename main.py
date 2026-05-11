@@ -3202,6 +3202,9 @@ class TradingBot:
     def check_min_time_between_trades(self, asset_name: str) -> bool:
         """Check minimum time between trades.
 
+        Returns True  → OK to trade (no cooldown active).
+        Returns False → blocked (cooldown still running).
+
         Per-asset override wins if set in config (min_time_between_trades_minutes
         under the asset key).  Falls back to the global trading setting (default 60).
         In strongly-trending regimes (BEARISH/BULLISH) a 0.5× multiplier is applied
@@ -3221,20 +3224,26 @@ class TradingBot:
         if regime in ("BULLISH", "BEARISH") and regime_conf >= 0.7:
             min_minutes = max(15, min_minutes * 0.5)
 
+        # If the asset has never traded this session it cannot be in cooldown.
+        if asset_name not in self.last_trade_times:
+            return True
+
         # Bypass cooldown entirely when there are no open positions for the asset.
         # The cooldown exists to prevent over-trading; with zero exposure there is
         # nothing to protect and blocking here only causes missed entries.
-        if asset_name in self.last_trade_times:
-            open_positions = self.portfolio_manager.get_asset_positions(asset_name)
-            if not open_positions:
-                logger.debug(f"[COOLDOWN] {asset_name}: no open positions — cooldown bypassed")
-                return True
+        open_positions = self.portfolio_manager.get_asset_positions(asset_name)
+        if not open_positions:
+            logger.debug(f"[COOLDOWN] {asset_name}: no open positions — cooldown bypassed")
+            return True
 
-            elapsed = datetime.now() - self.last_trade_times[asset_name]
-            if elapsed.total_seconds() < min_minutes * 60:
-                remaining = min_minutes - (elapsed.total_seconds() / 60)
-                logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min, regime={regime})")
-                return False
+        elapsed = datetime.now() - self.last_trade_times[asset_name]
+        if elapsed.total_seconds() < min_minutes * 60:
+            remaining = min_minutes - (elapsed.total_seconds() / 60)
+            logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min, regime={regime})")
+            return False
+
+        # Cooldown period has fully elapsed — allow trading.
+        return True
 
     def check_market_hours(self, asset_name: str) -> bool:
         """Check if market is open for the asset"""
@@ -5117,6 +5126,16 @@ def main():
         bot.start()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (KeyboardInterrupt)")
+        print("\n[STOPPED] Bot stopped by user.")
+    except Exception as e:
+        logger.exception(f"Fatal error in bot: {e}")
+        print(f"\n[FATAL] Bot crashed: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+Bot stopped by user (KeyboardInterrupt)")
         print("\n[STOPPED] Bot stopped by user.")
     except Exception as e:
         logger.exception(f"Fatal error in bot: {e}")
