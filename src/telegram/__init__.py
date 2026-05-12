@@ -316,6 +316,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("vtm_status", self.cmd_vtm_status_detail))
         self.application.add_handler(CommandHandler("set_sl", self.cmd_set_sl))
         self.application.add_handler(CommandHandler("set_tp", self.cmd_set_tp))
+        self.application.add_handler(CommandHandler("reset_equity", self.cmd_reset_equity))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
         self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
@@ -1359,6 +1360,51 @@ class TradingTelegramBot:
 
         except Exception as e:
             logger.error(f"[TG] /set_tp error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_reset_equity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /reset_equity — Re-baseline peak_equity and session_start_equity to the
+        current live broker balance.  Use this after switching broker accounts
+        (e.g. Binance demo → MT5 live) to clear a phantom drawdown that would
+        otherwise keep the circuit-breaker permanently halted.
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            pm = self.trading_bot.portfolio_manager
+            if pm.is_paper_mode:
+                await update.message.reply_text("ℹ️ Paper mode — equity baseline is virtual, nothing to reset.")
+                return
+
+            # Force-fetch the real balance from the broker
+            ok = pm.refresh_capital(force=True)
+            if not ok or not pm.equity:
+                await update.message.reply_text("❌ Could not fetch live balance — check broker connection.")
+                return
+
+            old_peak = pm.peak_equity
+            pm.peak_equity          = pm.equity
+            pm.session_start_equity = pm.equity
+            pm.session_start_capital= pm.equity
+            pm.initial_capital      = pm.equity
+
+            logger.info(
+                f"[TG] /reset_equity: peak reset ${old_peak:,.2f} → ${pm.equity:,.2f} "
+                f"by {update.effective_user.username or update.effective_user.id}"
+            )
+            await update.message.reply_text(
+                f"✅ <b>Equity baseline reset</b>\n\n"
+                f"Old peak:  <s>${old_peak:,.2f}</s>\n"
+                f"New baseline: <b>${pm.equity:,.2f}</b>\n\n"
+                f"Circuit-breaker has been cleared. Trading will resume on the next cycle.",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+            logger.error(f"[TG] /reset_equity error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

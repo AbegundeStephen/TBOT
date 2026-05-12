@@ -906,7 +906,7 @@ class TradingBot:
             for asset_name in enabled_assets:
                 try:
                     asset_cfg = self.config["assets"][asset_name]
-                    symbol = asset_cfg.get("symbol")
+                    symbol = self._resolve_symbol(asset_name)
                     exchange = asset_cfg.get("exchange", "binance")
 
                     # Force refresh to get latest data
@@ -2642,7 +2642,9 @@ class TradingBot:
                     # Execution is already skipped by check_market_hours() downstream, but
                     # the evaluation still runs, generating stale price warnings and
                     # consuming CPU on closed-market weekends. BTC is 24/7 so always runs.
-                    _is_mt5_asset = "BTC" not in asset_name.upper()
+                    _is_mt5_asset = (
+                        self.config["assets"].get(asset_name, {}).get("exchange", "binance") != "binance"
+                    )
                     if _is_mt5_asset and not self.check_market_hours(asset_name):
                         logger.debug(f"[SIGNALS] Skipping {asset_name}: market closed")
                         continue
@@ -2670,7 +2672,7 @@ class TradingBot:
                     )
 
                     if handler:
-                        symbol = asset_cfg.get("symbol")
+                        symbol = self._resolve_symbol(asset_name)
                         current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                 except Exception as e:
                     logger.error(f"Failed to get {asset_name} price: {e}")
@@ -2712,9 +2714,7 @@ class TradingBot:
 
                                 if handler == self.binance_handler:
                                     df = self.data_manager.fetch_binance_data(
-                                        symbol=self.config["assets"][asset_name][
-                                            "symbol"
-                                        ],
+                                        symbol=self._resolve_symbol(asset_name),
                                         interval=self.config["assets"][asset_name].get(
                                             "interval", "1h"
                                         ),
@@ -2723,9 +2723,7 @@ class TradingBot:
                                     )
                                 else:
                                     df = self.data_manager.fetch_mt5_data(
-                                        symbol=self.config["assets"][asset_name][
-                                            "symbol"
-                                        ],
+                                        symbol=self._resolve_symbol(asset_name),
                                         timeframe=self.config["assets"][asset_name].get(
                                             "timeframe", "H1"
                                         ),
@@ -2924,7 +2922,7 @@ class TradingBot:
                     try:
                         asset_cfg_r = self.config["assets"].get(asset_name, {})
                         exchange_r  = asset_cfg_r.get("exchange", "mt5")
-                        symbol_r    = asset_cfg_r.get("symbol")
+                        symbol_r    = self._resolve_symbol(asset_name)
                         tf_r        = asset_cfg_r.get("timeframe", "H1")
                         if symbol_r and self.data_manager:
                             from datetime import datetime as _dtR, timedelta as _tdR, timezone as _tzR
@@ -3316,12 +3314,33 @@ class TradingBot:
         # Cooldown period has fully elapsed — allow trading.
         return True
 
+    def _resolve_symbol(self, asset_name: str) -> str:
+        """
+        Return the correct trading symbol for the asset's configured exchange.
+
+        When BTC (or any asset) is switched to MT5 via config, the MT5 broker
+        symbol (e.g. BTCUSDm on Exness) is returned instead of the Binance
+        symbol (BTCUSDT).  Falls back to the generic 'symbol' field if the
+        exchange-specific one is absent.
+
+        Usage:  symbol = self._resolve_symbol(asset_name)
+        Config: set "exchange": "mt5" and "mt5_symbol": "BTCUSDm" on BTC to
+                route execution to Exness without touching any other code.
+        """
+        cfg = self.config["assets"].get(asset_name, {})
+        exchange = cfg.get("exchange", "binance")
+        if exchange == "mt5":
+            return cfg.get("mt5_symbol") or cfg.get("symbol", asset_name)
+        # binance (default)
+        return cfg.get("binance_symbol") or cfg.get("symbol", asset_name)
+
     def check_market_hours(self, asset_name: str) -> bool:
         """Check if market is open for the asset"""
         asset_name_upper = asset_name.upper()
 
-        # 1. Crypto is 24/7
-        if "BTC" in asset_name_upper:
+        # 1. Crypto is 24/7 (covers BTC on Binance AND BTC on MT5/Exness)
+        asset_cfg = self.config["assets"].get(asset_name, {})
+        if asset_cfg.get("asset_type", "") == "crypto" or "BTC" in asset_name_upper:
             return True
 
         # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex)
@@ -3367,7 +3386,7 @@ class TradingBot:
             return
 
         exchange = asset_cfg.get("exchange", "binance")
-        symbol = asset_cfg.get("symbol", "BTCUSDT")
+        symbol = self._resolve_symbol(asset_name)   # picks mt5_symbol when exchange=mt5
         handler = self.binance_handler if exchange == "binance" else self.mt5_handler
 
         if not handler:
@@ -4084,7 +4103,7 @@ class TradingBot:
         """
         try:
             asset_cfg = self.config["assets"][asset_name]
-            symbol = asset_cfg.get("symbol")
+            symbol = self._resolve_symbol(asset_name)
             exchange = asset_cfg.get("exchange", "binance")
 
             end_time = datetime.now(timezone.utc)
@@ -4180,7 +4199,7 @@ class TradingBot:
         try:
             asset_cfg = self.config["assets"][asset_name]
             exchange = asset_cfg.get("exchange", "binance")
-            symbol = asset_cfg.get("symbol")
+            symbol = self._resolve_symbol(asset_name)
 
             # Fetch latest data
             end_time = datetime.now(timezone.utc)
@@ -4477,8 +4496,7 @@ class TradingBot:
                     )
                     if handler:
                         try:
-                            # Resolve symbol
-                            symbol = self.config["assets"][asset_name].get("symbol")
+                            symbol = self._resolve_symbol(asset_name)
                             current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                         except:
                             pass
@@ -4537,7 +4555,7 @@ class TradingBot:
         """
         try:
             asset_cfg = self.config["assets"][asset_name]
-            symbol = asset_cfg.get("symbol")
+            symbol = self._resolve_symbol(asset_name)
             exchange = asset_cfg.get("exchange", "binance")
 
             end_time = datetime.now(timezone.utc)
@@ -4587,7 +4605,7 @@ class TradingBot:
 
                 if handler:
                     try:
-                        symbol = asset_cfg.get("symbol")
+                        symbol = self._resolve_symbol(asset_name)
                         current_prices[asset_name] = handler.get_current_price(symbol=symbol)
                     except:
                         pass

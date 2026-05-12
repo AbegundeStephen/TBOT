@@ -1083,6 +1083,14 @@ class InstitutionalCouncilAggregator:
                             consensus_regime not in ("STRONGLY_BULLISH", "STRONGLY_BEARISH")):
                         safety_threshold = max(safety_threshold, 0.80)
 
+                    # Near-unanimous Council (≥ 4.5/5.0) in NEUTRAL/SLIGHTLY regime:
+                    # Council + AI are both signalling reversal — TF momentum lag
+                    # should not be able to override a near-unanimous Council.
+                    # Effectively disable the veto by requiring TF to be > 100%.
+                    if (total_score >= 4.5 and
+                            consensus_regime in ("NEUTRAL", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH")):
+                        safety_threshold = 1.01  # impossible to exceed — veto bypassed
+
                     if self.detailed_logging:
                         logger.debug(
                             f"[VETO] Opposite-Trend gate: regime={consensus_regime}, "
