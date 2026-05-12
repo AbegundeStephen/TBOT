@@ -1064,7 +1064,32 @@ class InstitutionalCouncilAggregator:
                 # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
                 # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
                 if self.use_gatekeeper:
-                    safety_threshold = self.config.get('trend_safety_threshold', 0.50)
+                    base_threshold = self.config.get('trend_safety_threshold', 0.50)
+
+                    # Regime-adaptive threshold: in ambiguous regimes TF must be
+                    # much more confident to override the Council's consensus.
+                    if consensus_regime == "NEUTRAL":
+                        safety_threshold = max(base_threshold, 0.75)
+                    elif consensus_regime in ("SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH"):
+                        safety_threshold = max(base_threshold, 0.65)
+                    else:
+                        # STRONGLY trending — keep original tight threshold
+                        safety_threshold = base_threshold
+
+                    # High-conviction Council override: when Council ≥ 4.0/5.0
+                    # in a non-strongly-trending regime, a borderline TF signal
+                    # should not be able to veto it.
+                    if (total_score >= 4.0 and
+                            consensus_regime not in ("STRONGLY_BULLISH", "STRONGLY_BEARISH")):
+                        safety_threshold = max(safety_threshold, 0.80)
+
+                    if self.detailed_logging:
+                        logger.debug(
+                            f"[VETO] Opposite-Trend gate: regime={consensus_regime}, "
+                            f"council={total_score:.2f}/5.0, tf_conf={tf_conf:.2f}, "
+                            f"threshold={safety_threshold:.2f}"
+                        )
+
                     if (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
                        (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
                         logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees.")
