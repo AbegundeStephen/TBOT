@@ -226,7 +226,7 @@ class MT5ExecutionHandler:
             mt5_assets = ["GOLD", "USTEC", "EURJPY", "EURUSD"]
             for asset in mt5_assets:
                 if self.config["assets"].get(asset, {}).get("enabled", False):
-                    symbol = self.config["assets"][asset]["symbol"]
+                    symbol = self._resolve_symbol(asset)
                     self.sync_positions_with_mt5(asset, symbol)
 
     def _check_connection(self) -> bool:
@@ -245,6 +245,16 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[MT5] Connection check failed: {e}")
             return False
+
+    def _resolve_symbol(self, asset_name: str) -> str:
+        """
+        Return the correct MT5 broker symbol for an asset.
+        When 'mt5_symbol' is present in config it takes precedence over 'symbol',
+        allowing assets like BTC to use 'BTCUSDm' on Exness while keeping
+        'BTCUSDT' as the Binance symbol in the same config block.
+        """
+        cfg = self.config["assets"].get(asset_name, {})
+        return cfg.get("mt5_symbol") or cfg.get("symbol", asset_name)
 
     def get_current_price(
         self, symbol: str = None, force_live: bool = False
@@ -1232,8 +1242,8 @@ class MT5ExecutionHandler:
             # STEP 1: Get correct symbol and price
             # ============================================================
             if symbol is None:
-                symbol = self.config["assets"].get(asset_name, {}).get("symbol")
-            
+                symbol = self._resolve_symbol(asset_name)
+
             if not symbol:
                 logger.error(f"[MT5 HANDLER] ❌ Could not find symbol for asset: {asset_name}")
                 return False
@@ -1516,7 +1526,7 @@ class MT5ExecutionHandler:
                 logger.warning(f"[PARTIAL-MT5] No ticket for {asset_name} — cannot partial close")
                 return False
 
-            symbol = self.config["assets"].get(asset_name, {}).get("symbol")
+            symbol = self._resolve_symbol(asset_name)
             if not symbol:
                 logger.error(f"[PARTIAL-MT5] Symbol not found for {asset_name}")
                 return False
@@ -1620,7 +1630,7 @@ class MT5ExecutionHandler:
 
         try:
             # Dynamic symbol lookup
-            symbol = self.config["assets"].get(asset, {}).get("symbol")
+            symbol = self._resolve_symbol(asset)
             if not symbol:
                 logger.error(f"[MT5] Cannot close ticket {ticket}: Symbol not found for asset {asset}")
                 return False
@@ -1860,7 +1870,7 @@ class MT5ExecutionHandler:
             if not positions:
                 return False
 
-            symbol = self.config["assets"].get(asset_name, {}).get("symbol")
+            symbol = self._resolve_symbol(asset_name)
             if not symbol:
                 logger.error(f"[VTM LOOP] Could not find symbol for asset {asset_name}")
                 return False
@@ -2017,8 +2027,8 @@ class MT5ExecutionHandler:
         ✅ FIXED: Import positions WITH multi-asset support
         """
         if symbol is None:
-            symbol = self.config["assets"].get(asset, {}).get("symbol")
-        
+            symbol = self._resolve_symbol(asset)
+
         if not symbol:
             logger.error(f"[SYNC] No symbol found for {asset}")
             return False

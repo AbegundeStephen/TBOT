@@ -1486,7 +1486,23 @@ class PortfolioManager:
             self.equity = new_capital
             self.last_balance_refresh = now
 
-            if self.equity > self.peak_equity:
+            # ✅ Account-switch guard: if the fetched balance is dramatically
+            # lower than peak_equity (>80% drop in one refresh), the previous
+            # peak is almost certainly from a different broker account (e.g.
+            # switching from Binance demo to a small live MT5 account).
+            # Reset peak_equity and session_start_equity to the real balance so
+            # the circuit-breaker doesn't fire a phantom 99% drawdown.
+            if self.peak_equity > 0 and new_capital < self.peak_equity * 0.20:
+                logger.warning(
+                    f"[BALANCE] ⚠️  Peak equity reset: fetched balance ${new_capital:,.2f} is "
+                    f"<20% of stored peak ${self.peak_equity:,.2f} — looks like an account "
+                    f"switch.  Resetting peak and session baseline to current balance."
+                )
+                self.peak_equity = new_capital
+                self.session_start_equity = new_capital
+                self.session_start_capital = new_capital
+                self.initial_capital = new_capital
+            elif self.equity > self.peak_equity:
                 self.peak_equity = self.equity
 
             change = new_capital - old_capital
@@ -3039,8 +3055,19 @@ class PortfolioManager:
         don't create a phantom loss when they are closed: their unrealized P&L is
         already baked into the baseline, and the circuit-breaker only fires on
         NEW losses incurred during this session.
+
+        ✅ FIX: Force-refresh the real broker balance BEFORE locking in
+        session_start_equity.  Without this, switching from a large demo/Binance
+        account to a small live MT5 account causes the circuit-breaker to fire
+        immediately (99% phantom drawdown) because session_start_equity is set
+        from the previous session's stale in-memory equity value.
         """
         self.session_start_time = datetime.now()
+        if not self.is_paper_mode:
+            try:
+                self.refresh_capital(force=True)
+            except Exception as _e:
+                logger.warning(f"[SESSION] Could not refresh capital before session start: {_e}")
         self.session_start_equity = self.equity
         self.session_start_capital = self.current_capital
         self.realized_pnl_today = 0.0
@@ -3618,8 +3645,19 @@ class PortfolioManager:
         don't create a phantom loss when they are closed: their unrealized P&L is
         already baked into the baseline, and the circuit-breaker only fires on
         NEW losses incurred during this session.
+
+        ✅ FIX: Force-refresh the real broker balance BEFORE locking in
+        session_start_equity.  Without this, switching from a large demo/Binance
+        account to a small live MT5 account causes the circuit-breaker to fire
+        immediately (99% phantom drawdown) because session_start_equity is set
+        from the previous session's stale in-memory equity value.
         """
         self.session_start_time = datetime.now()
+        if not self.is_paper_mode:
+            try:
+                self.refresh_capital(force=True)
+            except Exception as _e:
+                logger.warning(f"[SESSION] Could not refresh capital before session start: {_e}")
         self.session_start_equity = self.equity
         self.session_start_capital = self.current_capital
         self.realized_pnl_today = 0.0
