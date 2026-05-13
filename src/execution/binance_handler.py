@@ -364,6 +364,11 @@ class BinanceExecutionHandler:
         self.last_trade_time = {}  # ✨ NEW: Rapid-fire cooldown
         self.trade_timestamps_hourly = []  # ✨ NEW: Hourly trade limit
 
+        # VTM SL/TP exchange-push tracking (mirrors MT5 handler pattern)
+        # Keyed by position_id so multiple simultaneous positions don't collide.
+        self._last_pushed_sl: dict = {}
+        self._last_pushed_tp: dict = {}
+
         # ✨ NEW: Standardized Hedging Config
         self.allow_hedging = self.trading_config.get(
             "allow_simultaneous_long_short", False
@@ -1360,6 +1365,158 @@ class BinanceExecutionHandler:
             )
             return False
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # VTM SL / TP PUSH — Binance Futures
+    # Called every VTM loop tick whenever VTM moves its internal SL or TP.
+    # Strategy:
+    #   SL → cancel existing STOP_MARKET for the position's side + place new one
+    #   TP → cancel existing reduce-only LIMIT orders + place new LIMIT
+    # Always a no-op in paper mode.  Gated by place_vtm_sl/tp_on_exchange flags.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _push_sl_to_exchange(self, position, symbol: str, new_sl: float) -> bool:
+        """
+        Update the exchange-side stop-loss order for a Binance Futures position.
+        Cancel-and-replace pattern: cancel any existing STOP_MARKET for the side,
+        then place a new STOP_MARKET at new_sl covering the remaining position.
+        """
+        if self.is_paper_mode:
+            return False
+        if not self.futures_handler:
+            return False
+        try:
+            pid = position.position_id
+
+            # Guard: skip micro-movements
+            last = self._last_pushed_sl.get(pid)
+            if last is not None and abs(last - new_sl) < 0.01:
+                return False
+
+            # Remaining quantity on exchange (fraction × original qty)
+            remaining_qty = position.quantity
+            if position.trade_manager:
+                remaining_qty = position.quantity * position.trade_manager.remaining_position
+            remaining_qty = self.futures_handler._round_quantity(remaining_qty)
+            if remaining_qty <= 0:
+                return False
+
+            side = position.side  # "long" or "short"
+            stop_order_side = "SELL" if side == "long" else "BUY"
+            position_side   = "LONG" if side == "long" else "SHORT"
+            rounded_sl = self.futures_handler._round_price(new_sl)
+
+            # 1. Cancel existing STOP_MARKET orders for this side
+            self.futures_handler._cancel_existing_stop_orders(side)
+
+            # 2. Place new STOP_MARKET at updated level
+            order_params = {
+                "symbol":       symbol,
+                "side":         stop_order_side,
+                "type":         "STOP_MARKET",
+                "quantity":     remaining_qty,
+                "stopPrice":    rounded_sl,
+                "closePosition": False,
+            }
+            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", True)
+            if hedge_mode:
+                order_params["positionSide"] = position_side
+
+            result = self.futures_handler.client.futures_create_order(**order_params)
+            if result and result.get("orderId"):
+                self._last_pushed_sl[pid] = new_sl
+                prev_str = f" (was {last:,.2f})" if last is not None else " (initial)"
+                logger.info(
+                    f"[VTM-SL] ✅ Binance #{pid} {symbol} SL → {rounded_sl:,.2f}{prev_str}"
+                )
+                return True
+            else:
+                logger.warning(f"[VTM-SL] ⚠️ Binance {symbol} SL modify returned no orderId: {result}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[VTM-SL] Binance SL push error for {position.position_id}: {e}")
+            return False
+
+    def _push_tp_to_exchange(self, position, symbol: str, new_tp: float) -> bool:
+        """
+        Update the exchange-side take-profit order for a Binance Futures position.
+        Cancel-and-replace pattern: cancel existing reduce-only LIMIT orders for the
+        side, then place a new LIMIT at new_tp for the remaining position.
+        """
+        if self.is_paper_mode:
+            return False
+        if not self.futures_handler:
+            return False
+        try:
+            pid = position.position_id
+
+            # Guard: skip micro-movements
+            last = self._last_pushed_tp.get(pid)
+            if last is not None and abs(last - new_tp) < 0.01:
+                return False
+
+            # Remaining quantity
+            remaining_qty = position.quantity
+            if position.trade_manager:
+                remaining_qty = position.quantity * position.trade_manager.remaining_position
+            remaining_qty = self.futures_handler._round_quantity(remaining_qty)
+            if remaining_qty <= 0:
+                return False
+
+            side = position.side
+            tp_order_side = "SELL" if side == "long" else "BUY"
+            position_side = "LONG" if side == "long" else "SHORT"
+            rounded_tp = self.futures_handler._round_price(new_tp)
+
+            # 1. Cancel existing reduce-only LIMIT orders for this side
+            try:
+                open_orders = self.futures_handler.client.futures_get_open_orders(symbol=symbol)
+                for o in (open_orders or []):
+                    if (o.get("type") in ("LIMIT", "TAKE_PROFIT_MARKET")
+                            and o.get("side") == tp_order_side
+                            and o.get("reduceOnly")):
+                        try:
+                            self.futures_handler.client.futures_cancel_order(
+                                symbol=symbol, orderId=o["orderId"]
+                            )
+                            logger.debug(f"[VTM-TP] Cancelled old TP order {o['orderId']}")
+                        except Exception:
+                            pass
+            except Exception as _ce:
+                logger.debug(f"[VTM-TP] Could not cancel old TP orders: {_ce}")
+
+            # 2. Place new LIMIT TP at updated level
+            order_params = {
+                "symbol":      symbol,
+                "side":        tp_order_side,
+                "type":        "LIMIT",
+                "quantity":    remaining_qty,
+                "price":       rounded_tp,
+                "timeInForce": "GTC",
+                "reduceOnly":  True,
+            }
+            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", True)
+            if hedge_mode:
+                order_params["positionSide"] = position_side
+                # reduceOnly is incompatible with positionSide in hedge mode
+                order_params.pop("reduceOnly", None)
+
+            result = self.futures_handler.client.futures_create_order(**order_params)
+            if result and result.get("orderId"):
+                self._last_pushed_tp[pid] = new_tp
+                prev_str = f" (was {last:,.2f})" if last is not None else " (initial)"
+                logger.info(
+                    f"[VTM-TP] ✅ Binance #{pid} {symbol} TP → {rounded_tp:,.2f}{prev_str}"
+                )
+                return True
+            else:
+                logger.warning(f"[VTM-TP] ⚠️ Binance {symbol} TP modify returned no orderId: {result}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[VTM-TP] Binance TP push error for {position.position_id}: {e}")
+            return False
+
     def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None):
         """Check and update ALL positions with VTM"""
         try:
@@ -1394,9 +1551,35 @@ class BinanceExecutionHandler:
 
             for position in positions:
                 if position.trade_manager:
+                    # Snapshot SL/TP before update to detect VTM movement
+                    _sl_before = position.trade_manager.current_stop_loss
+                    _tp_before = position.trade_manager.current_take_profit
+
                     exit_signal = position.trade_manager.update_with_current_price(
                         current_price, df_4h=df_4h
                     )
+
+                    _sl_after = position.trade_manager.current_stop_loss
+                    _tp_after = position.trade_manager.current_take_profit
+
+                    # Push SL/TP to exchange whenever VTM moves them, but only
+                    # when we're NOT about to close the position (would conflict).
+                    _is_closing = (
+                        exit_signal is not None
+                        and not (isinstance(exit_signal, dict) and "action" in exit_signal)
+                    )
+                    if not _is_closing and self.futures_handler:
+                        _sym = self.config["assets"].get(asset_name, {}).get("symbol", "")
+                        if _sym:
+                            if (self.trading_config.get("place_vtm_sl_on_exchange", False)
+                                    and _sl_after is not None
+                                    and _sl_before != _sl_after):
+                                self._push_sl_to_exchange(position, _sym, _sl_after)
+
+                            if (self.trading_config.get("place_vtm_tp_on_exchange", False)
+                                    and _tp_after is not None
+                                    and _tp_before != _tp_after):
+                                self._push_tp_to_exchange(position, _sym, _tp_after)
 
                     if exit_signal:
                         # ✅ Check if it's an action (like pyramid) or an exit (reason)
