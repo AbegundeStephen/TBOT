@@ -1927,10 +1927,14 @@ class MT5ExecutionHandler:
                     ).get("exchange", "mt5")
                     
                     if not _is_closing and position.mt5_ticket and _asset_exchange == "mt5":
-                        _sym = self.config.get("assets", {}).get(
-                            asset_name, {}
-                        ).get("symbol", "")
-                        
+                        # Always resolve via _resolve_symbol so that dual-exchange
+                        # assets like BTC use their MT5 symbol ("BTCUSDm") instead of
+                        # the Binance symbol ("BTCUSDT") that sits under the bare
+                        # config["assets"][asset]["symbol"] key.  Using the wrong
+                        # symbol causes every SL/TP push to fail silently, leaving the
+                        # original exchange stop in place indefinitely.
+                        _sym = self._resolve_symbol(asset_name)
+
                         if _sym:
                             # Push SL if moved
                             if (self.trading_config.get("place_vtm_sl_on_exchange", False)

@@ -831,15 +831,40 @@ class VeteranTradeManager:
         else:
             current_profit = self.entry_price - current_price
 
-        if current_profit > atr_value:
+        # --- STEP 0.5: Intermediate Trail (Early Protection) ---
+        # After profit exceeds 0.75×ATR the trade has proven itself enough to start
+        # trailing — but we don't want to immediately snap SL all the way to entry
+        # (Step 1 does that at 1.5×ATR).  This intermediate step trails SL to
+        # entry_price - (initial_risk - 0.5×ATR) for longs (or + for shorts),
+        # reducing risk by ~half while still leaving room to breathe.
+        _initial_risk = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss is not None else atr_value
+        if current_profit > 0.75 * atr_value:
+            if self.side == "long":
+                _intermediate_sl = self.entry_price - max(0.0, _initial_risk - 0.5 * atr_value)
+                if _intermediate_sl > self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔒 Intermediate trail: {self.asset} SL → {_intermediate_sl:,.5f} "
+                        f"(Profit: ${current_profit:.2f} > 0.75×ATR: ${0.75*atr_value:.2f})"
+                    )
+                    self.current_stop_loss = _intermediate_sl
+            else:
+                _intermediate_sl = self.entry_price + max(0.0, _initial_risk - 0.5 * atr_value)
+                if _intermediate_sl < self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔒 Intermediate trail: {self.asset} SL → {_intermediate_sl:,.5f} "
+                        f"(Profit: ${current_profit:.2f} > 0.75×ATR: ${0.75*atr_value:.2f})"
+                    )
+                    self.current_stop_loss = _intermediate_sl
+
+        if current_profit > 1.5 * atr_value:
             # T1.4 fix: only move SL TO entry if it hasn't already passed entry.
             # Original code fired every tick with no side check, pulling a trailing
             # stop BACKWARDS to entry even after it had advanced beyond it.
             if self.side == "long" and self.current_stop_loss < self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
+                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
                 self.current_stop_loss = self.entry_price
             elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > ATR: ${atr_value:.2f})")
+                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
                 self.current_stop_loss = self.entry_price
 
         # --- STEP 1.5: Time-Based Break-Even Lock ---
@@ -960,13 +985,14 @@ class VeteranTradeManager:
                     rev_size = min(0.50, self.remaining_position)
                     if rev_size > 0:
                         self.remaining_position = max(0.0, self.remaining_position - rev_size)
-                        # Tighten SL on the runner to just inside break-even
+                        # Tighten SL on the runner to 0.8×ATR inside break-even
+                        # (was 0.3×ATR — too close to entry, often hit by normal noise)
                         if self.side == "long":
-                            tight_sl = self.entry_price - 0.3 * atr_value
+                            tight_sl = self.entry_price - 0.8 * atr_value
                             if tight_sl > self.current_stop_loss:
                                 self.current_stop_loss = tight_sl
                         else:
-                            tight_sl = self.entry_price + 0.3 * atr_value
+                            tight_sl = self.entry_price + 0.8 * atr_value
                             if tight_sl < self.current_stop_loss:
                                 self.current_stop_loss = tight_sl
                         logger.warning(
@@ -1014,12 +1040,14 @@ class VeteranTradeManager:
         if not getattr(self, "_greed_mode_activated", False):
             if adx_value > 40 and atr_value > (1.5 * atr_slow):
                 if len(self.take_profit_levels) > 1:
+                    # Keep TP1 as a 30% partial lock — it gives certainty while the
+                    # runner chases the full move.  Only TP2+ collapse into the runner.
                     logger.info(
                         f"[VTM] 🔥 GREED MODE: Strong trend (ADX:{adx_value:.1f}) & "
-                        f"Volatility Expansion detected. Collapsing to final target."
+                        f"Volatility Expansion detected. Keeping TP1 (30%), collapsing rest to runner."
                     )
-                    self.take_profit_levels = [self.take_profit_levels[-1]]
-                    self.partial_sizes = [1.0]
+                    self.take_profit_levels = [self.take_profit_levels[0], self.take_profit_levels[-1]]
+                    self.partial_sizes = [0.30, 0.70]
                     self._greed_mode_activated = True
 
         # --- STEP 3.5: Early Scale Exit ---
