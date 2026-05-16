@@ -150,8 +150,27 @@ class InstitutionalCouncilAggregator:
         self._log_initialization()
     
     def _get_default_config(self) -> Dict:
-        """Asset-specific configurations"""
-        if self.asset_type == "BTC":
+        """
+        Asset-specific configurations.
+
+        RSI zone logic:
+          bullish_zone = (low, high) — RSI must be IN this range to score bullish momentum
+          bearish_zone = (low, high) — RSI must be IN this range to score bearish momentum
+          oversold_bonus  — RSI below this level gets a mean-reversion BUY bonus
+          overbought_bonus — RSI above this level gets a mean-reversion SELL bonus
+
+        Asset classes:
+          BTC          — Crypto: high volatility, strong trends, wide RSI range
+          GOLD/XAUUSD  — Commodity: moderate volatility, mix of trend and range
+          USTEC/US100  — Index: high momentum, RSI stays elevated longer in trends
+          USOIL        — Oil: commodity, wide swings, mean-reverting within trends
+          FX majors    — EURUSD, GBPUSD, USDJPY: lower volatility, tighter RSI ranges
+          FX crosses   — GBPAUD, EURJPY: higher volatility, wider RSI tolerance
+        """
+        a = self.asset_type.upper()
+
+        # ── Crypto ────────────────────────────────────────────────────────────
+        if "BTC" in a:
             return {
                 'rsi_bullish_zone': (40, 65),
                 'rsi_bearish_zone': (35, 60),
@@ -160,9 +179,11 @@ class InstitutionalCouncilAggregator:
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
-                'trend_safety_threshold': 0.50, # ✨ NEW: Blocks Council if TF disagrees > 50%
+                'trend_safety_threshold': 0.50,
             }
-        else:  # GOLD
+
+        # ── Gold / Precious Metals ─────────────────────────────────────────────
+        if "GOLD" in a or "XAU" in a:
             return {
                 'rsi_bullish_zone': (35, 60),
                 'rsi_bearish_zone': (40, 65),
@@ -171,8 +192,66 @@ class InstitutionalCouncilAggregator:
                 'volume_ma_period': 20,
                 'pattern_confidence_min': 0.65,
                 'macd_confirmation': True,
-                'trend_safety_threshold': 0.50, # ✨ NEW: Blocks Council if TF disagrees > 50%
+                'trend_safety_threshold': 0.50,
             }
+
+        # ── Tech / Equity Indices ──────────────────────────────────────────────
+        # USTEC / US100 / NAS100 trend hard — RSI stays elevated; use wider zones
+        # and a higher overbought threshold so bull runs aren't prematurely blocked.
+        if any(x in a for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
+            return {
+                'rsi_bullish_zone': (45, 70),
+                'rsi_bearish_zone': (30, 55),
+                'rsi_oversold_bonus': 30,
+                'rsi_overbought_bonus': 75,
+                'volume_ma_period': 20,
+                'pattern_confidence_min': 0.65,
+                'macd_confirmation': True,
+                'trend_safety_threshold': 0.50,
+            }
+
+        # ── Oil / Energy Commodities ───────────────────────────────────────────
+        # USOIL swings wide; symmetric RSI zones, slightly relaxed extremes.
+        if "OIL" in a or "WTI" in a or "BRENT" in a:
+            return {
+                'rsi_bullish_zone': (35, 65),
+                'rsi_bearish_zone': (35, 65),
+                'rsi_oversold_bonus': 28,
+                'rsi_overbought_bonus': 72,
+                'volume_ma_period': 20,
+                'pattern_confidence_min': 0.60,
+                'macd_confirmation': True,
+                'trend_safety_threshold': 0.50,
+            }
+
+        # ── FX Crosses (GBPAUD, EURJPY) ────────────────────────────────────────
+        # Cross pairs carry two economies — bigger swings, wider RSI tolerance.
+        # Lower pattern_confidence_min because AI patterns are noisier on crosses.
+        if any(x in a for x in ("GBPAUD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY")):
+            return {
+                'rsi_bullish_zone': (35, 65),
+                'rsi_bearish_zone': (35, 65),
+                'rsi_oversold_bonus': 25,
+                'rsi_overbought_bonus': 75,
+                'volume_ma_period': 20,
+                'pattern_confidence_min': 0.60,
+                'macd_confirmation': True,
+                'trend_safety_threshold': 0.55,
+            }
+
+        # ── FX Majors (EURUSD, GBPUSD, USDJPY, etc.) ─────────────────────────
+        # Major pairs are more mean-reverting with tighter RSI ranges.
+        # Higher trend_safety_threshold — TF must be more confident to veto.
+        return {
+            'rsi_bullish_zone': (40, 62),
+            'rsi_bearish_zone': (38, 60),
+            'rsi_oversold_bonus': 30,
+            'rsi_overbought_bonus': 70,
+            'volume_ma_period': 20,
+            'pattern_confidence_min': 0.65,
+            'macd_confirmation': True,
+            'trend_safety_threshold': 0.55,
+        }
     
     def _log_initialization(self):
         """Log startup configuration"""

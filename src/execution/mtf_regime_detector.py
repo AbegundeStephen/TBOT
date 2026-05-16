@@ -153,16 +153,17 @@ class MultiTimeFrameRegimeDetector:
                     logger.warning(f"[CSV] No timestamp column found in {csv_file}")
                     return self._fetch_data(symbol, timeframe_str, exchange)
 
-                # Check data freshness (should be within last 4 hours)
+                # Check data freshness — threshold scales with timeframe
                 if df.empty:
                     return self._fetch_data(symbol, timeframe_str, exchange)
-                    
+
                 latest_date = df.index[-1]
                 now = pd.Timestamp.now(tz='UTC')
                 hours_old = (now - latest_date).total_seconds() / 3600
 
-                if hours_old > 4 or pd.isna(hours_old):
-                    logger.warning(f"[CSV] Data is {hours_old:.1f} hours old (Stale) - FALLING BACK TO API")
+                stale_threshold = {"1h": 1.0, "4h": 4.0, "1d": 24.0}.get(timeframe_str, 4.0)
+                if hours_old > stale_threshold or pd.isna(hours_old):
+                    logger.warning(f"[CSV] Data is {hours_old:.1f}h old (limit={stale_threshold}h) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)
 
                 logger.info(f"[CSV] ✓ Loaded {len(df)} bars from CSV")
@@ -252,10 +253,20 @@ class MultiTimeFrameRegimeDetector:
                 _floor = _now.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
                 _floor = _now # fallback
-                
+
             if df.index[-1] >= _floor:
                 df = df.iloc[:-1]
-                
+
+        # Cache the result to CSV so subsequent cycles skip the API call
+        if not df.empty:
+            try:
+                csv_file = Path(f"data/raw/{symbol}_{timeframe_str}.csv")
+                csv_file.parent.mkdir(parents=True, exist_ok=True)
+                df.to_csv(csv_file, index=True, index_label="timestamp")
+                logger.info(f"[CSV] ✓ Saved {len(df)} bars → {csv_file}")
+            except Exception as _save_err:
+                logger.warning(f"[CSV] Could not save cache for {symbol} {timeframe_str}: {_save_err}")
+
         return df
 
 
