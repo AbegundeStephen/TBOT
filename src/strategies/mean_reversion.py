@@ -82,6 +82,8 @@ class MeanReversionStrategy(BaseStrategy):
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate minimal, non-redundant features"""
         df = df.copy()
+        # Normalise column names — MT5 can return mixed-case headers
+        df.columns = [c.lower() for c in df.columns]
 
         close = df["close"].values
         high = df["high"].values

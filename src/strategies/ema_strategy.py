@@ -54,6 +54,10 @@ class EMAStrategy(BaseStrategy):
 
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate EMA-based features, ensuring all data is numeric."""
+        # Normalise column names — MT5 can return mixed-case headers
+        df = df.copy()
+        df.columns = [c.lower() for c in df.columns]
+
         if len(df) < self.get_warmup_period():
             logger.debug(
                 f"[{self.name}] Insufficient data: {len(df)} < {self.get_warmup_period()}"
