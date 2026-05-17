@@ -1727,6 +1727,15 @@ class TradingBot:
         switch_occurred = mode_info["switch_occurred"]
         analysis = mode_info["analysis"]
 
+        # ✅ FIX: Record the actually-used mode so the HYBRID STATS block can
+        # read it accurately. The stats block previously called
+        # get_optimal_mode(asset, pd.DataFrame()) which always falls through to
+        # _default_analysis() → 'performance', making the log misleading even
+        # when council was running every cycle.
+        if not hasattr(self, "_hybrid_active_modes"):
+            self._hybrid_active_modes = {}
+        self._hybrid_active_modes[asset_name] = selected_mode
+
         # Log mode selection
         if switch_occurred:
             logger.info(f"\n{'='*70}")
@@ -2322,12 +2331,14 @@ class TradingBot:
         self._last_blocked_notification[asset] = _dedup_key
 
         try:
-            # Stamp the REAL hybrid mode into details so Telegram shows
-            # "Engine: [PERF]" / "Engine: [COUNCIL]" based on what the
-            # hybrid selector is *actually* using for this asset — not
-            # whichever aggregator happened to run last during AI validation.
             _details = dict(details or {})
-            if hasattr(self, "hybrid_selector"):
+            # ✅ FIX: Only fall back to hybrid_selector when the aggregator hasn't
+            # already stamped aggregator_mode. The aggregator stamps it at call time
+            # (trade_asset / _update_asset_signal). Previously we always overwrote
+            # the correct stamp with hybrid_selector.get_optimal_mode() which stores
+            # a static "performance" for all assets, causing [COUNCIL] runs to show
+            # [PERF] in every blocked-signal Telegram notification.
+            if not _details.get("aggregator_mode") and hasattr(self, "hybrid_selector"):
                 try:
                     _real_mode = self.hybrid_selector.get_optimal_mode(
                         asset, pd.DataFrame()
@@ -2882,15 +2893,14 @@ class TradingBot:
             if hasattr(self, "hybrid_selector"):
                 stats = self.hybrid_selector.get_statistics()
 
-                # ✅ FIXED: Actively query the current modes for the dashboard/logs
-                active_modes = {}
-                for asset in self.config["assets"]:
-                    if self.config["assets"][asset].get("enabled", False):
-                        # Get mode without logging the switch to avoid log spam
-                        mode_info = self.hybrid_selector.get_optimal_mode(
-                            asset, pd.DataFrame()
-                        )
-                        active_modes[asset] = mode_info["mode"]
+                # ✅ FIX: Read from _hybrid_active_modes, which is stamped by
+                # get_aggregated_signal_hybrid_dynamic() with the mode that was
+                # *actually* used each cycle. The old approach called
+                # get_optimal_mode(asset, pd.DataFrame()), which always falls
+                # through to _default_analysis() → 'performance' because there
+                # is no market data — producing a misleading log even when
+                # council ran every cycle.
+                active_modes = getattr(self, "_hybrid_active_modes", {})
 
                 logger.info(f"\n[HYBRID STATS]")
                 logger.info(f"  Total Switches:      {stats['total_switches']}")
@@ -3688,6 +3698,16 @@ class TradingBot:
                     is_bull_market=mtf_regime.get("is_bull", False),
                     governor_data=mtf_regime,
                     live_price=current_price
+                )
+                # ✅ FIX: Stamp engine label immediately after aggregator runs.
+                # Previously this stamp was absent from trade_asset (it existed only
+                # in _update_asset_signal), so when _notify_blocked fired for a blocked
+                # council signal it found aggregator_mode missing and the hybrid_selector
+                # fallback always wrote "performance" → Telegram always showed [PERF].
+                details["aggregator_mode"] = (
+                    "council"
+                    if isinstance(aggregator, InstitutionalCouncilAggregator)
+                    else "performance"
                 )
 
             details["price"] = current_price
