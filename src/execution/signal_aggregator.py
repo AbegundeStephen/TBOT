@@ -2732,8 +2732,22 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _transition_conditions = _te.conditions_met if _te else 0
 
                 if is_neutral:
-                    # NEUTRAL: all strategies allowed in any direction
-                    logger.debug(f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})")
+                    # NEUTRAL: all strategies allowed in any direction.
+                    # If TransitionDetector fired (NEUTRAL+TRANSITION trade), log the
+                    # directional tilt so it's visible in logs/dashboard for calibration.
+                    # No hard block or boost — NEUTRAL stays permissive by design.
+                    if _te and _transition_conditions >= 2:
+                        _tilt = (
+                            f"BULLISH tilt ({_transition_score:+.3f})" if _transition_score > 0.15
+                            else f"BEARISH tilt ({_transition_score:+.3f})" if _transition_score < -0.15
+                            else f"no clear tilt ({_transition_score:+.3f})"
+                        )
+                        logger.info(
+                            f"[GATEKEEPER] NEUTRAL+TRANSITION — all strategies allowed, "
+                            f"evidence {_tilt} ({_transition_conditions}/4 conditions) [{self.asset_type}]"
+                        )
+                    else:
+                        logger.debug(f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})")
 
                 elif regime_is_bullish:
                     if regime_strength >= 1.0:
