@@ -1138,8 +1138,16 @@ class TradingBot:
             }
             selected_preset = PRESET_NAME_MAP.get(selected_preset, selected_preset)
 
-            # Handle asset key mapping (BTCUSDT -> BTC, everything else defaults to GOLD presets for now)
-            config_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
+            # Map asset to its preset bucket.
+            # FX pairs have a dedicated preset tuned for tighter ranges and
+            # higher MR relevance. Commodities/indices use GOLD. BTC is its own.
+            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            if "BTC" in asset_name.upper():
+                config_key = "BTC"
+            elif asset_name.upper() in _FX_ASSETS:
+                config_key = "FX"
+            else:
+                config_key = "GOLD"  # GOLD, USTEC, USOIL and any future commodity/index
             preset_config = AGGREGATOR_PRESETS.get(config_key, {}).get(selected_preset)
 
             if preset_config is None:
@@ -2377,12 +2385,16 @@ class TradingBot:
                 logger.warning(f"[AUTO PRESET] No strategies for {asset_name}")
                 return
 
-            # Get preset config
-            # Fix #9: _preset_key selects which preset bucket to use (BTC vs GOLD/FX),
-            # but asset_type must be the real asset name so aggregators log correctly.
-            # Previously asset_type was set to "GOLD" for ALL non-BTC assets, meaning
-            # GBPAUD, EURUSD, USTEC etc. were all identified as "GOLD" internally.
-            _preset_key = "BTC" if "BTC" in asset_name.upper() else "GOLD"
+            # Get preset config — map asset to its preset bucket.
+            # FX pairs use a dedicated preset tuned for tighter ranges and higher
+            # MR weight. Commodities/indices share GOLD. BTC is its own bucket.
+            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            if "BTC" in asset_name.upper():
+                _preset_key = "BTC"
+            elif asset_name.upper() in _FX_ASSETS:
+                _preset_key = "FX"
+            else:
+                _preset_key = "GOLD"
             preset_config = AGGREGATOR_PRESETS.get(_preset_key, {}).get(preset)
             asset_type = asset_name  # Pass actual asset name to aggregator
 
