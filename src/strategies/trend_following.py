@@ -81,6 +81,8 @@ class TrendFollowingStrategy(BaseStrategy):
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate trend following features"""
         df = df.copy()
+        # Normalise column names — MT5 can return mixed-case headers
+        df.columns = [c.lower() for c in df.columns]
 
         close = df["close"].values
         high = df["high"].values

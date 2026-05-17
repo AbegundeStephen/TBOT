@@ -4506,8 +4506,10 @@ class TradingBot:
 
     def _fetch_4h_data(self, asset_name: str) -> pd.DataFrame:
         """
-        Helper method to fetch 4H data for S/R analysis
-
+        Helper method to fetch 4H data for S/R analysis and strategy 4H context.
+        Returns None (not an empty DataFrame) when data is unavailable so that
+        strategy 4H context guards (`if df_4h is not None`) correctly skip rather
+        than crash with KeyError('close') on a column-less empty DataFrame.
         """
         try:
             asset_cfg = self.config["assets"][asset_name]
@@ -4534,18 +4536,28 @@ class TradingBot:
 
             df_4h = self.data_manager.clean_data(df)
 
-            # B.1: Drop incomplete current 4H candle — use only confirmed bars
-            if not df_4h.empty:
-                _now_floor_4h = pd.Timestamp.now(tz='UTC').floor('4h')
-                if df_4h.index[-1] >= _now_floor_4h:
-                    df_4h = df_4h.iloc[:-1]
+            # Guard: if fetch/clean failed, return None so strategies skip 4H context
+            # rather than crash trying to call generate_features on a column-less df.
+            if df_4h is None or df_4h.empty or len(df_4h) < 10:
+                logger.warning(
+                    f"[4H] {asset_name}: Insufficient 4H data "
+                    f"({0 if df_4h is None or df_4h.empty else len(df_4h)} bars) — 4H context disabled this cycle"
+                )
+                return None
 
-            return df_4h
+            # Normalise column names to lowercase in case exchange returns mixed case
+            df_4h.columns = [c.lower() for c in df_4h.columns]
+
+            # B.1: Drop incomplete current 4H candle — use only confirmed bars
+            _now_floor_4h = pd.Timestamp.now(tz='UTC').floor('4h')
+            if df_4h.index[-1] >= _now_floor_4h:
+                df_4h = df_4h.iloc[:-1]
+
+            return df_4h if not df_4h.empty else None
 
         except Exception as e:
-            logger.error(f"[VIZ] Failed to fetch 4H data: {e}")
-            # Return empty dataframe as fallback
-            return pd.DataFrame()
+            logger.error(f"[4H] {asset_name}: Failed to fetch 4H data: {e}")
+            return None
 
     def _update_funding_rate(self):
         """

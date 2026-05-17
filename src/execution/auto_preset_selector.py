@@ -75,18 +75,38 @@ class DynamicPresetSelector:
                 'volatility_very_high': 3.0,
                 'volatility_high': 1.4,
                 'volatility_normal': 1.15,
-                
+
                 'adx_very_weak': 20,
                 'adx_weak': 18,
                 'adx_moderate': 23,
-                
+
                 'momentum_strong_bull': 1.5,
                 'momentum_bull': 1.5,
                 'momentum_bear': -1.5,
                 'momentum_strong_bear': -3.0,
-                
+
                 'ema_distance_strong': 2.0,
                 'ema_distance_moderate': 1.0,
+            },
+            'FX': {
+                # FX pairs: EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY
+                # Tighter pip-range moves, lower ADX regimes, momentum in fractions of %.
+                # Using GOLD thresholds here would misclassify most FX sessions as "stagnant".
+                'volatility_very_high': 3.0,       # Ratio-based — comparable across assets
+                'volatility_high': 1.4,
+                'volatility_normal': 1.1,           # Slightly tighter than GOLD
+
+                'adx_very_weak': 18,               # FX trends are valid at lower ADX
+                'adx_weak': 15,
+                'adx_moderate': 20,                # ADX 20 is a solid trend for FX
+
+                'momentum_strong_bull': 0.5,       # 0.5% over 20 bars = strong for FX
+                'momentum_bull': 0.8,
+                'momentum_bear': -0.5,
+                'momentum_strong_bear': -1.0,
+
+                'ema_distance_strong': 1.0,        # FX rarely moves >1% from EMA200
+                'ema_distance_moderate': 0.5,
             }
         }
     
@@ -102,7 +122,13 @@ class DynamicPresetSelector:
         ✅ ENHANCED: Asset-DNA Gating & MR Preset Support.
         """
         try:
-            asset_type = 'BTC' if 'BTC' in asset_name.upper() else 'GOLD'
+            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            if 'BTC' in asset_name.upper() or 'USTEC' in asset_name.upper():
+                asset_type = 'BTC'
+            elif asset_name.upper() in _FX_ASSETS:
+                asset_type = 'FX'
+            else:
+                asset_type = 'GOLD'   # GOLD, USOIL, and anything else commodity-like
             thresholds = self.thresholds.get(asset_type)
             
             # Calculate metrics
@@ -316,18 +342,27 @@ class DynamicPresetSelector:
             # ================================================================
             asset = asset_name.upper()
             
+            _FX_ASSET_SET = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+
             if new_preset == "mr":
                 # BTC / USTEC: Block MR during BULLISH or SLIGHTLY_BULLISH
+                # These assets trend strongly — MR in a bull regime is fighting the tape.
                 if "BTC" in asset or "USTEC" in asset:
                     if regime_name in ["BULLISH", "SLIGHTLY_BULLISH"]:
                         logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
                         new_preset = "conservative"
-                
-                # GOLD: Only allow MR in BEARISH or NEUTRAL (Safety rule)
+
+                # GOLD: Only allow MR in BEARISH or NEUTRAL (safety rule — gold has structural bull bias)
                 elif "GOLD" in asset:
                     if regime_name not in ["BEARISH", "NEUTRAL"]:
                         logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
                         new_preset = "conservative"
+
+                # FX pairs: Allow MR in any regime — these are inherently mean-reverting intra-session.
+                # The Regime Alignment Veto above already blocks MR in strong TREND (ADX > 25),
+                # so no additional hard gate needed here.
+                elif asset in _FX_ASSET_SET:
+                    pass  # MR allowed — FX DNA is mean-reverting by design
             
             # Build detailed reason
             reason = self._format_reason_with_score(
