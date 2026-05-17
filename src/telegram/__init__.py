@@ -3320,6 +3320,33 @@ class TradingTelegramBot:
 
         await self.send_notification(msg)
 
+    async def notify_profit_milestone(
+        self,
+        asset: str,
+        side: str,
+        milestone: float,
+        current_pnl: float,
+        pnl_pct: float,
+        entry_price: float,
+        current_price: float,
+    ):
+        """
+        Fire when an open trade's unrealized P&L crosses a configured milestone.
+        e.g. "BTC LONG is up +$100 — you've hit your $100 milestone!"
+        """
+        side_emoji = "🟢" if side == "long" else "🔴"
+        sign = "+" if current_pnl >= 0 else ""
+        msg = (
+            f"💰 *Profit Milestone Hit: {asset}*\n\n"
+            f"{side_emoji} Side    : {side.upper()}\n"
+            f"🎯 Milestone : ${milestone:,.0f}\n"
+            f"📈 Unrealized: {sign}${current_pnl:,.2f} ({sign}{pnl_pct:.2f}%)\n"
+            f"💵 Entry     : ${entry_price:,.5g}\n"
+            f"💹 Current   : ${current_price:,.5g}\n\n"
+            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await self.send_notification(msg)
+
     async def notify_error(self, error_msg: str):
         """Notify about errors"""
         msg = (

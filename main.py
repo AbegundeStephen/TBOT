@@ -2848,6 +2848,12 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to update positions: {e}")
 
+            # ✅ NEW: Profit milestone alerts — fires after P&L is refreshed
+            try:
+                self._check_profit_milestones(current_prices)
+            except Exception as e:
+                logger.debug(f"[MILESTONE] Check failed: {e}")
+
             logger.info(f"[ASSETS] Enabled: {', '.join(enabled)}")
 
             if hasattr(self, "data_manager_telegram"):
@@ -3201,6 +3207,96 @@ class TradingBot:
             logger.error(
                 f"Error logging VTM status: {e}"
             )  # Wait 5 minutes before next cycle # Wait 5 minutes before next cycle
+
+    def _check_profit_milestones(self, current_prices: dict):
+        """
+        After each P&L refresh, check whether any open position's unrealized
+        profit has crossed a new milestone threshold and send a Telegram alert.
+
+        Thresholds are configured globally under:
+            config["trading"]["profit_alert_thresholds"]  (list of USD amounts)
+
+        Example config entry:
+            "profit_alert_thresholds": [25, 50, 100, 200, 500]
+
+        Milestones are tracked per position_id so they fire exactly once per
+        crossing per trade. The tracker is reset when a position is closed.
+        """
+        if not self.telegram_bot:
+            return
+
+        thresholds = self.config.get("trading", {}).get(
+            "profit_alert_thresholds", []
+        )
+        if not thresholds:
+            return
+
+        sorted_thresholds = sorted(thresholds)
+
+        # Initialise tracker dict on first call
+        if not hasattr(self, "_profit_milestone_tracker"):
+            self._profit_milestone_tracker = {}  # {position_id: set of alerted milestones}
+
+        open_ids = set(self.portfolio_manager.positions.keys())
+
+        # Prune closed positions from tracker
+        stale = set(self._profit_milestone_tracker.keys()) - open_ids
+        for pid in stale:
+            del self._profit_milestone_tracker[pid]
+
+        for position_id, position in self.portfolio_manager.positions.items():
+            try:
+                # Get the freshest unrealized P&L from the exchange
+                unrealized = position.get_exchange_pnl()
+
+                # For paper mode or positions without live exchange P&L, fall
+                # back to price-based calculation using current_prices
+                if unrealized == 0.0 and position.asset in current_prices:
+                    unrealized = position.get_pnl(current_prices[position.asset])
+
+                # Only fire for profitable positions
+                if unrealized <= 0:
+                    continue
+
+                alerted = self._profit_milestone_tracker.setdefault(
+                    position_id, set()
+                )
+
+                for milestone in sorted_thresholds:
+                    if unrealized >= milestone and milestone not in alerted:
+                        alerted.add(milestone)
+
+                        # Calculate P&L % relative to position notional
+                        entry = position.entry_price or 0.0
+                        current = (
+                            current_prices.get(position.asset)
+                            or entry
+                        )
+                        notional = position.size * entry if entry > 0 else 1.0
+                        pnl_pct = (unrealized / notional) * 100 if notional > 0 else 0.0
+
+                        logger.info(
+                            f"[MILESTONE] 💰 {position.asset} "
+                            f"{position.side.upper()} hit ${milestone} milestone "
+                            f"(unrealized: +${unrealized:,.2f})"
+                        )
+
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_profit_milestone(
+                                asset=position.asset,
+                                side=position.side,
+                                milestone=milestone,
+                                current_pnl=unrealized,
+                                pnl_pct=pnl_pct,
+                                entry_price=entry,
+                                current_price=current,
+                            )
+                        )
+                        break  # Only alert one new milestone per cycle per position
+                        # (the next will fire on the following cycle when P&L is checked again)
+
+            except Exception as e:
+                logger.debug(f"[MILESTONE] Error checking {position_id}: {e}")
 
     def _log_portfolio_status(self, status):
         """
