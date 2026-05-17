@@ -1294,8 +1294,30 @@ class InstitutionalCouncilAggregator:
                             f"threshold={safety_threshold:.2f}"
                         )
 
-                    if (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
-                       (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
+                    # ✅ FIX: Only apply the TF veto when the council's signal is
+                    # COUNTER-TREND. The veto was designed to stop the council from
+                    # fighting strong trends (BUY in BEARISH, SELL in BULLISH).
+                    # Previously it fired symmetrically, also blocking trend-aligned
+                    # council trades (e.g., SELL in BEARISH) whenever TF picked up
+                    # short-term counter-trend momentum. A TF counter-trend reading
+                    # should NOT override a high-conviction trend-aligned council —
+                    # it's noise, not a regime change.
+                    _council_counter_trend = (
+                        (signal == 1 and not is_bull) or   # BUY in BEARISH regime
+                        (signal == -1 and is_bull)          # SELL in BULLISH regime
+                    )
+
+                    if not _council_counter_trend:
+                        # Trend-aligned council — log TF opposition for visibility
+                        # but bypass the veto entirely.
+                        if (signal == 1 and tf_signal == -1) or (signal == -1 and tf_signal == 1):
+                            logger.info(
+                                f"[VETO] ⚡ TF counter-trend opposition noted "
+                                f"(tf_conf={tf_conf:.2f}, threshold={safety_threshold:.2f}) "
+                                f"but council is TREND-ALIGNED — veto bypassed."
+                            )
+                    elif (signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold) or \
+                         (signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold):
                         logger.info(f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees.")
                         return 0, {
                             'timestamp': timestamp,

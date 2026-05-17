@@ -162,7 +162,7 @@ def get_history(asset):
 
     # Map friendly names to CSV filenames
     filename_map = {
-        "BTC":    "BTCUSDT_1h.csv",
+        "BTC":    "BTCUSDm_1h.csv",
         "GOLD":   "XAUUSDm_1h.csv",
         "XAU":    "XAUUSDm_1h.csv",
         "USTEC":  "USTECm_1h.csv",
