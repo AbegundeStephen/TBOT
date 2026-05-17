@@ -43,9 +43,14 @@ class MTFRegimeIntegration:
 
         # Create detectors for each asset
         self.detectors = {}
-        
+
         # ✅ Store latest regime data for aggregators
         self._current_regime_data = {}
+
+        # ✅ FIX: Track last notified regime per asset so _should_notify only fires
+        # on actual regime changes, not every cycle. Previously the check was purely
+        # score-based with no memory, which would flood Telegram once uncommented.
+        self._last_notified_regime: dict = {}
 
         logger.info("[MTF INTEGRATION] Initialized")
 
@@ -202,16 +207,32 @@ class MTFRegimeIntegration:
 
     def _should_notify(self, regime_status: RegimeStatus) -> bool: # Updated parameter type
         """
-        Determine if Telegram notification should be sent based on significant score change.
+        Determine if Telegram notification should be sent.
+
+        Fires only when the consensus_regime label changes for an asset (e.g.
+        NEUTRAL → BEARISH, or SLIGHTLY_BULLISH → BULLISH).  Comparing raw score
+        thresholds every cycle would flood Telegram once send_message is enabled.
 
         Args:
             regime_status: RegimeStatus object
 
         Returns:
-            True if notification should be sent
+            True if regime label changed since the last notification for this asset.
         """
-        # Notify if there's a strong bullish or bearish bias
-        return regime_status.score > 0.5 or regime_status.score < -0.5
+        asset = regime_status.asset
+        new_regime = regime_status.consensus_regime
+        previous = self._last_notified_regime.get(asset)
+
+        if previous == new_regime:
+            return False  # Same regime as last notification — stay quiet
+
+        # Regime changed: update tracker and notify
+        self._last_notified_regime[asset] = new_regime
+        logger.info(
+            f"[MTF TG] Regime change detected for {asset}: "
+            f"{previous or 'NONE'} → {new_regime}"
+        )
+        return True
 
     def _send_telegram_notification(self, regime_status: RegimeStatus): # Updated parameter type
         """
@@ -302,6 +323,14 @@ class MTFRegimeIntegration:
                 # council_aggregator uses governor_data.get("consensus_regime", "NEUTRAL")
                 # Previously only "regime" existed, causing both to always read the default.
                 "consensus_regime": regime_status.consensus_regime,
+                # ✅ FIX: Expose trade_type so _is_transition_trade in _build_composite_state
+                # can fire for NEUTRAL+FX assets (EURUSD/EURJPY in consolidation).
+                # "TRANSITION" matches the string returned by _check_governor_filter()
+                # for NEUTRAL regimes, enabling TransitionDetector on those assets.
+                "trade_type": (
+                    "TRANSITION" if regime_status.consensus_regime == "NEUTRAL"
+                    else regime_status.trade_type.value
+                ),
                 "regime_score": regime_status.score,
                 "is_bullish": regime_status.is_bullish,
                 "is_bearish": regime_status.is_bearish,

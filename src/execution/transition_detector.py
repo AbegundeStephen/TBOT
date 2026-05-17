@@ -80,7 +80,13 @@ class TransitionDetector:
     ) -> TransitionEvidence:
         """
         Collect evidence for a potential regime transition.
-        Only called in SLIGHTLY regimes.
+        Called in SLIGHTLY regimes and NEUTRAL+TRANSITION trades.
+
+        For SLIGHTLY_BEARISH  → looks for bullish reversal evidence.
+        For SLIGHTLY_BULLISH  → looks for bearish reversal evidence.
+        For NEUTRAL           → direction-agnostic scan; positive total_score means
+                                bullish conditions dominate, negative means bearish.
+                                Used for TRANSITION trades (FX pairs in consolidation).
         """
         evidence = TransitionEvidence()
         details = []
@@ -89,6 +95,12 @@ class TransitionDetector:
             looking_for = "bullish"
         elif regime == "SLIGHTLY_BULLISH":
             looking_for = "bearish"
+        elif regime == "NEUTRAL":
+            # TRANSITION trade: run analysis from bullish perspective.
+            # A positive total_score = bullish breakout conditions dominate.
+            # A negative total_score = bearish breakout conditions dominate.
+            # The Gatekeeper reads the sign to determine the likely breakout direction.
+            looking_for = "bullish"
         else:
             return evidence
 
@@ -141,10 +153,18 @@ class TransitionDetector:
         )
 
         if evidence.conditions_met >= self.MIN_CONDITIONS:
-            if looking_for == "bullish" and evidence.total_score > 0.15:
-                evidence.direction = "BULLISH_REVERSAL"
-            elif looking_for == "bearish" and evidence.total_score < -0.15:
-                evidence.direction = "BEARISH_REVERSAL"
+            if regime == "NEUTRAL":
+                # TRANSITION trade: score sign determines breakout direction
+                if evidence.total_score > 0.15:
+                    evidence.direction = "BULLISH_BREAKOUT"
+                elif evidence.total_score < -0.15:
+                    evidence.direction = "BEARISH_BREAKOUT"
+            else:
+                # SLIGHTLY regimes: evidence of counter-trend reversal
+                if looking_for == "bullish" and evidence.total_score > 0.15:
+                    evidence.direction = "BULLISH_REVERSAL"
+                elif looking_for == "bearish" and evidence.total_score < -0.15:
+                    evidence.direction = "BEARISH_REVERSAL"
 
         evidence.details = " | ".join(details)
         logger.info(
