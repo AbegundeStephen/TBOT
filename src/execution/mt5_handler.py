@@ -816,6 +816,7 @@ class MT5ExecutionHandler:
             if symbol_info.volume_step > 0:
                 lot_precision = max(0, int(round(-math.log10(symbol_info.volume_step))))
 
+            _leverage_cfg = self.config.get("assets", {}).get(asset, {}).get("leverage", 1)
             success = self.portfolio_manager.add_position(
                 asset=asset,
                 symbol=symbol,
@@ -830,6 +831,7 @@ class MT5ExecutionHandler:
                 min_lot=symbol_info.volume_min,
                 lot_precision=lot_precision,
                 disable_partials=_disable_partials,
+                leverage=_leverage_cfg,
             )
 
             if success:
@@ -2220,6 +2222,41 @@ class MT5ExecutionHandler:
                                 f"[SYNC] Falling back to market price ${exit_price} "
                                 f"for #{pos.mt5_ticket} P&L calc."
                             )
+
+                        # ── Calculate P&L for alert ─────────────────────────
+                        _raw_profit = broker_data.get("profit") if broker_data else None
+                        if _raw_profit is None and exit_price:
+                            if pos.side == "short":
+                                _raw_profit = (pos.entry_price - exit_price) * pos.quantity
+                            else:
+                                _raw_profit = (exit_price - pos.entry_price) * pos.quantity
+
+                        # ── Telegram alert — position closed outside the bot ─
+                        try:
+                            _bot      = getattr(self, 'trading_bot', None)
+                            _telegram = getattr(_bot, 'telegram_bot', None)
+                            _send_fn  = getattr(_bot, '_send_telegram_notification', None)
+                            if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                                _pnl_str = (
+                                    f"{'🟢 +' if (_raw_profit or 0) >= 0 else '🔴 '}"
+                                    f"${abs(_raw_profit or 0):.2f}"
+                                )
+                                _msg = (
+                                    f"⚠️ <b>POSITION CLOSED BY MT5</b>\n"
+                                    f"Asset:  <b>{asset}</b> {pos.side.upper()}\n"
+                                    f"Ticket: #{pos.mt5_ticket}\n"
+                                    f"Entry:  ${pos.entry_price:.4g}\n"
+                                    f"Exit:   ${exit_price:.4g}\n"
+                                    f"P&L:    {_pnl_str}\n"
+                                    f"Reason: SL/TP hit or manual close on broker\n"
+                                    f"<i>VTM did not trigger this close — "
+                                    f"MT5 executed it directly.</i>"
+                                )
+                                _coro = _telegram.send_message(text=_msg, parse_mode="HTML")
+                                if _coro:
+                                    _send_fn(_coro)
+                        except Exception as _tg_exc:
+                            logger.debug(f"[SYNC] Telegram close alert failed: {_tg_exc}")
 
                         self.portfolio_manager.close_position(
                             position_id=pos.position_id,

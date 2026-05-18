@@ -282,6 +282,9 @@ class TradingBot:
         self.telegram_thread = None
         self.vtm_thread = None
 
+        # Market Watcher — real-time protective monitor
+        self.market_watcher = None
+
         # Main bot state
         self._shutdown_requested = False
         self._main_loop_running = False
@@ -4226,6 +4229,26 @@ class TradingBot:
                 )
                 return
 
+            # C-0. MarketWatcher momentum-disagreement suppression
+            if self.market_watcher:
+                _mw_suppressed, _mw_reason = self.market_watcher.is_signal_suppressed(
+                    asset_name, signal
+                )
+                if _mw_suppressed:
+                    logger.warning(
+                        f"[WATCHER] ✗ {asset_name} {'SELL' if signal == -1 else 'BUY'} "
+                        f"suppressed — {_mw_reason}"
+                    )
+                    self._notify_blocked(
+                        asset=asset_name,
+                        signal=signal,
+                        block_source="Market Watcher",
+                        block_reason=_mw_reason,
+                        details=details,
+                        price=details.get("price"),
+                    )
+                    return
+
             # C. Confidence/Quality Check
             min_quality = self.config.get("trading", {}).get("min_signal_quality", 0.40)
             signal_quality = details.get("signal_quality", 0)
@@ -5242,6 +5265,22 @@ class TradingBot:
             self.vtm_thread.start()
             logger.info("[VTM] ✅ VTM management thread started.")
 
+            # Start MarketWatcher — real-time adverse-move guard + signal suppression
+            try:
+                from src.execution.market_watcher import MarketWatcher
+                self.market_watcher = MarketWatcher(
+                    config=self.config,
+                    portfolio_manager=self.portfolio_manager,
+                    mt5_handler=self.mt5_handler,
+                    binance_handler=self.binance_handler,
+                    telegram_bot=self.telegram_bot,
+                    send_telegram_fn=self._send_telegram_notification,
+                )
+                self.market_watcher.start()
+                logger.info("[WATCHER] ✅ MarketWatcher thread started.")
+            except Exception as _watcher_exc:
+                logger.warning(f"[WATCHER] Failed to start MarketWatcher: {_watcher_exc}")
+
             logger.info(f"\n[OK] Trading bot running")
             logger.info(
                 f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
@@ -5395,6 +5434,10 @@ class TradingBot:
                 logger.info("[STOP] ✅ Positions closed")
             except Exception as e:
                 logger.error(f"[STOP] Error closing positions: {e}")
+
+        # ✨  Shutdown MarketWatcher thread
+        if self.market_watcher:
+            self.market_watcher.stop()
 
         # ✨  Shutdown VTM thread
         if self.vtm_thread and self.vtm_thread.is_alive():

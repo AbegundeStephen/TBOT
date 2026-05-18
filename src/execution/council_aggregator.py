@@ -615,6 +615,81 @@ class InstitutionalCouncilAggregator:
             return True
 
     
+    def _check_recent_momentum_alignment(
+        self,
+        df: pd.DataFrame,
+        signal: int,
+        atr_fast: float,
+        n_candles: int = 3,
+        min_agreement: int = 2,
+    ) -> Tuple[bool, str]:
+        """
+        Candle Momentum Alignment Gate.
+
+        Blocks a trend-aligned signal when the most recent closed 1H candles
+        show clear momentum in the *opposite* direction — i.e. price is actively
+        bouncing against the proposed trade.
+
+        Examples of what this catches:
+          • SELL proposed in a BEARISH regime but the last 3 candles are all
+            bullish (price rallying) — don't add short exposure into a bounce.
+          • BUY proposed in a BULLISH regime but the last 3 candles are all
+            bearish (price pulling back hard) — don't add long exposure into a
+            sharp sell-off.
+
+        Returns:
+            (passed: bool, reason: str)
+            passed=True  → gate cleared, signal may proceed
+            passed=False → gate failed, signal should be blocked
+        """
+        try:
+            if len(df) < n_candles + 2:
+                return True, "insufficient data"
+
+            # Use rows [-n_candles-1 : -1] to get n_candles confirmed-closed
+            # bars (exclude the most-recent potentially-forming candle).
+            _recent = df.iloc[-(n_candles + 1):-1]
+            _opens  = _recent['open'].values
+            _closes = _recent['close'].values
+
+            _bullish = int((_closes > _opens).sum())
+            _bearish = int((_closes < _opens).sum())
+
+            # Require that candle bodies are meaningful (not tiny dojis).
+            _avg_body = float(abs(_closes - _opens).mean())
+            _min_body = atr_fast * 0.08   # 8% of ATR — filters out doji noise
+
+            if _avg_body < _min_body:
+                return True, "candle bodies too small to determine momentum"
+
+            if signal == -1 and _bullish >= min_agreement:
+                reason = (
+                    f"{_bullish}/{n_candles} recent candles are bullish "
+                    f"(avg body {_avg_body:.4f}) — momentum opposing SELL"
+                )
+                logger.info(
+                    f"[CMR] ⛔ SELL blocked — recent {_bullish}/{n_candles} "
+                    f"candles bullish, market bouncing against short entry."
+                )
+                return False, reason
+
+            if signal == 1 and _bearish >= min_agreement:
+                reason = (
+                    f"{_bearish}/{n_candles} recent candles are bearish "
+                    f"(avg body {_avg_body:.4f}) — momentum opposing BUY"
+                )
+                logger.info(
+                    f"[CMR] ⛔ BUY blocked — recent {_bearish}/{n_candles} "
+                    f"candles bearish, market falling against long entry."
+                )
+                return False, reason
+
+            return True, "momentum aligned"
+
+        except Exception as e:
+            logger.warning(f"[CMR] Check failed, allowing signal: {e}")
+            return True, f"check error: {e}"
+
     def _check_macro_regime(self, asset: str) -> str:
         """
         Extract macro regime from MTF integration or current state.
@@ -1557,6 +1632,60 @@ class InstitutionalCouncilAggregator:
                         
                 except Exception as e:
                     logger.warning(f"[COUNCIL] Risk/Reward Gate simulation failed: {e}")
+
+                # 5. CANDLE MOMENTUM ALIGNMENT GATE (ABSOLUTE VETO)
+                # Reason: Prevents adding trend-aligned exposure when short-term
+                # price action is clearly moving against the proposed direction.
+                # Addresses "9 SELL signals while BTC bounces" — macro regime is
+                # sticky (BEARISH for hours) but recent 1H candles may show a
+                # clear bullish rebound, making a new short entry very poor timing.
+                #
+                # Only applied to TREND-ALIGNED signals (counter-trend signals
+                # already require a higher council score; MR setups may legitimately
+                # trade against recent momentum).
+                _cmr_trend_aligned = (
+                    (signal == -1 and not is_bull) or   # SELL in BEARISH regime
+                    (signal ==  1 and is_bull)           # BUY  in BULLISH regime
+                )
+                if _cmr_trend_aligned:
+                    _cmr_cfg = self.config.get('momentum_alignment', {})
+                    _cmr_candles = _cmr_cfg.get('candles', 3)
+                    _cmr_min_agree = _cmr_cfg.get('min_agreement', 2)
+                    _cmr_enabled = _cmr_cfg.get('enabled', True)
+
+                    if _cmr_enabled:
+                        _cmr_passed, _cmr_reason = self._check_recent_momentum_alignment(
+                            df, signal, atr_fast,
+                            n_candles=_cmr_candles,
+                            min_agreement=_cmr_min_agree,
+                        )
+                        if not _cmr_passed:
+                            logger.info(
+                                f"[VETO] ❌ BLOCKED - Candle Momentum Reversal: {_cmr_reason}"
+                            )
+                            return 0, {
+                                'timestamp': timestamp,
+                                'signal': 0,
+                                'asset': self.asset_type,
+                                'decision_type': "BLOCKED (Candle Momentum Reversal)",
+                                'action': 'rejected',
+                                'original_signal': signal,
+                                'reasoning': "blocked_by_candle_momentum_reversal",
+                                'final_signal': 0,
+                                'signal_quality': 0.0,
+                                'total_score': total_score,
+                                'scores': chosen_scores,
+                                'buy_total': buy_total,
+                                'sell_total': sell_total,
+                                'regime': regime_name,
+                                'mr_signal': mr_signal,
+                                'mr_confidence': mr_conf,
+                                'tf_signal': tf_signal,
+                                'tf_confidence': tf_conf,
+                                'ema_signal': ema_signal,
+                                'ema_confidence': ema_conf,
+                                'cmr_reason': _cmr_reason,
+                            }
 
             # ====================================================================
             # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)
