@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 # ── Tuning constants ─────────────────────────────────────────────────────────
 _POLL_INTERVAL        = 15     # seconds between watcher ticks
 _MOMENTUM_CANDLES     = 3      # how many closed 1H candles to inspect for direction
-_ADVERSE_ATR_WARN     = 0.70   # adverse move > 0.7 × ATR  → tighten SL to breakeven
-_ADVERSE_ATR_CLOSE    = 1.60   # adverse move > 1.6 × ATR  → emergency SL tighten hard
+_ADVERSE_ATR_WARN     = 1.10   # adverse move > 1.1 × ATR  → tighten SL to breakeven
+_ADVERSE_ATR_CLOSE    = 2.20   # adverse move > 2.2 × ATR  → emergency SL tighten hard
 _SUPPRESS_ATR_BOUNCE  = 0.50   # new-signal suppressed if price bounced > 0.5 × ATR
                                 # against the signal direction since the last entry
 _ALERT_COOLDOWN_SEC   = 300    # minimum seconds between repeated alerts for same position
@@ -233,12 +233,15 @@ class MarketWatcher:
             candle_dirs.append(1 if row["close"] >= row["open"] else -1)
 
         direction_score = sum(candle_dirs)   # range: -N..+N
-        if direction_score >= 2:
-            momentum_direction = 1    # predominantly bullish
-        elif direction_score <= -2:
-            momentum_direction = -1   # predominantly bearish
+        # Require all 3 candles unanimous before calling momentum directional.
+        # 2/3 is too easy to trigger on a normal shallow pullback inside a trend;
+        # we only want to suppress signals when the short-term move is unambiguous.
+        if direction_score >= _MOMENTUM_CANDLES:
+            momentum_direction = 1    # all candles bullish
+        elif direction_score <= -_MOMENTUM_CANDLES:
+            momentum_direction = -1   # all candles bearish
         else:
-            momentum_direction = 0    # mixed
+            momentum_direction = 0    # mixed / normal retracement
 
         # Current price (last close in df)
         last_price = float(df["close"].iloc[-1])

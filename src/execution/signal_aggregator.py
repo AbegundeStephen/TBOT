@@ -742,7 +742,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             state.order_book_imbalance = float(governor_data.get("order_book_imbalance", 0.0))
             state.order_book_wall_detected = bool(governor_data.get("order_book_wall_detected", False))
 
-        # ── TRANSITION EVIDENCE (SLIGHTLY regimes only) ───────────────────
+        # ── TRANSITION EVIDENCE (SLIGHTLY + full trend regimes) ──────────────
         # Must run AFTER CVD/order-book fields are populated above so the
         # order_flow sub-score has live data. df_4h is already available as
         # the second parameter of _build_composite_state.
@@ -756,7 +756,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             governor_data.get("trade_type", "") == "TRANSITION"
             if governor_data else False
         )
-        if _regime_name in ("SLIGHTLY_BEARISH", "SLIGHTLY_BULLISH") or _is_transition_trade:
+        # ✅ TASK-8 FIX: Also run for full BEARISH/BULLISH regimes.
+        # The post-score momentum softener in mtf_regime_detector may have already
+        # downgraded the regime to SLIGHTLY_*, but if it hasn't (e.g. the day-open
+        # regime snapshot is stale), the transition detector can still collect
+        # evidence for the gatekeeper's counter-trend penalty scaling.
+        # Strong evidence (conditions_met >= 3) is consumed by the gatekeeper's
+        # softener as a second confirmation layer for full trend regimes.
+        if _regime_name in ("BEARISH", "SLIGHTLY_BEARISH", "BULLISH", "SLIGHTLY_BULLISH") or _is_transition_trade:
             try:
                 _depth = governor_data.get("depth_data") if governor_data else None
                 state._transition_evidence = self._transition_detector.collect_evidence(
@@ -2751,24 +2758,57 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                 elif regime_is_bullish:
                     if regime_strength >= 1.0:
-                        # FULL BULLISH: hard block counter-trend shorts
-                        if tf_signal < 0:
-                            if self._is_explosive_momentum(df, -1):
-                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)")
-                            else:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Strong bullish for {self.asset_type}")
-                                tf_signal = 0; tf_conf = 0.0
-                        if ema_signal < 0:
-                            if self._is_explosive_momentum(df, -1):
-                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)")
-                            else:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Strong bullish for {self.asset_type}")
+                        # FULL BULLISH: hard block counter-trend shorts.
+                        # Exception 1: explosive momentum (existing)
+                        # Exception 2 (TASK-8): strong transition evidence (≥3/4 sources,
+                        #   score < -0.30) softens the hard block to a steep penalty.
+                        _strong_bearish_reversal = (
+                            _te is not None
+                            and _transition_conditions >= 3
+                            and _transition_score < -0.30
+                        )
+                        if _strong_bearish_reversal:
+                            _full_bull_penalty = max(0.35, 0.55 + _transition_score * 0.5)
+                            logger.info(
+                                f"[GATEKEEPER] ⚡ FULL BULLISH softened by transition evidence "
+                                f"({_transition_conditions}/4 conditions, score={_transition_score:+.3f}) → "
+                                f"applying penalty {_full_bull_penalty:.2f} instead of hard block "
+                                f"[{self.asset_type}]"
+                            )
+                            if tf_signal < 0:
+                                tf_conf *= _full_bull_penalty
+                                logger.info(
+                                    f"[GATEKEEPER] ⚠️ PENALIZED SHORT (TF): Full bullish+evidence — "
+                                    f"conf reduced to {tf_conf:.2f}"
+                                )
+                            if ema_signal < 0:
                                 ema_signal = 0; ema_conf = 0.0
-                        if mr_signal < 0:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in strong Bullish for {self.asset_type}")
-                            mr_signal = 0; mr_conf = 0.0
-                        elif mr_signal > 0:
-                            logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in strong Bullish for {self.asset_type}")
+                            if mr_signal < 0:
+                                mr_conf *= min(_full_bull_penalty + 0.10, 0.80)
+                                logger.info(
+                                    f"[GATEKEEPER] ⚠️ PENALIZED SHORT (MR): Full bullish+evidence — "
+                                    f"conf reduced to {mr_conf:.2f}"
+                                )
+                            elif mr_signal > 0:
+                                logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in bullish+evidence for {self.asset_type}")
+                        else:
+                            if tf_signal < 0:
+                                if self._is_explosive_momentum(df, -1):
+                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)")
+                                else:
+                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Strong bullish for {self.asset_type}")
+                                    tf_signal = 0; tf_conf = 0.0
+                            if ema_signal < 0:
+                                if self._is_explosive_momentum(df, -1):
+                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)")
+                                else:
+                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Strong bullish for {self.asset_type}")
+                                    ema_signal = 0; ema_conf = 0.0
+                            if mr_signal < 0:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in strong Bullish for {self.asset_type}")
+                                mr_signal = 0; mr_conf = 0.0
+                            elif mr_signal > 0:
+                                logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in strong Bullish for {self.asset_type}")
 
                     else:
                         # SLIGHTLY BULLISH: penalise shorts, don't kill them
@@ -2801,24 +2841,61 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                 elif regime_is_bearish:
                     if regime_strength >= 1.0:
-                        # FULL BEARISH: hard block counter-trend longs
-                        if tf_signal > 0:
-                            if self._is_explosive_momentum(df, 1):
-                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)")
-                            else:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Strong bearish for {self.asset_type}")
-                                tf_signal = 0; tf_conf = 0.0
-                        if ema_signal > 0:
-                            if self._is_explosive_momentum(df, 1):
-                                logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)")
-                            else:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Strong bearish for {self.asset_type}")
+                        # FULL BEARISH: hard block counter-trend longs.
+                        # Exception 1: explosive momentum (existing)
+                        # Exception 2 (TASK-8): strong transition evidence (≥3/4 sources,
+                        #   score > 0.30) softens the hard block to a steep penalty instead.
+                        #   This handles the "GOLD stuck at BEARISH all day while price
+                        #   rallied 1%+" scenario where the day-open regime snapshot is stale.
+                        _strong_bullish_reversal = (
+                            _te is not None
+                            and _transition_conditions >= 3
+                            and _transition_score > 0.30
+                        )
+                        if _strong_bullish_reversal:
+                            # Treat like a SLIGHTLY_BEARISH with extra caution
+                            _full_bear_penalty = max(0.35, 0.55 - _transition_score * 0.5)
+                            logger.info(
+                                f"[GATEKEEPER] ⚡ FULL BEARISH softened by transition evidence "
+                                f"({_transition_conditions}/4 conditions, score={_transition_score:+.3f}) → "
+                                f"applying penalty {_full_bear_penalty:.2f} instead of hard block "
+                                f"[{self.asset_type}]"
+                            )
+                            if tf_signal > 0:
+                                tf_conf *= _full_bear_penalty
+                                logger.info(
+                                    f"[GATEKEEPER] ⚠️ PENALIZED LONG (TF): Full bearish+evidence — "
+                                    f"conf reduced to {tf_conf:.2f}"
+                                )
+                            if ema_signal > 0:
+                                # EMA is slow — zero it even with evidence; TF covers the bullish case
                                 ema_signal = 0; ema_conf = 0.0
-                        if mr_signal > 0:
-                            logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in strong Bearish for {self.asset_type}")
-                            mr_signal = 0; mr_conf = 0.0
-                        elif mr_signal < 0:
-                            logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in strong Bearish for {self.asset_type}")
+                            if mr_signal > 0:
+                                mr_conf *= min(_full_bear_penalty + 0.10, 0.80)
+                                logger.info(
+                                    f"[GATEKEEPER] ⚠️ PENALIZED LONG (MR): Full bearish+evidence — "
+                                    f"conf reduced to {mr_conf:.2f}"
+                                )
+                            elif mr_signal < 0:
+                                logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in bearish+evidence for {self.asset_type}")
+                        else:
+                            if tf_signal > 0:
+                                if self._is_explosive_momentum(df, 1):
+                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)")
+                                else:
+                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Strong bearish for {self.asset_type}")
+                                    tf_signal = 0; tf_conf = 0.0
+                            if ema_signal > 0:
+                                if self._is_explosive_momentum(df, 1):
+                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)")
+                                else:
+                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Strong bearish for {self.asset_type}")
+                                    ema_signal = 0; ema_conf = 0.0
+                            if mr_signal > 0:
+                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in strong Bearish for {self.asset_type}")
+                                mr_signal = 0; mr_conf = 0.0
+                            elif mr_signal < 0:
+                                logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in strong Bearish for {self.asset_type}")
 
                     else:
                         # SLIGHTLY BEARISH: penalise longs, don't kill them
@@ -2943,6 +3020,96 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                 reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})" if final_signal == 1 else f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})" if final_signal == -1 else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
                 original_signal = final_signal
+
+                # ── CANDLE MOMENTUM REVERSAL GATE ───────────────────────────
+                # Mirror of the CMR veto in council_aggregator. Blocks a
+                # trend-aligned signal when the most recent closed 1H candles
+                # are unanimously moving AGAINST the proposed direction.
+                # "3 green candles → don't add a new short" principle.
+                # Only applied to trend-aligned signals (SELL in BEARISH,
+                # BUY in BULLISH). Counter-trend setups are exempt — they
+                # intentionally trade against recent momentum.
+                if final_signal != 0:
+                    _cmr_trend_aligned = (
+                        (final_signal == -1 and not is_bull) or
+                        (final_signal ==  1 and is_bull)
+                    )
+                    if _cmr_trend_aligned:
+                        try:
+                            _cmr_cfg      = self.config.get("momentum_alignment", {})
+                            _cmr_enabled  = _cmr_cfg.get("enabled", True)
+                            _cmr_candles  = _cmr_cfg.get("candles", 3)
+                            _cmr_agree    = _cmr_cfg.get("min_agreement", 3)
+
+                            if _cmr_enabled and len(df) >= _cmr_candles + 2:
+                                _cmr_recent = df.iloc[-(_cmr_candles + 1):-1]
+                                _cmr_opens  = _cmr_recent["open"].values
+                                _cmr_closes = _cmr_recent["close"].values
+                                _cmr_bull   = int((_cmr_closes > _cmr_opens).sum())
+                                _cmr_bear   = int((_cmr_closes < _cmr_opens).sum())
+
+                                # Reuse _atr14 from flash-veto block above if present
+                                _cmr_atr = locals().get("_atr14", 0.0)
+                                if _cmr_atr <= 0:
+                                    try:
+                                        import numpy as _cnp
+                                        _hi = df["high"].values; _lo = df["low"].values; _cl = df["close"].values
+                                        _tr = _cnp.maximum(_hi[1:]-_lo[1:], _cnp.abs(_hi[1:]-_cl[:-1]), _cnp.abs(_lo[1:]-_cl[:-1]))
+                                        _cmr_atr = float(_cnp.nanmean(_tr[-14:])) if len(_tr) >= 14 else 0.0
+                                    except Exception:
+                                        _cmr_atr = 0.0
+
+                                _avg_body = float(abs(_cmr_closes - _cmr_opens).mean())
+                                _min_body = _cmr_atr * 0.08
+
+                                if _avg_body >= _min_body:
+                                    if final_signal == -1 and _cmr_bull >= _cmr_agree:
+                                        _cmr_reason = (
+                                            f"{_cmr_bull}/{_cmr_candles} recent candles bullish "
+                                            f"— momentum opposing SELL"
+                                        )
+                                        logger.info(
+                                            f"[CMR] ⛔ {self.asset_type} SELL blocked — "
+                                            f"{_cmr_bull}/{_cmr_candles} candles bullish, "
+                                            f"market bouncing against short entry."
+                                        )
+                                        return 0, {
+                                            "timestamp": timestamp,
+                                            "regime": regime_name,
+                                            "reasoning": "blocked_by_candle_momentum_reversal",
+                                            "final_signal": 0,
+                                            "original_signal": final_signal,
+                                            "signal_quality": 0.0,
+                                            "mr_signal": mr_signal, "mr_confidence": mr_conf,
+                                            "tf_signal": tf_signal, "tf_confidence": tf_conf,
+                                            "ema_signal": ema_signal, "ema_confidence": ema_conf,
+                                            "cmr_reason": _cmr_reason,
+                                        }
+                                    elif final_signal == 1 and _cmr_bear >= _cmr_agree:
+                                        _cmr_reason = (
+                                            f"{_cmr_bear}/{_cmr_candles} recent candles bearish "
+                                            f"— momentum opposing BUY"
+                                        )
+                                        logger.info(
+                                            f"[CMR] ⛔ {self.asset_type} BUY blocked — "
+                                            f"{_cmr_bear}/{_cmr_candles} candles bearish, "
+                                            f"market falling against long entry."
+                                        )
+                                        return 0, {
+                                            "timestamp": timestamp,
+                                            "regime": regime_name,
+                                            "reasoning": "blocked_by_candle_momentum_reversal",
+                                            "final_signal": 0,
+                                            "original_signal": final_signal,
+                                            "signal_quality": 0.0,
+                                            "mr_signal": mr_signal, "mr_confidence": mr_conf,
+                                            "tf_signal": tf_signal, "tf_confidence": tf_conf,
+                                            "ema_signal": ema_signal, "ema_confidence": ema_conf,
+                                            "cmr_reason": _cmr_reason,
+                                        }
+                        except Exception as _cmr_exc:
+                            logger.debug(f"[CMR] Check failed, allowing signal: {_cmr_exc}")
+                # ── END CMR GATE ─────────────────────────────────────────────
 
                 # Fix F: removed hard cap at 0.7 — score can now reflect true 3-strategy consensus
                 raw_quality = max(buy_score, sell_score)
