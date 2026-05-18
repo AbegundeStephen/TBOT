@@ -380,14 +380,16 @@ class MultiTimeFrameRegimeDetector:
         ema_4h_slow = latest_4h[f"ema_{SLOW_EMA}"]
         ema_1h_slow = latest_1h[f"ema_{SLOW_EMA}"]
 
-        # ✅ TASK 21: Rolling Quantile Thresholds (Phase 3)
-        # Reason: Fixed thresholds are blind to vol cycles.
+        # Rolling Quantile Thresholds — symmetric around the median.
+        # Previous 65/35 split made BEARISH easier to reach and harder to leave
+        # than BULLISH, creating a persistent short bias.
+        # 55/45 keeps slight asymmetry (trends run further than corrections) while
+        # requiring more meaningful extension before locking in a full regime.
         all_dists = (abs(df_4h_with_ema["close"] - df_4h_with_ema[f"ema_{BASELINE_EMA}"]) / df_4h_with_ema[f"ema_{BASELINE_EMA}"]).tail(100)
-        
-        # Bullish needs more extension (0.65), Bearish slightly less (0.35)
-        thresh_bull = all_dists.quantile(0.65)
-        thresh_bear = all_dists.quantile(0.35)
-        
+
+        thresh_bull = all_dists.quantile(0.55)
+        thresh_bear = all_dists.quantile(0.45)
+
         # Clamp to realistic institutional bounds [0.05% to 0.40%]
         thresh_bull = max(0.0005, min(0.0040, thresh_bull))
         thresh_bear = max(0.0005, min(0.0040, thresh_bear))
@@ -405,6 +407,27 @@ class MultiTimeFrameRegimeDetector:
         above_4h_200 = price_4h > ema_4h_baseline
         above_4h_50 = price_4h > ema_4h_slow
         above_1h_50 = price_1h > ema_1h_slow
+
+        # ── Early 1H momentum (used by post-score softener below) ──────────
+        # Compute before the 5-tier block so the softener can reference it.
+        try:
+            _h1_closes_pre = df_1h_with_ema["close"].iloc[-6:]
+            _h1_mom_pre = float(
+                (_h1_closes_pre.iloc[-1] - _h1_closes_pre.iloc[0])
+                / max(_h1_closes_pre.iloc[0], 1e-9)
+            )
+            _h1_lows_pre  = df_1h_with_ema["low"].iloc[-4:].values
+            _h1_highs_pre = df_1h_with_ema["high"].iloc[-4:].values
+            _h1_higher_lows_pre = bool(
+                _h1_lows_pre[-1] > _h1_lows_pre[-2] > _h1_lows_pre[-3]
+            )
+            _h1_lower_highs_pre = bool(
+                _h1_highs_pre[-1] < _h1_highs_pre[-2] < _h1_highs_pre[-3]
+            )
+        except Exception:
+            _h1_mom_pre = 0.0
+            _h1_higher_lows_pre = False
+            _h1_lower_highs_pre = False
 
         # 5-TIER LOGIC (Regime-Adaptive)
         if macro_bullish:
@@ -453,6 +476,50 @@ class MultiTimeFrameRegimeDetector:
             consensus_regime = "NEUTRAL"
             score = 0.0
             reasons.append("Constitution: 1D 200 EMA is neutral/unclear.")
+
+        # ── Post-Score Momentum Softener ────────────────────────────────────
+        # The 5-tier model anchors on slow EMAs — it can't see intraday momentum
+        # shifts. If the structural score is full BEARISH (-1.0) but the 1H chart
+        # is clearly recovering (price up >0.8% over 6 bars AND printing higher
+        # lows), the macro structure is under challenge. Downgrade to
+        # SLIGHTLY_BEARISH so the gatekeeper switches from hard-block to soft
+        # penalty — allowing the bot to respond to the intraday reality rather
+        # than being locked out of all BUY signals while price grinds upward.
+        # Mirror logic for BULLISH when 1H is rolling over.
+        #
+        # Both conditions are required (momentum + structure) so that a single
+        # spike candle can't soften the regime — the market must show sustained
+        # recovery through consecutive higher lows.
+        _SOFTEN_THRESHOLD = 0.008   # 0.8% move over 6 bars
+
+        if score == -1.0:
+            if _h1_mom_pre > _SOFTEN_THRESHOLD and _h1_higher_lows_pre:
+                score = -0.5
+                consensus_regime = "SLIGHTLY_BEARISH"
+                reasons.append(
+                    f"[SOFTENED] BEARISH→SLIGHTLY_BEARISH: "
+                    f"1H +{_h1_mom_pre:.2%} with higher-lows structure "
+                    f"contradicts macro bearish bias"
+                )
+                logger.info(
+                    f"[REGIME] ⚡ {asset_type} BEARISH softened → SLIGHTLY_BEARISH "
+                    f"(1H +{_h1_mom_pre:.2%} | higher lows confirmed)"
+                )
+
+        elif score == 1.0:
+            if _h1_mom_pre < -_SOFTEN_THRESHOLD and _h1_lower_highs_pre:
+                score = 0.5
+                consensus_regime = "SLIGHTLY_BULLISH"
+                reasons.append(
+                    f"[SOFTENED] BULLISH→SLIGHTLY_BULLISH: "
+                    f"1H {_h1_mom_pre:.2%} with lower-highs structure "
+                    f"contradicts macro bullish bias"
+                )
+                logger.info(
+                    f"[REGIME] ⚡ {asset_type} BULLISH softened → SLIGHTLY_BULLISH "
+                    f"(1H {_h1_mom_pre:.2%} | lower highs confirmed)"
+                )
+        # ── End Softener ─────────────────────────────────────────────────────
 
         is_bullish = consensus_regime in ["BULLISH", "SLIGHTLY_BULLISH"]
         is_bearish = consensus_regime in ["BEARISH", "SLIGHTLY_BEARISH"]

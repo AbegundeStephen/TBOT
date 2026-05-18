@@ -25,10 +25,10 @@
         "trend_following_weight": 0.85,
         "ema_weight": 0.30,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when short-term candle momentum is clearly against the trade direction. Prevents overtrading into bounces.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
-          "min_agreement": 2
+          "min_agreement": 3
         }
       },
       "balanced": {
@@ -54,10 +54,10 @@
         "trend_following_weight": 0.75,
         "ema_weight": 0.40,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when short-term candle momentum is clearly against the trade direction. Prevents overtrading into bounces.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
-          "min_agreement": 2
+          "min_agreement": 3
         }
       },
       "aggressive": {
@@ -144,7 +144,12 @@
         "council_counter_trend": 4.5,
         "mean_reversion_weight": 0.25,
         "trend_following_weight": 0.80,
-        "ema_weight": 0.30
+        "ema_weight": 0.30,
+        "momentum_alignment": {
+          "enabled": true,
+          "candles": 3,
+          "min_agreement": 3
+        }
       },
       "balanced": {
         "description": "Standard GOLD settings. Focus: Balanced Growth.",
@@ -167,7 +172,12 @@
         "council_counter_trend": 4.0,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.70,
-        "ema_weight": 0.40
+        "ema_weight": 0.40,
+        "momentum_alignment": {
+          "enabled": true,
+          "candles": 3,
+          "min_agreement": 3
+        }
       },
       "aggressive": {
         "description": "Active GOLD settings. Focus: Trend Catching.",
@@ -190,7 +200,12 @@
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.45,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50
+        "ema_weight": 0.50,
+        "momentum_alignment": {
+          "enabled": true,
+          "candles": 3,
+          "min_agreement": 3
+        }
       },
       "scalper": {
         "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
@@ -215,7 +230,13 @@
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50
+        "ema_weight": 0.50,
+        "momentum_alignment": {
+          "_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.",
+          "enabled": false,
+          "candles": 3,
+          "min_agreement": 3
+        }
       }
     },
 

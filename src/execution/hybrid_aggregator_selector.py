@@ -290,12 +290,12 @@ class MarketRegimeAnalyzer:
             mode = 'council'
             confidence = min(council_score / 9.0, 1.0)  # Max 9 points
             reasoning = " | ".join(council_reasons)
-            
+
         elif performance_score > council_score:
             mode = 'performance'
             confidence = min(performance_score / 10.0, 1.0)  # Max 10 points
             reasoning = " | ".join(performance_reasons)
-            
+
         else:
             # Tie-breaker: Use regime type
             if regime_type in ['trending_clean', 'trending_volatile']:
@@ -306,6 +306,11 @@ class MarketRegimeAnalyzer:
                 mode = 'performance'
                 confidence = 0.6
                 reasoning = "Tie-breaker: Complex market favors Performance"
+
+        # Floor: a confidence of 0.0 means the selector has no evidence at
+        # all for its choice — that makes the metric useless downstream.
+        # Apply a minimum so mode_confidence always reflects something real.
+        confidence = max(confidence, 0.10)
         
         return {
             'mode': mode,

@@ -273,6 +273,12 @@ class TradingBot:
         self.last_trade_times = {}
         self.last_market_status_log = {}  # Per-asset logging dictionary
 
+        # Session-open cooldown tracking (MT5 assets only)
+        # Tracks when each asset's market was first seen as "open" after being
+        # "closed" so we can suppress new entries for the noisy first candle.
+        self._market_open_timestamps: dict = {}   # asset → datetime of session open detection
+        self._market_prev_open: dict = {}          # asset → bool (last known open/closed state)
+
         # Signal aggregators
         self.aggregators = {}
         self.selected_presets = {}
@@ -2043,6 +2049,25 @@ class TradingBot:
             min_quality = 0.28
             actual_quality = merged_details.get("signal_quality", 0)
 
+            # When MR strategy has zero opinion (signal=0, conf=0) the entry
+            # timing is based purely on TF/EMA conviction with no
+            # oversold/overbought or structural-level confirmation.
+            # Raise the quality bar so only genuinely high-conviction TF signals
+            # pass without MR backing.
+            _mr_signal = merged_details.get("mr_signal", None)
+            _mr_conf   = merged_details.get("mr_confidence", None)
+            _mr_neutral = (
+                _mr_signal is not None and _mr_conf is not None
+                and _mr_signal == 0 and _mr_conf == 0.0
+            )
+            if _mr_neutral and signal != 0:
+                min_quality = 0.60
+                logger.warning(
+                    f"[PERFORMANCE] ⚠️ {asset_name}: MR strategy has zero opinion "
+                    f"(0/5 both directions) — raising min quality gate: "
+                    f"0.28 → 0.60. Entry requires strong TF conviction alone."
+                )
+
             if signal != 0 and actual_quality < min_quality:
                 logger.info(
                     f"[PERFORMANCE] Signal filtered: {actual_quality:.2%} < {min_quality:.2%}"
@@ -2050,6 +2075,7 @@ class TradingBot:
                 signal = 0
                 merged_details["reasoning"] = (
                     f"Signal quality too low ({actual_quality:.2%})"
+                    + (" [no MR confirmation]" if _mr_neutral else "")
                 )
 
         # Update signal in details
@@ -3658,6 +3684,72 @@ class TradingBot:
                 return False
 
         return True
+
+    def _update_session_open_state(self, asset_name: str, is_open: bool) -> bool:
+        """
+        Track closed→open market transitions and return True if entries should
+        be suppressed because we're within the session-open cooldown window.
+
+        The first candle after a session open is typically the noisiest — wide
+        spreads, thin liquidity, and frequent spike-and-retrace moves that look
+        like signals but aren't.  This guard blocks NEW entries for a configurable
+        window (default 30 min) after the transition is first detected.
+
+        Only applies to MT5 assets. BTC is 24/7 and is never gated.
+        Existing positions are never affected — only new entries.
+
+        Returns True  → in cooldown, caller should skip new entry.
+        Returns False → outside cooldown, normal trading allowed.
+        """
+        # Crypto / BTC: 24/7, no session boundaries apply
+        asset_cfg = self.config["assets"].get(asset_name, {})
+        if (
+            asset_cfg.get("asset_type", "") == "crypto"
+            or "BTC" in asset_name.upper()
+        ):
+            return False
+
+        cooldown_minutes = float(
+            self.config.get("trading", {}).get("session_open_cooldown_minutes", 30)
+        )
+
+        was_open = self._market_prev_open.get(asset_name, True)  # assume open on first boot
+        self._market_prev_open[asset_name] = is_open
+
+        if not is_open:
+            # Market closed: reset the timestamp so the next open triggers a fresh cooldown
+            self._market_open_timestamps.pop(asset_name, None)
+            return False  # (caller already returns early on closed market)
+
+        # Market is open now
+        if not was_open:
+            # Transition detected: closed → open
+            self._market_open_timestamps[asset_name] = datetime.now()
+            logger.info(
+                f"[SESSION] 🔔 {asset_name}: Market just opened — "
+                f"suppressing new entries for {cooldown_minutes:.0f} min (first-candle protection)"
+            )
+
+        open_since = self._market_open_timestamps.get(asset_name)
+        if open_since is None:
+            # No recorded open time (e.g. bot started mid-session) — apply a
+            # one-shot guard for the very first cycle to be safe.
+            self._market_open_timestamps[asset_name] = datetime.now() - timedelta(
+                minutes=cooldown_minutes  # treat as already elapsed → no block
+            )
+            return False
+
+        elapsed_minutes = (datetime.now() - open_since).total_seconds() / 60.0
+        if elapsed_minutes < cooldown_minutes:
+            remaining = cooldown_minutes - elapsed_minutes
+            logger.info(
+                f"[SESSION] ⏳ {asset_name}: Session-open cooldown active — "
+                f"{remaining:.0f} min remaining (opened {elapsed_minutes:.0f} min ago)"
+            )
+            return True  # block new entry
+
+        return False  # cooldown elapsed, normal trading
+
     @handle_errors(
         component="trade_asset",
         severity=ErrorSeverity.ERROR,
@@ -3674,9 +3766,17 @@ class TradingBot:
             return
 
         # Check market hours BEFORE trading
-        if not self.check_market_hours(asset_name):
+        _market_is_open = self.check_market_hours(asset_name)
+        if not _market_is_open:
+            self._update_session_open_state(asset_name, False)
             logger.info(f"[SKIP] {asset_name}: Market closed")
             return
+
+        # Session-open cooldown: block new entries for the first N minutes after
+        # a closed→open transition (e.g. Sunday open, US market open for USTEC).
+        # Existing positions are not affected — only new entries are gated here.
+        if self._update_session_open_state(asset_name, True):
+            return  # logged inside the method
 
         exchange = asset_cfg.get("exchange", "binance")
         symbol = self._resolve_symbol(asset_name)   # picks mt5_symbol when exchange=mt5

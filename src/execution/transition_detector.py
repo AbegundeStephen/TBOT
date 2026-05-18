@@ -91,9 +91,15 @@ class TransitionDetector:
         evidence = TransitionEvidence()
         details = []
 
-        if regime == "SLIGHTLY_BEARISH":
+        if regime in ("BEARISH", "SLIGHTLY_BEARISH"):
+            # In full BEARISH we look for bullish reversal evidence exactly as
+            # we do in SLIGHTLY_BEARISH. The difference is that in full BEARISH
+            # the gatekeeper used to never call us — now it does when the
+            # post-score softener has already flagged momentum divergence.
+            # Strong evidence (conditions_met >= 3) is used by the regime
+            # detector's softener as a second confirmation layer.
             looking_for = "bullish"
-        elif regime == "SLIGHTLY_BULLISH":
+        elif regime in ("BULLISH", "SLIGHTLY_BULLISH"):
             looking_for = "bearish"
         elif regime == "NEUTRAL":
             # TRANSITION trade: run analysis from bullish perspective.
