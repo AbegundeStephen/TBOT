@@ -1239,8 +1239,12 @@ class PortfolioManager:
 
         # Consecutive Loss Shield — alert fires ONCE when streak is first hit,
         # not on every subsequent 5-minute cycle.
-        if self.loss_streak >= 3:
-            reason = f'Consecutive loss streak of {self.loss_streak} trades'
+        # Threshold is configurable via risk_management.max_loss_streak (default 5).
+        # Note: streak is incremented on partial closes too, so 3 was too tight
+        # and would halt the bot after a single position's partial exits.
+        _max_streak = self.risk_cfg.get("max_loss_streak", 5)
+        if self.loss_streak >= _max_streak:
+            reason = f'Consecutive loss streak of {self.loss_streak} trades (limit: {_max_streak})'
             if not self._loss_streak_alerted:
                 send_alert(reason)
                 self._loss_streak_alerted = True
@@ -1825,9 +1829,14 @@ class PortfolioManager:
         
         for pos in self.positions.values():
             notional = pos.quantity * pos.entry_price
-            leverage = getattr(pos, 'leverage', 1)
-            margin = notional / leverage  # ← Use margin
-            
+            # Use config leverage as fallback when position was stored without
+            # leverage (defaults to 1), which would inflate margin to full notional.
+            stored_lev = getattr(pos, 'leverage', 1)
+            if stored_lev <= 1:
+                _acfg = self.config.get("assets", {}).get(pos.asset, {})
+                stored_lev = _acfg.get("leverage", 1)
+            margin = notional / stored_lev
+
             if pos.side == "long":
                 long_margin += margin
             else:

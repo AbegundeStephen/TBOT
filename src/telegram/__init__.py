@@ -2351,12 +2351,13 @@ class TradingTelegramBot:
     def _get_preset_description(self, preset: str) -> str:
         """Get description for a preset"""
         descriptions = {
+            "mr":           "  • Mean Reversion mode\n  • Best for ranging/choppy markets",
             "conservative": "  • Low risk, high thresholds\n  • Best for stable markets",
-            "balanced": "  • Moderate risk/reward\n  • Default for most conditions",
-            "aggressive": "  • Higher frequency trading\n  • Best for trending markets",
-            "scalper": "  • Maximum activity\n  • Best for high volatility",
+            "balanced":     "  • Moderate risk/reward\n  • Default for most conditions",
+            "aggressive":   "  • Higher frequency trading\n  • Best for trending markets",
+            "scalper":      "  • Maximum activity\n  • Best for high volatility",
         }
-        return descriptions.get(preset, "  • Unknown preset")
+        return descriptions.get(preset, f"  • {preset.upper()} preset")
 
     # ==================== DIRECT COMMAND WRAPPERS ====================
     # These commands previously only had _send_* callback versions.

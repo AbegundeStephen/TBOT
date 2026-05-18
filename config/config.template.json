@@ -1126,6 +1126,7 @@
     "max_daily_loss_pct": 0.03,
     "max_position_loss_pct": 0.02,
     "circuit_breaker_loss_pct": 0.1,
+    "max_loss_streak": 5,
     "trailing_stop_activation_pct": 0.02,
     "stop_loss_pct": 0.04,
     "auto_rebalance_positions": true,
