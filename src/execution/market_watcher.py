@@ -149,14 +149,28 @@ class MarketWatcher:
 
     def _update_momentum(self):
         """
-        For every enabled asset, fetch the last _MOMENTUM_CANDLES closed 1H bars
-        and determine whether momentum is bullish, bearish, or mixed.
-        Also update signal suppression state.
+        For every enabled asset WITH an open position, fetch the last
+        _MOMENTUM_CANDLES closed 1H bars and determine momentum direction.
+        Also updates signal suppression state (Cases 1a/1b — position protection).
+
+        Assets with no open positions are skipped entirely: suppression only
+        fires when a position exists, so polling momentum data for flat assets
+        burns MT5 API calls without any effect.
         """
         assets = self.config.get("assets", {})
         for asset_name, asset_cfg in assets.items():
             if not asset_cfg.get("enabled", False):
                 continue
+
+            # Skip assets with no open positions — suppression can't trigger for them
+            if self.portfolio_manager:
+                try:
+                    positions = self.portfolio_manager.get_asset_positions(asset_name)
+                    if not positions:
+                        continue
+                except Exception:
+                    pass  # if PM lookup fails, still run the update (safe fallback)
+
             try:
                 self._refresh_asset_momentum(asset_name, asset_cfg)
             except Exception as exc:

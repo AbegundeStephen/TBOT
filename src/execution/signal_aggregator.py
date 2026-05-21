@@ -2730,6 +2730,29 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Explosive momentum overrule preserved for full-regime hard blocks.
             # ═══════════════════════════════════════════════════════════════
             if self.use_gatekeeper:
+                # FAIL-CLOSED guard: no governor data = no regime context.
+                # Trading without regime context risks entering during high-volatility
+                # regime transitions where direction is unknown. Log a warning and skip.
+                # Council already fails-closed; this aligns Performance with that posture.
+                # NOTE: Only applies after the gatekeeper is enabled — early startup cycles
+                # that haven't yet received governor data will be caught here and logged,
+                # not silently treated as NEUTRAL.
+                if not governor_data:
+                    logger.warning(
+                        f"[GATEKEEPER] ⚠️ No governor data for {self.asset_type} — "
+                        f"fail-closed (no regime context). Skipping signal."
+                    )
+                    return 0, {
+                        "timestamp": timestamp,
+                        "regime": "UNKNOWN",
+                        "reasoning": "no_governor_data",
+                        "final_signal": 0,
+                        "signal_quality": 0.0,
+                        "mr_signal": 0, "mr_confidence": 0.0,
+                        "tf_signal": 0, "tf_confidence": 0.0,
+                        "ema_signal": 0, "ema_confidence": 0.0,
+                    }
+
                 is_neutral = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
                 regime_strength = abs(regime_score)  # 0.5 for SLIGHTLY, 1.0 for full
 

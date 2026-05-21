@@ -14,6 +14,7 @@ from datetime import datetime
 from src.utils.trap_filter import validate_candle_structure
 from src.indicators.divergence import RSIDivergenceDetector
 from src.analysis.break_retest import BreakRetestValidator
+from src.execution.transition_detector import TransitionDetector
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,9 @@ class InstitutionalCouncilAggregator:
         # ✨ NEW: Advanced Confluence Engines
         self.divergence_detector = RSIDivergenceDetector(pivot_window=5)
         self.break_retest_validator = BreakRetestValidator(lookback=50)
+
+        # Transition evidence — same detector used by Performance's gatekeeper
+        self._transition_detector = TransitionDetector()
 
         self._log_initialization()
     
@@ -926,10 +930,14 @@ class InstitutionalCouncilAggregator:
 
         # ════════════════════════════════════════════════════════════════════
         # T3.3: NY OPEN HOUR BLOCK (13:00–13:59 UTC)
-        # USTEC/GOLD only — FX pairs excluded (13:00 UTC is their best hour).
+        # USTEC/GOLD/USOIL/GBPAUD — FX majors excluded (13:00 UTC is their
+        # best liquidity hour). USOIL and GBPAUD added: same stop-hunting
+        # behaviour as GOLD/USTEC at NY open (53% WR, -21% P&L in that hour).
         # ════════════════════════════════════════════════════════════════════
         _hour_utc = _dt.utcnow().hour
-        if _hour_utc == 13 and self.asset_type in ("USTEC", "US100", "NAS100", "GOLD", "XAUUSD"):
+        if _hour_utc == 13 and self.asset_type in (
+            "USTEC", "US100", "NAS100", "GOLD", "XAUUSD", "USOIL", "OIL", "GBPAUD"
+        ):
             logger.info(f"[COUNCIL] ⏸️ NY open hour block — no new entries for {self.asset_type}")
             return 0, {
                 "timestamp": timestamp, "signal": 0, "asset": self.asset_type,
@@ -1451,10 +1459,54 @@ class InstitutionalCouncilAggregator:
                         required_score = min(required_score + 0.75, 4.5)
                         logger.info(f"[GOV] 🔄 TRANSITION: Neutral market — required score raised to {required_score:.2f}")
 
-                    # SLIGHTLY_COUNTER — ambiguous regime counter-trend, raise required_score
+                    # SLIGHTLY_COUNTER — ambiguous regime counter-trend, raise required_score.
+                    # TransitionDetector can soften the +0.50 raise if ≥2 of 4 sources
+                    # confirm a reversal is building (momentum, S/R, order flow, candle).
+                    # Matches Performance aggregator's gatekeeper behaviour in SLIGHTLY regimes.
                     elif trade_type == "SLIGHTLY_COUNTER":
                         trade_type = "TREND"  # Restore for downstream gates
-                        required_score = min(required_score + 0.50, 4.0)
+                        _te_raise = 0.50
+                        try:
+                            from types import SimpleNamespace as _NS
+                            # Build a minimal state object — Council has no CompositeState.
+                            # nearby_4h_level=None → _check_structure skips the S/R bounce
+                            # sub-score and falls back to pure higher-lows / lower-highs only.
+                            _dummy_state = _NS(
+                                nearby_4h_level=None,
+                                level_test_count=0,
+                                level_defended=False,
+                                cvd_trend=int(governor_data.get("cvd_trend", 0)) if governor_data else 0,
+                                order_book_imbalance=float(governor_data.get("order_book_imbalance", 0.0)) if governor_data else 0.0,
+                            )
+                            _depth = governor_data.get("depth_data") if governor_data else None
+                            _te = self._transition_detector.collect_evidence(
+                                asset=self.asset_type,
+                                regime=regime_name,
+                                df_4h=df_4h if df_4h is not None else pd.DataFrame(),
+                                df_1h=df,
+                                composite_state=_dummy_state,
+                                cvd_trend=_dummy_state.cvd_trend,
+                                order_book_imbalance=_dummy_state.order_book_imbalance,
+                                depth_data=_depth,
+                            )
+                            if _te.conditions_met >= 2:
+                                # Reduce raise proportionally to evidence strength; floor at 0.20
+                                _te_raise = max(0.20, 0.50 - abs(_te.total_score) * 0.50)
+                                logger.info(
+                                    f"[COUNCIL] 🔄 TRANSITION evidence softens SLIGHTLY_COUNTER raise: "
+                                    f"0.50 → {_te_raise:.2f} "
+                                    f"(score={_te.total_score:+.3f}, conditions={_te.conditions_met}/4, "
+                                    f"dir={_te.direction}) [{self.asset_type}]"
+                                )
+                            else:
+                                logger.debug(
+                                    f"[COUNCIL] SLIGHTLY_COUNTER: insufficient transition evidence "
+                                    f"({_te.conditions_met}/4 conditions) — full +0.50 raise applies "
+                                    f"[{self.asset_type}]"
+                                )
+                        except Exception as _te_err:
+                            logger.debug(f"[COUNCIL] Transition evidence error in SLIGHTLY_COUNTER: {_te_err}")
+                        required_score = min(required_score + _te_raise, 4.0)
                         logger.info(f"[GOV] ⚠️ SLIGHTLY_COUNTER: required score raised to {required_score:.2f}")
 
                 # 2. ATR WICK TRAP (ABSOLUTE VETO) — T2.3: pass regime context

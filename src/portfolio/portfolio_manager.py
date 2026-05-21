@@ -3111,6 +3111,9 @@ class PortfolioManager:
                 if local_exchange_id not in broker_ids:
                     logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
                     self.positions.pop(pos.position_id, None)
+                    # Flag as manual so the cooldown bypass does NOT fire on the
+                    # next cycle — the user closed this position outside the bot.
+                    self.last_close_was_manual[pos.asset] = True
                     continue
 
             # B. If no IDs (rare) or for Binance where positions are aggregated by side
@@ -3119,12 +3122,17 @@ class PortfolioManager:
             if pos.side.lower() not in broker_sides:
                 logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
                 self.positions.pop(pos.position_id, None)
+                # Flag as manual — broker-side close (SL/TP set in MT5 terminal,
+                # or manual close) must still respect the cooldown window.
+                self.last_close_was_manual[pos.asset] = True
 
         # 2. Final check: If broker has 0 positions but we still have local ones, clear them
         if not broker_positions and local_positions:
             logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
             for pos in local_positions:
                 self.positions.pop(pos.position_id, None)
+                # All of these were closed outside the bot — treat as manual.
+                self.last_close_was_manual[pos.asset] = True
 
     @handle_errors(
         component="portfolio_manager",
@@ -3731,6 +3739,9 @@ class PortfolioManager:
                 if local_exchange_id not in broker_ids:
                     logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
                     self.positions.pop(pos.position_id, None)
+                    # Flag as manual so the cooldown bypass does NOT fire on the
+                    # next cycle — the user closed this position outside the bot.
+                    self.last_close_was_manual[pos.asset] = True
                     continue
 
             # B. If no IDs (rare) or for Binance where positions are aggregated by side
@@ -3739,12 +3750,17 @@ class PortfolioManager:
             if pos.side.lower() not in broker_sides:
                 logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
                 self.positions.pop(pos.position_id, None)
+                # Flag as manual — broker-side close (SL/TP set in MT5 terminal,
+                # or manual close) must still respect the cooldown window.
+                self.last_close_was_manual[pos.asset] = True
 
         # 2. Final check: If broker has 0 positions but we still have local ones, clear them
         if not broker_positions and local_positions:
             logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
             for pos in local_positions:
                 self.positions.pop(pos.position_id, None)
+                # All of these were closed outside the bot — treat as manual.
+                self.last_close_was_manual[pos.asset] = True
 
     @handle_errors(
         component="portfolio_manager",

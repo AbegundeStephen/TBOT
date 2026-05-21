@@ -1145,6 +1145,70 @@ class VeteranTradeManager:
             except Exception as _e:
                 logger.debug(f"[VTM] Counter-momentum cut check skipped: {_e}")
 
+        # --- STEP 2.9: Profit Guard Exit ---
+        # A human trader watching a profitable trade recognises the moment momentum
+        # has turned and exits rather than waiting for the SL to be hit bar by bar.
+        # This step does exactly that: once the trade has built meaningful profit
+        # (> 0.8×ATR), and the MACD histogram crosses zero AGAINST the trade
+        # direction while RSI confirms that the opposing side has taken control,
+        # close the full remaining position immediately.
+        #
+        # Why this threshold?
+        #   • MACD zero-cross is a definitive, non-lagging momentum flip signal.
+        #   • RSI < 50 for longs / > 50 for shorts confirms bears/bulls are now
+        #     in session control — not just a single noisy bar.
+        #   • 0.8×ATR profit floor means the bot does NOT exit on the first sign
+        #     of a wiggle; it waits until there is real profit worth protecting.
+        #
+        # Distinct from Step 5.5 (Momentum Exhaustion) which requires RSI > 75
+        # and 5+ bars — too late for most 1H setups on small accounts.
+        if (not getattr(self, "_profit_reversal_exited", False)
+                and len(self.close) >= 26
+                and self.bars_in_trade >= 2):
+            try:
+                _profit_guard = (
+                    (current_price - self.entry_price) if self.side == "long"
+                    else (self.entry_price - current_price)
+                )
+                if _profit_guard > 0.8 * atr_value:
+                    _rsi_pg   = talib.RSI(self.close, timeperiod=14)
+                    _, _, _hist_pg = talib.MACD(
+                        self.close, fastperiod=12, slowperiod=26, signalperiod=9
+                    )
+                    _rsi_now = _rsi_pg[-1] if not np.isnan(_rsi_pg[-1]) else 50.0
+                    _h1_pg   = _hist_pg[-1] if not np.isnan(_hist_pg[-1]) else 0.0
+                    _h2_pg   = _hist_pg[-2] if not np.isnan(_hist_pg[-2]) else 0.0
+
+                    # MACD histogram zero-cross against the trade
+                    _macd_flipped = (
+                        (self.side == "long"  and _h2_pg > 0 and _h1_pg < 0) or
+                        (self.side == "short" and _h2_pg < 0 and _h1_pg > 0)
+                    )
+                    # RSI confirms opposing side in control
+                    _rsi_confirms = (
+                        (self.side == "long"  and _rsi_now < 50) or
+                        (self.side == "short" and _rsi_now > 50)
+                    )
+
+                    if _macd_flipped and _rsi_confirms:
+                        self._profit_reversal_exited = True
+                        _pg_size = self.remaining_position
+                        if _pg_size > 0:
+                            self.remaining_position = 0.0
+                            logger.warning(
+                                f"[VTM] 💰 PROFIT GUARD: {self.asset} {self.side.upper()} — "
+                                f"profit=${_profit_guard:.2f} ({_profit_guard/atr_value:.1f}×ATR), "
+                                f"MACD flipped ({_h2_pg:+.4f}→{_h1_pg:+.4f}), "
+                                f"RSI={_rsi_now:.1f}. Full close at ${current_price:,.5f}."
+                            )
+                            return {
+                                "reason": ExitReason.TREND_INVALIDATION,
+                                "price": current_price,
+                                "size": _pg_size,
+                            }
+            except Exception as _e:
+                logger.debug(f"[VTM] Profit-guard check skipped: {_e}")
+
         # --- STEP 3: Greed Mode Accelerator ---
         # During extreme trends/volatility, collapse early targets so the runner
         # trail captures the full move. One-shot: _greed_mode_activated prevents
