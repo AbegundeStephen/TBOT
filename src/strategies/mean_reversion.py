@@ -244,7 +244,10 @@ class MeanReversionStrategy(BaseStrategy):
             context["is_extreme_overbought"] = True
             context["reversion_score"] = overbought_count
 
-        if adx > 25:
+        # ADX gate lowered from 25 to 18 — most 1H/4H assets on this bot sit
+        # between ADX 15-22, so 25 was blocking the micro-reversion path entirely.
+        # 18 aligns with the signal aggregator's own ADX threshold.
+        if adx > 18:
             context["is_trending"] = True
             if bb_pos > 0.6 and rsi > 55: context["trend_direction"] = 1  # Uptrend
             elif bb_pos < 0.4 and rsi < 45: context["trend_direction"] = -1  # Downtrend
@@ -364,20 +367,28 @@ class MeanReversionStrategy(BaseStrategy):
             score_short = 0
             
             # PILLAR 1: THE STRETCH (2pts)
-            stretch_long = (ema_50[i] - current_close > 2.0 * atr[i]) or (current_close < bb_lower[i])
-            stretch_short = (current_close - ema_50[i] > 2.0 * atr[i]) or (current_close > bb_upper[i])
+            # Threshold lowered from 2.0×ATR to 1.5×ATR to match generate_signal().
+            stretch_long = (ema_50[i] - current_close > 1.5 * atr[i]) or (current_close < bb_lower[i])
+            stretch_short = (current_close - ema_50[i] > 1.5 * atr[i]) or (current_close > bb_upper[i])
             if stretch_long: score_long += 2
             if stretch_short: score_short += 2
+
+            # PILLAR 1.5: RSI EXTREME (1pt) — mirrors generate_signal()
+            _bb_pos_i = bb_pos[i]
+            _rsi_i    = rsi[i]
+            if _bb_pos_i < 0.15 and _rsi_i < 35: score_long  += 1
+            if _bb_pos_i > 0.85 and _rsi_i > 65: score_short += 1
 
             # PILLAR 2: THE DIVERGENCE (1pt) - Using 20/60 windows
             div_long = self._check_divergence(df.iloc[:i+1], signal=1, period=60)
             div_short = self._check_divergence(df.iloc[:i+1], signal=-1, period=60)
             if div_long: score_long += 1
             if div_short: score_short += 1
-            
+
             # PILLAR 3: LIQUIDITY SWEEP (1pt)
-            lookback_100 = low[max(0, i-100):i]
-            highback_100 = high[max(0, i-100):i]
+            # Lookback lowered from 100 bars to 30 bars to match generate_signal().
+            lookback_100 = low[max(0, i-30):i]
+            highback_100 = high[max(0, i-30):i]
             sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
             sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
             if sweep_long: score_long += 1
@@ -513,27 +524,42 @@ class MeanReversionStrategy(BaseStrategy):
             score_short = 0
             
             # PILLAR 1: THE STRETCH (2pts)
-            # Full stretch = 2 pts
-            stretch_long = (ema_50[-1] - current_close > 2.0 * atr[-1]) or (current_close < bb_lower[-1])
-            stretch_short = (current_close - ema_50[-1] > 2.0 * atr[-1]) or (current_close > bb_upper[-1])
+            # Full stretch = 2 pts (lowered from 2.0×ATR to 1.5×ATR — 2.0×ATR
+            # was rarely achieved on 1H, killing almost every potential signal)
+            stretch_long = (ema_50[-1] - current_close > 1.5 * atr[-1]) or (current_close < bb_lower[-1])
+            stretch_short = (current_close - ema_50[-1] > 1.5 * atr[-1]) or (current_close > bb_upper[-1])
             if stretch_long: score_long += 2
             if stretch_short: score_short += 2
 
-            # Half stretch = 1 pt (new — catches moderate pullbacks)
-            if not stretch_long and (ema_50[-1] - current_close > 1.2 * atr[-1]):
+            # Half stretch = 1 pt (moderate pullback, lowered from 1.2×ATR to 0.8×ATR)
+            if not stretch_long and (ema_50[-1] - current_close > 0.8 * atr[-1]):
                 score_long += 1
-            if not stretch_short and (current_close - ema_50[-1] > 1.2 * atr[-1]):
+            if not stretch_short and (current_close - ema_50[-1] > 0.8 * atr[-1]):
                 score_short += 1
+
+            # PILLAR 1.5: RSI EXTREME (1pt)
+            # When price is already outside or near the Bollinger Band AND RSI
+            # confirms the extreme, that is strong enough evidence on its own
+            # for one additional point.  This bridges the gap where stretch=2pts
+            # but no divergence/sweep/pattern stacks — a common situation on 1H.
+            rsi_extreme_long  = (bb_pos[-1] < 0.15 and rsi[-1] < 35)
+            rsi_extreme_short = (bb_pos[-1] > 0.85 and rsi[-1] > 65)
+            if rsi_extreme_long:  score_long  += 1
+            if rsi_extreme_short: score_short += 1
 
             # PILLAR 2: THE DIVERGENCE (1pt)
             div_long = self._check_divergence(features_df, signal=1, period=60)
             div_short = self._check_divergence(features_df, signal=-1, period=60)
             if div_long: score_long += 1
             if div_short: score_short += 1
-            
+
             # PILLAR 3: LIQUIDITY SWEEP (1pt)
-            lookback_100 = low[-101:-1]
-            highback_100 = high[-101:-1]
+            # 100-bar lookback was nearly impossible to trigger on 1H — a new
+            # 4-day extreme almost never coincides with a mean-reversion entry.
+            # 30 bars (~30 hours) catches meaningful local sweeps without requiring
+            # a full macro breakout.
+            lookback_100 = low[-31:-1]
+            highback_100 = high[-31:-1]
             sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
             sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
             if sweep_long: score_long += 1
@@ -565,12 +591,14 @@ class MeanReversionStrategy(BaseStrategy):
             logger.info(
                 f"[MR SCORECARD] {self.asset}:\n"
                 f"  STRETCH:   long={stretch_long} short={stretch_short} "
-                f"(dist={abs(ema_50[-1] - current_close):.2f}, 2xATR={2.0 * atr[-1]:.2f}, 1.2xATR={1.2 * atr[-1]:.2f})\n"
+                f"(dist={abs(ema_50[-1] - current_close):.4f}, 1.5xATR={1.5 * atr[-1]:.4f}, 0.8xATR={0.8 * atr[-1]:.4f})\n"
+                f"  RSI_XTR:   long={rsi_extreme_long} short={rsi_extreme_short} "
+                f"(rsi={rsi[-1]:.1f}, bb_pos={bb_pos[-1]:.3f})\n"
                 f"  DIVERGENCE: long={div_long} short={div_short}\n"
                 f"  SWEEP:     long={sweep_long} short={sweep_short} "
-                f"(min={np.min(lookback_100) if len(lookback_100) > 0 else 0:.2f}, max={np.max(highback_100) if len(highback_100) > 0 else 0:.2f})\n"
+                f"(min={np.min(lookback_100) if len(lookback_100) > 0 else 0:.4f}, max={np.max(highback_100) if len(highback_100) > 0 else 0:.4f})\n"
                 f"  EXHAUSTION: long={exhaust_long} short={exhaust_short} (bb_pos={bb_pos[-1]:.3f})\n"
-                f"  SCORES:    long={score_long}/5 short={score_short}/5 (need ≥3)"
+                f"  SCORES:    long={score_long}/6 short={score_short}/6 (need ≥3)"
             )
 
             # ================================================================
