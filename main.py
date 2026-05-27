@@ -463,18 +463,23 @@ class TradingBot:
                 telegram_bot=self.telegram_bot,
             )
 
-            # ✨ NEW: Enable hedging support
+            # Hedging status — must be OFF. Confirmed on every startup.
             hedging_enabled = self.config.get("trading", {}).get(
-                "allow_simultaneous_long_short", True
+                "allow_simultaneous_long_short", False
             )
             if hedging_enabled:
+                # This branch should never execute in production.
+                # allow_simultaneous_long_short must be false in config.
                 max_hedge_ratio = self.config.get("portfolio", {}).get(
-                    "max_hedge_ratio", 1.0
+                    "max_hedge_ratio", 0.0
                 )
                 enable_hedging_for_portfolio(self.portfolio_manager, max_hedge_ratio)
-                logger.info(
-                    f"[HEDGING] ✅ Enabled with max ratio {max_hedge_ratio:.0%}"
+                logger.warning(
+                    f"[HEDGING] ⚠️  ENABLED — max ratio {max_hedge_ratio:.0%}. "
+                    f"Set allow_simultaneous_long_short=false in config to disable."
                 )
+            else:
+                logger.info("[HEDGING] OFF confirmed — simultaneous long/short suppressed.")
 
             logger.info(
                 f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
@@ -825,32 +830,13 @@ class TradingBot:
                 logger.error(f"[AI] Analyst failed: {e}")
                 return False
 
-            # Initialize Sniper (15min)
-            try:
-                num_classes = config.get("num_classes", len(pattern_map))
-
-                self.sniper = OHLCSniper(
-                    input_shape=(15, 4), num_classes=num_classes, dropout_rate=0.3
-                )
-
-                logger.info(f"[AI] Sniper created ({num_classes} classes)")
-
-                # Load weights
-                self.sniper.load_model(str(model_path))
-                logger.info("[AI] ✓ Weights loaded")
-
-            except ValueError as e:
-                if "shape" in str(e).lower():
-                    logger.error(f"[AI] ✗ ARCHITECTURE MISMATCH!")
-                    logger.error(f"     {e}")
-                    logger.error("[AI] Solution: Retrain model")
-                    logger.error("     python train_dual_timeframe.py")
-                    return False
-                raise
-
-            except Exception as e:
-                logger.error(f"[AI] Sniper failed: {e}")
-                return False
+            # Sniper — DISCONNECTED (Phase 0B, MRS §6).
+            # CNN-LSTM trained on 15-min data was receiving 1H data (timeframe
+            # mismatch) and adds no edge over structural rules at ~0.70 accuracy.
+            # self.sniper remains None. The scoring pipeline no longer calls it.
+            # Re-enable only if a correctly-trained replacement is validated.
+            self.sniper = None
+            logger.info("[AI] Sniper: DISCONNECTED (Phase 0B — see MRS §6 Phase 0)")
 
             # Initialize Validator
             try:
@@ -3571,49 +3557,29 @@ class TradingBot:
         Returns True  → OK to trade (no cooldown active).
         Returns False → blocked (cooldown still running).
 
-        Per-asset override wins if set in config (min_time_between_trades_minutes
-        under the asset key).  Falls back to the global trading setting (default 60).
-        In strongly-trending regimes (BEARISH/BULLISH) a 0.5× multiplier is applied
-        so the bot can re-enter faster when the move is still clearly intact.
+        Cooldown is unconditional — it applies regardless of portfolio state,
+        regime, or how the last position was closed.  No bypasses.  No overrides.
+        The global default is 480 minutes (8 hours).  Per-asset config override
+        is permitted but must be set explicitly — there is no automatic halving.
         """
         global_default = self.config["trading"].get("min_time_between_trades_minutes", 480)
 
-        # Per-asset override (e.g. GOLD: min_time_between_trades_minutes: 30)
+        # Per-asset override permitted only via explicit config — no automatic reduction.
         asset_cfg = self.config.get("assets", {}).get(asset_name, {})
         min_minutes = asset_cfg.get("min_time_between_trades_minutes", global_default)
-
-        # Regime-aware reduction: if the MTF regime is strongly directional,
-        # halve the cooldown so re-entries are faster after manual closes or TP hits.
-        regime_data = getattr(self, "_current_regime_data", {}).get(asset_name, {})
-        regime = regime_data.get("regime", "NEUTRAL")
-        regime_conf = regime_data.get("confidence", 0.0)
-        if regime in ("BULLISH", "BEARISH") and regime_conf >= 0.7:
-            min_minutes = max(15, min_minutes * 0.5)
 
         # If the asset has never traded this session it cannot be in cooldown.
         if asset_name not in self.last_trade_times:
             return True
 
-        # Bypass cooldown when there are no open positions AND the last close was
-        # natural (VTM / SL / TP hit).  Do NOT bypass after a manual close — the user
-        # explicitly exited and the bot should respect the cooldown before re-entering.
-        open_positions = self.portfolio_manager.get_asset_positions(asset_name)
-        if not open_positions:
-            last_was_manual = self.portfolio_manager.last_close_was_manual.get(asset_name, False)
-            if last_was_manual:
-                logger.debug(
-                    f"[COOLDOWN] {asset_name}: no open positions but last close was MANUAL — "
-                    f"cooldown still applies"
-                )
-                # Fall through to the elapsed-time check below
-            else:
-                logger.debug(f"[COOLDOWN] {asset_name}: no open positions (natural close) — cooldown bypassed")
-                return True
-
+        # Unconditional elapsed-time check — portfolio state is irrelevant.
+        # The no-positions bypass was removed: a flat portfolio is not a reason
+        # to skip cooldown.  Doing so allowed the bot to churn trades rapidly
+        # after every TP/SL hit, compounding losses across multiple entries.
         elapsed = datetime.now() - self.last_trade_times[asset_name]
         if elapsed.total_seconds() < min_minutes * 60:
             remaining = min_minutes - (elapsed.total_seconds() / 60)
-            logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min, regime={regime})")
+            logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min)")
             return False
 
         # Cooldown period has fully elapsed — allow trading.
@@ -5234,8 +5200,67 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
+    # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
 
-    
+    def _warm_start_livermore_all_assets(self) -> None:
+        """
+        Replay historical bars through each aggregator's Livermore state machines
+        so they begin from the correct structural state on bot startup.
+
+        Called once in start(), immediately before the first run_trading_cycle().
+        Uses the same fetch helpers as the main loop (_fetch_4h_data + Binance/MT5
+        1H fetch) so the warm-start data path is identical to the live data path.
+
+        Failures are non-fatal — the state machines will converge over time
+        even starting cold from MAIN_UP.
+        """
+        logger.info("[Livermore] Starting warm-up for all assets...")
+        warmed = 0
+        for asset_name, aggregator in self.aggregators.items():
+            if not hasattr(aggregator, 'warm_start_livermore'):
+                continue
+            try:
+                asset_cfg = self.config["assets"].get(asset_name, {})
+                if not asset_cfg.get("enabled", False):
+                    continue
+
+                exchange = asset_cfg.get("exchange", "binance")
+                symbol   = self._resolve_symbol(asset_name)
+                end_time   = datetime.now(timezone.utc)
+                # 90 days of 4H = ~540 bars — enough to reach correct state
+                start_4h   = (end_time - timedelta(days=90)).strftime("%Y-%m-%d")
+                # 30 days of 1H = ~720 bars
+                start_1h   = (end_time - timedelta(days=30)).strftime("%Y-%m-%d")
+                end_str    = end_time.strftime("%Y-%m-%d %H:%M:%S")
+
+                # ── 4H data ──────────────────────────────────────────────────
+                df_4h = self._fetch_4h_data(asset_name)
+
+                # ── 1H data ──────────────────────────────────────────────────
+                df_1h = None
+                try:
+                    if exchange == "binance":
+                        _raw = self.data_manager.fetch_binance_data(
+                            symbol=symbol, interval="1h",
+                            start_date=start_1h, end_date=end_str,
+                        )
+                    else:
+                        _raw = self.data_manager.fetch_mt5_data(
+                            symbol=symbol, timeframe="H1",
+                            start_date=start_1h, end_date=end_str,
+                        )
+                    df_1h = self.data_manager.clean_data(_raw) if _raw is not None and len(_raw) > 0 else None
+                except Exception as _e1:
+                    logger.debug("[Livermore] %s 1H fetch failed: %s", asset_name, _e1)
+
+                aggregator.warm_start_livermore(df_4h, df_1h)
+                warmed += 1
+
+            except Exception as _e:
+                logger.warning("[Livermore] warm-start failed for %s: %s", asset_name, _e)
+
+        logger.info("[Livermore] Warm-up complete — %d/%d assets", warmed, len(self.aggregators))
+
     def start(self):
         """
         ✨  Start bot with proper Telegram thread management
@@ -5387,6 +5412,9 @@ class TradingBot:
             )
             logger.info(f"[MTF] Regime updates: Every cycle (~{check_interval}s), 5-min detector cache")
             logger.info(f"Press Ctrl+C to stop\n")
+
+            # Phase 1: Warm-start Livermore state machines before first cycle
+            self._warm_start_livermore_all_assets()
 
             # Run initial cycle
             self.run_trading_cycle()

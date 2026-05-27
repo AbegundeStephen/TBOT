@@ -1,16 +1,15 @@
 {
   "AGGREGATOR_PRESETS": {
-
     "BTC": {
       "conservative": {
         "description": "High thresholds, requires almost unanimous Council agreement. Focus: Capital Preservation.",
         "buy_threshold": 0.32,
         "sell_threshold": 0.34,
         "two_strategy_bonus": 0.18,
-        "three_strategy_bonus": 0.20,
-        "bull_buy_boost": 0.10,
+        "three_strategy_bonus": 0.2,
+        "bull_buy_boost": 0.1,
         "bull_sell_penalty": 0.12,
-        "bear_sell_boost": 0.10,
+        "bear_sell_boost": 0.1,
         "bear_buy_penalty": 0.12,
         "min_confidence_to_use": 0.12,
         "min_signal_quality": 0.32,
@@ -21,11 +20,11 @@
         "verbose": false,
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5,
-        "mean_reversion_weight": 0.20,
+        "mean_reversion_weight": 0.2,
         "trend_following_weight": 0.85,
-        "ema_weight": 0.30,
+        "ema_weight": 0.3,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
           "min_agreement": 3
@@ -33,15 +32,15 @@
       },
       "balanced": {
         "description": "Standard thresholds, standard Council rules. Focus: Balanced Growth.",
-        "buy_threshold": 0.30,
+        "buy_threshold": 0.3,
         "sell_threshold": 0.32,
-        "two_strategy_bonus": 0.20,
+        "two_strategy_bonus": 0.2,
         "three_strategy_bonus": 0.22,
         "bull_buy_boost": 0.11,
         "bull_sell_penalty": 0.11,
         "bear_sell_boost": 0.11,
         "bear_buy_penalty": 0.11,
-        "min_confidence_to_use": 0.10,
+        "min_confidence_to_use": 0.1,
         "min_signal_quality": 0.28,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
@@ -52,9 +51,9 @@
         "council_counter_trend": 4.0,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.75,
-        "ema_weight": 0.40,
+        "ema_weight": 0.4,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
           "min_agreement": 3
@@ -74,14 +73,14 @@
         "min_signal_quality": 0.25,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
-        "opposition_penalty": 0.60,
+        "single_override_threshold": 0.7,
+        "opposition_penalty": 0.6,
         "verbose": false,
         "council_trend_aligned": 2.9,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.45,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.50,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.5,
         "momentum_alignment": {
           "_comment": "Slightly looser: requires all 3 candles against trade to block (aggressive preset tolerates 1 opposing candle).",
           "enabled": true,
@@ -95,33 +94,32 @@
         "buy_threshold": 0.24,
         "sell_threshold": 0.24,
         "two_strategy_bonus": 0.25,
-        "three_strategy_bonus": 0.30,
+        "three_strategy_bonus": 0.3,
         "bull_buy_boost": 0.15,
-        "bull_sell_penalty": 0.10,
+        "bull_sell_penalty": 0.1,
         "bear_sell_boost": 0.15,
-        "bear_buy_penalty": 0.10,
+        "bear_buy_penalty": 0.1,
         "min_confidence_to_use": 0.08,
-        "min_signal_quality": 0.20,
+        "min_signal_quality": 0.2,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.05,
-        "opposition_penalty": 0.60,
+        "opposition_penalty": 0.6,
         "council_trend_aligned": 2.7,
         "council_counter_trend": 3.5,
-        "mean_reversion_weight": 0.30,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.50,
+        "mean_reversion_weight": 0.3,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disable momentum alignment check — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disable momentum alignment check \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 2
         }
       }
     },
-
     "GOLD": {
       "conservative": {
         "description": "Strict GOLD settings. Focus: Capital Preservation.",
@@ -134,7 +132,7 @@
         "bear_sell_boost": 0.07,
         "bear_buy_penalty": 0.09,
         "min_confidence_to_use": 0.12,
-        "min_signal_quality": 0.30,
+        "min_signal_quality": 0.3,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.75,
@@ -143,8 +141,8 @@
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5,
         "mean_reversion_weight": 0.25,
-        "trend_following_weight": 0.80,
-        "ema_weight": 0.30,
+        "trend_following_weight": 0.8,
+        "ema_weight": 0.3,
         "momentum_alignment": {
           "enabled": true,
           "candles": 3,
@@ -155,13 +153,13 @@
         "description": "Standard GOLD settings. Focus: Balanced Growth.",
         "buy_threshold": 0.33,
         "sell_threshold": 0.34,
-        "two_strategy_bonus": 0.20,
+        "two_strategy_bonus": 0.2,
         "three_strategy_bonus": 0.25,
         "bull_buy_boost": 0.08,
         "bull_sell_penalty": 0.08,
         "bear_sell_boost": 0.08,
         "bear_buy_penalty": 0.08,
-        "min_confidence_to_use": 0.10,
+        "min_confidence_to_use": 0.1,
         "min_signal_quality": 0.28,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
@@ -171,8 +169,8 @@
         "council_trend_aligned": 3.5,
         "council_counter_trend": 4.0,
         "mean_reversion_weight": 0.35,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.40,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.4,
         "momentum_alignment": {
           "enabled": true,
           "candles": 3,
@@ -184,7 +182,7 @@
         "buy_threshold": 0.28,
         "sell_threshold": 0.28,
         "two_strategy_bonus": 0.22,
-        "three_strategy_bonus": 0.30,
+        "three_strategy_bonus": 0.3,
         "bull_buy_boost": 0.09,
         "bull_sell_penalty": 0.09,
         "bear_sell_boost": 0.09,
@@ -193,14 +191,14 @@
         "min_signal_quality": 0.22,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
-        "opposition_penalty": 0.60,
+        "single_override_threshold": 0.7,
+        "opposition_penalty": 0.6,
         "verbose": false,
         "council_trend_aligned": 3.0,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.45,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50,
+        "ema_weight": 0.5,
         "momentum_alignment": {
           "enabled": true,
           "candles": 3,
@@ -225,29 +223,28 @@
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.06,
-        "opposition_penalty": 0.60,
+        "opposition_penalty": 0.6,
         "council_trend_aligned": 2.8,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50,
+        "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disabled \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 3
         }
       }
     },
-
     "FX": {
-      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals — so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
+      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals \u2014 so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
       "conservative": {
         "description": "Strict FX settings. Focus: Capital Preservation.",
         "buy_threshold": 0.28,
         "sell_threshold": 0.26,
         "two_strategy_bonus": 0.16,
-        "three_strategy_bonus": 0.20,
+        "three_strategy_bonus": 0.2,
         "bull_buy_boost": 0.07,
         "bull_sell_penalty": 0.07,
         "bear_sell_boost": 0.07,
@@ -279,19 +276,19 @@
         "min_signal_quality": 0.22,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
+        "single_override_threshold": 0.7,
         "opposition_penalty": 0.45,
         "verbose": false,
         "council_trend_aligned": 3.3,
         "council_counter_trend": 3.8,
-        "mean_reversion_weight": 0.50,
-        "trend_following_weight": 0.60,
-        "ema_weight": 0.40
+        "mean_reversion_weight": 0.5,
+        "trend_following_weight": 0.6,
+        "ema_weight": 0.4
       },
       "aggressive": {
         "description": "Active FX settings. Focus: Trend and Range Catching.",
         "buy_threshold": 0.22,
-        "sell_threshold": 0.20,
+        "sell_threshold": 0.2,
         "two_strategy_bonus": 0.18,
         "three_strategy_bonus": 0.22,
         "bull_buy_boost": 0.07,
@@ -314,10 +311,10 @@
       "scalper": {
         "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
         "description": "High frequency FX settings. Focus: Volume & Speed.",
-        "buy_threshold": 0.20,
+        "buy_threshold": 0.2,
         "sell_threshold": 0.18,
         "two_strategy_bonus": 0.16,
-        "three_strategy_bonus": 0.20,
+        "three_strategy_bonus": 0.2,
         "bull_buy_boost": 0.07,
         "bull_sell_penalty": 0.05,
         "bear_sell_boost": 0.07,
@@ -332,11 +329,48 @@
         "opposition_penalty": 0.32,
         "council_trend_aligned": 2.5,
         "council_counter_trend": 3.2,
-        "mean_reversion_weight": 0.50,
+        "mean_reversion_weight": 0.5,
         "trend_following_weight": 0.55,
-        "ema_weight": 0.50
+        "ema_weight": 0.5
       }
     }
-
+  },
+  "LIVERMORE_PIVOTS": {
+    "_comment": "ATR multipliers for the Livermore State Machine (Phase 1). major_mult \u00d7 ATR14 = pivot distance for MAIN state transitions. minor_mult \u00d7 ATR14 = pivot distance for SECONDARY / bounce confirmation. dual_confirm = consecutive bars required to confirm a MAIN state flip. Calibrated on 4H data: BTC from BTC 4H (Jan2024\u2013Feb2026, score=6.00/6), GOLD/FX defaults pending their own calibration runs.",
+    "BTC": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "BTC 4H Jan2024\u2013Feb2026: 1.48 transitions/week, 5/6 turning-point score"
+    },
+    "GOLD": {
+      "major_mult": 4.0,
+      "minor_mult": 1.5,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "GOLD 4H default \u2014 run calibration when 4H data available"
+    },
+    "EURUSD": {
+      "major_mult": 3.0,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "FX default \u2014 run calibration when 4H data available"
+    },
+    "EURJPY": {
+      "major_mult": 3.0,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "FX default \u2014 run calibration when 4H data available"
+    },
+    "USTEC": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "USTEC default \u2014 run calibration when 4H data available"
+    }
   }
 }

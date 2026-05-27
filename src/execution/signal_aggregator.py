@@ -103,26 +103,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             'volatility_gate': config.get('world_class_filters', {}).get(
                 'volatility_gate_threshold', _default_vol_threshold
             ),
-            'sniper_confidence': config.get('world_class_filters', {}).get(
-                'sniper_pattern_confidence', 0.60
-            ),
             'min_profit': config.get('world_class_filters', {}).get(
                 'min_profit_potential', 0.005
             ),
         }
-        
+        # NOTE: sniper_confidence threshold removed — CNN-LSTM sniper disconnected
+        # from scoring pipeline in Phase 0B. See MRS §6 Phase 0.
+
         if self.enable_filters:
             logger.info(f"[FILTERS] World-Class Filters ENABLED for {asset_type}")
             logger.info(f"  Volatility Gate: {self.filter_thresholds['volatility_gate']:.3%}")
-            logger.info(f"  Sniper Min:      {self.filter_thresholds['sniper_confidence']:.0%}")
             logger.info(f"  Min Profit:      {self.filter_thresholds['min_profit']:.2%}")
-            
-            
+            logger.info(f"  Sniper:          DISCONNECTED (Phase 0B)")
+
         if ai_validator is not None:
             try:
-                # Validate AI is properly initialized
-                assert hasattr(ai_validator, "sniper"), "Sniper not initialized"
-                assert hasattr(ai_validator.sniper, "model"), "Model not loaded"
+                # Validate AI pattern miner is properly initialized.
+                # Sniper assertions removed — sniper is disconnected from pipeline.
                 assert hasattr(
                     ai_validator, "pattern_id_map"
                 ), "Pattern mapping missing"
@@ -360,6 +357,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # Regime transition evidence collector (SLIGHTLY regimes only)
         self._transition_detector = TransitionDetector()
 
+        # ── PHASE 1: Livermore State Machine ────────────────────────────────
+        # Two instances per asset: 4H (trend structure) + 1H (entry timing).
+        # Both are cold-started here; warm_start_livermore() must be called
+        # once historical bars are available (see main.py startup sequence).
+        self._livermore_4h = None
+        self._livermore_1h = None
+        self._livermore_warmed = False
+        self._livermore_last_4h_ts = None   # deduplicate 4H bar updates
+        try:
+            import json as _json
+            _presets_path = "config/aggregator_presets.json"
+            with open(_presets_path) as _f:
+                _presets = _json.load(_f)
+            _lp = _presets.get("LIVERMORE_PIVOTS", {})
+            # Map common asset aliases to preset keys
+            _alias_map = {
+                "BTCUSDT": "BTC", "XAUUSD": "GOLD",
+                "EURUSD": "EURUSD", "EURJPY": "EURJPY", "USTEC": "USTEC",
+            }
+            _lp_key = _alias_map.get(self.asset_type, self.asset_type)
+            _lp_cfg = _lp.get(_lp_key, _lp.get("BTC", {}))
+            from src.execution.livermore_state_machine import make_livermore_pair
+            self._livermore_4h, self._livermore_1h = make_livermore_pair(
+                asset=self.asset_type, pivots_config=_lp_cfg
+            )
+            logger.info(
+                "[Livermore] %s  major=%.1f  minor=%.1f  dual=%d",
+                self.asset_type,
+                _lp_cfg.get("major_mult", 3.5),
+                _lp_cfg.get("minor_mult", 1.0),
+                _lp_cfg.get("dual_confirm", 2),
+            )
+        except Exception as _lsm_err:
+            logger.error("[Livermore] Init failed — state machine disabled: %s", _lsm_err)
+        # ─────────────────────────────────────────────────────────────────────
+
         self._log_initialization()
 
     # ── B.4: State Persistence ───────────────────────────────────────────────
@@ -493,6 +526,52 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         else:
             logger.info("   ⚠ AI VALIDATION: Disabled")
         logger.info("=" * 80)
+
+    # ── PHASE 1: Livermore warm-start ────────────────────────────────────────
+
+    def warm_start_livermore(self, df_4h: "pd.DataFrame", df_1h: "pd.DataFrame") -> None:
+        """
+        Replay historical bars through the Livermore state machines so they
+        arrive at the correct state before the live loop begins.
+
+        Call once from main.py after the DataManager has fetched historical data,
+        before the first get_aggregated_signal() call.
+
+        df_4h / df_1h must have columns: open, high, low, close, volume.
+        ATR is computed internally.
+        """
+        if self._livermore_4h is None:
+            return
+        if self._livermore_warmed:
+            return
+
+        from src.execution.livermore_state_machine import atr14 as _atr14
+        try:
+            if df_4h is not None and len(df_4h) >= 20:
+                _df4 = df_4h.copy()
+                _df4["atr"] = _atr14(_df4)
+                self._livermore_4h.update_from_series(_df4)
+                self._livermore_last_4h_ts = df_4h.index[-1] if not df_4h.empty else None
+                snap4 = self._livermore_4h.snapshot()
+                logger.info(
+                    "[Livermore] %s 4H warm-start complete | state=%s age=%d bars",
+                    self.asset_type, snap4.state, snap4.state_age,
+                )
+
+            if df_1h is not None and len(df_1h) >= 20:
+                _df1 = df_1h.copy()
+                _df1["atr"] = _atr14(_df1)
+                self._livermore_1h.update_from_series(_df1)
+                snap1 = self._livermore_1h.snapshot()
+                logger.info(
+                    "[Livermore] %s 1H warm-start complete | state=%s age=%d bars",
+                    self.asset_type, snap1.state, snap1.state_age,
+                )
+
+            self._livermore_warmed = True
+
+        except Exception as _ws_err:
+            logger.error("[Livermore] warm_start failed: %s", _ws_err)
 
     # ─────────────────────────────────────────────────────────────────────
     # CALENDAR HELPERS
@@ -814,6 +893,53 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             except Exception:
                 pass
 
+        # ── PHASE 1: Livermore State Machine update ──────────────────────────
+        # Update both timeframe instances with the latest closed bar.
+        # 4H: only update when df_4h has a bar newer than the last processed one.
+        # 1H: update every call (df is the 1H feed).
+        # Writes to CompositeState livermore_* fields defined in Phase 1 reserved block.
+        if self._livermore_4h is not None:
+            try:
+                from src.execution.livermore_state_machine import atr14 as _atr14_lsm
+
+                # ── 4H update ────────────────────────────────────────────────
+                if df_4h is not None and len(df_4h) >= 15:
+                    _4h_ts = df_4h.index[-1]
+                    if _4h_ts != self._livermore_last_4h_ts:
+                        # New 4H candle — compute ATR and update
+                        _atr4_series = _atr14_lsm(df_4h)
+                        _atr4 = float(_atr4_series.iloc[-1]) if not np.isnan(_atr4_series.iloc[-1]) else 0.0
+                        _close4 = float(df_4h['close'].iloc[-1])
+                        snap4 = self._livermore_4h.update(_close4, _atr4)
+                        self._livermore_last_4h_ts = _4h_ts
+                    else:
+                        snap4 = self._livermore_4h.snapshot()
+
+                    state.livermore_state_4h              = snap4.state
+                    state.livermore_state_age_4h          = snap4.state_age
+                    state.livermore_anchor_main_up_max    = snap4.anchor_main_up_max
+                    state.livermore_anchor_main_down_min  = snap4.anchor_main_down_min
+                    state.livermore_anchor_natural_high   = snap4.anchor_natural_high
+                    state.livermore_anchor_natural_low    = snap4.anchor_natural_low
+                    state.livermore_dual_confirmation     = snap4.dual_confirmation
+                    # is_silent_zone = True when in NATURAL_RETR or NATURAL_REBOUND
+                    # (counter-trend signals suppressed by Hard Veto Layer — Phase 2)
+                    state.is_silent_zone = snap4.is_silent_zone
+
+                # ── 1H update ────────────────────────────────────────────────
+                if df is not None and len(df) >= 15:
+                    _atr1_series = _atr14_lsm(df)
+                    _atr1 = float(_atr1_series.iloc[-1]) if not np.isnan(_atr1_series.iloc[-1]) else 0.0
+                    _close1 = float(df['close'].iloc[-1])
+                    snap1 = self._livermore_1h.update(_close1, _atr1)
+                    state.livermore_state_1h     = snap1.state
+                    state.livermore_state_age_1h = snap1.state_age
+
+            except Exception as _lsm_err:
+                logger.debug("[Livermore] _build_composite_state update error: %s", _lsm_err)
+        # ─────────────────────────────────────────────────────────────────────
+
+        state.sanitise()
         return state
 
     # ── D.1: Trend Lifecycle Modifier ────────────────────────────────────
@@ -1790,35 +1916,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 viz_data["pattern_id"] = pattern_result.get("pattern_id")
                 viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
 
-                # Get top 3 patterns
-                if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
-                    try:
-                        snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-                        first_open = snippet[0, 0]
-
-                        if first_open > 0:
-                            snippet_norm = snippet / first_open - 1
-                            snippet_input = snippet_norm.reshape(1, 15, 4)
-
-                            predictions = self.ai_validator.sniper.model.predict(
-                                snippet_input, verbose=0
-                            )[0]
-
-                            top3_indices = predictions.argsort()[-3:][::-1]
-                            top3_confidences = predictions[top3_indices]
-
-                            top3_patterns = []
-                            for idx in top3_indices:
-                                pattern_name = self.ai_validator.reverse_pattern_map.get(
-                                    idx, f"Pattern_{idx}"
-                                )
-                                top3_patterns.append(pattern_name)
-
-                            viz_data["top3_patterns"] = top3_patterns
-                            viz_data["top3_confidences"] = top3_confidences.tolist()
-
-                    except Exception as e:
-                        logger.debug(f"[VIZ] Top3 patterns failed: {e}")
+                # Top-3 sniper patterns removed (Phase 0B) — CNN-LSTM disconnected.
 
             except Exception as e:
                 logger.error(f"[VIZ] Pattern detection failed: {e}")
@@ -2079,14 +2177,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             else:
                 trade_type = getattr(raw_trade_type, 'value', str(raw_trade_type))
 
-            # T2.1 fix: NEUTRAL used to block all trading.
-            # Simulation: 129 blocked signals at 70.5% WR, +70.2% P&L.
-            # NEUTRAL is MR's best environment (+159% P&L, 71% WR).
-            # Now returns TRANSITION so trades fire at 50% position size
-            # (sizing reduction applied in get_aggregated_signal below).
+            # TRANSITION path removed (Phase 0B — MRS §6).
+            # NEUTRAL regime no longer maps to a half-size TRANSITION entry.
+            # NEUTRAL trades pass through at full sizing — the gatekeeper
+            # already handles NEUTRAL as "all strategies allowed."
+            # Future: Phase 2 Hard Veto Layer will gate on Livermore state
+            # (NATURAL/SECONDARY) rather than MTF regime, providing structural
+            # context that MTF NEUTRAL cannot supply.
             if trade_type == "NEUTRAL":
-                logger.info("[GOV] ⚠️ TRANSITION — market neutral, allowing at 50% size")
-                return True, "TRANSITION"
+                logger.debug("[GOV] NEUTRAL regime — passing at full size")
+                return True, "NEUTRAL"
 
             return True, trade_type
         
@@ -2134,40 +2234,37 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
     
     def _check_sniper_filter(self, df: pd.DataFrame, signal: int, governor_data: Dict = None) -> Tuple[bool, Dict]:
         """
-        Filter 3: Sniper Lock - Institutional Edge Confirmation
-        =======================================================
-        A trade is confirmed if ANY of the following institutional edge conditions are met.
-        This prevents rejecting high-quality trades due to cosmetic candle issues.
-        
-        Confirmation Logic (OR-based):
-        1. AI Pattern: A high-confidence AI pattern is detected.
-        2. Momentum Candle: The candle body is at least 60% of the total range.
-        3. Turtle Breakout: Price closes above the 20-period Donchian High or below the Low.
-        4. Volume Surge: Volume is >= 150% of its 20-period rolling average.
-        5. Volatility Breach: Price closes outside the 2.0 standard deviation Bollinger Bands.
-        6. Trend Momentum: Macro regime and 1H momentum are strong and aligned.
-        
-        Returns:
-            (passed, details)
+        DISCONNECTED — Phase 0B (MRS §6 Phase 0).
+        CNN-LSTM sniper removed from scoring pipeline.
+        This method is retained as dead code for reference only.
+        It is no longer called from get_aggregated_signal().
+
+        Returns (True, {}) unconditionally if somehow invoked.
+        """
+        return True, {'trigger_type': 'SNIPER_DISCONNECTED'}
+
+    def _check_sniper_filter_LEGACY(self, df: pd.DataFrame, signal: int, governor_data: Dict = None) -> Tuple[bool, Dict]:
+        """
+        LEGACY — kept for reference only. Not called anywhere.
+        Original Filter 3: Sniper Lock - Institutional Edge Confirmation.
+        Removed in Phase 0B: CNN-LSTM trained on 15-min data, received 1H data.
+        Peak accuracy ~0.70 adds no edge over structural rules.
         """
         if not self.enable_filters:
             return True, {'trigger_type': 'DISABLED'}
 
         try:
-            # Trap filter moved to pre-consensus veto phase
-
             latest = df.iloc[-1]
             reasons = []
 
             # ================================================================
             # 1. AI Pattern Confidence
             # ================================================================
-            # Reason: The AI model has already encoded a multi-factor edge.
             if self.ai_validator and hasattr(self.ai_validator, 'sniper'):
                 pattern_result = self.ai_validator._check_pattern(
                     df=df,
                     signal=signal,
-                    min_confidence=self.filter_thresholds['sniper_confidence']
+                    min_confidence=0.60  # was self.filter_thresholds['sniper_confidence']
                 )
                 if pattern_result.get('pattern_confirmed'):
                     reasons.append({
@@ -3352,20 +3449,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         vol_passed, _ = self._check_volatility_filter(df)
                         if not vol_passed: final_signal = 0; reasoning = "low_volatility"
                         else:
-                            sniper_passed, _ = self._check_sniper_filter(df, final_signal, governor_data=governor_data)
-                            if not sniper_passed:
-                                # Fix #19: Sniper is advisory (quality discount) for strong
-                                # consensus signals; hard block only for marginal signals.
-                                # strong_signal_bypass default = 0.70 (set at construction).
-                                if signal_quality >= self.strong_signal_bypass:
-                                    signal_quality *= 0.80   # −20% quality, still trades
-                                    reasoning += "+sniper_warning"
-                                    logger.info(
-                                        f"[SNIPER] ⚠️ Advisory downgrade "
-                                        f"(quality={signal_quality:.2f})"
-                                    )
-                                else:
-                                    final_signal = 0; reasoning = "no_sniper_confirmation"
+                            # Sniper filter removed (Phase 0B) — CNN-LSTM disconnected.
+                            # Filter chain: Governor → Volatility → ATR Expansion.
                             if final_signal != 0:
                                 atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
                                 if not atr_exp_passed:
@@ -3469,21 +3554,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 except Exception:
                     pass
 
-                # H.1: Feed AI Sniper output into composite state
-                try:
-                    _ai_data = ai_validation_details if isinstance(ai_validation_details, dict) else {}
-                    if _ai_data:
-                        state.ai_pattern_name = _ai_data.get("pattern_name")
-                        state.ai_pattern_confidence = float(_ai_data.get("confidence", 0.0))
-                        _reversal_patterns = [
-                            "Evening Star", "Bearish Engulfing", "Shooting Star",
-                            "Morning Star", "Bullish Engulfing", "Hammer"
-                        ]
-                        if state.ai_pattern_name in _reversal_patterns and \
-                           state.ai_pattern_confidence > 0.75:
-                            state.ai_reversal_probability = state.ai_pattern_confidence
-                except Exception:
-                    pass
+                # H.1: Sniper composite state population removed (Phase 0B).
+                # CNN-LSTM sniper disconnected from scoring pipeline.
+                # ai_pattern_name / ai_pattern_confidence / ai_reversal_probability
+                # remain in CompositeState as reserved fields for future use.
 
                 # Section I: Confluence Engine — adjust tf_conf and mr_conf
                 try:
@@ -3511,10 +3585,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 reasoning += " | " + " | ".join(bonus_tags[:2])
 
             # ✅ FIX: If a filter (sniper, volatility, governor, ATR) zeroed the
-            # signal, reset quality to 0.0.  Previously signal_quality was set
-            # before the filter chain, so a 1.0-quality signal that was blocked
-            # by e.g. no_sniper_confirmation still reported "Signal Quality: 100%"
-            # in the [PERFORMANCE] log — contradictory and misleading.
+            # If a filter zeroed the signal, reset quality to 0.0.
+            # Previously signal_quality was set before the filter chain, so a
+            # 1.0-quality signal blocked by e.g. low_volatility or governor
+            # still reported "Signal Quality: 100%" — contradictory and misleading.
             if final_signal == 0 and original_signal != 0:
                 signal_quality = 0.0
 
@@ -3595,17 +3669,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "friday_tighten": state.friday_tighten if state else False,
                 "composite_state": state.to_dict() if state else {},
             })
-
-            # T2.1: TRANSITION sizing — governor approved but market is neutral.
-            # Apply 50% risk multiplier so these trades fire at half normal size.
-            # T1.7 already wires mtf_risk_multiplier into both execution handlers.
-            if final_signal != 0 and trade_type == "TRANSITION":
-                current_multiplier = details.get("mtf_risk_multiplier", 1.0)
-                details["mtf_risk_multiplier"] = current_multiplier * 0.5
-                logger.info(
-                    f"[TRANSITION] {self.asset_type}: signal approved at 50% size "
-                    f"(mtf_risk_multiplier={details['mtf_risk_multiplier']:.2f})"
-                )
 
             return final_signal, details
         
