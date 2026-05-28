@@ -76,6 +76,7 @@ from src.utils.trade_logger import log_trade_event
 from src.utils.calendar_updater import CalendarUpdater
 from src.audit_logger.audit_logger import log_trade
 from src.monitoring.health_monitor import HealthMonitor
+from src.execution.system_validator import SystemValidator
 from src.portfolio.hedging_support import (
     enable_hedging_for_portfolio,
     log_hedging_status,
@@ -341,6 +342,12 @@ class TradingBot:
 
         # ✨ NEW: System Health Tracking
         self.health_monitor = HealthMonitor()
+
+        # PHASE 2: System Validator — silent immune-system monitor.
+        # Never blocks trading. Logs 6-hour summaries. Atomic persistence.
+        self.system_validator = SystemValidator(
+            state_path="data/system_validator_state.json",
+        )
 
         self.error_handler = GlobalErrorHandler(
             telegram_bot=self.telegram_bot,
@@ -2669,6 +2676,13 @@ class TradingBot:
             if hasattr(self, 'health_monitor') and self.health_monitor:
                 logger.info("[HEARTBEAT] System running...")
                 self.health_monitor.heartbeat()
+
+            # Phase 2: System Validator — update liveness/calibration this cycle
+            if hasattr(self, 'system_validator') and self.system_validator:
+                try:
+                    self.system_validator.update(asset="CYCLE")
+                except Exception as _sv_err:
+                    logger.debug("[VALIDATOR] cycle update error: %s", _sv_err)
                 if not self.health_monitor.is_healthy():
                     logger.critical("[HEALTH] ⚠️ System is UNHEALTHY! Triggering emergency shutdown.")
                     
@@ -5200,6 +5214,48 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
+    # ── Phase 2: System Validator watchdog ───────────────────────────────────
+
+    def _run_validator_watchdog(self) -> None:
+        """
+        SYSTEM_INTEGRITY watchdogs — called every 5 minutes by scheduler.
+        Checks: Amnesia Monitor, VTM Circuit Breaker signal, API Rate Limit.
+        Never blocks trading. Non-fatal on any exception.
+        """
+        if not hasattr(self, "system_validator") or self.system_validator is None:
+            return
+        try:
+            # Collect Binance API weight from handler if available
+            _binance_weight = None
+            if self.binance_handler and hasattr(self.binance_handler, '_api_weight'):
+                _binance_weight = self.binance_handler._api_weight
+
+            # Get open positions for VTM CB check
+            _open_positions = []
+            if self.portfolio_manager:
+                try:
+                    _open_positions = list(self.portfolio_manager.positions.values())
+                except Exception:
+                    pass
+
+            results = self.system_validator.watchdog_tick(
+                dynamic_thresholds=getattr(
+                    next(iter(self.aggregators.values()), None),
+                    'dynamic_thresholds', None
+                ) if self.aggregators else None,
+                open_positions=_open_positions,
+                binance_api_weight=_binance_weight,
+                binance_api_weight_limit=6000,
+            )
+
+            # If API throttle signal fires, flag historical updater to skip next fetch
+            if results.get("api_throttle"):
+                if hasattr(self, 'historical_updater') and self.historical_updater:
+                    self.historical_updater._skip_next_fetch = True
+
+        except Exception as _wdog_err:
+            logger.debug("[VALIDATOR] watchdog_tick error: %s", _wdog_err)
+
     # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
 
     def _warm_start_livermore_all_assets(self) -> None:
@@ -5378,6 +5434,9 @@ class TradingBot:
             check_interval = self.config["trading"].get("check_interval_seconds", 300)
             schedule.every(check_interval).seconds.do(self.run_trading_cycle)
             schedule.every(1).hours.do(self.log_detailed_pnl_report)
+
+            # Phase 2: System Validator watchdog — runs every 5 minutes
+            schedule.every(5).minutes.do(self._run_validator_watchdog)
 
             self.is_running = True
             self._main_loop_running = True
@@ -5770,7 +5829,7 @@ def main():
     import os as _os
     _pid_path = Path("logs") / "bot.pid"
     _pid_path.write_text(str(_os.getpid()))
-    logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
+    logger.info(f"[MAIN] PID {{_os.getpid()}} written to {{_pid_path}}")
 
     try:
         with open("config/config.json", encoding="utf-8") as f:
@@ -5787,16 +5846,16 @@ def main():
 
             if strategies.get("mean_reversion", {}).get("enabled", False):
                 required_models.append(
-                    f"models/mean_reversion_{asset_name.lower()}.pkl"
+                    f"models/mean_reversion_{{asset_name.lower()}}.pkl"
                 )
 
             if strategies.get("trend_following", {}).get("enabled", False):
                 required_models.append(
-                    f"models/trend_following_{asset_name.lower()}.pkl"
+                    f"models/trend_following_{{asset_name.lower()}}.pkl"
                 )
 
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
-                required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
+                required_models.append(f"models/ema_strategy_{{asset_name.lower()}}.pkl")
 
     missing = [m for m in required_models if not Path(m).exists()]
     if missing:
@@ -5804,7 +5863,7 @@ def main():
         print("[FAIL] REQUIRED MODELS NOT FOUND")
         print("=" * 70)
         for model in missing:
-            print(f"  [X] {model}")
+            print(f"  [X] {{model}}")
         print("\nRun: python train.py")
         print("=" * 70)
         sys.exit(1)
@@ -5814,7 +5873,7 @@ def main():
         print("=" * 70)
         print("\u26a0\ufe0f  AI MODEL NOT FOUND (Optional)")
         print("=" * 70)
-        print(f"  Missing: {ai_model}")
+        print(f"  Missing: {{ai_model}}")
         print("\nBot will run without AI validation (pattern detection disabled)")
         print("Train AI: python train_ai.py")
         print("=" * 70)
@@ -5827,8 +5886,8 @@ def main():
         logger.info("Bot stopped by user (KeyboardInterrupt)")
         print("\n[STOPPED] Bot stopped by user.")
     except Exception as e:
-        logger.exception(f"Fatal error in bot: {e}")
-        print(f"\n[FATAL] Bot crashed: {e}")
+        logger.exception(f"Fatal error in bot: {{e}}")
+        print(f"\n[FATAL] Bot crashed: {{e}}")
         sys.exit(1)
 
 

@@ -939,6 +939,30 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 logger.debug("[Livermore] _build_composite_state update error: %s", _lsm_err)
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── PHASE 2: vol_down_ratio ──────────────────────────────────────────
+        # Volume on down-close bars vs up-close bars over the last 20 1H bars.
+        # Used as MR Mode 1 veto (Phase 3A) and Scenario B continuation veto.
+        # > 1.2 means down-volume dominates (distribution, not re-accumulation).
+        # Wire now — actual veto applied in Phase 3A.
+        # NOT a directional predictor. Only valid as a blocking filter.
+        try:
+            if df is not None and len(df) >= 10:
+                _vdr_n     = min(20, len(df))
+                _vdr_close = df['close'].values[-_vdr_n:]
+                _vdr_open  = df['open'].values[-_vdr_n:]
+                _vdr_vol   = df['volume'].values[-_vdr_n:].astype(float)
+                _down_vol  = float(np.sum(_vdr_vol[_vdr_close < _vdr_open]))
+                _up_vol    = float(np.sum(_vdr_vol[_vdr_close > _vdr_open]))
+                if _up_vol > 0:
+                    state.vol_down_ratio       = _down_vol / _up_vol
+                    state.vol_down_ratio_valid = True
+                else:
+                    state.vol_down_ratio       = None
+                    state.vol_down_ratio_valid = False
+        except Exception as _vdr_err:
+            logger.debug("[vol_down_ratio] compute error: %s", _vdr_err)
+        # ─────────────────────────────────────────────────────────────────────
+
         state.sanitise()
         return state
 
@@ -947,6 +971,20 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
     def _update_trend_lifecycle(self, state, regime_name: str, current_dt=None):
         """
         Classify where in the trend lifecycle this asset sits.
+
+        Phase 2: When Livermore state machine is warmed, derive lifecycle_phase
+        directly from the Livermore state and its age (bars in state).
+        This unblocks institutional patterns which were stuck on ESTABLISHED
+        because the old regime-event-based derivation never transitioned.
+
+        MRS lifecycle mapping (Livermore):
+          MAIN_UP / MAIN_DOWN  age  1–5  bars → PICKUP
+          MAIN_UP / MAIN_DOWN  age  5–15 bars → CONFIRMATION
+          MAIN_UP / MAIN_DOWN  age  15+  bars → ESTABLISHED
+          NATURAL_RETRACEMENT / NATURAL_REBOUND → FADING
+          SECONDARY_RETRACEMENT / SECONDARY_REBOUND → EXHAUSTION
+
+        Fallback: original regime-event logic if Livermore is not warmed.
 
         Args:
             state:       CompositeState to update in place.
@@ -957,6 +995,35 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         """
         from datetime import datetime, timezone
         asset = self.asset_type
+
+        # ── PHASE 2: Livermore-based lifecycle derivation ────────────────────
+        # When the state machine is warmed (livermore_state_4h is populated),
+        # skip the regime-event logic entirely and derive from state age.
+        # Regime-age fields (regime_age_hours, transition_probability) still need
+        # updating so the confluence engine has valid context — handled below.
+        _lsm_state = getattr(state, 'livermore_state_4h', None)
+        _lsm_age   = getattr(state, 'livermore_state_age_4h', 0)
+        if _lsm_state is not None:
+            if _lsm_state in ("MAIN_UP", "MAIN_DOWN"):
+                if _lsm_age <= 5:
+                    state.lifecycle_phase = "PICKUP"
+                elif _lsm_age <= 15:
+                    state.lifecycle_phase = "CONFIRMATION"
+                else:
+                    state.lifecycle_phase = "ESTABLISHED"
+            elif _lsm_state in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+                state.lifecycle_phase = "FADING"
+            elif _lsm_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                state.lifecycle_phase = "EXHAUSTION"
+            else:
+                state.lifecycle_phase = "ESTABLISHED"
+            logger.debug(
+                "[LIFECYCLE] %s Livermore=%s age=%d → %s",
+                asset, _lsm_state, _lsm_age, state.lifecycle_phase,
+            )
+            # Still update regime-age fields for confluence engine downstream.
+            # Fall through to the regime-age calculation block below.
+        # ─────────────────────────────────────────────────────────────────────
         # Use provided timestamp if given, otherwise real wall-clock time.
         # In backtesting all bars run in seconds of wall time, so datetime.now()
         # would keep regime_age_hours ≈ 0 for the entire run.
@@ -988,27 +1055,32 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             self._regime_start_time[asset] = now
             state.transition_type = f"{prev}→{regime_name}"
 
-            if "NEUTRAL" in prev and "SLIGHTLY" in regime_name:
-                state.lifecycle_phase = "PICKUP"
-            elif "SLIGHTLY" in prev and regime_name in ("BULLISH", "BEARISH"):
-                state.lifecycle_phase = "CONFIRMATION"
-            elif regime_name in ("BULLISH", "BEARISH") and prev in ("BULLISH", "BEARISH"):
-                state.lifecycle_phase = "ESTABLISHED"
-            elif prev in ("BULLISH", "BEARISH") and "SLIGHTLY" in regime_name:
-                state.lifecycle_phase = "FADING"
-            elif prev in ("BULLISH", "BEARISH", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH") \
-                 and regime_name == "NEUTRAL":
-                state.lifecycle_phase = "EXHAUSTION"
-            else:
-                state.lifecycle_phase = "ESTABLISHED"
+            # Only overwrite lifecycle_phase from regime events when Livermore
+            # is not yet warmed — once Livermore is running it has higher authority.
+            if _lsm_state is None:
+                if "NEUTRAL" in prev and "SLIGHTLY" in regime_name:
+                    state.lifecycle_phase = "PICKUP"
+                elif "SLIGHTLY" in prev and regime_name in ("BULLISH", "BEARISH"):
+                    state.lifecycle_phase = "CONFIRMATION"
+                elif regime_name in ("BULLISH", "BEARISH") and prev in ("BULLISH", "BEARISH"):
+                    state.lifecycle_phase = "ESTABLISHED"
+                elif prev in ("BULLISH", "BEARISH") and "SLIGHTLY" in regime_name:
+                    state.lifecycle_phase = "FADING"
+                elif prev in ("BULLISH", "BEARISH", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH") \
+                     and regime_name == "NEUTRAL":
+                    state.lifecycle_phase = "EXHAUSTION"
+                else:
+                    state.lifecycle_phase = "ESTABLISHED"
         elif prev == regime_name:
             pass  # Same regime — keep current phase, just update age
         else:
             # First observation (after restart or new asset)
             self._regime_start_time[asset] = now
-            # ✅ FIX: Default to ESTABLISHED so pattern layer is active immediately
-            state.lifecycle_phase = "ESTABLISHED"
-            logger.info(f"[LIFECYCLE] {asset} initialized to ESTABLISHED (Startup)")
+            # Default to ESTABLISHED so pattern layer is active immediately.
+            # Overridden by Livermore derivation above if machine is warmed.
+            if _lsm_state is None:
+                state.lifecycle_phase = "ESTABLISHED"
+                logger.info(f"[LIFECYCLE] {asset} initialized to ESTABLISHED (Startup)")
 
         self._previous_regime[asset] = regime_name
 
@@ -2843,6 +2915,80 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             tf_original = tf_signal
 
             # ═══════════════════════════════════════════════════════════════
+            # PHASE 2: LIVERMORE HARD VETO LAYER
+            # Three unconditional structural blocks. No signal strength or
+            # confidence overrides these. Runs before any gatekeeper, scoring,
+            # or adjustments. Logs specific reason for every block event.
+            #
+            # Block A — 1H NATURAL_REBOUND + any LONG: trend is down, pullback
+            #   is healthy breathing. New longs fight the macro structure.
+            # Block B — 1H SECONDARY_REBOUND + LONG without dual confirmation:
+            #   counter-trend rally exceeded natural threshold but hasn't confirmed
+            #   a new downtrend reversal. Too risky to enter long.
+            # Block C — MR counter-trend during any 1H NATURAL state:
+            #   MR specifically fires SHORT during NATURAL_RETRACEMENT (trend-up
+            #   pullback) — the exact losing pattern identified in the MRS.
+            # ═══════════════════════════════════════════════════════════════
+            if state is not None:
+                _hv_1h   = state.livermore_state_1h
+                _hv_dual = state.livermore_dual_confirmation
+
+                # Block A: 1H NATURAL_REBOUND + any LONG
+                if _hv_1h == "NATURAL_REBOUND":
+                    _blocked = []
+                    if mr_signal > 0:
+                        mr_signal = 0; mr_conf = 0.0
+                        _blocked.append("MR")
+                    if tf_signal > 0:
+                        tf_signal = 0; tf_conf = 0.0
+                        _blocked.append("TF")
+                    if ema_signal > 0:
+                        ema_signal = 0; ema_conf = 0.0
+                        _blocked.append("EMA")
+                    if _blocked:
+                        logger.info(
+                            "[HARD_VETO] %s Block A: NATURAL_REBOUND+LONG → zeroed %s",
+                            self.asset_type, "+".join(_blocked),
+                        )
+
+                # Block B: 1H SECONDARY_REBOUND + LONG without dual confirmation
+                elif _hv_1h == "SECONDARY_REBOUND" and not _hv_dual:
+                    _blocked = []
+                    if mr_signal > 0:
+                        mr_signal = 0; mr_conf = 0.0
+                        _blocked.append("MR")
+                    if tf_signal > 0:
+                        tf_signal = 0; tf_conf = 0.0
+                        _blocked.append("TF")
+                    if ema_signal > 0:
+                        ema_signal = 0; ema_conf = 0.0
+                        _blocked.append("EMA")
+                    if _blocked:
+                        logger.info(
+                            "[HARD_VETO] %s Block B: SECONDARY_REBOUND+LONG+no_dual → zeroed %s",
+                            self.asset_type, "+".join(_blocked),
+                        )
+
+                # Block C: MR counter-trend during any NATURAL state
+                # NATURAL_RETRACEMENT (up-trend): SHORT is counter-trend → block MR SHORT
+                # NATURAL_REBOUND (down-trend): LONG is counter-trend → block MR LONG
+                # (MR LONG in NATURAL_REBOUND is also caught by Block A, but Belt-and-suspenders)
+                if _hv_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+                    _c_blocked = None
+                    if _hv_1h == "NATURAL_RETRACEMENT" and mr_signal < 0:
+                        mr_signal = 0; mr_conf = 0.0
+                        _c_blocked = "MR_SHORT in NATURAL_RETRACEMENT"
+                    elif _hv_1h == "NATURAL_REBOUND" and mr_signal > 0:
+                        mr_signal = 0; mr_conf = 0.0
+                        _c_blocked = "MR_LONG in NATURAL_REBOUND"
+                    if _c_blocked:
+                        logger.info(
+                            "[HARD_VETO] %s Block C: %s → MR zeroed",
+                            self.asset_type, _c_blocked,
+                        )
+            # ─────────────────────────────────────────────────────────────
+
+            # ═══════════════════════════════════════════════════════════════
             # T3.5: BTC FUNDING RATE Z-SCORE CONFIDENCE MULTIPLIER
             # Extreme funding rates (Z ≥ 2.0) indicate crowded positioning.
             # Over-leveraged longs → MR short setups become highest probability.
@@ -2960,6 +3106,31 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Explosive momentum overrule preserved for full-regime hard blocks.
             # ═══════════════════════════════════════════════════════════════
             if self.use_gatekeeper:
+                # ─────────────────────────────────────────────────────────────
+                # PHASE 2: LIVERMORE STRUCTURAL HOLD — 4H NATURAL STATES
+                # When the 4H macro state is NATURAL (silent zone), no new entries.
+                # NATURAL_RETRACEMENT and NATURAL_REBOUND are the two highest-
+                # value waiting periods in Livermore's system — these are where
+                # the trend breathes before continuation. Entering here was the
+                # primary losing pattern in the pre-v3 bot.
+                #
+                # SECONDARY states are handled via Required Score Modifier (+0.40)
+                # which raises the entry bar — entries still allowed but harder.
+                # Phase 3A MR Mode 1 will add specific NATURAL_RETRACEMENT re-entry
+                # logic (spring detection) that bypasses this hold for that one case.
+                # ─────────────────────────────────────────────────────────────
+                if state is not None and state.is_silent_zone:
+                    if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
+                        logger.info(
+                            "[GATEKEEPER] %s 4H Livermore=%s (silent zone) → HOLD, no new entries",
+                            self.asset_type,
+                            state.livermore_state_4h or "NATURAL",
+                        )
+                        mr_signal  = 0; mr_conf  = 0.0
+                        tf_signal  = 0; tf_conf  = 0.0
+                        ema_signal = 0; ema_conf = 0.0
+                # ─────────────────────────────────────────────────────────────
+
                 # FAIL-CLOSED guard: no governor data = no regime context.
                 # Trading without regime context risks entering during high-volatility
                 # regime transitions where direction is unknown. Log a warning and skip.
@@ -3264,6 +3435,53 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                 # STEP 5: Dynamic thresholds
                 adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+
+                # STEP 5B: PHASE 2 — REQUIRED SCORE MODIFIER
+                # Livermore state-conditional delta applied to BOTH thresholds.
+                # SECONDARY states: +0.40 — entries still allowed but harder to clear.
+                # NATURAL states gate earlier (Hard Veto + Gatekeeper HOLD) so their
+                # modifier is 0.00 — no signal should reach here from NATURAL anyway.
+                # Full retest-type modifiers (CLEAN/BREAKOUT/etc.) wired in Phase 3B.
+                # All modifier values live in aggregator_presets.json — no magic numbers.
+                try:
+                    _rsm_state = state.livermore_state_4h if state is not None else None
+                    if _rsm_state is not None:
+                        # Load modifier table once (cached on instance after first call)
+                        if not hasattr(self, '_rsm_table'):
+                            import json as _json_rsm
+                            try:
+                                with open("config/aggregator_presets.json") as _rsm_f:
+                                    _rsm_cfg = _json_rsm.load(_rsm_f)
+                                self._rsm_table = _rsm_cfg.get(
+                                    "REQUIRED_SCORE_MODIFIER", {}
+                                ).get("state_modifiers", {})
+                                self._rsm_cap = _rsm_cfg.get(
+                                    "REQUIRED_SCORE_MODIFIER", {}
+                                ).get("modifier_cap", 1.50)
+                            except Exception:
+                                self._rsm_table = {}
+                                self._rsm_cap   = 1.50
+
+                        _rsm_delta = self._rsm_table.get(_rsm_state, 0.0)
+                        if _rsm_delta != 0.0:
+                            _base_buy  = self.config["buy_threshold"]
+                            _base_sell = self.config["sell_threshold"]
+                            adj_buy_thresh  = min(
+                                _base_buy  + self._rsm_cap,
+                                adj_buy_thresh  + _rsm_delta,
+                            )
+                            adj_sell_thresh = min(
+                                _base_sell + self._rsm_cap,
+                                adj_sell_thresh + _rsm_delta,
+                            )
+                            logger.info(
+                                "[RSM] %s Livermore=%s → +%.2f modifier | "
+                                "buy_thresh=%.2f sell_thresh=%.2f",
+                                self.asset_type, _rsm_state, _rsm_delta,
+                                adj_buy_thresh, adj_sell_thresh,
+                            )
+                except Exception as _rsm_err:
+                    logger.debug("[RSM] modifier error (non-blocking): %s", _rsm_err)
 
                 # STEP 6: Make decision
                 if buy_score >= adj_buy_thresh and buy_score > sell_score:

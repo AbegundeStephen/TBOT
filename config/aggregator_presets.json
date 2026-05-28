@@ -372,5 +372,20 @@
       "atr_period": 14,
       "_calibration": "USTEC default \u2014 run calibration when 4H data available"
     }
+  },
+  "REQUIRED_SCORE_MODIFIER": {
+    "_comment": "Phase 2: Livermore state-conditional threshold deltas. Applied additively to BOTH buy and sell thresholds after regime-adjusted thresholds are computed. Full retest-type modifiers (CLEAN/BREAKOUT/WICK/CHASE_SOFT/CHASE_HARD) are wired in Phase 3B. SECONDARY states raise the bar \u2014 entries still allowed but harder to clear. NATURAL states are gated by the Hard Veto + Gatekeeper HOLD before reaching this modifier.",
+    "state_modifiers": {
+      "MAIN_UP":                0.00,
+      "MAIN_DOWN":              0.00,
+      "NATURAL_RETRACEMENT":    0.00,
+      "NATURAL_REBOUND":        0.00,
+      "SECONDARY_RETRACEMENT":  0.40,
+      "SECONDARY_REBOUND":      0.40
+    },
+    "modifier_cap": 1.50,
+    "vtm_circuit_breaker_atr_mult": 3.0,
+    "vol_down_ratio_veto_threshold": 1.2,
+    "_note": "All numeric thresholds live here per MRS zero-magic-numbers rule."
   }
 }
