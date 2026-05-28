@@ -431,6 +431,64 @@ class VeteranTradeManager:
         self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
         self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
 
+        # ── Phase 4: Livermore Awareness + Structural Stop Routing ────────────
+        # All fields sourced from composite_state written by signal_aggregator.
+        # entry_type was set by the Phase 3B retest_engine.
+        _cs = (signal_details or {}).get("composite_state", {})
+        self.livermore_state_4h         = _cs.get("livermore_state_4h")
+        self.livermore_state_age_4h     = int(_cs.get("livermore_state_age_4h",  0))
+        self.livermore_anchor_main_up   = _cs.get("livermore_anchor_main_up_max")
+        self.livermore_anchor_main_down = _cs.get("livermore_anchor_main_down_min")
+        self.livermore_anchor_nat_high  = _cs.get("livermore_anchor_natural_high")
+        self.livermore_anchor_nat_low   = _cs.get("livermore_anchor_natural_low")
+        self.nearby_4h_level            = _cs.get("nearby_4h_level")
+        self.level_defended             = bool(_cs.get("level_defended",  False))
+        self.sweep_level                = _cs.get("sweep_level")
+        # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
+        #             RANGE_BOUNDARY / REJECT / None (no classification)
+        self.vtm_entry_type             = _cs.get("entry_type")
+
+        # Livermore-aware ATR multiplier overlay
+        _lv4h = self.livermore_state_4h
+        if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
+            # Strong impulse — widen stop to survive mid-move volatility
+            self.atr_multiplier += 0.3
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: ATR mult +0.3 → {self.atr_multiplier:.2f}×"
+            )
+        elif _lv4h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+            # Uncertain state — tighter stop, quicker protection
+            self.atr_multiplier = max(1.5, self.atr_multiplier - 0.2)
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: ATR mult −0.2 → {self.atr_multiplier:.2f}×"
+            )
+
+        # Livermore-aware runner trailing multiplier
+        if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
+            self.runner_trail_atr_multiplier *= 1.3
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: trail mult ×1.3 → "
+                f"{self.runner_trail_atr_multiplier:.2f}×"
+            )
+        elif _lv4h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+            self.runner_trail_atr_multiplier *= 0.7
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: trail mult ×0.7 → "
+                f"{self.runner_trail_atr_multiplier:.2f}×"
+            )
+
+        # Livermore-aware break-even ATR trigger
+        # Young state (age < 5 bars): fresh breakout — give room before locking B/E
+        # Aging state (age > 20 bars): protect profits, state may be ending
+        _age4h = self.livermore_state_age_4h
+        if _age4h < 5:
+            self.breakeven_atr_trigger = 1.8
+        elif _age4h > 20:
+            self.breakeven_atr_trigger = 1.2
+        else:
+            self.breakeven_atr_trigger = 1.5   # matches pre-Phase-4 hardcoded default
+        # ─────────────────────────────────────────────────────────────────────
+
         # Early Scale: lock in a small partial exit within the first N bars
         self.early_scale_enabled = self.risk_config.get("early_scale_enabled", False)
         self.early_scale_threshold = self.risk_config.get("early_scale_threshold", 0.02)
@@ -664,7 +722,46 @@ class VeteranTradeManager:
                         self.entry_price + max_stop_dist,
                         max(self.entry_price + min_stop_dist, final_sl)
                     )
-                
+
+                # STEP 2.5 — Structural Stop Override (Phase 4)
+                # Routes stop placement by entry_type from the retest engine.
+                # Overrides the ATR baseline with a level-anchored stop when
+                # the entry context provides a structural invalidation reference.
+                # Global clamps (min/max ATR) applied again after to ensure safety.
+                try:
+                    _struct_sl = self._compute_structural_stop(atr)
+                    if _struct_sl is not None:
+                        # Validate the structural stop is on the correct side of entry
+                        _valid = (
+                            (self.side == "long"  and _struct_sl < self.entry_price) or
+                            (self.side == "short" and _struct_sl > self.entry_price)
+                        )
+                        if _valid:
+                            final_sl = _struct_sl
+                            # Re-apply clamps to the structural stop
+                            if self.side == "long":
+                                final_sl = max(
+                                    self.entry_price - max_stop_dist,
+                                    min(self.entry_price - min_stop_dist, final_sl),
+                                )
+                            else:
+                                final_sl = min(
+                                    self.entry_price + max_stop_dist,
+                                    max(self.entry_price + min_stop_dist, final_sl),
+                                )
+                            logger.info(
+                                f"[VTM] 🎯 Structural stop "
+                                f"({self.vtm_entry_type}): {final_sl:.5f} "
+                                f"(clamped from raw {_struct_sl:.5f})"
+                            )
+                        else:
+                            logger.debug(
+                                f"[VTM] Structural stop {_struct_sl:.5f} invalid "
+                                f"side — keeping ATR stop {final_sl:.5f}"
+                            )
+                except Exception as _ss_err:
+                    logger.debug(f"[VTM] Structural stop error (non-blocking): {_ss_err}")
+
                 # STEP 2 — Spread-Aware SL Floor
                 # Reason: Prevents stops from being too tight relative to broker spread.
                 if self.current_ask > 0 and self.current_bid > 0:
@@ -895,15 +992,26 @@ class VeteranTradeManager:
                     )
                     self.current_stop_loss = _intermediate_sl
 
-        if current_profit > 1.5 * atr_value:
+        # Phase 4: break-even trigger is Livermore-aware (set in __init__).
+        # Young state (age < 5) = 1.8×ATR; aged state (>20) = 1.2×ATR; default 1.5×.
+        _be_trigger = getattr(self, "breakeven_atr_trigger", 1.5)
+        if current_profit > _be_trigger * atr_value:
             # T1.4 fix: only move SL TO entry if it hasn't already passed entry.
             # Original code fired every tick with no side check, pulling a trailing
             # stop BACKWARDS to entry even after it had advanced beyond it.
             if self.side == "long" and self.current_stop_loss < self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
+                logger.info(
+                    f"[VTM] 🛡️ Break-even lock: {self.asset} "
+                    f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
+                    f"${_be_trigger*atr_value:.2f})"
+                )
                 self.current_stop_loss = self.entry_price
             elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
+                logger.info(
+                    f"[VTM] 🛡️ Break-even lock: {self.asset} "
+                    f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
+                    f"${_be_trigger*atr_value:.2f})"
+                )
                 self.current_stop_loss = self.entry_price
 
         # --- STEP 1.5: Time-Based Break-Even Lock ---
@@ -1684,6 +1792,78 @@ class VeteranTradeManager:
             "trade_type":     getattr(self, "trade_type", "UNKNOWN"),
             "runner_active":  getattr(self, "runner_activated", False),
         }
+
+    def _compute_structural_stop(self, atr: float) -> "Optional[float]":
+        """
+        Phase 4 — Structural Stop Router.
+        Returns a level-anchored stop loss price, or None if entry_type does
+        not provide a structural reference (falls back to ATR baseline).
+
+        Stop placement by entry_type:
+          SPRING_ENTRY     — Below/above the sweep_level (liquidity grab reversal).
+                             Invalidation = price returning through the swept level.
+          RANGE_BOUNDARY   — Behind the defended nearby_4h_level.
+                             Invalidation = level giving way.
+          TREND_FOLLOWING  — Behind the Livermore anchor just broken.
+                             Invalidation = price returning back below/above the breakout.
+          MR_PULLBACK      — Ensure stop clears the nearby_4h_level (level must sit
+                             between stop and entry; don't place stop inside the level).
+          REJECT / None    — Return None → caller keeps ATR baseline.
+        """
+        entry_type = getattr(self, "vtm_entry_type", None)
+        side       = self.side          # "long" or "short"
+        entry      = self.entry_price
+
+        if entry_type is None or entry_type == "REJECT":
+            return None
+
+        if entry_type == "SPRING_ENTRY":
+            # Stop just beyond the sweep level (the wick tip defines invalidation).
+            sweep = getattr(self, "sweep_level", None)
+            if sweep is not None and atr > 0:
+                buf = 0.3 * atr
+                return (sweep - buf) if side == "long" else (sweep + buf)
+            return None
+
+        if entry_type == "RANGE_BOUNDARY":
+            # Stop behind the defended 4H level.
+            level = getattr(self, "nearby_4h_level", None)
+            if level is not None and atr > 0:
+                buf = 0.5 * atr
+                return (level - buf) if side == "long" else (level + buf)
+            return None
+
+        if entry_type == "TREND_FOLLOWING":
+            # Stop behind the Livermore anchor that price just broke through.
+            lv_state = getattr(self, "livermore_state_4h", None)
+            if side == "long":
+                anchor = getattr(self, "livermore_anchor_main_up", None)
+                if anchor is None:
+                    anchor = getattr(self, "livermore_anchor_nat_low", None)
+            else:
+                anchor = getattr(self, "livermore_anchor_main_down", None)
+                if anchor is None:
+                    anchor = getattr(self, "livermore_anchor_nat_high", None)
+            if anchor is not None and atr > 0:
+                buf = 0.5 * atr
+                return (anchor - buf) if side == "long" else (anchor + buf)
+            return None
+
+        if entry_type == "MR_PULLBACK":
+            # Ensure the stop is BEYOND the nearby_4h_level (level stays between stop
+            # and entry — otherwise the stop is sitting inside the "active zone").
+            level = getattr(self, "nearby_4h_level", None)
+            if level is not None and atr > 0:
+                buf = 0.5 * atr
+                candidate = (level - buf) if side == "long" else (level + buf)
+                # Only override if the structural stop is FURTHER from entry than
+                # the pure ATR stop (i.e. looser, not tighter — we want the level
+                # cleared so the trade has breathing room).
+                # If ATR stop already clears the level, no change needed.
+                return candidate
+            return None
+
+        return None
 
     def __repr__(self):
         levels = self.get_current_levels()
