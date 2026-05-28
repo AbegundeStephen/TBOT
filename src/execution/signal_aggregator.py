@@ -963,6 +963,92 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.debug("[vol_down_ratio] compute error: %s", _vdr_err)
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── PHASE 3A: BB/KC Squeeze detection ───────────────────────────────────
+        # BB(20,2sigma) inside Keltner(20 EMA, 1.5xATR14) for 5+ bars = volatility
+        # compression. bbw_percentile: how compressed vs 6-month rolling history.
+        # Fields consumed by MR Mode 1 bb_contraction optional condition and
+        # Range Classification Scenario A/B.
+        try:
+            if df is not None and len(df) >= 25:
+                _bkc_bb_period = 20
+                _bkc_kc_period = 20
+                _bkc_kc_mult   = 1.5
+                _bkc_min_bars  = 5
+
+                _bkc_close = df['close'].values
+                _bkc_high  = df['high'].values
+                _bkc_low   = df['low'].values
+
+                # Bollinger Bands (2-sigma)
+                _bb_u, _bb_m, _bb_l = ta.BBANDS(
+                    _bkc_close, timeperiod=_bkc_bb_period,
+                    nbdevup=2.0, nbdevdn=2.0
+                )
+                # Keltner Channel: EMA(20) +/- 1.5xATR14
+                _kc_mid   = df['close'].ewm(span=_bkc_kc_period, adjust=False).mean().values
+                _kc_atr14 = ta.ATR(_bkc_high, _bkc_low, _bkc_close, timeperiod=14)
+                _kc_upper = _kc_mid + _bkc_kc_mult * _kc_atr14
+                _kc_lower = _kc_mid - _bkc_kc_mult * _kc_atr14
+
+                # Squeeze when BB is entirely inside KC
+                _valid_mask = (
+                    ~np.isnan(_bb_u) & ~np.isnan(_bb_l) &
+                    ~np.isnan(_kc_upper) & ~np.isnan(_kc_lower)
+                )
+                _in_squeeze = np.where(
+                    _valid_mask,
+                    (_bb_u <= _kc_upper) & (_bb_l >= _kc_lower),
+                    False
+                )
+
+                # Count consecutive squeeze bars (most-recent bar backwards)
+                _sq_dur = 0
+                for _sj in range(len(_in_squeeze) - 1, max(len(_in_squeeze) - 25, -1), -1):
+                    if _in_squeeze[_sj]:
+                        _sq_dur += 1
+                    else:
+                        break
+                state.bb_kc_squeeze_active   = _sq_dur >= _bkc_min_bars
+                state.bb_kc_squeeze_duration = int(_sq_dur)
+
+                # BBW percentile: rank current bandwidth vs 6-month rolling window
+                # (~1095 1H bars; capped to available history)
+                _bbw = (_bb_u - _bb_l) / np.maximum(np.abs(_bb_m), 1e-10)
+                _bbw_curr = _bbw[-1] if not np.isnan(_bbw[-1]) else None
+                if _bbw_curr is not None:
+                    _hist_lb   = min(1095, len(_bbw))
+                    _bbw_hist  = _bbw[-_hist_lb:]
+                    _bbw_valid = _bbw_hist[~np.isnan(_bbw_hist)]
+                    if len(_bbw_valid) >= 10:
+                        state.bbw_percentile = float(
+                            np.sum(_bbw_valid < _bbw_curr) / len(_bbw_valid) * 100.0
+                        )
+        except Exception as _bkc_err:
+            logger.debug("[BB/KC squeeze] compute error: %s", _bkc_err)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── PHASE 3A: NR7-ID detection ───────────────────────────────────────
+        # NR7: current bar's range is the narrowest of the last 7 bars.
+        # NR7-ID: NR7 AND current bar is inside the previous bar.
+        # Both flags indicate terminal tightness before breakout (Scenario B).
+        try:
+            if df is not None and len(df) >= 8:
+                _nr7_lb   = 7
+                _bar_rng  = df['high'].values - df['low'].values
+                _curr_rng = float(_bar_rng[-1])
+                _prior_rng = _bar_rng[-(_nr7_lb + 1):-1]
+                if len(_prior_rng) == _nr7_lb:
+                    state.nr7_active = bool(_curr_rng <= float(np.min(_prior_rng)))
+                if state.nr7_active:
+                    _ph     = float(df['high'].iloc[-2])
+                    _pl     = float(df['low'].iloc[-2])
+                    _ch     = float(df['high'].iloc[-1])
+                    _cl_low = float(df['low'].iloc[-1])
+                    state.nr7_id_active = bool(_ch <= _ph and _cl_low >= _pl)
+        except Exception as _nr7_err:
+            logger.debug("[NR7-ID] compute error: %s", _nr7_err)
+        # ─────────────────────────────────────────────────────────────────────
+
         state.sanitise()
         return state
 
@@ -2906,7 +2992,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             df_4h = governor_data.get('df_4h') if governor_data else None
             logger.debug(f"[MR INPUT] {self.asset_type}: df_4h={'present, ' + str(len(df_4h)) + ' bars' if df_4h is not None else 'MISSING'}")
             
-            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h)
+            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h, composite_state=state)
             tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h)
             ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h)
 

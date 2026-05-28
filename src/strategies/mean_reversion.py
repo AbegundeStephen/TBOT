@@ -1,12 +1,40 @@
 """
-MULTI-TIMEFRAME Mean Reversion Strategy with 4H Context
-Key improvements:
-- 4H timeframe context for trend filtering
-- Scorecard-based label generation for higher signal frequency
-- Micro-Reversion path for trend-aligned pullbacks
-- Optimized BB thresholds and divergence windows
+Mean Reversion Strategy — Phase 3A Three-Mode Rebuild
+======================================================
+Livermore State Machine routing replaces the legacy scorecard that produced
+$0 P&L. Requires Phase 1 (Livermore) and Phase 2 (Hard Veto / RSM gates) to
+be running. Falls back to legacy scorecard during Livermore warmup period.
+
+Mode 1 — Pullback Completion  (1H NATURAL_RETRACEMENT, LONG only)
+  - Spring MANDATORY: wick sweeps prior swing low, closes back above it.
+      Penetration 0.5–5% of swing level. Recovery within 1–3 bars.
+      Current bar volume must be lower than spring bar volume.
+  - 2 of 4 optional: vol_contraction, hidden_divergence, bb_contraction, ma_proximity
+  - vol_down_ratio > 1.2  →  full block (distribution, not re-accumulation)
+  - BTC near 4H EMA200     →  −0.10 confidence modifier
+
+Mode 2 — Counter-Trend  (1H SECONDARY_RETRACEMENT / SECONDARY_REBOUND)
+  SECONDARY_RETRACEMENT → LONG  (counter to the deep pullback)
+  SECONDARY_REBOUND     → SHORT (counter to the deep bounce)
+  - ADX < 25  (mandatory — market must not be trending)
+  - 4 of 4 optional conditions  (all required)
+  - BB must have closed back inside bands before entry
+  - BTC only: LONG z-score < −2.0; SHORT z-score > +3.5
+
+Mode 3 — Climax Fade  (1H MAIN_UP / MAIN_DOWN)
+  MAIN_UP   → SHORT (fade the overextended leg)
+  MAIN_DOWN → LONG  (fade the selling climax)
+  - leg_stretch_ratio  > 1.5× typical leg  (distance from Livermore anchor)
+  - price              > 2.5×ATR from anchor
+  - High-rank reversal candle (bearish/bullish engulfing or evening/morning star)
+  - Above-average volume on signal bar
+  - Target is EMA20 within MAIN state — NOT a full reversal call
+
+All numeric thresholds in config/aggregator_presets.json → MR_THREE_MODE.
 """
 
+import json
+import os
 import pandas as pd
 import numpy as np
 import talib as ta
@@ -15,652 +43,576 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Resolved relative to this module's directory (src/strategies/ → ../../config/)
+_PRESETS_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "config", "aggregator_presets.json")
+)
+
 
 class MeanReversionStrategy(BaseStrategy):
     """
-    Production-ready mean reversion with multi-timeframe analysis
-    Uses 4H context to identify favorable mean reversion setups
+    Phase 3A: Livermore-state-conditional three-mode mean reversion.
+    Wired into PerformanceWeightedAggregator via generate_signal().
     """
 
     def __init__(self, config: dict):
         super().__init__(config, "MeanReversion")
 
-        # Standard parameters
+        # Core indicator parameters
         self.bb_period = config.get("bb_period", 20)
-        self.bb_std = config.get("bb_std", 2.0)
-        self.rsi_period = config.get("rsi_period", 14)
-        self.stoch_k = config.get("stoch_k", 14)
-        self.stoch_d = config.get("stoch_d", 3)
+        self.bb_std    = config.get("bb_std", 2.0)
+        self.rsi_period  = config.get("rsi_period", 14)
+        self.stoch_k     = config.get("stoch_k", 14)
+        self.stoch_d     = config.get("stoch_d", 3)
         self.reversion_window = config.get("reversion_window", 3)
         self.asset = config.get("asset", "BTC")
 
-        # Thresholds - Optimized for Institutional Grade MR
-        self.rsi_overbought = config.get("rsi_overbought", 64)
-        self.rsi_oversold = config.get("rsi_oversold", 35)
-        # ✅ T1.1B: Lowered to 0.25 for genuine stretch
-        self.bb_lower_threshold = config.get("bb_lower_threshold", 0.25) 
-        # ✅ T1.1B: Adjusted to 0.75 for BTC/Standard
-        self.bb_upper_threshold = config.get("bb_upper_threshold", 0.75) 
-
-        # Strict thresholds
-        self.min_return_threshold = config.get("min_return_threshold", 0.0025) # 0.25%
-        self.min_score_threshold = config.get("min_conditions", 3.0) # Scorecard threshold
-
-        # 4H context parameters
+        # Legacy scorecard thresholds (fallback during warmup)
+        self.rsi_overbought      = config.get("rsi_overbought", 64)
+        self.rsi_oversold        = config.get("rsi_oversold", 35)
+        self.bb_lower_threshold  = config.get("bb_lower_threshold", 0.25)
+        self.bb_upper_threshold  = config.get("bb_upper_threshold", 0.75)
+        self.min_return_threshold = config.get("min_return_threshold", 0.0025)
+        self.min_score_threshold = config.get("min_conditions", 3.0)
         self.use_4h_context = config.get("use_4h_context", True)
-        self.h4_reversion_mode = config.get(
-            "h4_reversion_mode", "smart"
-        )  # 'smart', 'counter', 'aligned'
-        self.h4_extreme_weight = config.get(
-            "h4_extreme_weight", 1.2
-        )  # Boost for 4H extremes
-        self.h4_trend_penalty = config.get(
-            "h4_trend_penalty", 0.5
-        )  # Penalty for trending 4H
 
-        logger.info(f"[{self.name}] Initialized with:")
-        logger.info(f"  RSI: {self.rsi_oversold}/{self.rsi_overbought}")
+        # Phase 3A thresholds — loaded once from presets JSON
+        self._mr3_cfg = self._load_mr3_config()
+
         logger.info(
-            f"  BB Position: {self.bb_lower_threshold}/{self.bb_upper_threshold}"
+            f"[{self.name}] Phase 3A initialized: asset={self.asset} | "
+            f"mode1 spring={self._mr3_cfg['mode1']['spring_min_penetration']:.1%}–"
+            f"{self._mr3_cfg['mode1']['spring_max_penetration']:.1%} "
+            f"opt≥{self._mr3_cfg['mode1']['optional_min_count']} | "
+            f"mode2 adx<{self._mr3_cfg['mode2']['adx_max']} opt={self._mr3_cfg['mode2']['optional_min_count']}/4 | "
+            f"mode3 stretch≥{self._mr3_cfg['mode3']['leg_stretch_ratio_min']}×"
         )
-        logger.info(f"  Min Return: {self.min_return_threshold:.3%}")
-        logger.info(f"  Min Score: {self.min_score_threshold}")
-        logger.info(
-            f"  4H Context: {self.use_4h_context} (Mode: {self.h4_reversion_mode})"
-        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CONFIG LOADING
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _load_mr3_config(self) -> dict:
+        """
+        Load MR_THREE_MODE section from aggregator_presets.json.
+        Deep-merges config values over safe built-in defaults so any missing
+        key falls back gracefully (never raises at runtime).
+        """
+        defaults = {
+            "mode1": {
+                "spring_min_penetration":  0.005,
+                "spring_max_penetration":  0.05,
+                "spring_recovery_max_bars": 3,
+                "spring_swing_lookback":   20,
+                "vol_contraction_avg_pct": 0.80,
+                "vol_spike_max_pct":       1.50,
+                "bb_lower_zone_threshold": 0.20,
+                "ma_proximity_atr_mult":   0.5,
+                "optional_min_count":      2,
+                "vol_down_ratio_veto":     1.2,
+                "btc_ema200_4h_modifier": -0.10,
+            },
+            "mode2": {
+                "adx_max":                     25,
+                "optional_min_count":          4,
+                "bb_inside_required":          True,
+                "btc_long_zscore_threshold":  -2.0,
+                "btc_short_zscore_threshold":  3.5,
+            },
+            "mode3": {
+                "leg_stretch_ratio_min":     1.5,
+                "leg_stretch_window":        10,
+                "leg_stretch_lookback":      50,
+                "price_anchor_atr_mult":     2.5,
+                "require_above_avg_volume":  True,
+                "volume_avg_lookback":       20,
+            },
+            "bb_kc_squeeze": {
+                "min_squeeze_bars":        5,
+                "bbw_percentile_threshold": 30.0,
+                "kc_ema_period":           20,
+                "kc_atr_mult":             1.5,
+            },
+            "nr7_lookback": 7,
+        }
+        try:
+            if os.path.exists(_PRESETS_PATH):
+                with open(_PRESETS_PATH, "r") as _f:
+                    _data = json.load(_f)
+                _section = _data.get("MR_THREE_MODE", {})
+                for key, val in _section.items():
+                    if isinstance(val, dict) and key in defaults and isinstance(defaults[key], dict):
+                        defaults[key].update(val)
+                    else:
+                        defaults[key] = val
+        except Exception as _e:
+            logger.warning(f"[{self.name}] Could not load MR_THREE_MODE config: {_e}. Using defaults.")
+        return defaults
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # WARMUP + FEATURE GENERATION
+    # ─────────────────────────────────────────────────────────────────────────
 
     def get_warmup_period(self) -> int:
-        periods = [
+        return max(
             self.bb_period,
             self.rsi_period,
-            self.stoch_k + self.stoch_d,
-            20,  # ✅ T1.1C: Lookback for current pivot
-            50 + 10 # EMA 50 burn-in
-        ]
-        return max(periods)
+            50,   # EMA50
+            200,  # EMA200 (Mode 1 MA proximity check)
+        )
 
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Generate minimal, non-redundant features"""
+        """Compute all indicators used across modes + legacy scorecard."""
         df = df.copy()
-        # Normalise column names — MT5 can return mixed-case headers
         df.columns = [c.lower() for c in df.columns]
 
         close = df["close"].values
-        high = df["high"].values
-        low = df["low"].values
+        high  = df["high"].values
+        low   = df["low"].values
 
-        # === Core Indicators Only ===
         # Bollinger Bands
         bb_upper, bb_middle, bb_lower = ta.BBANDS(
             close, timeperiod=self.bb_period, nbdevup=self.bb_std, nbdevdn=self.bb_std
         )
+        df["bb_upper"]    = bb_upper
+        df["bb_middle"]   = bb_middle
+        df["bb_lower"]    = bb_lower
+        df["bb_position"] = (close - bb_lower) / np.maximum(bb_upper - bb_lower, 1e-10)
+        df["bb_width_norm"] = (bb_upper - bb_lower) / np.maximum(np.abs(bb_middle), 1e-10)
 
-        df["bb_upper"] = bb_upper
-        df["bb_middle"] = bb_middle
-        df["bb_lower"] = bb_lower
-        df["bb_position"] = (close - bb_lower) / (bb_upper - bb_lower)
-        df["bb_width_norm"] = (bb_upper - bb_lower) / bb_middle
-
-        # RSI
+        # RSI + ADX + ATR
         df["rsi"] = ta.RSI(close, timeperiod=self.rsi_period)
-        df["rsi_normalized"] = (df["rsi"] - 50) / 50
-
-        # Stochastic
-        slowk, slowd = ta.STOCH(
-            high,
-            low,
-            close,
-            fastk_period=self.stoch_k,
-            slowk_period=self.stoch_d,
-            slowd_period=self.stoch_d,
-        )
-        df["stoch_k"] = slowk
-        df["stoch_d"] = slowd
-
-        # MACD (Standard parameters 12, 26, 9)
-        macd, macdsignal, macdhist = ta.MACD(
-            close,
-            fastperiod=12,
-            slowperiod=26,
-            signalperiod=9
-        )
-        df["macd"] = macd
-        df["macd_signal"] = macdsignal
-        df["macd_hist"] = macdhist
-
-        # Volatility (normalized)
-        df["atr"] = ta.ATR(high, low, close, timeperiod=14)
-        df["atr_pct"] = df["atr"] / close
-
-        # Simple momentum
-        df["roc_5"] = ta.ROC(close, timeperiod=5)
-
-        # ADX for trend strength
         df["adx"] = ta.ADX(high, low, close, timeperiod=14)
-        
-        # ✅ T1.1A: EMA-20 for Micro-Reversion path
-        df["ema_20"] = ta.EMA(close, timeperiod=20)
-        # EMA 50 for "The Stretch" scorecard
-        df["ema_50"] = ta.EMA(close, timeperiod=50)
+        df["atr"] = ta.ATR(high, low, close, timeperiod=14)
+
+        # EMAs  (200 needed for Mode 1 MA proximity)
+        df["ema_20"]  = ta.EMA(close, timeperiod=20)
+        df["ema_50"]  = ta.EMA(close, timeperiod=50)
+        df["ema_200"] = ta.EMA(close, timeperiod=200)
 
         return df
 
-    def _align_4h_to_1h(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
-        """Align 4H data to 1H timeframe using forward-fill"""
-        if df_4h is None or df_4h.empty:
-            return None
+    # ─────────────────────────────────────────────────────────────────────────
+    # SPRING DETECTION  (Mode 1 mandatory)
+    # ─────────────────────────────────────────────────────────────────────────
 
-        if not isinstance(df_1h.index, pd.DatetimeIndex):
-            df_1h = df_1h.set_index("timestamp")
-        if not isinstance(df_4h.index, pd.DatetimeIndex):
-            df_4h = df_4h.set_index("timestamp")
-
-        # ✅ FIX: Handle timezone mismatch between 1H and 4H indices
-        if df_1h.index.tz is not None:
-            df_1h = df_1h.copy()
-            df_1h.index = df_1h.index.tz_localize(None)
-        if df_4h.index.tz is not None:
-            df_4h = df_4h.copy()
-            df_4h.index = df_4h.index.tz_localize(None)
-
-        h4_features = [
-            "bb_position",
-            "rsi",
-            "stoch_k",
-            "adx",
-            "bb_width_norm",
-            "atr_pct",
-            "close",
-        ]
-
-        df_4h_aligned = pd.DataFrame(index=df_1h.index)
-
-        for feature in h4_features:
-            if feature in df_4h.columns:
-                df_4h_aligned[f"h4_{feature}"] = df_4h[feature].reindex(
-                    df_1h.index, method="ffill"
-                )
-
-        return df_4h_aligned
-
-    def _calculate_4h_reversion_context(
-        self, df_4h_aligned: pd.DataFrame, idx: int
-    ) -> dict:
+    def _detect_spring(self, df: pd.DataFrame) -> tuple:
         """
-        Calculate 4H mean reversion context
+        Wyckoff spring: a bar's wick sweeps below a prior swing low then closes
+        back above it within spring_recovery_max_bars of the current bar.
+
+        Penetration must be 0.5–5% of the swing low level.
+        Current-bar volume must be lower than the spring bar's volume
+        (spring bar = selling climax; entry bar = quiet absorption).
+
+        Returns: (found: bool, strength: float 0–1)
         """
-        if df_4h_aligned is None or idx >= len(df_4h_aligned):
-            return {
-                "is_extreme_oversold": False,
-                "is_extreme_overbought": False,
-                "is_trending": False,
-                "trend_direction": 0,
-                "reversion_score": 0.0,
-            }
+        cfg = self._mr3_cfg["mode1"]
+        min_pen  = cfg["spring_min_penetration"]    # 0.005
+        max_pen  = cfg["spring_max_penetration"]    # 0.050
+        max_bars = cfg["spring_recovery_max_bars"]  # 3
+        swing_lb = cfg["spring_swing_lookback"]     # 20
 
-        row = df_4h_aligned.iloc[idx]
+        min_total = swing_lb + max_bars + 2
+        if len(df) < min_total:
+            return False, 0.0
 
-        if pd.isna(row.get("h4_bb_position")) or pd.isna(row.get("h4_rsi")):
-            return {
-                "is_extreme_oversold": False,
-                "is_extreme_overbought": False,
-                "is_trending": False,
-                "trend_direction": 0,
-                "reversion_score": 0.0,
-            }
+        close  = df["close"].values
+        low    = df["low"].values
+        volume = df["volume"].values if "volume" in df.columns else None
 
-        context = {
-            "is_extreme_oversold": False,
-            "is_extreme_overbought": False,
-            "is_trending": False,
-            "trend_direction": 0,
-            "reversion_score": 0.0,
-        }
+        # Prior swing low is established from the window BEFORE the search bars
+        # so we don't confuse the spring bar itself as the swing low.
+        _win_end   = -(max_bars + 1)           # index of last bar before search window
+        _win_start = _win_end - swing_lb
+        _prior_arr = low[_win_start:_win_end]
+        if len(_prior_arr) < 5:
+            return False, 0.0
+        prior_swing_low = float(np.min(_prior_arr))
+        if prior_swing_low <= 0:
+            return False, 0.0
 
-        bb_pos = row["h4_bb_position"]
-        rsi = row["h4_rsi"]
-        stoch = row.get("h4_stoch_k", 50)
-        adx = row.get("h4_adx", 0)
-
-        oversold_count = 0
-        if bb_pos < 0.15: oversold_count += 2
-        elif bb_pos < 0.25: oversold_count += 1
-        if rsi < self.rsi_oversold: oversold_count += 2
-        elif rsi < self.rsi_oversold + 5: oversold_count += 1
-        if stoch < 20: oversold_count += 1
-
-        if oversold_count >= 2:
-            context["is_extreme_oversold"] = True
-            context["reversion_score"] = oversold_count
-
-        overbought_count = 0
-        if bb_pos > 0.85: overbought_count += 2
-        elif bb_pos > 0.75: overbought_count += 1
-        if rsi > self.rsi_overbought: overbought_count += 2
-        elif rsi > self.rsi_overbought - 5: overbought_count += 1
-        if stoch > 80: overbought_count += 1
-
-        if overbought_count >= 2:
-            context["is_extreme_overbought"] = True
-            context["reversion_score"] = overbought_count
-
-        # ADX gate lowered from 25 to 18 — most 1H/4H assets on this bot sit
-        # between ADX 15-22, so 25 was blocking the micro-reversion path entirely.
-        # 18 aligns with the signal aggregator's own ADX threshold.
-        if adx > 18:
-            context["is_trending"] = True
-            if bb_pos > 0.6 and rsi > 55: context["trend_direction"] = 1  # Uptrend
-            elif bb_pos < 0.4 and rsi < 45: context["trend_direction"] = -1  # Downtrend
-
-        return context
-
-    def _find_swing_pivot(self, values: np.ndarray, direction: str, lookback: int = 60, n_bars: int = 5) -> int:
-        """Find a significant swing high/low using an N-bar window."""
-        if len(values) < lookback:
-            lookback = len(values)
-            
-        for j in range(n_bars, lookback - n_bars):
-            idx = len(values) - j - 1
-            if idx < n_bars or idx + n_bars >= len(values):
+        # Scan the last max_bars bars (not including current bar) for the spring
+        for k in range(1, max_bars + 1):
+            bar_idx   = -(k + 1)   # k positions before current bar
+            if abs(bar_idx) > len(df):
                 continue
-            
-            window = values[idx - n_bars : idx + n_bars + 1]
-            
-            if direction == 'low' and values[idx] == np.min(window):
-                return idx
-            if direction == 'high' and values[idx] == np.max(window):
-                return idx
-                
-        return -1
 
-    def _check_divergence(self, df: pd.DataFrame, signal: int, period: int = 60) -> bool:
+            bar_low   = float(low[bar_idx])
+            bar_close = float(close[bar_idx])
+
+            # Condition 1: wick swept below swing low
+            if bar_low >= prior_swing_low:
+                continue
+
+            # Condition 2: bar closed BACK ABOVE the swept level
+            if bar_close <= prior_swing_low:
+                continue
+
+            # Condition 3: penetration in [0.5%, 5%]
+            penetration = (prior_swing_low - bar_low) / prior_swing_low
+            if not (min_pen <= penetration <= max_pen):
+                continue
+
+            # Condition 4: current-bar volume < spring-bar volume
+            if volume is not None:
+                spring_vol  = float(volume[bar_idx])
+                current_vol = float(volume[-1])
+                if spring_vol > 0 and current_vol >= spring_vol:
+                    continue
+
+            # Spring confirmed.  Strength peaks near 2.5% penetration.
+            _optimal  = 0.025
+            strength  = max(0.30, 1.0 - abs(penetration - _optimal) / _optimal)
+            return True, float(min(strength, 1.0))
+
+        return False, 0.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPTIONAL CONDITIONS  (shared by Mode 1 and Mode 2)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_vol_contraction(self, df: pd.DataFrame, direction: int) -> bool:
         """
-        Dynamic Divergence Engine (Institutional Grade)
-        - 60-bar historical lookback window
-        - ✅ T1.1C: 20-bar current pivot search (Lookback window within period)
+        Volume Contraction:
+          - Down-close bar volumes < 80% of 20-bar average (for longs)
+          - No single bar in the last 5 exceeds 150% of average
+        Signals quiet re-accumulation, not continued distribution.
         """
+        if "volume" not in df.columns or len(df) < 22:
+            return False
+        cfg    = self._mr3_cfg["mode1"]
+        avg_pct   = cfg["vol_contraction_avg_pct"]   # 0.80
+        spike_pct = cfg["vol_spike_max_pct"]          # 1.50
         try:
-            if len(df) < period:
+            vol    = df["volume"].values
+            close  = df["close"].values
+            open_  = df["open"].values
+            n      = min(22, len(vol))
+            vol_n  = vol[-n:]
+            avg_vol = float(np.mean(vol_n[:-2]))    # 20-bar avg excluding last 2 bars
+            if avg_vol <= 0:
                 return False
-                
-            close = df['close'].values
-            rsi = df['rsi'].values
-            
-            if signal == 1:
-                # Current pivot low (recent 20 bars)
-                curr_idx = self._find_swing_pivot(close, 'low', lookback=20, n_bars=5)
-                if curr_idx == -1: return False
-                
-                # Previous significant swing low (up to 60 bars)
-                prev_idx = self._find_swing_pivot(close, 'low', lookback=period, n_bars=5)
-                if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
-                
-                # Bullish: Price Lower Low, RSI Higher Low
-                if close[curr_idx] < close[prev_idx] and rsi[curr_idx] > rsi[prev_idx]:
-                    return True
-                        
-            elif signal == -1:
-                # Current pivot high (recent 20 bars)
-                curr_idx = self._find_swing_pivot(close, 'high', lookback=20, n_bars=5)
-                if curr_idx == -1: return False
-                
-                # Previous significant swing high (up to 60 bars)
-                prev_idx = self._find_swing_pivot(close, 'high', lookback=period, n_bars=5)
-                if prev_idx == -1 or prev_idx >= curr_idx - 5: return False
-                
-                # Bearish: Price Higher High, RSI Lower High
-                if close[curr_idx] > close[prev_idx] and rsi[curr_idx] < rsi[prev_idx]:
-                    return True
-                        
-            return False
-        except Exception as e:
-            logger.debug(f"Divergence error: {e}")
+            # Scan last 5 bars (excluding current)
+            for j in range(-6, -1):
+                bv    = float(vol[j])
+                is_dn = float(close[j]) < float(open_[j])
+                if is_dn and bv > avg_vol * avg_pct:
+                    return False    # Down bar with above-threshold volume
+                if bv > avg_vol * spike_pct:
+                    return False    # Spike bar breaks contraction
+            return True
+        except Exception:
             return False
 
-    def generate_labels(
-        self, df: pd.DataFrame, df_4h: pd.DataFrame = None, pattern_miner = None
-    ) -> pd.Series:
+    def _check_hidden_divergence(self, df: pd.DataFrame, direction: int) -> bool:
         """
-        INSTITUTIONAL Mean Reversion with Scorecard & Micro-Reversion (T1.1)
+        Hidden Bullish Divergence (direction=+1): price makes lower lows but RSI
+        makes higher lows — momentum holding while price dips. Confirms pullback.
+
+        Hidden Bearish Divergence (direction=−1): price higher highs, RSI lower
+        highs — hidden weakness at top.
         """
-        df = df.copy()
-        labels = pd.Series(0, index=df.index)
-
-        # Generate core features
-        df = self.generate_features(df)
-        
-        close = df["close"].values
-        high = df["high"].values
-        low = df["low"].values
-        bb_upper = df["bb_upper"].values
-        bb_lower = df["bb_lower"].values
-        bb_pos = df["bb_position"].values
-        rsi = df["rsi"].values
-        atr = df["atr"].values
-        ema_20 = df["ema_20"].values
-        ema_50 = df["ema_50"].values
-
-        # Align 4H data if provided
-        df_4h_aligned = None
-        if self.use_4h_context and df_4h is not None:
-            if "bb_position" not in df_4h.columns:
-                df_4h = self.generate_features(df_4h)
-            df_4h_aligned = self._align_4h_to_1h(df, df_4h)
-
-        signal_count = {"buy": 0, "sell": 0, "hold": 0}
-
-        for i in range(100, len(df) - self.reversion_window - 1):
-            if pd.isna(ema_50[i]) or pd.isna(rsi[i]):
-                continue
-
-            current_close = close[i]
-            
-            # ATR Velocity Veto
-            velocity_drop = close[i-3] - current_close
-            velocity_rise = current_close - close[i-3]
-            atr_threshold = 4.0 * atr[i]
-            
-            # ================================================================
-            # ✅ T1.1A: MACRO REVERSION SCORECARD (Threshold=3pts)
-            # ================================================================
-            score_long = 0
-            score_short = 0
-            
-            # PILLAR 1: THE STRETCH (2pts)
-            # Threshold lowered from 2.0×ATR to 1.5×ATR to match generate_signal().
-            stretch_long = (ema_50[i] - current_close > 1.5 * atr[i]) or (current_close < bb_lower[i])
-            stretch_short = (current_close - ema_50[i] > 1.5 * atr[i]) or (current_close > bb_upper[i])
-            if stretch_long: score_long += 2
-            if stretch_short: score_short += 2
-
-            # PILLAR 1.5: RSI EXTREME (1pt) — mirrors generate_signal()
-            _bb_pos_i = bb_pos[i]
-            _rsi_i    = rsi[i]
-            if _bb_pos_i < 0.15 and _rsi_i < 35: score_long  += 1
-            if _bb_pos_i > 0.85 and _rsi_i > 65: score_short += 1
-
-            # PILLAR 2: THE DIVERGENCE (1pt) - Using 20/60 windows
-            div_long = self._check_divergence(df.iloc[:i+1], signal=1, period=60)
-            div_short = self._check_divergence(df.iloc[:i+1], signal=-1, period=60)
-            if div_long: score_long += 1
-            if div_short: score_short += 1
-
-            # PILLAR 3: LIQUIDITY SWEEP (1pt)
-            # Lookback lowered from 100 bars to 30 bars to match generate_signal().
-            lookback_100 = low[max(0, i-30):i]
-            highback_100 = high[max(0, i-30):i]
-            sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
-            sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
-            if sweep_long: score_long += 1
-            if sweep_short: score_short += 1
-
-            # PILLAR 4: THE EXHAUSTION (1pt)
-            # ✅ T1.1D: Pattern only worth paying for extreme stretch (<0.15 or >0.85)
-            # This avoids late entries on minor pullbacks.
-            if bb_pos[i] < 0.15 or bb_pos[i] > 0.85:
-                patterns_to_check = {
-                    'Hammer': ta.CDLHAMMER,
-                    'Doji': ta.CDLDOJI,
-                    'Engulfing': ta.CDLENGULFING
-                }
-                o, h, l, c = df['open'].iloc[:i+1].values, df['high'].iloc[:i+1].values, df['low'].iloc[:i+1].values, df['close'].iloc[:i+1].values
-                for name, func in patterns_to_check.items():
-                    res = func(o, h, l, c)
-                    if res[-1] != 0:
-                        if res[-1] > 0: score_long += 1
-                        if res[-1] < 0: score_short += 1
-
-            # ================================================================
-            # ✅ T1.1A: MICRO-REVERSION PATH (Scorecard 1.5pt threshold)
-            # ================================================================
-            micro_triggered_long = False
-            micro_triggered_short = False
-            
-            if df_4h_aligned is not None:
-                h4_context = self._calculate_4h_reversion_context(df_4h_aligned, i)
-                micro_score_long = 0
-                micro_score_short = 0
-                
-                # LONG: 4H BULLISH + 1H RSI < 40 + EMA-20 touch
-                if h4_context['trend_direction'] == 1: micro_score_long += 0.5
-                if rsi[i] < 40: micro_score_long += 0.5
-                if low[i] <= ema_20[i] <= high[i]: micro_score_long += 0.5
-                if micro_score_long >= 1.5: micro_triggered_long = True
-                
-                # SHORT: 4H BEARISH + 1H RSI > 60 + EMA-20 touch
-                if h4_context['trend_direction'] == -1: micro_score_short += 0.5
-                if rsi[i] > 60: micro_score_short += 0.5
-                if low[i] <= ema_20[i] <= high[i]: micro_score_short += 0.5
-                if micro_score_short >= 1.5: micro_triggered_short = True
-
-            # ================================================================
-            # FINAL TRADE TRIGGER
-            # ================================================================
-            
-            # ✅ T1.1 / Section 3A: ATR-Scaled Return Threshold
-            # Reason: Static thresholds mislabel high-ATR crypto vs low-ATR FX.
-            current_atr_pct = atr[i] / current_close
-            min_return = max(self.min_return_threshold, 0.30 * current_atr_pct)
-            
-            # BUY setup
-            if (score_long >= 3.0) or micro_triggered_long:
-                if velocity_drop > atr_threshold:
-                    logger.debug(f"[{self.name}] VETO BUY: Velocity drop {velocity_drop:.2f} > {atr_threshold:.2f}")
-                else:
-                    # Validate with future returns (ATR-scaled)
-                    future_closes = close[i + 1 : i + 1 + 5]
-                    future_return = (np.mean(future_closes) - current_close) / current_close if len(future_closes) > 0 else 0
-                    if future_return > min_return:
-                        labels.iloc[i] = 1
-                        signal_count["buy"] += 1
-            
-            # SELL setup
-            elif (score_short >= 3.0) or micro_triggered_short:
-                if velocity_rise > atr_threshold:
-                    logger.debug(f"[{self.name}] VETO SELL: Velocity rise {velocity_rise:.2f} > {atr_threshold:.2f}")
-                else:
-                    future_closes = close[i + 1 : i + 1 + 5]
-                    future_return = (np.mean(future_closes) - current_close) / current_close if len(future_closes) > 0 else 0
-                    if future_return < -min_return:
-                        labels.iloc[i] = -1
-                        signal_count["sell"] += 1
-
-        # Remove labels from last bars
-        labels.iloc[-self.reversion_window :] = 0
-
-        # === Detailed logging ===
-        signal_count["hold"] = len(labels) - signal_count["buy"] - signal_count["sell"]
-        total = len(labels)
-
-        logger.info(f"[{self.name}] Label distribution:")
-        logger.info(f"  SELL: {signal_count['sell']:>5} ({signal_count['sell']/total*100:>5.2f}%)")
-        logger.info(f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)")
-        logger.info(f"  BUY:  {signal_count['buy']:>5} ({signal_count['buy']/total*100:>5.2f}%)")
-
-        total_signals = (signal_count["buy"] + signal_count["sell"]) / total * 100
-        logger.info(f"  ✓ MR Refactored signal rate: {total_signals:.1f}%")
-
-        return labels
-
-    def generate_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple:
-        """
-        Generate real-time signal based on full scorecard logic.
-        Eliminates Train/Serve skew by mirroring generate_labels.
-        """
-        if len(df) < self.get_warmup_period():
-            return 0, 0.0
-
         try:
-            # Generate features for the full window needed (at least 100 for liquidity sweep)
-            features_df = self.generate_features(df.tail(150))
-            if len(features_df) < 100:
-                return 0, 0.0
-                
-            latest = features_df.iloc[-1]
-            idx = len(features_df) - 1
-            
-            close = features_df["close"].values
-            high = features_df["high"].values
-            low = features_df["low"].values
-            bb_upper = features_df["bb_upper"].values
-            bb_lower = features_df["bb_lower"].values
-            bb_pos = features_df["bb_position"].values
-            rsi = features_df["rsi"].values
-            atr = features_df["atr"].values
-            ema_20 = features_df["ema_20"].values
-            ema_50 = features_df["ema_50"].values
+            if len(df) < 40 or "rsi" not in df.columns:
+                return False
+            low_arr  = df["low"].values
+            high_arr = df["high"].values
+            rsi_arr  = df["rsi"].values
+            if pd.isna(rsi_arr[-1]):
+                return False
 
-            current_close = close[-1]
-            
-            # ATR Velocity Veto
-            velocity_drop = close[-4] - current_close # i-3 to i
-            velocity_rise = current_close - close[-4]
-            atr_threshold = 4.0 * atr[-1]
-            
-            # ================================================================
-            # ✅ MACRO REVERSION SCORECARD (Mirroring generate_labels)
-            # ================================================================
-            score_long = 0
-            score_short = 0
-            
-            # PILLAR 1: THE STRETCH (2pts)
-            # Full stretch = 2 pts (lowered from 2.0×ATR to 1.5×ATR — 2.0×ATR
-            # was rarely achieved on 1H, killing almost every potential signal)
-            stretch_long = (ema_50[-1] - current_close > 1.5 * atr[-1]) or (current_close < bb_lower[-1])
-            stretch_short = (current_close - ema_50[-1] > 1.5 * atr[-1]) or (current_close > bb_upper[-1])
-            if stretch_long: score_long += 2
-            if stretch_short: score_short += 2
+            if direction == 1:
+                recent_low  = float(np.min(low_arr[-6:-1]))
+                prior_low   = float(np.min(low_arr[-26:-6]))
+                recent_rsi  = float(np.nanmin(rsi_arr[-6:-1]))
+                prior_rsi   = float(np.nanmin(rsi_arr[-26:-6]))
+                # Price lower low AND RSI higher low = hidden bullish divergence
+                return recent_low < prior_low and recent_rsi > prior_rsi
 
-            # Half stretch = 1 pt (moderate pullback, lowered from 1.2×ATR to 0.8×ATR)
-            if not stretch_long and (ema_50[-1] - current_close > 0.8 * atr[-1]):
-                score_long += 1
-            if not stretch_short and (current_close - ema_50[-1] > 0.8 * atr[-1]):
-                score_short += 1
+            elif direction == -1:
+                recent_high = float(np.max(high_arr[-6:-1]))
+                prior_high  = float(np.max(high_arr[-26:-6]))
+                recent_rsi  = float(np.nanmax(rsi_arr[-6:-1]))
+                prior_rsi   = float(np.nanmax(rsi_arr[-26:-6]))
+                # Price higher high AND RSI lower high = hidden bearish divergence
+                return recent_high > prior_high and recent_rsi < prior_rsi
 
-            # PILLAR 1.5: RSI EXTREME (1pt)
-            # When price is already outside or near the Bollinger Band AND RSI
-            # confirms the extreme, that is strong enough evidence on its own
-            # for one additional point.  This bridges the gap where stretch=2pts
-            # but no divergence/sweep/pattern stacks — a common situation on 1H.
-            rsi_extreme_long  = (bb_pos[-1] < 0.15 and rsi[-1] < 35)
-            rsi_extreme_short = (bb_pos[-1] > 0.85 and rsi[-1] > 65)
-            if rsi_extreme_long:  score_long  += 1
-            if rsi_extreme_short: score_short += 1
+        except Exception:
+            return False
+        return False
 
-            # PILLAR 2: THE DIVERGENCE (1pt)
-            div_long = self._check_divergence(features_df, signal=1, period=60)
-            div_short = self._check_divergence(features_df, signal=-1, period=60)
-            if div_long: score_long += 1
-            if div_short: score_short += 1
+    def _check_bb_contraction(self, df: pd.DataFrame, direction: int) -> bool:
+        """
+        BB Contraction: price is in the lower 20% (long) or upper 80%+ (short)
+        of the Bollinger Band while bandwidth is stable or declining.
+        Confirms the price is stretched AND momentum is bleeding off.
+        """
+        try:
+            if len(df) < self.bb_period + 5:
+                return False
+            cfg      = self._mr3_cfg["mode1"]
+            zone_pct = cfg["bb_lower_zone_threshold"]   # 0.20
+            bb_pos   = df["bb_position"].values
+            bb_wid   = df["bb_width_norm"].values
+            if pd.isna(bb_pos[-1]) or pd.isna(bb_wid[-1]):
+                return False
+            pos       = float(bb_pos[-1])
+            bw_prev5  = bb_wid[-6:-1]
+            bw_prev5  = bw_prev5[~np.isnan(bw_prev5)]
+            if len(bw_prev5) == 0:
+                return False
+            bw_mean     = float(np.mean(bw_prev5))
+            bw_declining = float(bb_wid[-1]) <= bw_mean
 
-            # PILLAR 3: LIQUIDITY SWEEP (1pt)
-            # 100-bar lookback was nearly impossible to trigger on 1H — a new
-            # 4-day extreme almost never coincides with a mean-reversion entry.
-            # 30 bars (~30 hours) catches meaningful local sweeps without requiring
-            # a full macro breakout.
-            lookback_100 = low[-31:-1]
-            highback_100 = high[-31:-1]
-            sweep_long = current_close < np.min(lookback_100) if len(lookback_100) > 0 else False
-            sweep_short = current_close > np.max(highback_100) if len(highback_100) > 0 else False
-            if sweep_long: score_long += 1
-            if sweep_short: score_short += 1
+            if direction == 1:
+                return pos < zone_pct and bw_declining
+            elif direction == -1:
+                return pos > (1.0 - zone_pct) and bw_declining
+        except Exception:
+            return False
+        return False
 
-            # PILLAR 4: THE EXHAUSTION (1pt)
-            exhaust_long = False
-            exhaust_short = False
-            if bb_pos[-1] < 0.15 or bb_pos[-1] > 0.85:
-                patterns_to_check = {
-                    'Hammer': ta.CDLHAMMER,
-                    'Doji': ta.CDLDOJI,
-                    'Engulfing': ta.CDLENGULFING
-                }
-                o, h, l, c = features_df['open'].values, features_df['high'].values, features_df['low'].values, features_df['close'].values
-                for name, func in patterns_to_check.items():
-                    res = func(o, h, l, c)
-                    if res[-1] != 0:
-                        if res[-1] > 0: 
-                            score_long += 1
-                            exhaust_long = True
-                        if res[-1] < 0: 
-                            score_short += 1
-                            exhaust_short = True
+    def _check_ma_proximity(self, df: pd.DataFrame, direction: int) -> bool:
+        """
+        MA Proximity: current price is within 0.5×ATR of EMA50 or EMA200.
+        Classic Wyckoff Last Point of Support — price testing a major MA.
+        """
+        try:
+            if len(df) < 5:
+                return False
+            cfg    = self._mr3_cfg["mode1"]
+            mult   = cfg["ma_proximity_atr_mult"]    # 0.5
+            close  = float(df["close"].values[-1])
+            atr_v  = float(df["atr"].values[-1]) if not pd.isna(df["atr"].values[-1]) else 0.0
+            if atr_v <= 0:
+                return False
+            threshold = mult * atr_v
+            ema50  = df["ema_50"].values[-1]  if "ema_50"  in df.columns else None
+            ema200 = df["ema_200"].values[-1] if "ema_200" in df.columns else None
+            if ema50  is not None and not pd.isna(ema50)  and abs(close - float(ema50))  <= threshold:
+                return True
+            if ema200 is not None and not pd.isna(ema200) and abs(close - float(ema200)) <= threshold:
+                return True
+        except Exception:
+            return False
+        return False
 
-            # ================================================================
-            # DIAGNOSTIC: Log scorecard breakdown every cycle (Issue 2, Step 1)
-            # ================================================================
-            logger.info(
-                f"[MR SCORECARD] {self.asset}:\n"
-                f"  STRETCH:   long={stretch_long} short={stretch_short} "
-                f"(dist={abs(ema_50[-1] - current_close):.4f}, 1.5xATR={1.5 * atr[-1]:.4f}, 0.8xATR={0.8 * atr[-1]:.4f})\n"
-                f"  RSI_XTR:   long={rsi_extreme_long} short={rsi_extreme_short} "
-                f"(rsi={rsi[-1]:.1f}, bb_pos={bb_pos[-1]:.3f})\n"
-                f"  DIVERGENCE: long={div_long} short={div_short}\n"
-                f"  SWEEP:     long={sweep_long} short={sweep_short} "
-                f"(min={np.min(lookback_100) if len(lookback_100) > 0 else 0:.4f}, max={np.max(highback_100) if len(highback_100) > 0 else 0:.4f})\n"
-                f"  EXHAUSTION: long={exhaust_long} short={exhaust_short} (bb_pos={bb_pos[-1]:.3f})\n"
-                f"  SCORES:    long={score_long}/6 short={score_short}/6 (need ≥3)"
-            )
+    def _count_optional(self, df: pd.DataFrame, direction: int) -> int:
+        """Count how many of the 4 optional conditions are met."""
+        return sum([
+            self._check_vol_contraction(df, direction),
+            self._check_hidden_divergence(df, direction),
+            self._check_bb_contraction(df, direction),
+            self._check_ma_proximity(df, direction),
+        ])
 
-            # ================================================================
-            # ✅ MICRO-REVERSION PATH
-            # ================================================================
-            micro_triggered_long = False
-            micro_triggered_short = False
-            
-            # Align 4H data if provided
-            if self.use_4h_context and df_4h is not None:
-                if "bb_position" not in df_4h.columns:
-                    df_4h = self.generate_features(df_4h)
-                df_4h_aligned = self._align_4h_to_1h(features_df.tail(1), df_4h)
-                
-                if df_4h_aligned is not None:
-                    h4_context = self._calculate_4h_reversion_context(df_4h_aligned, -1)
-                    micro_score_long = 0
-                    micro_score_short = 0
-                    
-                    # LONG: 4H BULLISH + 1H RSI < 40 + EMA-20 touch
-                    if h4_context['trend_direction'] == 1: micro_score_long += 0.5
-                    if rsi[-1] < 40: micro_score_long += 0.5
-                    if low[-1] <= ema_20[-1] <= high[-1]: micro_score_long += 0.5
-                    if micro_score_long >= 1.5: micro_triggered_long = True
-                    
-                    # SHORT: 4H BEARISH + 1H RSI > 60 + EMA-20 touch
-                    if h4_context['trend_direction'] == -1: micro_score_short += 0.5
-                    if rsi[-1] > 60: micro_score_short += 0.5
-                    if low[-1] <= ema_20[-1] <= high[-1]: micro_score_short += 0.5
-                    if micro_score_short >= 1.5: micro_triggered_short = True
+    # ─────────────────────────────────────────────────────────────────────────
+    # BB Z-SCORE  (Mode 2 BTC-specific gate)
+    # ─────────────────────────────────────────────────────────────────────────
 
-            # ================================================================
-            # FINAL SIGNAL GENERATION
-            # ================================================================
-            signal = 0
-            confidence = 0.0
-            
-            # BUY setup
-            if (score_long >= 3.0) or micro_triggered_long:
-                if velocity_drop > atr_threshold:
-                    logger.debug(f"[{self.name}] VETO BUY: Velocity drop {velocity_drop:.2f} > {atr_threshold:.2f}")
-                else:
-                    signal = 1
-                    # Confidence scaling: Score 3.0 = 0.6 conf, Score 5.0 = 1.0 conf
-                    if micro_triggered_long:
-                        confidence = 0.65
-                    else:
-                        confidence = 0.6 + (score_long - 3.0) * 0.2
-            
-            # SELL setup
-            elif (score_short >= 3.0) or micro_triggered_short:
-                if velocity_rise > atr_threshold:
-                    logger.debug(f"[{self.name}] VETO SELL: Velocity rise {velocity_rise:.2f} > {atr_threshold:.2f}")
-                else:
-                    signal = -1
-                    if micro_triggered_short:
-                        confidence = 0.65
-                    else:
-                        confidence = 0.6 + (score_short - 3.0) * 0.2
-            
-            return signal, min(1.0, confidence)
+    def _compute_bb_zscore(self, df: pd.DataFrame) -> float:
+        """
+        Bollinger Band z-score: (close − middle) / σ
+        For 2σ bands: σ = (upper − lower) / 4.
+        z < 0 → below mean, z < −2 → below lower band.
+        """
+        try:
+            close    = float(df["close"].values[-1])
+            bb_mid   = float(df["bb_middle"].values[-1])
+            bb_upper = float(df["bb_upper"].values[-1])
+            bb_lower = float(df["bb_lower"].values[-1])
+            band_width = bb_upper - bb_lower
+            if band_width <= 0:
+                return 0.0
+            sigma = band_width / 4.0    # 2σ bands → σ = (upper − lower) / 4
+            return (close - bb_mid) / sigma
+        except Exception:
+            return 0.0
 
-        except Exception as e:
-            logger.error(f"[{self.name}] Signal error: {e}")
+    # ─────────────────────────────────────────────────────────────────────────
+    # MODE 1: Pullback Completion
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _mode1_pullback_completion(
+        self, df: pd.DataFrame, composite_state
+    ) -> tuple:
+        """
+        Mode 1 — Pullback Completion (1H NATURAL_RETRACEMENT, LONG only).
+
+        [MANDATORY] Spring detected in last 1–3 bars
+        [2 of 4]    Optional: vol_contraction, hidden_div, bb_contraction, ma_proximity
+        [VETO]      vol_down_ratio > 1.2
+        [MODIFIER]  BTC near 4H EMA200 → −0.10 confidence
+        """
+        cfg      = self._mr3_cfg["mode1"]
+        features = self.generate_features(df.tail(260))
+        if len(features) < 50:
             return 0, 0.0
+
+        # ── vol_down_ratio veto ────────────────────────────────────────────
+        if composite_state is not None:
+            _vdr       = composite_state.vol_down_ratio
+            _vdr_valid = composite_state.vol_down_ratio_valid
+            _veto_thr  = cfg["vol_down_ratio_veto"]
+            if _vdr_valid and _vdr is not None and float(_vdr) > _veto_thr:
+                logger.debug(
+                    f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > {_veto_thr} → VETO"
+                )
+                return 0, 0.0
+
+        # ── Spring (mandatory) ─────────────────────────────────────────────
+        spring_ok, spring_strength = self._detect_spring(features)
+        if not spring_ok:
+            logger.debug(f"[MR Mode1] {self.asset}: no spring → 0")
+            return 0, 0.0
+
+        # ── Optional conditions (2 of 4 required) ─────────────────────────
+        opt_count = self._count_optional(features, direction=1)
+        min_opt   = cfg["optional_min_count"]
+        if opt_count < min_opt:
+            logger.debug(
+                f"[MR Mode1] {self.asset}: spring OK but opt={opt_count}<{min_opt} → 0"
+            )
+            return 0, 0.0
+
+        # ── BTC near 4H EMA200: small confidence penalty ──────────────────
+        conf_mod = 0.0
+        if self.asset in ("BTC", "BTCUSDT") and composite_state is not None:
+            try:
+                _ema_dist = getattr(composite_state, "ema200_1d_dist_atr", None)
+                if _ema_dist is not None and float(_ema_dist) < 1.0:
+                    conf_mod = float(cfg["btc_ema200_4h_modifier"])   # −0.10
+            except Exception:
+                pass
+
+        # ── Confidence: spring strength + optional bonus + modifier ───────
+        # spring_strength 0.30–1.0 → base 0.55–0.75
+        base_conf = 0.55 + float(spring_strength) * 0.20
+        extra_opt = max(0, opt_count - min_opt)
+        confidence = float(min(1.0, base_conf + extra_opt * 0.05 + conf_mod))
+
+        logger.info(
+            f"[MR Mode1] {self.asset}: LONG "
+            f"spring_str={spring_strength:.2f} opt={opt_count}/4 conf={confidence:.2f}"
+        )
+        return 1, confidence
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MODE 2: Counter-Trend
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _mode2_counter_trend(
+        self, df: pd.DataFrame, composite_state
+    ) -> tuple:
+        """
+        Mode 2 — Counter-Trend (SECONDARY states only).
+
+        SECONDARY_RETRACEMENT → LONG  (counter the deep pullback)
+        SECONDARY_REBOUND     → SHORT (counter the deep bounce)
+
+        [MANDATORY] ADX < 25
+        [MANDATORY] 4 of 4 optional conditions
+        [MANDATORY] BB has closed back inside bands (was recently outside)
+        [BTC only]  LONG: BB z-score < −2.0; SHORT: z-score > +3.5
+        """
+        cfg      = self._mr3_cfg["mode2"]
+        features = self.generate_features(df.tail(260))
+        if len(features) < 50:
+            return 0, 0.0
+
+        # Direction from Livermore state
+        lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None
+        if lsm_state == "SECONDARY_RETRACEMENT":
+            direction = 1
+        elif lsm_state == "SECONDARY_REBOUND":
+            direction = -1
+        else:
+            return 0, 0.0
+
+        # ── ADX gate ──────────────────────────────────────────────────────
+        adx_max = int(cfg["adx_max"])
+        adx_val = float(features["adx"].values[-1]) if not pd.isna(features["adx"].values[-1]) else 99.0
+        if adx_val >= adx_max:
+            logger.debug(f"[MR Mode2] {self.asset}: ADX={adx_val:.1f} ≥ {adx_max} → 0")
+            return 0, 0.0
+
+        # ── 4 of 4 optional conditions ────────────────────────────────────
+        opt_count = self._count_optional(features, direction)
+        min_opt   = int(cfg["optional_min_count"])   # 4
+        if opt_count < min_opt:
+            logger.debug(
+                f"[MR Mode2] {self.asset}: opt={opt_count} < {min_opt} → 0"
+            )
+            return 0, 0.0
+
+        # ── BB closed back inside ─────────────────────────────────────────
+        if cfg.get("bb_inside_required", True):
+            bb_pos_arr = features["bb_position"].values
+            if len(bb_pos_arr) < 5:
+                return 0, 0.0
+            if direction == 1:
+                # Was outside lower band (bb_pos < 0) and has now closed back inside
+                was_outside = any(float(v) < 0.0 for v in bb_pos_arr[-5:-1])
+                if not was_outside:
+                    logger.debug(f"[MR Mode2] {self.asset}: BB not recently outside (long) → 0")
+                    return 0, 0.0
+            elif direction == -1:
+                was_outside = any(float(v) > 1.0 for v in bb_pos_arr[-5:-1])
+                if not was_outside:
+                    logger.debug(f"[MR Mode2] {self.asset}: BB not recently outside (short) → 0")
+                    return 0, 0.0
+
+        # ── BTC-specific z-score gates ────────────────────────────────────
+        if self.asset in ("BTC", "BTCUSDT"):
+            z_score = self._compute_bb_zscore(features)
+            if direction == 1:
+                z_thr = float(cfg["btc_long_zscore_threshold"])   # -2.0
+                if z_score >= z_thr:
+                    logger.debug(
+                        f"[MR Mode2 BTC] LONG z={z_score:.2f} not < {z_thr} → 0"
+                    )
+                    return 0, 0.0
+            elif direction == -1:
+                z_thr = float(cfg["btc_short_zscore_threshold"])  # 3.5
+                if z_score <= z_thr:
+                    logger.debug(
+                        f"[MR Mode2 BTC] SHORT z={z_score:.2f} not > {z_thr} → 0"
+                    )
+                    return 0, 0.0
+
+        # ── Confidence: lower ADX = more range-bound = stronger MR edge ──
+        adx_factor = max(0.0, (adx_max - adx_val) / adx_max)
+        confidence = float(min(1.0, 0.60 + adx_factor * 0.15))
+
+        _dir_str = "LONG" if direction == 1 else "SHORT"
+        logger.info(
+            f"[MR Mode2] {self.asset}: {_dir_str} "
+            f"adx={adx_val:.1f} opt=4/4 conf={confidence:.2f}"
+        )
+        return direction, confidence
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MODE 3: Climax Fade
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _mode3_climax_fade(
+        self, df: pd.DataFrame, composite_state
+    ) -> tuple:
+        """
+        Mode 3 — Climax Fade (MAIN_UP / MAIN_DOWN).
+
+        MAIN_UP   → SHORT  (fade the overextended upleg)
+        MAIN_DOWN → LONG   (fade the selling climax downleg)
+
+        [MANDATORY] leg_stretch_ratio > 1.5× (current move from Livermore anchor
+                    vs median window-range over last 50 bars)
+        [MANDATORY] price > 2.5×ATR from Livermore anchor
+        [MANDATORY] High-rank reversal candle:
+                      SHORT: bearish engulfing or evening star
+                      LONG:  bullish engulfing or morning star
+        [MANDATORY] Above-average volume on signal bar
+        NOTE: Target is EMA20 within MAIN state — this is NOT a reversal call.
+        """
+        cfg      = self._mr3_cfg["mode3"]
+        features = self.generate_features(df.tail(260))
