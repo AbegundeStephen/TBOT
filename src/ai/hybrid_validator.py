@@ -621,6 +621,10 @@ class HybridSignalValidator:
             except Exception:
                 cache_key = None  # Cache miss — proceed normally
 
+            # Sniper was disconnected in Phase 0B — guard against None
+            if self.sniper is None:
+                return {"pattern_confirmed": False, "reason": "sniper_disabled", "confidence": 0.0}
+
             snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
             if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
             snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
