@@ -5829,7 +5829,7 @@ def main():
     import os as _os
     _pid_path = Path("logs") / "bot.pid"
     _pid_path.write_text(str(_os.getpid()))
-    logger.info(f"[MAIN] PID {{_os.getpid()}} written to {{_pid_path}}")
+    logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
 
     try:
         with open("config/config.json", encoding="utf-8") as f:
@@ -5846,16 +5846,16 @@ def main():
 
             if strategies.get("mean_reversion", {}).get("enabled", False):
                 required_models.append(
-                    f"models/mean_reversion_{{asset_name.lower()}}.pkl"
+                    f"models/mean_reversion_{asset_name.lower()}.pkl"
                 )
 
             if strategies.get("trend_following", {}).get("enabled", False):
                 required_models.append(
-                    f"models/trend_following_{{asset_name.lower()}}.pkl"
+                    f"models/trend_following_{asset_name.lower()}.pkl"
                 )
 
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
-                required_models.append(f"models/ema_strategy_{{asset_name.lower()}}.pkl")
+                required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
 
     missing = [m for m in required_models if not Path(m).exists()]
     if missing:
@@ -5863,7 +5863,7 @@ def main():
         print("[FAIL] REQUIRED MODELS NOT FOUND")
         print("=" * 70)
         for model in missing:
-            print(f"  [X] {{model}}")
+            print(f"  [X] {model}")
         print("\nRun: python train.py")
         print("=" * 70)
         sys.exit(1)
@@ -5873,7 +5873,7 @@ def main():
         print("=" * 70)
         print("\u26a0\ufe0f  AI MODEL NOT FOUND (Optional)")
         print("=" * 70)
-        print(f"  Missing: {{ai_model}}")
+        print(f"  Missing: {ai_model}")
         print("\nBot will run without AI validation (pattern detection disabled)")
         print("Train AI: python train_ai.py")
         print("=" * 70)
@@ -5886,8 +5886,8 @@ def main():
         logger.info("Bot stopped by user (KeyboardInterrupt)")
         print("\n[STOPPED] Bot stopped by user.")
     except Exception as e:
-        logger.exception(f"Fatal error in bot: {{e}}")
-        print(f"\n[FATAL] Bot crashed: {{e}}")
+        logger.exception(f"Fatal error in bot: {e}")
+        print(f"\n[FATAL] Bot crashed: {e}")
         sys.exit(1)
 
 
