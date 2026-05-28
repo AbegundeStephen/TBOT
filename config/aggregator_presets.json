@@ -387,5 +387,4 @@
     "vtm_circuit_breaker_atr_mult": 3.0,
     "vol_down_ratio_veto_threshold": 1.2,
     "_note": "All numeric thresholds live here per MRS zero-magic-numbers rule."
-  }
-}
+  },
