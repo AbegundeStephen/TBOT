@@ -1092,9 +1092,17 @@ class PortfolioManager:
             # ================================================================
             # STEP 5: Total Risk Limit (Aggregate Cap)
             # ✅ IMPROVED: Use Dollar Risk at SL (not notional exposure)
+            # ✅ MRS FIX: Grace window prevents one large position (GOLD) from
+            #             starving other assets when total risk is slightly over cap.
             # ================================================================
             max_total_risk_pct = self.risk_cfg.get("max_total_open_risk", 0.10)
-            
+            # How far over the cap before blocking entirely (default: 5%).
+            # e.g. cap=25% → block only when total > 30%.
+            total_risk_grace_pct = self.risk_cfg.get("total_risk_grace_pct", 0.05)
+            # Minimum entry size allowed while inside the grace window (default: 0.5%).
+            # Keeps USOIL/EURUSD/etc. alive even while GOLD holds most of the budget.
+            total_risk_min_entry_pct = self.risk_cfg.get("total_risk_min_entry_pct", 0.005)
+
             # Calculate current total risk (Dollar amount at risk across all positions)
             current_total_risk_usd = 0.0
             for position in self.positions.values():
@@ -1107,25 +1115,45 @@ class PortfolioManager:
                 else:
                     # Fallback: estimate 5% of notional (in quote currency) → convert to USD
                     current_total_risk_usd += (position.entry_price * position.quantity * 0.05) * quote_to_usd
-            
+
             current_total_risk_pct = (
-                current_total_risk_usd / self.current_capital 
-                if self.current_capital > 0 
+                current_total_risk_usd / self.current_capital
+                if self.current_capital > 0
                 else 0
             )
-            
+
             # Check if adding new trade would exceed limit
             remaining_risk_budget_pct = max_total_risk_pct - current_total_risk_pct
-            
+
             if risk_pct > remaining_risk_budget_pct:
                 logger.warning(
                     f"  ⚠️ Total Risk Limit: Current {current_total_risk_pct:.2%}, "
                     f"Max {max_total_risk_pct:.2%}"
                 )
-                logger.info(
-                    f"  Risk capped from {risk_pct:.3%} to {max(0, remaining_risk_budget_pct):.3%}"
-                )
-                risk_pct = max(0, remaining_risk_budget_pct)
+                if remaining_risk_budget_pct > 0:
+                    # Budget still positive but smaller than requested: use what's left.
+                    logger.info(
+                        f"  Risk capped from {risk_pct:.3%} to {remaining_risk_budget_pct:.3%}"
+                    )
+                    risk_pct = remaining_risk_budget_pct
+                elif current_total_risk_pct <= max_total_risk_pct + total_risk_grace_pct:
+                    # Slightly over cap but within grace window.
+                    # Allow a minimum viable entry so one large position (e.g. GOLD)
+                    # cannot completely starve other assets like USOIL/EURUSD.
+                    logger.info(
+                        f"  ⚠️ Over cap by {-remaining_risk_budget_pct:.2%} — within "
+                        f"grace window ({total_risk_grace_pct:.0%}); "
+                        f"sizing to min-entry {total_risk_min_entry_pct:.3%}"
+                    )
+                    risk_pct = total_risk_min_entry_pct
+                else:
+                    # Significantly over cap (total > cap + grace): block entirely.
+                    logger.warning(
+                        f"  ❌ Total risk {current_total_risk_pct:.2%} exceeds "
+                        f"cap + grace ({max_total_risk_pct + total_risk_grace_pct:.2%}); "
+                        f"trade blocked"
+                    )
+                    risk_pct = 0.0
             
             # ================================================================
             # STEP 5.5: Risk Floor (Enforce Minimum Risk USD)

@@ -1787,6 +1787,21 @@ class TradingBot:
             # cached 4H data was fetched but never reached the aggregator.
             mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
 
+            # ── Livermore composite_state injection ───────────────────────────
+            # The council aggregator has no Livermore state machine of its own.
+            # Run the performance aggregator's _build_composite_state so the council
+            # judges (rewired in Phase 3B to read governor_data["composite_state"])
+            # get Livermore state, hard-veto flags, and retest-engine entry_type.
+            # This is the fix for GOLD/USOIL/GBPAUD/GBPUSD always running in legacy mode.
+            _perf_agg = aggregators.get("performance")
+            if _perf_agg is not None and hasattr(_perf_agg, '_build_composite_state'):
+                try:
+                    _df4h_cs = mtf_regime.get("df_4h")
+                    _cs = _perf_agg._build_composite_state(df, _df4h_cs, mtf_regime)
+                    mtf_regime["composite_state"] = _cs
+                except Exception as _cs_err:
+                    logger.debug("[HYBRID/council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
             # ✅ FIXED: Pass full market context to the Institutional Council
             signal, details = aggregator.get_aggregated_signal(
                 df,
@@ -2047,19 +2062,66 @@ class TradingBot:
             # oversold/overbought or structural-level confirmation.
             # Raise the quality bar so only genuinely high-conviction TF signals
             # pass without MR backing.
+            #
+            # HOWEVER: with Livermore routing active, MR returning (0, 0.0) can
+            # mean very different things:
+            #   a) NATURAL_REBOUND → MR is in the SILENT ZONE.  MR will ALWAYS
+            #      return 0 here by design (hard veto).  Raising the gate would
+            #      permanently block signals in this state — wrong.
+            #   b) Other Livermore states where mode conditions weren't met —
+            #      MR had a structural context but conditions weren't right.
+            #      A modest raise is still appropriate.
+            #   c) Livermore warmup (lsm=None) / legacy fallback — MR has no
+            #      structural context at all.  Full raise to 0.60 is correct.
             _mr_signal = merged_details.get("mr_signal", None)
             _mr_conf   = merged_details.get("mr_confidence", None)
             _mr_neutral = (
                 _mr_signal is not None and _mr_conf is not None
                 and _mr_signal == 0 and _mr_conf == 0.0
             )
+
             if _mr_neutral and signal != 0:
-                min_quality = 0.60
-                logger.warning(
-                    f"[PERFORMANCE] ⚠️ {asset_name}: MR strategy has zero opinion "
-                    f"(0/5 both directions) — raising min quality gate: "
-                    f"0.28 → 0.60. Entry requires strong TF conviction alone."
-                )
+                # Determine Livermore context from the performance aggregator
+                _lsm_1h_state = None
+                try:
+                    _agg = self.aggregators.get(asset_name)
+                    _pagg = _agg.get("performance") if isinstance(_agg, dict) else _agg
+                    if _pagg is not None and hasattr(_pagg, "_livermore_1h"):
+                        _snap = _pagg._livermore_1h.snapshot() if _pagg._livermore_1h else None
+                        if _snap:
+                            _lsm_1h_state = _snap.state
+                except Exception:
+                    pass
+
+                _MR_SILENT_STATES = {"NATURAL_REBOUND"}   # hard veto always zeroes MR
+                _MR_ACTIVE_STATES = {
+                    "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT", "SECONDARY_REBOUND",
+                    "MAIN_UP", "MAIN_DOWN",
+                }
+
+                if _lsm_1h_state in _MR_SILENT_STATES:
+                    # MR is intentionally forbidden in this state — no gate raise.
+                    # TF conviction at normal threshold is sufficient.
+                    logger.debug(
+                        f"[PERFORMANCE] {asset_name}: MR silent (Livermore={_lsm_1h_state}) "
+                        f"— gate raise suppressed"
+                    )
+                elif _lsm_1h_state in _MR_ACTIVE_STATES:
+                    # MR had a structural context but mode conditions weren't met.
+                    # Modest raise: Livermore-backed TF signal is stronger than TF alone.
+                    min_quality = 0.45
+                    logger.info(
+                        f"[PERFORMANCE] {asset_name}: MR conditions unmet "
+                        f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
+                    )
+                else:
+                    # No Livermore state (warmup/legacy) — full raise, MR has no opinion.
+                    min_quality = 0.60
+                    logger.warning(
+                        f"[PERFORMANCE] ⚠️ {asset_name}: MR strategy has zero opinion "
+                        f"(no Livermore context) — raising min quality gate: "
+                        f"0.28 → 0.60. Entry requires strong TF conviction alone."
+                    )
 
             if signal != 0 and actual_quality < min_quality:
                 logger.info(
@@ -2464,6 +2526,27 @@ class TradingBot:
                 and current_aggregator.get("mode") == "hybrid"
             )
 
+            # ── Capture warmed Livermore state before discarding old aggregator ──
+            # _reinitialize_aggregator creates fresh instances that start cold.
+            # If the old performance aggregator had a warmed Livermore state machine
+            # we transfer the LSM instances to the new aggregator so the warmup
+            # isn't wasted and state transitions don't reset mid-session.
+            _old_livermore_4h  = None
+            _old_livermore_1h  = None
+            _old_livermore_ts  = None
+            _old_lsm_warmed    = False
+            _old_perf_for_lsm  = None
+            if isinstance(current_aggregator, dict) and current_aggregator.get("mode") == "hybrid":
+                _old_perf_for_lsm = current_aggregator.get("performance")
+            elif hasattr(current_aggregator, "_livermore_4h"):
+                _old_perf_for_lsm = current_aggregator
+
+            if _old_perf_for_lsm is not None and getattr(_old_perf_for_lsm, "_livermore_warmed", False):
+                _old_livermore_4h = _old_perf_for_lsm._livermore_4h
+                _old_livermore_1h = _old_perf_for_lsm._livermore_1h
+                _old_livermore_ts = getattr(_old_perf_for_lsm, "_livermore_last_4h_ts", None)
+                _old_lsm_warmed   = True
+
             # Force hybrid if config says so OR state says so
             if global_mode == "hybrid" or is_hybrid_state:
                 mode_to_init = "hybrid"
@@ -2520,6 +2603,17 @@ class TradingBot:
                     use_gatekeeper=use_gatekeeper
                 )
 
+                # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
+                if _old_lsm_warmed:
+                    perf_agg._livermore_4h         = _old_livermore_4h
+                    perf_agg._livermore_1h         = _old_livermore_1h
+                    perf_agg._livermore_last_4h_ts = _old_livermore_ts
+                    perf_agg._livermore_warmed     = True
+                    logger.info(
+                        f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
+                        f"for {asset_name}"
+                    )
+
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
                     "council": council_agg,
@@ -2571,6 +2665,16 @@ class TradingBot:
                     use_macro_governor=use_macro_gov,
                     use_gatekeeper=use_gatekeeper
                 )
+                # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
+                if _old_lsm_warmed:
+                    new_aggregator._livermore_4h         = _old_livermore_4h
+                    new_aggregator._livermore_1h         = _old_livermore_1h
+                    new_aggregator._livermore_last_4h_ts = _old_livermore_ts
+                    new_aggregator._livermore_warmed     = True
+                    logger.info(
+                        f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
+                        f"for {asset_name}"
+                    )
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(
                     f"[AUTO PRESET] ✓ Performance aggregator refreshed for {asset_name}"
@@ -2595,6 +2699,13 @@ class TradingBot:
             preset_changed = False
             changes = []
             for asset_name in enabled_assets:
+                # Skip regime data fetch for MT5 assets when market is closed —
+                # the dynamic selector would fetch stale MT5 data unnecessarily.
+                _is_mt5 = self.config["assets"].get(asset_name, {}).get("exchange", "binance") != "binance"
+                if _is_mt5 and not self.check_market_hours(asset_name):
+                    logger.debug(f"[REGIME CHECK] Skipping {asset_name}: market closed")
+                    continue
+
                 # Get optimal preset for current market conditions
                 # Fetch the latest MTF regime data to pass to the selector for Asset-DNA Gating
                 regime_data = None
@@ -2756,7 +2867,7 @@ class TradingBot:
                         self.config["assets"].get(asset_name, {}).get("exchange", "binance") != "binance"
                     )
                     if _is_mt5_asset and not self.check_market_hours(asset_name):
-                        logger.debug(f"[SIGNALS] Skipping {asset_name}: market closed")
+                        logger.info(f"[SIGNALS] Skipping {asset_name}: market closed")
                         continue
                     self._update_asset_signal(asset_name)
                 except Exception as e:
@@ -2775,6 +2886,10 @@ class TradingBot:
                 try:
                     asset_cfg = self.config["assets"][asset_name]
                     exchange = asset_cfg.get("exchange", "binance")
+                    # Skip MT5 price fetch for closed assets — returns stale data and
+                    # generates error logs while adding nothing useful.
+                    if exchange != "binance" and not self.check_market_hours(asset_name):
+                        continue
                     handler = (
                         self.binance_handler
                         if exchange == "binance"
@@ -5273,7 +5388,12 @@ class TradingBot:
         logger.info("[Livermore] Starting warm-up for all assets...")
         warmed = 0
         for asset_name, aggregator in self.aggregators.items():
-            if not hasattr(aggregator, 'warm_start_livermore'):
+            # Hybrid mode stores aggregators as {"performance": ..., "council": ..., "mode": "hybrid"}.
+            # Unwrap to reach the PerformanceWeightedAggregator which owns warm_start_livermore.
+            target_agg = aggregator
+            if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
+                target_agg = aggregator.get("performance")
+            if target_agg is None or not hasattr(target_agg, 'warm_start_livermore'):
                 continue
             try:
                 asset_cfg = self.config["assets"].get(asset_name, {})
@@ -5309,7 +5429,7 @@ class TradingBot:
                 except Exception as _e1:
                     logger.debug("[Livermore] %s 1H fetch failed: %s", asset_name, _e1)
 
-                aggregator.warm_start_livermore(df_4h, df_1h)
+                target_agg.warm_start_livermore(df_4h, df_1h)
                 warmed += 1
 
             except Exception as _e:

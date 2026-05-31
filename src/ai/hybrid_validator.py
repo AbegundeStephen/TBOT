@@ -605,114 +605,181 @@ class HybridSignalValidator:
         self._pattern_cache.clear()
 
     def _check_pattern(self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60, strategy: str = "UNKNOWN") -> dict:
-        try:
-            if len(df) < 15: return {"pattern_confirmed": False, "reason": "insufficient_data"}
+        """
+        Detect candlestick patterns using TA-Lib functions.
 
-            # AI-5: Cache check — avoid triple neural net inference per council signal.
-            # Key: last close price (proxy for df identity) + signal direction.
+        Replaces the OHLCSniper neural net (trained on 15-min candles, mismatched
+        with the 1H data fed to it in production).  TA-Lib pattern functions are
+        timeframe-agnostic — they evaluate geometric OHLC relationships that look
+        the same whether bars are 1-minute or 4-hour.
+
+        Returns the same dict structure as before so all downstream consumers
+        (council PATTERN judge, visualization, dashboard, storyteller) are unchanged.
+        """
+        try:
+            if len(df) < 10:
+                return {"pattern_confirmed": False, "reason": "insufficient_data"}
+
+            # Cache check — same key as before (last close + signal direction).
             try:
                 cache_key = (round(float(df["close"].iloc[-1]), 6), signal)
                 if cache_key in self._pattern_cache:
                     cached = self._pattern_cache[cache_key]
-                    # Re-apply min_confidence gate since different callers may use different thresholds
                     if cached.get("pattern_confirmed") and cached.get("confidence", 0) < min_confidence:
                         return {**cached, "pattern_confirmed": False, "reason": "low_confidence_recalc"}
                     return cached
             except Exception:
-                cache_key = None  # Cache miss — proceed normally
+                cache_key = None
 
-            # Sniper was disconnected in Phase 0B — guard against None
-            if self.sniper is None:
-                return {"pattern_confirmed": False, "reason": "sniper_disabled", "confidence": 0.0}
+            o = df["open"].values.astype(float)
+            h = df["high"].values.astype(float)
+            l = df["low"].values.astype(float)
+            c = df["close"].values.astype(float)
 
-            snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-            if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
-            snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
-            predicted_id, confidence = self.sniper.predict_single(snippet_input)
-            pattern_name = self.reverse_pattern_map.get(predicted_id, "Unknown")
-            
-            # --- Noise Filter ---
-            if "noise" in pattern_name.lower():
-                return {
+            # ── Run TA-Lib detectors ──────────────────────────────────────────
+            # Each entry: (talib_fn, bullish_name, bearish_name_or_None, fn_kwargs)
+            # bullish_name / bearish_name must be in BULLISH_PATTERNS / BEARISH_PATTERNS.
+            # talib returns 0 (none), ±100 (detected), ±200 (strong variant).
+            _DETECTORS = [
+                # Unidirectional bullish
+                (ta.CDLHAMMER,          "Hammer",               None,               {}),
+                (ta.CDLMORNINGSTAR,     "Morning Star",         None,               {"penetration": 0.3}),
+                (ta.CDLINVERTEDHAMMER,  "Inverted Hammer",      None,               {}),
+                (ta.CDL3WHITESOLDIERS,  "Three White Soldiers", None,               {}),
+                (ta.CDLPIERCING,        "Piercing",             None,               {}),
+                (ta.CDLDRAGONFLYDOJI,   "Dragonfly Doji",       None,               {}),
+                # Unidirectional bearish
+                (ta.CDLEVENINGSTAR,     None,  "Evening Star",         {"penetration": 0.3}),
+                (ta.CDLSHOOTINGSTAR,    None,  "Shooting Star",        {}),
+                (ta.CDLHANGINGMAN,      None,  "Hanging Man",          {}),
+                (ta.CDL3BLACKCROWS,     None,  "Three Black Crows",    {}),
+                (ta.CDLDARKCLOUDCOVER,  None,  "Dark Cloud Cover",     {"penetration": 0.5}),
+                (ta.CDLGRAVESTONEDOJI,  None,  "Gravestone Doji",      {}),
+                # Bidirectional
+                (ta.CDLENGULFING,  "Bullish Engulfing",  "Bearish Engulfing",  {}),
+                (ta.CDLHARAMI,     "Bullish Harami",     "Bearish Harami",     {}),
+                (ta.CDL3INSIDE,    "Three Inside",       None,                 {}),
+                (ta.CDL3OUTSIDE,   None,                 "Three Outside",      {}),
+                (ta.CDLMARUBOZU,   "Marubozu",           None,                 {}),
+            ]
+
+            candidates = []   # [(pattern_name, talib_value), ...]
+            for fn, bull_name, bear_name, kwargs in _DETECTORS:
+                try:
+                    val = int(fn(o, h, l, c, **kwargs)[-1])
+                    if val == 0:
+                        continue
+                    if val > 0 and bull_name:
+                        candidates.append((bull_name, val))
+                    elif val < 0 and bear_name:
+                        candidates.append((bear_name, val))
+                except Exception:
+                    continue
+
+            if not candidates:
+                result = {
                     "pattern_confirmed": False,
-                    "confidence": 0,
-                    "reason": "noise_detected"
+                    "reason": "no_pattern_detected",
+                    "pattern_name": "None",
+                    "confidence": 0.0,
                 }
-
-            if predicted_id == 0:
-                # Fix: old code returned pattern_confirmed=True when confidence < 0.70 —
-                # inverse logic (uncertain "no pattern" = confirmed pattern). Corrected:
-                # - High confidence no-pattern (≥ 0.70): model is sure there's nothing → fail
-                # - Low confidence no-pattern (< 0.70): model is uncertain → soft-pass with flag
-                #   so validate_signal() can use S/R-only approval path instead of hard-failing.
-                if confidence >= 0.70:
-                    return {"pattern_confirmed": False, "reason": "no_pattern_detected", "pattern_name": "Noise", "confidence": confidence, "model_uncertain": False}
-                else:
-                    return {"pattern_confirmed": False, "reason": "model_uncertain_no_pattern", "pattern_name": "Uncertain", "confidence": confidence, "model_uncertain": True}
-
-            # Alignment check
-            is_bullish = pattern_name in self.BULLISH_PATTERNS
-            is_bearish = pattern_name in self.BEARISH_PATTERNS
-            
-            if signal == 1 and not is_bullish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
-            if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
-
-            # ================================================================
-            # MR PATTERN CONFIRMATION: Institutional Reversal Pattern List
-            # AI-4 Fix: expanded from 3 to 7 per direction. Original list blocked
-            # valid reversal patterns (Harami, Piercing, Inverted Hammer, Dragonfly
-            # Doji) that are established in institutional reversal playbooks.
-            # ================================================================
-            if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
-                allowed_long = [
-                    "hammer", "morning_star", "bullish_engulfing",
-                    "harami", "bullish_harami", "piercing",
-                    "inverted_hammer", "dragonfly_doji", "three_inside",
-                ]
-                allowed_short = [
-                    "shooting_star", "evening_star", "bearish_engulfing",
-                    "bearish_harami", "dark_cloud", "dark_cloud_cover",
-                    "gravestone_doji", "hanging_man", "three_outside",
-                ]
-
-                # Normalize for matching
-                norm_pattern = pattern_name.lower().replace(" ", "_")
-
-                if signal == 1 and norm_pattern not in allowed_long:
-                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for LONG.")
-                    return {
-                        "pattern_confirmed": False,
-                        "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
-                    }
-
-                if signal == -1 and norm_pattern not in allowed_short:
-                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for SHORT.")
-                    return {
-                        "pattern_confirmed": False,
-                        "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
-                    }
-            
-            # --- Volume Weighting ---
-            if 'volume' in df.columns and len(df) > 20:
-                avg_vol = df['volume'].iloc[-21:-1].mean()
-                volume = df['volume'].iloc[-1]
-                if volume > (2.0 * avg_vol):
-                    min_confidence = max(0.45, min_confidence - 0.20)
-
-            if confidence < min_confidence:
-                result = {"pattern_confirmed": False, "reason": "low_confidence", "confidence": confidence}
                 if cache_key:
                     self._pattern_cache[cache_key] = result
                 return result
 
-            result = {"pattern_confirmed": True, "pattern_name": pattern_name, "confidence": confidence}
+            # ── Filter by signal direction ────────────────────────────────────
+            direction_candidates = [
+                (name, val) for name, val in candidates
+                if (signal == 1  and name in self.BULLISH_PATTERNS) or
+                   (signal == -1 and name in self.BEARISH_PATTERNS)
+            ]
+
+            if not direction_candidates:
+                all_names = [n for n, _ in candidates]
+                result = {
+                    "pattern_confirmed": False,
+                    "reason": "direction_mismatch",
+                    "pattern_name": all_names[0],
+                    "confidence": 0.0,
+                }
+                if cache_key:
+                    self._pattern_cache[cache_key] = result
+                return result
+
+            # ── Pick strongest ────────────────────────────────────────────────
+            # |val| 200 > 100; ties broken alphabetically for determinism.
+            pattern_name, best_val = max(direction_candidates, key=lambda x: abs(x[1]))
+
+            # Map talib signal strength to confidence:
+            #   ±200 (e.g. Three White Soldiers strong variant) → 0.85
+            #   ±100 (standard detection)                       → 0.70
+            confidence = 0.85 if abs(best_val) >= 200 else 0.70
+
+            # ── MR pattern allowlist ─────────────────────────────────────────
+            # Same list as before — keeps MR trades to high-conviction reversal
+            # patterns only.
+            if strategy.upper() in ("REVERSION", "MEAN_REVERSION"):
+                allowed_long = {
+                    "hammer", "morning star", "bullish engulfing",
+                    "harami", "bullish harami", "piercing",
+                    "inverted hammer", "dragonfly doji", "three inside",
+                }
+                allowed_short = {
+                    "shooting star", "evening star", "bearish engulfing",
+                    "bearish harami", "dark cloud cover", "dark cloud",
+                    "gravestone doji", "hanging man", "three outside",
+                }
+                norm = pattern_name.lower()
+                if signal == 1 and norm not in allowed_long:
+                    logger.info(
+                        f"[PATTERN] MR LONG blocked: '{pattern_name}' not in institutional list"
+                    )
+                    result = {"pattern_confirmed": False, "confidence": 0.0,
+                              "reason": f"unsupported_mr_pattern_{norm.replace(' ', '_')}"}
+                    if cache_key:
+                        self._pattern_cache[cache_key] = result
+                    return result
+                if signal == -1 and norm not in allowed_short:
+                    logger.info(
+                        f"[PATTERN] MR SHORT blocked: '{pattern_name}' not in institutional list"
+                    )
+                    result = {"pattern_confirmed": False, "confidence": 0.0,
+                              "reason": f"unsupported_mr_pattern_{norm.replace(' ', '_')}"}
+                    if cache_key:
+                        self._pattern_cache[cache_key] = result
+                    return result
+
+            # ── Volume boost ─────────────────────────────────────────────────
+            # High-volume confirmation lowers the effective min_confidence gate.
+            if "volume" in df.columns and len(df) > 20:
+                try:
+                    avg_vol = float(df["volume"].iloc[-21:-1].mean())
+                    cur_vol = float(df["volume"].iloc[-1])
+                    if avg_vol > 0 and cur_vol > 2.0 * avg_vol:
+                        min_confidence = max(0.45, min_confidence - 0.20)
+                except Exception:
+                    pass
+
+            if confidence < min_confidence:
+                result = {"pattern_confirmed": False, "reason": "low_confidence",
+                          "pattern_name": pattern_name, "confidence": confidence}
+                if cache_key:
+                    self._pattern_cache[cache_key] = result
+                return result
+
+            logger.info(
+                f"[PATTERN] ✅ {pattern_name} detected "
+                f"({'LONG' if signal == 1 else 'SHORT'}, conf={confidence:.0%}, "
+                f"talib_val={best_val})"
+            )
+            result = {"pattern_confirmed": True, "pattern_name": pattern_name,
+                      "confidence": confidence}
             if cache_key:
                 self._pattern_cache[cache_key] = result
             return result
+
         except Exception as e:
-            logger.error(f"[PATTERN] Error: {e}")
+            logger.error(f"[PATTERN] Error: {e}", exc_info=True)
             return {"pattern_confirmed": False, "reason": "error"}
 
     def _approve_signal(self, signal: int, signal_details: dict, sr_result: dict, pattern_result: dict, strategy: str, validation_time: float, df: Optional[pd.DataFrame] = None) -> Tuple[int, dict]:
