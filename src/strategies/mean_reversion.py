@@ -456,7 +456,7 @@ class MeanReversionStrategy(BaseStrategy):
             _vdr_valid = composite_state.vol_down_ratio_valid
             _veto_thr  = cfg["vol_down_ratio_veto"]
             if _vdr_valid and _vdr is not None and float(_vdr) > _veto_thr:
-                logger.debug(
+                logger.info(
                     f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > {_veto_thr} → VETO"
                 )
                 return 0, 0.0
@@ -464,15 +464,23 @@ class MeanReversionStrategy(BaseStrategy):
         # ── Spring (mandatory) ─────────────────────────────────────────────
         spring_ok, spring_strength = self._detect_spring(features)
         if not spring_ok:
-            logger.debug(f"[MR Mode1] {self.asset}: no spring → 0")
+            logger.info(f"[MR Mode1] {self.asset}: no spring detected → 0")
             return 0, 0.0
 
         # ── Optional conditions (2 of 4 required) ─────────────────────────
         opt_count = self._count_optional(features, direction=1)
         min_opt   = cfg["optional_min_count"]
         if opt_count < min_opt:
-            logger.debug(
-                f"[MR Mode1] {self.asset}: spring OK but opt={opt_count}<{min_opt} → 0"
+            _vc = self._check_vol_contraction(features, 1)
+            _hd = self._check_hidden_divergence(features, 1)
+            _bc = self._check_bb_contraction(features, 1)
+            _mp = self._check_ma_proximity(features, 1)
+            logger.info(
+                f"[MR Mode1] {self.asset}: spring OK but opt={opt_count}/{min_opt} → 0 "
+                f"[vol={'✓' if _vc else '✗'} "
+                f"hdiv={'✓' if _hd else '✗'} "
+                f"bbc={'✓' if _bc else '✗'} "
+                f"map={'✓' if _mp else '✗'}]"
             )
             return 0, 0.0
 
@@ -534,15 +542,23 @@ class MeanReversionStrategy(BaseStrategy):
         adx_max = int(cfg["adx_max"])
         adx_val = float(features["adx"].values[-1]) if not pd.isna(features["adx"].values[-1]) else 99.0
         if adx_val >= adx_max:
-            logger.debug(f"[MR Mode2] {self.asset}: ADX={adx_val:.1f} ≥ {adx_max} → 0")
+            logger.info(f"[MR Mode2] {self.asset}: ADX={adx_val:.1f} ≥ {adx_max} (need <{adx_max}) → 0")
             return 0, 0.0
 
         # ── 4 of 4 optional conditions ────────────────────────────────────
         opt_count = self._count_optional(features, direction)
         min_opt   = int(cfg["optional_min_count"])   # 4
         if opt_count < min_opt:
-            logger.debug(
-                f"[MR Mode2] {self.asset}: opt={opt_count} < {min_opt} → 0"
+            _vc = self._check_vol_contraction(features, direction)
+            _hd = self._check_hidden_divergence(features, direction)
+            _bc = self._check_bb_contraction(features, direction)
+            _mp = self._check_ma_proximity(features, direction)
+            logger.info(
+                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need all 4) → 0 "
+                f"[vol={'✓' if _vc else '✗'} "
+                f"hdiv={'✓' if _hd else '✗'} "
+                f"bbc={'✓' if _bc else '✗'} "
+                f"map={'✓' if _mp else '✗'}]"
             )
             return 0, 0.0
 
@@ -555,12 +571,20 @@ class MeanReversionStrategy(BaseStrategy):
                 # Was outside lower band (bb_pos < 0) and has now closed back inside
                 was_outside = any(float(v) < 0.0 for v in bb_pos_arr[-5:-1])
                 if not was_outside:
-                    logger.debug(f"[MR Mode2] {self.asset}: BB not recently outside (long) → 0")
+                    _bb_recent = [f"{float(v):.2f}" for v in bb_pos_arr[-5:]]
+                    logger.info(
+                        f"[MR Mode2] {self.asset}: BB not recently outside lower band "
+                        f"(long) — bb_pos last 5: {_bb_recent} → 0"
+                    )
                     return 0, 0.0
             elif direction == -1:
                 was_outside = any(float(v) > 1.0 for v in bb_pos_arr[-5:-1])
                 if not was_outside:
-                    logger.debug(f"[MR Mode2] {self.asset}: BB not recently outside (short) → 0")
+                    _bb_recent = [f"{float(v):.2f}" for v in bb_pos_arr[-5:]]
+                    logger.info(
+                        f"[MR Mode2] {self.asset}: BB not recently outside upper band "
+                        f"(short) — bb_pos last 5: {_bb_recent} → 0"
+                    )
                     return 0, 0.0
 
         # ── BTC-specific z-score gates ────────────────────────────────────
@@ -569,15 +593,15 @@ class MeanReversionStrategy(BaseStrategy):
             if direction == 1:
                 z_thr = float(cfg["btc_long_zscore_threshold"])   # -2.0
                 if z_score >= z_thr:
-                    logger.debug(
-                        f"[MR Mode2 BTC] LONG z={z_score:.2f} not < {z_thr} → 0"
+                    logger.info(
+                        f"[MR Mode2 BTC] LONG z={z_score:.2f} ≥ {z_thr} (need < {z_thr}) → 0"
                     )
                     return 0, 0.0
             elif direction == -1:
                 z_thr = float(cfg["btc_short_zscore_threshold"])  # 3.5
                 if z_score <= z_thr:
-                    logger.debug(
-                        f"[MR Mode2 BTC] SHORT z={z_score:.2f} not > {z_thr} → 0"
+                    logger.info(
+                        f"[MR Mode2 BTC] SHORT z={z_score:.2f} ≤ {z_thr} (need > {z_thr}) → 0"
                     )
                     return 0, 0.0
 
@@ -616,3 +640,420 @@ class MeanReversionStrategy(BaseStrategy):
         """
         cfg      = self._mr3_cfg["mode3"]
         features = self.generate_features(df.tail(260))
+        if len(features) < 60:
+            return 0, 0.0
+
+        # Direction from Livermore state
+        lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None
+        if lsm_state == "MAIN_UP":
+            direction = -1  # SHORT: fade the climax
+        elif lsm_state == "MAIN_DOWN":
+            direction = 1   # LONG: fade the selling climax
+        else:
+            return 0, 0.0
+
+        close    = features["close"].values
+        high_arr = features["high"].values
+        low_arr  = features["low"].values
+        atr_arr  = features["atr"].values
+        atr_now  = float(atr_arr[-1]) if not pd.isna(atr_arr[-1]) else 0.0
+        if atr_now <= 0:
+            return 0, 0.0
+
+        current_close = float(close[-1])
+
+        # ── Pull Livermore anchor from composite state ─────────────────────
+        anchor = None
+        if composite_state is not None:
+            if lsm_state == "MAIN_UP":
+                anchor = getattr(composite_state, "livermore_anchor_main_up_max", None)
+            elif lsm_state == "MAIN_DOWN":
+                anchor = getattr(composite_state, "livermore_anchor_main_down_min", None)
+
+        # ── leg_stretch_ratio: current leg vs typical leg ─────────────────
+        stretch_min = float(cfg["leg_stretch_ratio_min"])
+        leg_stretch_ok = False
+
+        if anchor is not None and float(anchor) > 0:
+            current_leg = abs(current_close - float(anchor))
+            # Typical leg: median of range across N windows of W bars each
+            lb  = min(int(cfg["leg_stretch_lookback"]), len(close) - 1)
+            win = int(cfg["leg_stretch_window"])
+            _h  = high_arr[-lb:]
+            _l  = low_arr[-lb:]
+            _window_ranges = []
+            for _w in range(0, lb - win, win):
+                _window_ranges.append(float(np.max(_h[_w:_w+win]) - np.min(_l[_w:_w+win])))
+            if len(_window_ranges) >= 3:
+                typical_leg = float(np.median(_window_ranges))
+            else:
+                typical_leg = atr_now * 8.0   # Fallback: 8×ATR
+            if typical_leg <= 0:
+                typical_leg = atr_now * 8.0
+
+            leg_stretch_ratio = current_leg / typical_leg
+            if leg_stretch_ratio >= stretch_min:
+                leg_stretch_ok = True
+            else:
+                logger.info(
+                    f"[MR Mode3] {self.asset}: leg_stretch={leg_stretch_ratio:.2f} < {stretch_min} "
+                    f"(leg={current_leg:.4f}, typical={typical_leg:.4f}) → 0"
+                )
+                return 0, 0.0
+        # If anchor unavailable, leg check bypassed (dist_ok becomes sole gate)
+
+        # ── Price distance from anchor: > 2.5×ATR ─────────────────────────
+        _atr_mult = float(cfg["price_anchor_atr_mult"])
+        if anchor is not None and float(anchor) > 0:
+            _anchor_dist_atr = abs(current_close - float(anchor)) / atr_now
+        else:
+            # Fallback: distance from EMA50
+            _ema50 = float(features["ema_50"].values[-1]) if not pd.isna(features["ema_50"].values[-1]) else current_close
+            _anchor_dist_atr = abs(current_close - _ema50) / atr_now
+
+        if _anchor_dist_atr <= _atr_mult:
+            logger.info(
+                f"[MR Mode3] {self.asset}: anchor_dist={_anchor_dist_atr:.2f}×ATR ≤ {_atr_mult} "
+                f"(close={current_close:.4f}, anchor={anchor}) → 0"
+            )
+            return 0, 0.0
+
+        # ── High-rank reversal candle ──────────────────────────────────────
+        _n  = min(len(features), 30)
+        _o  = features["open"].values[-_n:]
+        _h  = features["high"].values[-_n:]
+        _l  = features["low"].values[-_n:]
+        _c  = features["close"].values[-_n:]
+
+        reversal_ok = False
+        if direction == -1:   # MAIN_UP → SHORT
+            # Bearish engulfing (historical win rate ~79%) or evening star (~72%)
+            # Shooting star excluded: lower reliability (~59%)
+            _eng = ta.CDLENGULFING(_o, _h, _l, _c)
+            _eve = ta.CDLEVENINGSTAR(_o, _h, _l, _c, penetration=0.3)
+            reversal_ok = int(_eng[-1]) < 0 or int(_eve[-1]) < 0
+        elif direction == 1:  # MAIN_DOWN → LONG
+            # Bullish engulfing or morning star (symmetric equivalents)
+            _eng  = ta.CDLENGULFING(_o, _h, _l, _c)
+            _morn = ta.CDLMORNINGSTAR(_o, _h, _l, _c, penetration=0.3)
+            reversal_ok = int(_eng[-1]) > 0 or int(_morn[-1]) > 0
+
+        if not reversal_ok:
+            logger.info(f"[MR Mode3] {self.asset}: no high-rank reversal candle (engulfing/star) → 0")
+            return 0, 0.0
+
+        # ── Above-average volume ───────────────────────────────────────────
+        if cfg.get("require_above_avg_volume", True) and "volume" in features.columns:
+            try:
+                _vol_lb   = int(cfg["volume_avg_lookback"])
+                _vol_avg  = float(np.mean(features["volume"].values[-_vol_lb-1:-1]))
+                _vol_now  = float(features["volume"].values[-1])
+                if _vol_avg > 0 and _vol_now <= _vol_avg:
+                    logger.info(
+                        f"[MR Mode3] {self.asset}: volume {_vol_now:.0f} ≤ avg {_vol_avg:.0f} "
+                        f"(need above-avg) → 0"
+                    )
+                    return 0, 0.0
+            except Exception:
+                pass   # Missing volume data: do not block
+
+        # ── Confidence ─────────────────────────────────────────────────────
+        # Scales with how overextended the anchor distance is
+        dist_factor = min(1.5, _anchor_dist_atr / _atr_mult)
+        confidence  = float(min(1.0, 0.60 + (dist_factor - 1.0) * 0.15))
+
+        _dir_str = "SHORT" if direction == -1 else "LONG"
+        logger.info(
+            f"[MR Mode3] {self.asset}: {_dir_str} climax fade "
+            f"anchor_dist={_anchor_dist_atr:.1f}×ATR conf={confidence:.2f}"
+        )
+        return direction, confidence
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LEGACY SCORECARD  (fallback during Livermore warmup)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _find_swing_pivot(
+        self, values: np.ndarray, direction: str, lookback: int = 60, n_bars: int = 5
+    ) -> int:
+        """Find a significant swing high/low via N-bar comparison window."""
+        if len(values) < lookback:
+            lookback = len(values)
+        for j in range(n_bars, lookback - n_bars):
+            idx = len(values) - j - 1
+            if idx < n_bars or idx + n_bars >= len(values):
+                continue
+            window = values[idx - n_bars: idx + n_bars + 1]
+            if direction == "low"  and values[idx] == np.min(window): return idx
+            if direction == "high" and values[idx] == np.max(window): return idx
+        return -1
+
+    def _check_divergence_legacy(
+        self, df: pd.DataFrame, signal: int, period: int = 60
+    ) -> bool:
+        """Classic price/RSI divergence check (used by legacy scorecard only)."""
+        try:
+            if len(df) < period:
+                return False
+            close    = df["close"].values
+            rsi_vals = df["rsi"].values
+            if signal == 1:
+                ci = self._find_swing_pivot(close, "low", lookback=20, n_bars=5)
+                if ci == -1: return False
+                pi = self._find_swing_pivot(close, "low", lookback=period, n_bars=5)
+                if pi == -1 or pi >= ci - 5: return False
+                return close[ci] < close[pi] and rsi_vals[ci] > rsi_vals[pi]
+            elif signal == -1:
+                ci = self._find_swing_pivot(close, "high", lookback=20, n_bars=5)
+                if ci == -1: return False
+                pi = self._find_swing_pivot(close, "high", lookback=period, n_bars=5)
+                if pi == -1 or pi >= ci - 5: return False
+                return close[ci] > close[pi] and rsi_vals[ci] < rsi_vals[pi]
+        except Exception:
+            return False
+        return False
+
+    def _legacy_scorecard(
+        self, df: pd.DataFrame, df_4h: pd.DataFrame = None
+    ) -> tuple:
+        """
+        Macro Reversion Scorecard — active during Livermore warmup period only.
+        Mirrors the pre-Phase-3A logic exactly to avoid any warmup-period gap.
+        """
+        try:
+            features = self.generate_features(df.tail(150))
+            if len(features) < 100:
+                return 0, 0.0
+
+            close    = features["close"].values
+            high_arr = features["high"].values
+            low_arr  = features["low"].values
+            bb_pos   = features["bb_position"].values
+            bb_upper = features["bb_upper"].values
+            bb_lower = features["bb_lower"].values
+            rsi_arr  = features["rsi"].values
+            atr_arr  = features["atr"].values
+            ema50    = features["ema_50"].values
+
+            cur = float(close[-1])
+            vel_drop = float(close[-4]) - cur
+            vel_rise = cur - float(close[-4])
+            atr_thr  = 4.0 * float(atr_arr[-1])
+
+            sl = 0; ss = 0  # score_long, score_short
+
+            # PILLAR 1: Stretch (2 pts)
+            sl_full  = (float(ema50[-1]) - cur > 1.5 * float(atr_arr[-1])) or (cur < float(bb_lower[-1]))
+            ss_full  = (cur - float(ema50[-1]) > 1.5 * float(atr_arr[-1])) or (cur > float(bb_upper[-1]))
+            if sl_full: sl += 2
+            if ss_full: ss += 2
+            if not sl_full and float(ema50[-1]) - cur > 0.8 * float(atr_arr[-1]): sl += 1
+            if not ss_full and cur - float(ema50[-1]) > 0.8 * float(atr_arr[-1]): ss += 1
+
+            # PILLAR 1.5: RSI extreme (1 pt)
+            if float(bb_pos[-1]) < 0.15 and float(rsi_arr[-1]) < 35: sl += 1
+            if float(bb_pos[-1]) > 0.85 and float(rsi_arr[-1]) > 65: ss += 1
+
+            # PILLAR 2: Divergence (1 pt)
+            if self._check_divergence_legacy(features, signal=1):  sl += 1
+            if self._check_divergence_legacy(features, signal=-1): ss += 1
+
+            # PILLAR 3: Liquidity sweep (1 pt)
+            _lb_low  = low_arr[-31:-1]
+            _lb_high = high_arr[-31:-1]
+            if len(_lb_low) > 0:
+                if cur < float(np.min(_lb_low)):  sl += 1
+                if cur > float(np.max(_lb_high)): ss += 1
+
+            # PILLAR 4: Exhaustion candle at extremes (1 pt)
+            if float(bb_pos[-1]) < 0.15 or float(bb_pos[-1]) > 0.85:
+                _o = features["open"].values
+                _h = features["high"].values
+                _l = features["low"].values
+                _c = features["close"].values
+                for _fn in (ta.CDLHAMMER, ta.CDLDOJI, ta.CDLENGULFING):
+                    _res = _fn(_o, _h, _l, _c)
+                    if int(_res[-1]) > 0: sl += 1
+                    if int(_res[-1]) < 0: ss += 1
+
+            logger.info(
+                f"[MR LEGACY] {self.asset}: long={sl}/6 short={ss}/6 (need ≥3, Livermore warmup)"
+            )
+
+            sig, conf = 0, 0.0
+            if sl >= 3.0 and vel_drop <= atr_thr:
+                sig  =  1
+                conf = min(1.0, 0.6 + (sl - 3.0) * 0.2)
+            elif ss >= 3.0 and vel_rise <= atr_thr:
+                sig  = -1
+                conf = min(1.0, 0.6 + (ss - 3.0) * 0.2)
+            return sig, conf
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Legacy scorecard error: {e}")
+            return 0, 0.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MAIN SIGNAL ENTRY POINT
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def generate_signal(
+        self,
+        df: pd.DataFrame,
+        df_4h: pd.DataFrame = None,
+        composite_state=None,
+    ) -> tuple:
+        """
+        Phase 3A: Route to the appropriate MR mode based on Livermore 1H state.
+
+        State routing:
+          NATURAL_RETRACEMENT   → Mode 1 (Pullback Completion, LONG only)
+          NATURAL_REBOUND       → zero  (MR silent zone; LONGs blocked by Phase 2 HVL)
+          SECONDARY_RETRACEMENT → Mode 2 (Counter-Trend, LONG)
+          SECONDARY_REBOUND     → Mode 2 (Counter-Trend, SHORT)
+          MAIN_UP               → Mode 3 (Climax Fade, SHORT)
+          MAIN_DOWN             → Mode 3 (Climax Fade, LONG)
+          None (warmup)         → Legacy scorecard fallback
+
+        Signature is backward-compatible: composite_state is optional.
+        """
+        if len(df) < self.get_warmup_period():
+            return 0, 0.0
+
+        try:
+            lsm_state = None
+            if composite_state is not None:
+                lsm_state = getattr(composite_state, "livermore_state_1h", None)
+
+            # ── MR routing diagnostic (Issue 2 Step 1 — always visible at INFO) ──
+            _mode_label = {
+                "NATURAL_RETRACEMENT":   "Mode1(Pullback/LONG)",
+                "NATURAL_REBOUND":       "SILENT_ZONE",
+                "SECONDARY_RETRACEMENT": "Mode2(Counter/LONG)",
+                "SECONDARY_REBOUND":     "Mode2(Counter/SHORT)",
+                "MAIN_UP":               "Mode3(Fade/SHORT)",
+                "MAIN_DOWN":             "Mode3(Fade/LONG)",
+            }
+            logger.info(
+                f"[MR GATE] {self.asset}: lsm_1h={lsm_state} "
+                f"→ {_mode_label.get(lsm_state, 'LEGACY(warmup)') if lsm_state else 'LEGACY(warmup)'}"
+            )
+
+            if lsm_state == "NATURAL_RETRACEMENT":
+                return self._mode1_pullback_completion(df, composite_state)
+
+            elif lsm_state == "NATURAL_REBOUND":
+                # MR silent zone for LONGs (Phase 2 Hard Veto Block A/C covers this).
+                # No Mode 1 SHORT spec in Phase 3A — emit zero here.
+                return 0, 0.0
+
+            elif lsm_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                return self._mode2_counter_trend(df, composite_state)
+
+            elif lsm_state in ("MAIN_UP", "MAIN_DOWN"):
+                return self._mode3_climax_fade(df, composite_state)
+
+            else:
+                # Livermore state unavailable (warmup or None) → legacy fallback
+                return self._legacy_scorecard(df, df_4h)
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Signal error: {e}", exc_info=True)
+            return 0, 0.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # GENERATE LABELS  (training — legacy scorecard, no composite state)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def generate_labels(
+        self,
+        df: pd.DataFrame,
+        df_4h: pd.DataFrame = None,
+        pattern_miner=None,
+    ) -> pd.Series:
+        """
+        Training labels via legacy macro-reversion scorecard.
+        Phase 3A mode-aware labeling requires per-bar Livermore state
+        (available in Phase 3B backtest pass or standalone calibration run).
+        """
+        df     = df.copy()
+        labels = pd.Series(0, index=df.index)
+        df     = self.generate_features(df)
+
+        close    = df["close"].values
+        high_arr = df["high"].values
+        low_arr  = df["low"].values
+        bb_upper = df["bb_upper"].values
+        bb_lower = df["bb_lower"].values
+        bb_pos   = df["bb_position"].values
+        rsi_arr  = df["rsi"].values
+        atr_arr  = df["atr"].values
+        ema50    = df["ema_50"].values
+
+        signal_count = {"buy": 0, "sell": 0, "hold": 0}
+
+        for i in range(100, len(df) - self.reversion_window - 1):
+            if pd.isna(ema50[i]) or pd.isna(rsi_arr[i]):
+                continue
+
+            cur      = float(close[i])
+            vel_drop = float(close[i-3]) - cur
+            vel_rise = cur - float(close[i-3])
+            atr_thr  = 4.0 * float(atr_arr[i])
+
+            sl = ss = 0
+
+            # PILLAR 1: Stretch
+            sl_full  = (float(ema50[i]) - cur > 1.5 * float(atr_arr[i])) or (cur < float(bb_lower[i]))
+            ss_full  = (cur - float(ema50[i]) > 1.5 * float(atr_arr[i])) or (cur > float(bb_upper[i]))
+            if sl_full: sl += 2
+            if ss_full: ss += 2
+            if not sl_full and float(ema50[i]) - cur > 0.8 * float(atr_arr[i]): sl += 1
+            if not ss_full and cur - float(ema50[i]) > 0.8 * float(atr_arr[i]): ss += 1
+
+            # PILLAR 1.5: RSI extreme
+            if float(bb_pos[i]) < 0.15 and float(rsi_arr[i]) < 35: sl += 1
+            if float(bb_pos[i]) > 0.85 and float(rsi_arr[i]) > 65: ss += 1
+
+            # PILLAR 2: Divergence
+            _slc = df.iloc[:i+1]
+            if self._check_divergence_legacy(_slc, signal=1):  sl += 1
+            if self._check_divergence_legacy(_slc, signal=-1): ss += 1
+
+            # PILLAR 3: Sweep
+            _lb_l = low_arr[max(0, i-30):i]
+            _lb_h = high_arr[max(0, i-30):i]
+            if len(_lb_l) > 0:
+                if cur < float(np.min(_lb_l)):  sl += 1
+                if cur > float(np.max(_lb_h)): ss += 1
+
+            # PILLAR 4: Exhaustion at extremes
+            if float(bb_pos[i]) < 0.15 or float(bb_pos[i]) > 0.85:
+                _o = df["open"].values[:i+1]
+                _h = df["high"].values[:i+1]
+                _l = df["low"].values[:i+1]
+                _c = df["close"].values[:i+1]
+                for _fn in (ta.CDLHAMMER, ta.CDLDOJI, ta.CDLENGULFING):
+                    _res = _fn(_o, _h, _l, _c)
+                    if int(_res[-1]) > 0: sl += 1
+                    if int(_res[-1]) < 0: ss += 1
+
+            # Future return validation
+            _atr_pct   = float(atr_arr[i]) / max(cur, 1e-10)
+            min_return = max(self.min_return_threshold, 0.30 * _atr_pct)
+            _fut       = close[i+1: i+1+5]
+            _fut_ret   = (float(np.mean(_fut)) - cur) / cur if len(_fut) > 0 else 0.0
+
+            if sl >= 3.0 and vel_drop <= atr_thr and _fut_ret > min_return:
+                labels.iloc[i] = 1;  signal_count["buy"] += 1
+            elif ss >= 3.0 and vel_rise <= atr_thr and _fut_ret < -min_return:
+                labels.iloc[i] = -1; signal_count["sell"] += 1
+
+        labels.iloc[-self.reversion_window:] = 0
+        signal_count["hold"] = len(labels) - signal_count["buy"] - signal_count["sell"]
+        total = len(labels)
+        logger.info(f"[{self.name}] Label distribution (legacy scorecard):")
+        logger.info(f"  SELL: {signal_count['sell']:>5} ({signal_count['sell']/total*100:>5.2f}%)")
+        logger.info(f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)")
+        logger.info(f"  BUY:  {signal_count['buy']:>5}  ({signal_count['buy']/total*100:>5.2f}%)")
+        return labels

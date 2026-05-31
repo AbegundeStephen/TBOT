@@ -17,6 +17,77 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ADX SLOPE UTILITY  (shared by TrendFollowing + CouncilAggregator)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_adx_slope(adx_arr) -> dict:
+    """
+    Compute ADX rate-of-change and classify it into an actionable regime.
+
+    Parameters
+    ----------
+    adx_arr : array-like of float
+        ADX values, newest last.  Must have ≥ 6 elements; returns FLAT
+        with zero slopes when the series is too short.
+
+    Returns
+    -------
+    dict with keys:
+        short_slope  : float  — 2-bar change  (adx[-1] - adx[-3])
+        med_slope    : float  — 5-bar change  (adx[-1] - adx[-6])
+        regime       : str    — one of RISING_FAST | RISING | FLAT |
+                                FALLING | FALLING_FAST
+        momentum     : float  — normalised scalar  -1.0 … +1.0
+                                (positive = strengthening, negative = weakening)
+
+    Regime thresholds (typical ADX swings 0–60 over the periods used):
+        RISING_FAST  : short > 3  AND med > 5   — new trend accelerating
+        RISING       : short > 1  OR  med > 2   — trend building
+        FLAT         : |short| ≤ 1              — no directional change
+        FALLING      : short < -1 OR  med < -2  — trend losing steam
+        FALLING_FAST : short < -3 AND med < -5  — trend collapsing
+    """
+    if adx_arr is None or len(adx_arr) < 6:
+        return {"short_slope": 0.0, "med_slope": 0.0,
+                "regime": "FLAT", "momentum": 0.0}
+
+    arr = np.asarray(adx_arr, dtype=float)
+    # Replace NaN with the nearest valid value
+    nan_mask = np.isnan(arr)
+    if nan_mask.all():
+        return {"short_slope": 0.0, "med_slope": 0.0,
+                "regime": "FLAT", "momentum": 0.0}
+    if nan_mask.any():
+        idx = np.where(~nan_mask)[0]
+        arr = np.interp(np.arange(len(arr)), idx, arr[idx])
+
+    short_slope = float(arr[-1] - arr[-3])   # 2-bar
+    med_slope   = float(arr[-1] - arr[-6])   # 5-bar
+
+    # Weighted composite: short-term gets more weight for responsiveness
+    raw_momentum = short_slope * 0.6 + med_slope * 0.4
+    momentum = float(np.clip(raw_momentum / 10.0, -1.0, 1.0))
+
+    if   short_slope >  3 and med_slope >  5:
+        regime = "RISING_FAST"
+    elif short_slope >  1 or  med_slope >  2:
+        regime = "RISING"
+    elif short_slope < -3 and med_slope < -5:
+        regime = "FALLING_FAST"
+    elif short_slope < -1 or  med_slope < -2:
+        regime = "FALLING"
+    else:
+        regime = "FLAT"
+
+    return {
+        "short_slope": round(short_slope, 2),
+        "med_slope":   round(med_slope,   2),
+        "regime":      regime,
+        "momentum":    round(momentum,    3),
+    }
+
+
 class TrendFollowingStrategy(BaseStrategy):
     """
      trend following with multi-timeframe analysis
@@ -352,10 +423,73 @@ class TrendFollowingStrategy(BaseStrategy):
         if latest["close"] > latest["sma_fast"]: bullish_score += 1.0
         elif latest["close"] < latest["sma_fast"]: bearish_score += 1.0
 
-        # 5. ADX Bonus (0-1 point)
+        # 5. ADX Bonus — slope-aware (0 – 1.5 points)
+        # ──────────────────────────────────────────────────────────────────
+        # The old binary gate (ADX > 25 → +1.0) gave the same bonus to a
+        # rising ADX=26 (trend just starting) and a falling ADX=40 (trend
+        # exhausted).  The slope-aware version scales the bonus by trend
+        # momentum so entries are rewarded more when ADX is accelerating and
+        # penalised when it is rolling over.
+        #
+        # Bonus table:
+        #   RISING_FAST  (slope > 3 short, > 5 med)  → +1.50  early acceleration
+        #   RISING       (slope > 1 or > 2 med)       → +1.20  trend building
+        #   FLAT         (|slope| ≤ 1)                → +1.00  baseline (no change)
+        #   FALLING      (slope < -1 or < -2 med)     → +0.60  losing momentum
+        #   FALLING_FAST (slope < -3 and < -5 med)    → +0.30  trend collapsing
+        #
+        # Early formation bonus (ADX 18–25, rising fast):
+        #   A trend forming below the threshold is still a trend.  +0.40
+        #   when the slope is strong so the bot doesn't miss the first bars.
+        # ──────────────────────────────────────────────────────────────────
+        _adx_slope = compute_adx_slope(df["adx"].values if "adx" in df.columns else None)
+        _adx_regime = _adx_slope["regime"]
+
+        _SLOPE_BONUS = {
+            "RISING_FAST":  1.50,
+            "RISING":       1.20,
+            "FLAT":         1.00,
+            "FALLING":      0.60,
+            "FALLING_FAST": 0.30,
+        }
+        _adx_bonus = _SLOPE_BONUS.get(_adx_regime, 1.00)
+
         if latest["adx"] > 25:
-            if bullish_score > bearish_score: bullish_score += 1.0
-            elif bearish_score > bullish_score: bearish_score += 1.0
+            if bullish_score > bearish_score:
+                bullish_score += _adx_bonus
+                if not silent and _adx_regime != "FLAT":
+                    logger.info(
+                        f"[{self.name}] ADX {latest['adx']:.1f} {_adx_regime} "
+                        f"(s={_adx_slope['short_slope']:+.1f} m={_adx_slope['med_slope']:+.1f}) "
+                        f"→ bull bonus +{_adx_bonus:.1f}"
+                    )
+            elif bearish_score > bullish_score:
+                bearish_score += _adx_bonus
+                if not silent and _adx_regime != "FLAT":
+                    logger.info(
+                        f"[{self.name}] ADX {latest['adx']:.1f} {_adx_regime} "
+                        f"(s={_adx_slope['short_slope']:+.1f} m={_adx_slope['med_slope']:+.1f}) "
+                        f"→ bear bonus +{_adx_bonus:.1f}"
+                    )
+        elif latest["adx"] > 18 and _adx_regime in ("RISING_FAST", "RISING"):
+            # Early trend formation: ADX hasn't crossed 25 yet but it's climbing.
+            # Give a small bonus so the strategy doesn't miss the first bars of a
+            # new trend — these are often the highest-quality entries.
+            _early_bonus = 0.40
+            if bullish_score > bearish_score:
+                bullish_score += _early_bonus
+                if not silent:
+                    logger.info(
+                        f"[{self.name}] ADX early formation: {latest['adx']:.1f} "
+                        f"{_adx_regime} → bull early +{_early_bonus:.1f}"
+                    )
+            elif bearish_score > bullish_score:
+                bearish_score += _early_bonus
+                if not silent:
+                    logger.info(
+                        f"[{self.name}] ADX early formation: {latest['adx']:.1f} "
+                        f"{_adx_regime} → bear early +{_early_bonus:.1f}"
+                    )
 
         # ✅ T1.2C: Live Squeeze Filter
         recent_widths = df["bb_width_norm"].tail(100).values

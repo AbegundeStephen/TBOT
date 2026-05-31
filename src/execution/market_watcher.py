@@ -179,6 +179,18 @@ class MarketWatcher:
     def _refresh_asset_momentum(self, asset_name: str, asset_cfg: dict):
         exchange = asset_cfg.get("exchange", "mt5")
 
+        # ── Skip data fetch when market is closed (non-crypto MT5 assets) ────
+        # GBPAUD / GOLD / EURUSD / USOIL return no data on weekends, generating
+        # a flood of "No MT5 data" errors every 15 seconds. Momentum doesn't
+        # change while the market is closed so the fetch is pointless anyway.
+        if exchange == "mt5":
+            try:
+                from src.utils.market_hours import MarketHours
+                if not MarketHours.should_trade(asset_name):
+                    return  # market closed — skip quietly
+            except Exception:
+                pass  # MarketHours unavailable: proceed normally
+
         # ── Fetch last N+1 closed candles ────────────────────────────────────
         df = None
         try:
@@ -428,8 +440,24 @@ class MarketWatcher:
 
         # ── Determine alert level ────────────────────────────────────────────
         if adverse_in_atr >= _ADVERSE_ATR_CLOSE:
+            # Extreme move: act unconditionally — price may have gapped past the SL.
             self._handle_extreme_adverse(position, current_price, adverse, atr, handler, asset_name)
         elif adverse_in_atr >= _ADVERSE_ATR_WARN:
+            # Moderate adverse move. Only act if the existing SL does NOT already
+            # cover this move — i.e. price has already blown PAST the stop.
+            # If the SL is still ahead of current price, let VTM manage it normally.
+            # Without this guard the watcher overwrites the VTM's designed stop
+            # distance the moment price touches it, causing premature exits on
+            # trades that then continue in the expected direction.
+            sl = position.stop_loss
+            if sl is not None:
+                if position.side == "short" and current_price <= sl:
+                    # Price is below the SHORT stop — SL is still valid, do nothing.
+                    return
+                if position.side == "long" and current_price >= sl:
+                    # Price is above the LONG stop — SL is still valid, do nothing.
+                    return
+            # No SL set, or price has blown through the existing SL → tighten.
             self._handle_warn_adverse(position, current_price, adverse, atr, asset_name)
 
     def _handle_warn_adverse(

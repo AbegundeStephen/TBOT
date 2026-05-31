@@ -966,14 +966,35 @@ class VeteranTradeManager:
         else:
             current_profit = self.entry_price - current_price
 
-        # --- STEP 0.5: Intermediate Trail (Early Protection) ---
-        # Fires when profit exceeds 1.0×ATR — the trade has proven itself with a full
-        # ATR of room, not just 0.75×.  Firing earlier (0.75×) caused chop-outs: a
-        # normal intrabar pullback after a modest push would stop the trade before it
-        # could play out.  At 1.0× the trade has real momentum before we tighten.
-        # SL moves to entry - (initial_risk - 0.5×ATR), reducing risk by ~half while
-        # still leaving 1.5× ATR of breathing room from current price.
+        # --- STEP 0.25: Soft Risk Reduction (first profit confirmation) ---
+        # Fires at 0.75×ATR profit — trade has moved meaningfully in our favour but
+        # hasn't proven full momentum yet. SL shifts to entry − 0.75×initial_risk,
+        # cutting risk by 25% while leaving ample room to breathe.
+        # Fills the gap between entry and the 1.0×ATR intermediate trail so a
+        # reversal after an early push exits at a reduced loss, not full risk.
         _initial_risk = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss is not None else atr_value
+        if current_profit > 0.75 * atr_value:
+            if self.side == "long":
+                _soft_sl = self.entry_price - 0.75 * _initial_risk
+                if _soft_sl > self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
+                    )
+                    self.current_stop_loss = _soft_sl
+            else:
+                _soft_sl = self.entry_price + 0.75 * _initial_risk
+                if _soft_sl < self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
+                    )
+                    self.current_stop_loss = _soft_sl
+
+        # --- STEP 0.5: Intermediate Trail (Early Protection) ---
+        # Fires when profit exceeds 1.0×ATR — trade has proven itself with a full
+        # ATR of room. SL moves to entry − (initial_risk − 0.5×ATR), reducing risk
+        # by ~half while leaving 1.5×ATR of breathing room from current price.
         if current_profit > 1.0 * atr_value:
             if self.side == "long":
                 _intermediate_sl = self.entry_price - max(0.0, _initial_risk - 0.5 * atr_value)

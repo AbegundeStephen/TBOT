@@ -15,6 +15,7 @@ from src.utils.trap_filter import validate_candle_structure
 from src.indicators.divergence import RSIDivergenceDetector
 from src.analysis.break_retest import BreakRetestValidator
 from src.execution.transition_detector import TransitionDetector
+from src.strategies.trend_following import compute_adx_slope
 
 logger = logging.getLogger(__name__)
 
@@ -2142,16 +2143,23 @@ class InstitutionalCouncilAggregator:
             buy_exp  = "STRUCT BUY: ❌ No signal"
             sell_exp = "STRUCT SELL: ❌ No signal"
 
-            cs = (governor_data or {}).get("composite_state", {}) if governor_data else {}
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
 
             if cs:
                 # ── Phase 3B: CompositeState reads ────────────────────────────
-                bos_detected      = bool(cs.get("bos_detected",       False))
-                choch_detected    = bool(cs.get("choch_detected",     False))
-                level_defended    = bool(cs.get("level_defended",     False))
-                rej_at_level      = bool(cs.get("rejection_at_level", False))
-                failed_breakout   = bool(cs.get("failed_breakout",    False))
-                sweep_direction   = int(cs.get("sweep_direction",     0))
+                # composite_state may be a CompositeState dataclass or a dict;
+                # use getattr with fallback to handle both.
+                def _cs(attr, default=False):
+                    if isinstance(cs, dict):
+                        return cs.get(attr, default)
+                    return getattr(cs, attr, default)
+
+                bos_detected      = bool(_cs("bos_detected",       False))
+                choch_detected    = bool(_cs("choch_detected",     False))
+                level_defended    = bool(_cs("level_defended",     False))
+                rej_at_level      = bool(_cs("rejection_at_level", False))
+                failed_breakout   = bool(_cs("failed_breakout",    False))
+                sweep_direction   = int(_cs("sweep_direction",     0))
                 is_bullish_regime = bool((governor_data or {}).get("is_bullish", False))
 
                 # ── BUY scoring ───────────────────────────────────────────────
@@ -2330,11 +2338,16 @@ class InstitutionalCouncilAggregator:
             # MRS: "conviction_dying reduces momentum score regardless of direction.
             #       vpd_diverging reduces score in trend direction.
             #       cvd_trend gives a small directional boost."
-            cs = (governor_data or {}).get("composite_state", {}) if governor_data else {}
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
             if cs:
-                conviction_dying = bool(cs.get("conviction_dying", False))
-                vpd_diverging    = bool(cs.get("vpd_diverging",    False))
-                cvd_trend        = int(cs.get("cvd_trend",          0))
+                def _cs(attr, default=False):
+                    if isinstance(cs, dict):
+                        return cs.get(attr, default)
+                    return getattr(cs, attr, default)
+
+                conviction_dying = bool(_cs("conviction_dying", False))
+                vpd_diverging    = bool(_cs("vpd_diverging",    False))
+                cvd_trend        = int(_cs("cvd_trend",          0))
 
                 if conviction_dying:
                     # Shrinking candle bodies = conviction dying; penalise both
@@ -2361,8 +2374,107 @@ class InstitutionalCouncilAggregator:
                     sell_score = min(sell_score + 0.15 * weight, weight)
                     sell_exp  += " +cvd"
 
+            # ── ADX slope modifier ────────────────────────────────────────────
+            # The raw ADX value (passed in as `adx`) is a snapshot.  The slope
+            # tells us whether trend strength is building or decaying — critical
+            # information for momentum scoring.
+            #
+            # Impact table (applied as a multiplier on the DOMINANT side only,
+            # capped so the score never exceeds the judge weight):
+            #   RISING_FAST  → +20% of weight  (trend accelerating)
+            #   RISING       → +10% of weight  (trend building)
+            #   FLAT         →   0%            (no change)
+            #   FALLING      → −15% of weight  (trend losing steam)
+            #   FALLING_FAST → −25% of weight  (trend collapsing)
+            #
+            # Also: when ADX is below 20 AND falling, both directions are
+            # penalised (choppy market, signals are noise).
+            # ─────────────────────────────────────────────────────────────────
+            try:
+                _adx_col = df["adx"].dropna().values if "adx" in df.columns else None
+                _slope   = compute_adx_slope(_adx_col)
+                _regime  = _slope["regime"]
+
+                _SLOPE_DELTA = {
+                    "RISING_FAST":  +0.20 * weight,
+                    "RISING":       +0.10 * weight,
+                    "FLAT":          0.0,
+                    "FALLING":      -0.15 * weight,
+                    "FALLING_FAST": -0.25 * weight,
+                }
+                _delta = _SLOPE_DELTA.get(_regime, 0.0)
+
+                # ── Livermore-aware ADX slope interpretation ──────────────────
+                # The default delta table assumes MAIN states where rising ADX
+                # aligns with the trade direction.  In SECONDARY and NATURAL
+                # states the relationship inverts or becomes ambiguous.
+                #
+                # SECONDARY_RETRACEMENT / SECONDARY_REBOUND (counter-trend setup):
+                #   Rising ADX = the ADVERSE move is accelerating → flip delta so
+                #   rising becomes a penalty and falling becomes a boost (exhaustion
+                #   is what you want before a counter-trend entry).
+                #
+                # NATURAL_RETRACEMENT / NATURAL_REBOUND (pullback within trend):
+                #   Rising ADX during a retracement is ambiguous — could be the
+                #   correction intensifying OR the trend reasserting.  Cap delta
+                #   to 0 (FLAT behaviour) to avoid false confidence either way.
+                #
+                # MAIN_UP / MAIN_DOWN: leave as-is — rising ADX is unambiguously
+                # bullish for the trend direction.
+                # ─────────────────────────────────────────────────────────────
+                _lsm_1h = None
+                if cs:
+                    _lsm_1h = _cs("livermore_state_1h", None)
+
+                _lsm_context = "MAIN"   # default
+                if _lsm_1h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                    _lsm_context = "SECONDARY"
+                elif _lsm_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+                    _lsm_context = "NATURAL"
+
+                if _lsm_context == "SECONDARY":
+                    # Flip: rising becomes penalty, falling becomes boost
+                    _delta = -_delta
+                elif _lsm_context == "NATURAL":
+                    # Ambiguous: neutralise any boost, keep penalties
+                    if _delta > 0:
+                        _delta = 0.0
+
+                _lsm_tag = f"|lsm={_lsm_1h}" if _lsm_1h and _lsm_context != "MAIN" else ""
+
+                if _delta != 0.0:
+                    if buy_score >= sell_score and buy_score > 0:
+                        buy_score = float(np.clip(buy_score + _delta, 0.0, weight))
+                        _sign = "+" if _delta > 0 else ""
+                        buy_exp += (
+                            f" ADX-slope:{_regime}{_lsm_tag}"
+                            f"(s={_slope['short_slope']:+.1f}"
+                            f" m={_slope['med_slope']:+.1f}"
+                            f" {_sign}{_delta:.2f})"
+                        )
+                    elif sell_score > buy_score and sell_score > 0:
+                        sell_score = float(np.clip(sell_score + _delta, 0.0, weight))
+                        _sign = "+" if _delta > 0 else ""
+                        sell_exp += (
+                            f" ADX-slope:{_regime}{_lsm_tag}"
+                            f"(s={_slope['short_slope']:+.1f}"
+                            f" m={_slope['med_slope']:+.1f}"
+                            f" {_sign}{_delta:.2f})"
+                        )
+
+                # Choppy-market penalty: ADX low AND falling → both sides hurt
+                if adx < 20 and _regime in ("FALLING", "FALLING_FAST"):
+                    _chop_penalty = 0.10 * weight
+                    buy_score  = max(0.0, buy_score  - _chop_penalty)
+                    sell_score = max(0.0, sell_score - _chop_penalty)
+                    buy_exp   += f" -chop(ADX{adx:.0f}↓)"
+                    sell_exp  += f" -chop(ADX{adx:.0f}↓)"
+
+            except Exception:
+                pass  # ADX slope is non-critical; never block a trade on failure
+
             return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
-            
+
         except Exception as e:
             logger.error(f"[MOMENTUM] Error: {e}", exc_info=True)
             return 0.0, 0.0, {'buy': "MOM: Error", 'sell': "MOM: Error"}
