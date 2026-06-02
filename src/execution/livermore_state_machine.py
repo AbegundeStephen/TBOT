@@ -4,8 +4,8 @@ Livermore State Machine — Phase 1 Brain.
 Classifies the current market chapter into one of 6 Jesse Livermore states:
 
   MAIN_UP          — price making higher highs; trend entries allowed
-  NATURAL_RETR     — normal pullback after MAIN_UP; is_silent_zone=True
-  SECONDARY_RETR   — deeper probe below natural low; structural warning
+  NATURAL_RETRACEMENT     — normal pullback after MAIN_UP; is_silent_zone=True
+  SECONDARY_RETRACEMENT   — deeper probe below natural low; structural warning
   MAIN_DOWN        — price making lower lows; trend entries (short) allowed
   NATURAL_REBOUND  — normal bounce after MAIN_DOWN; is_silent_zone=True
   SECONDARY_REBOUND— deeper push above natural high; structural warning
@@ -13,7 +13,7 @@ Classifies the current market chapter into one of 6 Jesse Livermore states:
 Key design decisions (all debugged via ATR calibration on BTC 4H 2024-2026):
   1. nl_confirmed uses LOCK-ONCE bounce confirmation — not a running watermark.
      This prevents the "treadmill" where natural_low chases price down forever.
-  2. SECONDARY_RETR uses nl_entry (FIXED pivot at secondary entry) for all
+  2. SECONDARY_RETRACEMENT uses nl_entry (FIXED pivot at secondary entry) for all
      threshold comparisons — not sec_low. Eliminates second treadmill.
   3. MAIN state transitions require dual_confirm consecutive closes.
   4. ATR pivots are recalculated every bar (adaptive to changing volatility).
@@ -45,11 +45,11 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 STATES = frozenset([
-    "MAIN_UP", "NATURAL_RETR", "SECONDARY_RETR",
+    "MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT",
     "MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND",
 ])
-SILENT_STATES = frozenset(["NATURAL_RETR", "NATURAL_REBOUND"])
-UP_STATES     = frozenset(["MAIN_UP", "NATURAL_RETR", "SECONDARY_RETR"])
+SILENT_STATES = frozenset(["NATURAL_RETRACEMENT", "NATURAL_REBOUND"])
+UP_STATES     = frozenset(["MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"])
 DOWN_STATES   = frozenset(["MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND"])
 
 
@@ -61,7 +61,7 @@ class LivermoreSnapshot:
     """
     state: str                                  # one of the 6 Livermore states
     state_age: int                              # bars since last state change
-    is_silent_zone: bool                        # True = NATURAL_RETR or NATURAL_REBOUND
+    is_silent_zone: bool                        # True = NATURAL_RETRACEMENT or NATURAL_REBOUND
     dual_confirmation: bool                     # True for dual-confirm MAIN state
     # Anchor prices (None until first relevant transition)
     anchor_main_up_max: Optional[float]         # highest close in current MAIN_UP
@@ -105,7 +105,7 @@ class LivermoreStateMachine:
 
         # Upside anchors
         self._main_up_max: Optional[float]    = None
-        self._nl_watermark: Optional[float]   = None   # running min in NATURAL_RETR
+        self._nl_watermark: Optional[float]   = None   # running min in NATURAL_RETRACEMENT
         self._nl_bounce_high: Optional[float] = None   # running max after last low
         self._nl_confirmed: Optional[float]   = None   # LOCKED natural_low pivot
         self._nl_entry: Optional[float]       = None   # FIXED at secondary entry
@@ -203,8 +203,8 @@ class LivermoreStateMachine:
     def _dispatch(self, close: float, atr: float, maj: float, mn: float) -> None:
         s = self._state
         if   s == "MAIN_UP":           self._main_up(close, maj)
-        elif s == "NATURAL_RETR":      self._natural_retr(close, maj, mn)
-        elif s == "SECONDARY_RETR":    self._secondary_retr(close, maj, mn)
+        elif s == "NATURAL_RETRACEMENT":      self._natural_retr(close, maj, mn)
+        elif s == "SECONDARY_RETRACEMENT":    self._secondary_retr(close, maj, mn)
         elif s == "MAIN_DOWN":         self._main_down(close, maj)
         elif s == "NATURAL_REBOUND":   self._natural_rebound(close, maj, mn)
         elif s == "SECONDARY_REBOUND": self._secondary_rebound(close, maj, mn)
@@ -216,13 +216,13 @@ class LivermoreStateMachine:
             self._main_up_max = close
 
         if close < self._main_up_max - maj:
-            self._state = "NATURAL_RETR"
+            self._state = "NATURAL_RETRACEMENT"
             self._nl_watermark   = close
             self._nl_confirmed   = None
             self._nl_bounce_high = close
             self._pending_down   = 0
 
-    # ── NATURAL_RETR ──────────────────────────────────────────────────────────
+    # ── NATURAL_RETRACEMENT ──────────────────────────────────────────────────────────
 
     def _natural_retr(self, close: float, maj: float, mn: float) -> None:
         # Update running watermark
@@ -248,23 +248,23 @@ class LivermoreStateMachine:
             self._main_up_max = close
             return
 
-        # Transition: confirmed nl breached → SECONDARY_RETR
+        # Transition: confirmed nl breached → SECONDARY_RETRACEMENT
         if self._nl_confirmed is not None and close < self._nl_confirmed:
-            self._state    = "SECONDARY_RETR"
+            self._state    = "SECONDARY_RETRACEMENT"
             self._nl_entry = self._nl_confirmed   # FIXED pivot for secondary
             self._pending_down = 0
 
-    # ── SECONDARY_RETR ────────────────────────────────────────────────────────
+    # ── SECONDARY_RETRACEMENT ────────────────────────────────────────────────────────
 
     def _secondary_retr(self, close: float, maj: float, mn: float) -> None:
         # nl_entry is FIXED — never updated inside this state.
         nl = self._nl_entry
 
-        # Recovery: back above natural_low + minor → return to NATURAL_RETR
+        # Recovery: back above natural_low + minor → return to NATURAL_RETRACEMENT
         if close > nl + mn:
-            self._state          = "NATURAL_RETR"
+            self._state          = "NATURAL_RETRACEMENT"
             self._nl_watermark   = nl
-            self._nl_confirmed   = nl   # anchor for next NATURAL_RETR cycle
+            self._nl_confirmed   = nl   # anchor for next NATURAL_RETRACEMENT cycle
             self._nl_bounce_high = close
             self._pending_down   = 0
             return
