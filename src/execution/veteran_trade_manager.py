@@ -678,8 +678,12 @@ class VeteranTradeManager:
                 logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
 
             else:
-                # ATR-based adaptive floors and caps
-                min_stop_dist = atr * 0.5
+                # ATR-based adaptive floors and caps.
+                # min_stop_atr_mult is configurable per asset (default 0.8 for
+                # FX/commodities, 0.5 for crypto). Prevents structural stops that
+                # land within noise distance in quiet-hour low-ATR conditions.
+                _min_mult = self.risk_config.get("min_stop_atr_mult", 0.8)
+                min_stop_dist = atr * _min_mult
                 max_stop_dist = atr * 5.0
 
                 if self.side == "long":

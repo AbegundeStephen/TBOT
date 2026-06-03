@@ -726,42 +726,56 @@ class HybridAggregatorSelector:
         Calculate adaptive TP/SL for the current trade
         """
         try:
-            asset_type = 'BTC' if 'BTC' in asset_name.upper() else 'GOLD'
-            manager = self.tpsl_managers.get(asset_type)
-            
-            if not manager:
-                raise ValueError(f"No TP/SL manager for {asset_type}")
-            
-            # Get market metrics
-            atr = manager._calculate_atr(df) if hasattr(manager, '_calculate_atr') else \
-                  self.market_analyzer._calculate_atr(df)
-            
-            analysis = self.market_analyzer.analyze_market_state(df, asset_name)
-            volatility_ratio = analysis['metrics'].get('atr_ratio', 1.0)
-            at_key_level = analysis.get('at_key_level', False)
-            
-            # Calculate levels
-            tp_sl = manager.calculate_tp_sl(
-                entry_price=entry_price,
-                signal=signal,
-                atr=atr,
-                mode=mode,
-                confidence=confidence,
-                volatility_ratio=volatility_ratio,
-                at_key_level=at_key_level,
-            )
-            
-            return tp_sl
-        
+            # Route to the correct TP/SL manager.
+            # Only BTC and GOLD have dedicated managers with asset-specific
+            # calibration. All FX pairs and USOIL use the ATR-based fallback
+            # directly — applying GOLD's dollar-scale parameters to FX pairs
+            # produced wrong SL/TP levels (e.g. 9-pip stops on USDJPY).
+            _name_upper = asset_name.upper()
+            if 'BTC' in _name_upper:
+                asset_type = 'BTC'
+            elif any(x in _name_upper for x in ('GOLD', 'XAU')):
+                asset_type = 'GOLD'
+            else:
+                asset_type = None  # FX / USOIL → use ATR fallback below
+
+            manager = self.tpsl_managers.get(asset_type) if asset_type else None
+
+            if manager:
+                # Get market metrics
+                atr = manager._calculate_atr(df) if hasattr(manager, '_calculate_atr') else \
+                      self.market_analyzer._calculate_atr(df)
+
+                analysis = self.market_analyzer.analyze_market_state(df, asset_name)
+                volatility_ratio = analysis['metrics'].get('atr_ratio', 1.0)
+                at_key_level = analysis.get('at_key_level', False)
+
+                tp_sl = manager.calculate_tp_sl(
+                    entry_price=entry_price,
+                    signal=signal,
+                    atr=atr,
+                    mode=mode,
+                    confidence=confidence,
+                    volatility_ratio=volatility_ratio,
+                    at_key_level=at_key_level,
+                )
+                return tp_sl
+            else:
+                raise ValueError(f"No dedicated TP/SL manager for {asset_name} — using ATR fallback")
+
         except Exception as e:
-            logger.error(f"[HYBRID] TP/SL calculation error: {e}")
-            # Fallback: basic ATR-based calculation
+            logger.debug(f"[HYBRID] TP/SL using ATR fallback for {asset_name}: {e}")
+            # ATR-based fallback — used for all FX pairs and USOIL.
+            # Uses 2.0× ATR stop and 3.5× ATR target for a 1.75:1 R:R floor.
             atr = self.market_analyzer._calculate_atr(df)
+            # 2.0× ATR stop, 4.0× ATR target → 2:1 R:R minimum for FX/USOIL
+            sl_dist = atr * 2.0
+            tp_dist = atr * 4.0
             return {
-                'stop_loss': entry_price - (atr * 1.0) if signal == 1 else entry_price + (atr * 1.0),
-                'take_profit': entry_price + (atr * 2.0) if signal == 1 else entry_price - (atr * 2.0),
-                'trailing_start': entry_price + (atr * 1.5) if signal == 1 else entry_price - (atr * 1.5),
-                'trailing_distance': atr * 0.8,
+                'stop_loss':       entry_price - sl_dist if signal == 1 else entry_price + sl_dist,
+                'take_profit':     entry_price + tp_dist if signal == 1 else entry_price - tp_dist,
+                'trailing_start':  entry_price + (atr * 2.5) if signal == 1 else entry_price - (atr * 2.5),
+                'trailing_distance': atr * 1.0,
                 'risk_reward_ratio': 2.0,
             }
     
