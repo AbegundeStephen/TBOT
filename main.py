@@ -4164,12 +4164,20 @@ class TradingBot:
             # counter-trend. The council's TF judge can still generate these signals
             # even though MR is correctly blocked — this gate closes that gap.
             if signal != 0:
-                _cs_post = mtf_regime.get("composite_state")
-                _lsm_post = None
-                if _cs_post is not None:
-                    _lsm_post = getattr(_cs_post, "livermore_state_1h", None)
-                    if hasattr(_lsm_post, "value"):
-                        _lsm_post = _lsm_post.value
+                # Primary: read from details (signal_aggregator injects this directly
+                # from composite_state, proven reliable since MR reads the same object).
+                # Fallback: mtf_regime composite_state (may be None in some council paths).
+                _lsm_post = details.get("livermore_state_1h")
+                if _lsm_post is None:
+                    _cs_post = mtf_regime.get("composite_state")
+                    if _cs_post is not None:
+                        _lsm_post = getattr(_cs_post, "livermore_state_1h", None)
+                        if hasattr(_lsm_post, "value"):
+                            _lsm_post = _lsm_post.value
+                logger.debug(
+                    "[LIVERMORE BLOCK] %s: 1H state=%s signal=%d",
+                    asset_name, _lsm_post, signal
+                )
                 if _lsm_post == "NATURAL_RETRACEMENT" and signal < 0:
                     logger.info(
                         f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
@@ -4184,22 +4192,67 @@ class TradingBot:
                     )
                     signal = 0
                     details["reasoning"] = "livermore_counter_trend_block"
+                elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
+                    # Shorting INTO a rebound sweeps the SL before price resumes down.
+                    # Gold June 4 2026: shorted at $4,463 during NATURAL_REBOUND,
+                    # price ran to $4,499 hitting SL before reversing.
+                    # Wait for rebound to exhaust (Mode 3 MR spring or state change).
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
+                        f"NATURAL_REBOUND is an active bounce; shorting INTO it risks SL sweep. "
+                        f"Wait for exhaustion."
+                    )
+                    signal = 0
+                    details["reasoning"] = "livermore_rebound_sl_sweep_block"
+                elif _lsm_post == "NATURAL_RETRACEMENT" and signal > 0:
+                    # Longing INTO a retracement risks SL sweep before trend resumes up.
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
+                        f"NATURAL_RETRACEMENT is an active pullback; longing INTO it risks SL sweep. "
+                        f"Wait for spring/exhaustion."
+                    )
+                    signal = 0
+                    details["reasoning"] = "livermore_retracement_sl_sweep_block"
 
             # ── MINIMUM REGIME CONFIDENCE GATE ────────────────────────────────
             # Block any signal when MTF regime confidence is below 60%.
             # NEUTRAL (0%), SLIGHTLY_BEARISH at 33-50% — all historically losing.
             # BTC BEARISH 100%, USTEC BULLISH 100% pass easily.
             # Configurable via config["trading"]["min_regime_confidence"] (default 0.60).
+            #
+            # BYPASS: If 1H Livermore state is MAIN_DOWN or MAIN_UP, the structural
+            # trend is confirmed regardless of 4H MTF regime confidence. The 4H
+            # detector often lags after major economic events (e.g. NFP) — MAIN_DOWN/UP
+            # on 1H IS the directional confirmation the gate is looking for.
+            # Also bypass if council score is very strong (>3.5/5.0) with high ADX.
             if signal != 0:
                 _min_conf = self.config.get("trading", {}).get("min_regime_confidence", 0.60)
                 _regime_conf = mtf_regime.get("confidence", 0.0)
                 if _regime_conf < _min_conf:
-                    logger.info(
-                        f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
-                        f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
+                    # Check for structural bypass conditions
+                    _lsm_main = _lsm_post in ("MAIN_DOWN", "MAIN_UP")
+                    _signal_aligned = (
+                        (_lsm_post == "MAIN_DOWN" and signal < 0) or
+                        (_lsm_post == "MAIN_UP"   and signal > 0)
                     )
-                    signal = 0
-                    details["reasoning"] = "low_regime_confidence"
+                    _council_score  = details.get("total_score", 0) or details.get("sell_score" if signal < 0 else "buy_score", 0)
+                    _strong_council = _council_score >= 3.0
+                    _conf_mode_ok   = details.get("mode_confidence", 0) >= 0.60
+
+                    if _lsm_main and _signal_aligned and _strong_council and _conf_mode_ok:
+                        logger.info(
+                            f"[CONFIDENCE GATE] {asset_name}: NEUTRAL 4H regime bypassed — "
+                            f"1H LSM={_lsm_post} aligned with signal, "
+                            f"council={_council_score:.2f}, mode_conf={details.get('mode_confidence',0):.0%}. "
+                            f"4H detector likely lagging post-event."
+                        )
+                    else:
+                        logger.info(
+                            f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
+                            f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
+                        )
+                        signal = 0
+                        details["reasoning"] = "low_regime_confidence"
 
             # Log Signal Quality
             logger.info(
