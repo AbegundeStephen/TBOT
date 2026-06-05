@@ -1990,6 +1990,14 @@ class InstitutionalCouncilAggregator:
                 'atr_slow': atr_slow,
                 'lifecycle_phase': lifecycle_phase,
                 'governor_data': governor_data,
+                'livermore_state_1h': (
+                    getattr(governor_data.get("composite_state"), "livermore_state_1h", None)
+                    if governor_data else None
+                ),
+                'livermore_state_4h': (
+                    getattr(governor_data.get("composite_state"), "livermore_state_4h", None)
+                    if governor_data else None
+                ),
                 'viz_overlay': {
                     'divergence': self.divergence_detector.analyze(df) if hasattr(self, 'divergence_detector') else None,
                     'break_retest': self.break_retest_validator.validate(df, self.asset_type) if hasattr(self, 'break_retest_validator') else None,

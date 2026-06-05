@@ -24,7 +24,7 @@
         "trend_following_weight": 0.85,
         "ema_weight": 0.3,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
           "min_agreement": 3
@@ -53,7 +53,7 @@
         "trend_following_weight": 0.75,
         "ema_weight": 0.4,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
           "enabled": true,
           "candles": 3,
           "min_agreement": 3
@@ -113,7 +113,7 @@
         "trend_following_weight": 0.7,
         "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disable momentum alignment check — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disable momentum alignment check \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 2
@@ -188,7 +188,7 @@
         "bear_sell_boost": 0.09,
         "bear_buy_penalty": 0.09,
         "min_confidence_to_use": 0.08,
-        "min_signal_quality": 0.30,
+        "min_signal_quality": 0.3,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.7,
@@ -230,7 +230,7 @@
         "trend_following_weight": 0.65,
         "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disabled \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 3
@@ -238,7 +238,7 @@
       }
     },
     "FX": {
-      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals — so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
+      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals \u2014 so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
       "conservative": {
         "description": "Strict FX settings. Focus: Capital Preservation.",
         "buy_threshold": 0.28,
@@ -336,66 +336,72 @@
     }
   },
   "LIVERMORE_PIVOTS": {
-    "_comment": "ATR multipliers for the Livermore State Machine (Phase 1). major_mult × ATR14 = pivot distance for MAIN state transitions. minor_mult × ATR14 = pivot distance for SECONDARY / bounce confirmation. dual_confirm = consecutive bars required to confirm a MAIN state flip. Calibrated on 4H data: BTC from BTC 4H (Jan2024–Feb2026, score=6.00/6), GOLD/FX defaults pending their own calibration runs.",
     "BTC": {
       "major_mult": 3.5,
       "minor_mult": 1.0,
       "dual_confirm": 2,
       "atr_period": 14,
-      "_calibration": "BTC 4H Jan2024–Feb2026: 1.48 transitions/week, 5/6 turning-point score"
+      "_calibration": "BTC 4H Jan2024-Feb2026: 1.48 transitions/week, 5/6 turning-point score"
     },
     "GOLD": {
-      "major_mult": 4.0,
-      "minor_mult": 1.5,
-      "dual_confirm": 2,
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
       "atr_period": 14,
-      "_calibration": "GOLD 4H default — run calibration when 4H data available"
+      "_calibration": "GOLD 4H Feb-Jun2026: 1.43 t/w, main_frac=35%, avg_main_dur=41 bars"
     },
     "EURUSD": {
-      "major_mult": 3.0,
-      "minor_mult": 1.0,
-      "dual_confirm": 2,
+      "major_mult": 4.0,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
       "atr_period": 14,
-      "_calibration": "FX default — run calibration when 4H data available"
+      "_calibration": "EURUSD 4H Feb-Jun2026: 1.24 t/w, main_frac=42%, avg_main_dur=44 bars"
     },
     "EURJPY": {
-      "major_mult": 3.0,
-      "minor_mult": 1.0,
+      "major_mult": 4.0,
+      "minor_mult": 0.5,
       "dual_confirm": 2,
       "atr_period": 14,
-      "_calibration": "FX default — run calibration when 4H data available"
+      "_calibration": "EURJPY 4H Feb-Jun2026: 1.08 t/w, main_frac=43%, avg_main_dur=53 bars"
     },
     "USTEC": {
-      "major_mult": 3.5,
-      "minor_mult": 1.0,
+      "major_mult": 3.0,
+      "minor_mult": 0.5,
       "dual_confirm": 2,
       "atr_period": 14,
-      "_calibration": "USTEC default — run calibration when 4H data available"
+      "_calibration": "USTEC 4H Feb-Jun2026: 1.48 t/w, main_frac=49%, avg_main_dur=39 bars"
     },
     "GBPAUD": {
-      "major_mult": 3.0,
-      "minor_mult": 1.0,
+      "major_mult": 4.5,
+      "minor_mult": 0.5,
       "dual_confirm": 2,
       "atr_period": 14,
-      "_calibration": "FX default — same as EURUSD, run calibration when 4H data available"
+      "_calibration": "GBPAUD 4H Feb-Jun2026: 1.20 t/w, main_frac=45%, avg_main_dur=78 bars"
     },
     "GBPUSD": {
-      "major_mult": 3.0,
-      "minor_mult": 1.0,
-      "dual_confirm": 2,
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
       "atr_period": 14,
-      "_calibration": "FX default — run calibration when 4H data available"
+      "_calibration": "GBPUSD 4H Feb-Jun2026: 1.56 t/w, main_frac=33%, avg_main_dur=35 bars"
     },
     "USOIL": {
       "major_mult": 3.5,
-      "minor_mult": 1.2,
+      "minor_mult": 1.0,
       "dual_confirm": 2,
       "atr_period": 14,
-      "_calibration": "Commodity default — run calibration when 4H data available"
+      "_calibration": "USOIL 4H Feb-Jun2026: low-confidence calibration (0.53 t/w, main_frac=15%) \u2014 kept major=3.5 from calibration, minor=1.0 for stability; re-run after 6mo data"
+    },
+    "USDJPY": {
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
+      "atr_period": 14,
+      "_calibration": "USDJPY 4H Feb-Jun2026: 1.11 t/w, main_frac=31%, avg_main_dur=43 bars"
     }
   },
   "REQUIRED_SCORE_MODIFIER": {
-    "_comment": "Phase 2: Livermore state-conditional threshold deltas. Applied additively to BOTH buy and sell thresholds after regime-adjusted thresholds are computed. Full retest-type modifiers (CLEAN/BREAKOUT/WICK/CHASE_SOFT/CHASE_HARD) are wired in Phase 3B. SECONDARY states raise the bar — entries still allowed but harder to clear. NATURAL states are gated by the Hard Veto + Gatekeeper HOLD before reaching this modifier.",
+    "_comment": "Phase 2: Livermore state-conditional threshold deltas. Applied additively to BOTH buy and sell thresholds after regime-adjusted thresholds are computed. Full retest-type modifiers (CLEAN/BREAKOUT/WICK/CHASE_SOFT/CHASE_HARD) are wired in Phase 3B. SECONDARY states raise the bar \u2014 entries still allowed but harder to clear. NATURAL states are gated by the Hard Veto + Gatekeeper HOLD before reaching this modifier.",
     "state_modifiers": {
       "MAIN_UP": 0.0,
       "MAIN_DOWN": 0.0,
@@ -410,9 +416,9 @@
     "_note": "All numeric thresholds live here per MRS zero-magic-numbers rule."
   },
   "MR_THREE_MODE": {
-    "_comment": "Phase 3A: MR Three-Mode Rebuild thresholds. Zero magic numbers — all constants here. Mode 1 = Pullback Completion (NATURAL_RETRACEMENT, spring mandatory). Mode 2 = Counter-Trend (SECONDARY states, ADX<25, 4/4 optional). Mode 3 = Climax Fade (MAIN states, stretched leg + reversal candle).",
+    "_comment": "Phase 3A: MR Three-Mode Rebuild thresholds. Zero magic numbers \u2014 all constants here. Mode 1 = Pullback Completion (NATURAL_RETRACEMENT, spring mandatory). Mode 2 = Counter-Trend (SECONDARY states, ADX<25, 4/4 optional). Mode 3 = Climax Fade (MAIN states, stretched leg + reversal candle).",
     "mode1": {
-      "_comment": "Pullback Completion — NATURAL_RETRACEMENT, LONG only.",
+      "_comment": "Pullback Completion \u2014 NATURAL_RETRACEMENT, LONG only.",
       "spring_min_penetration": 0.005,
       "spring_max_penetration": 0.05,
       "spring_recovery_max_bars": 3,
@@ -426,7 +432,7 @@
       "btc_ema200_4h_modifier": -0.1
     },
     "mode2": {
-      "_comment": "Counter-Trend — SECONDARY states only. SECONDARY_RETRACEMENT→LONG, SECONDARY_REBOUND→SHORT.",
+      "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT.",
       "adx_max": 25,
       "optional_min_count": 4,
       "bb_inside_required": true,
@@ -434,7 +440,7 @@
       "btc_short_zscore_threshold": 3.5
     },
     "mode3": {
-      "_comment": "Climax Fade — MAIN states. MAIN_UP→SHORT, MAIN_DOWN→LONG. Target is EMA20, NOT a reversal call.",
+      "_comment": "Climax Fade \u2014 MAIN states. MAIN_UP\u2192SHORT, MAIN_DOWN\u2192LONG. Target is EMA20, NOT a reversal call.",
       "leg_stretch_ratio_min": 1.5,
       "leg_stretch_window": 10,
       "leg_stretch_lookback": 50,
@@ -443,7 +449,7 @@
       "volume_avg_lookback": 20
     },
     "bb_kc_squeeze": {
-      "_comment": "BB(20,2σ) inside Keltner(20 EMA, 1.5×ATR14) for 5+ bars. bbw_percentile bottom 30th = compressed volatility.",
+      "_comment": "BB(20,2\u03c3) inside Keltner(20 EMA, 1.5\u00d7ATR14) for 5+ bars. bbw_percentile bottom 30th = compressed volatility.",
       "min_squeeze_bars": 5,
       "bbw_percentile_threshold": 30.0,
       "kc_ema_period": 20,
@@ -452,7 +458,7 @@
     "nr7_lookback": 7
   },
   "RETEST_ENGINE": {
-    "_comment": "Phase 3B: 5-Tier Retest Engine thresholds. Priority cascade: CLEAN → BREAKOUT → WICK → CHASE_HARD → CHASE_SOFT → NO_LEVEL_NEARBY. All ATR multiples are measured from nearby_4h_level. modifier_* values are ADDITIVE deltas to the required score threshold. Negative delta = easier to enter; positive = harder.",
+    "_comment": "Phase 3B: 5-Tier Retest Engine thresholds. Priority cascade: CLEAN \u2192 BREAKOUT \u2192 WICK \u2192 CHASE_HARD \u2192 CHASE_SOFT \u2192 NO_LEVEL_NEARBY. All ATR multiples are measured from nearby_4h_level. modifier_* values are ADDITIVE deltas to the required score threshold. Negative delta = easier to enter; positive = harder.",
     "clean_proximity_atr_mult": 0.5,
     "breakout_age_max_bars": 5,
     "modifier_clean": -0.2,

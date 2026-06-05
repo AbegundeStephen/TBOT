@@ -372,11 +372,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _presets = _json.load(_f)
             _lp = _presets.get("LIVERMORE_PIVOTS", {})
             # Map common asset aliases to preset keys
+            # Include MT5 broker-suffix variants (e.g. XAUUSDm, EURUSDm)
             _alias_map = {
-                "BTCUSDT": "BTC", "XAUUSD": "GOLD",
-                "EURUSD": "EURUSD", "EURJPY": "EURJPY", "USTEC": "USTEC",
+                # BTC
+                "BTCUSDT": "BTC", "BTCUSDM": "BTC", "BTCUSDM": "BTC",
+                # Gold
+                "XAUUSD": "GOLD", "XAUUSDM": "GOLD",
+                # FX
+                "EURUSD": "EURUSD", "EURUSDM": "EURUSD",
+                "EURJPY": "EURJPY", "EURJPYM": "EURJPY",
+                "GBPAUD": "GBPAUD", "GBPAUDM": "GBPAUD",
+                "GBPUSD": "GBPUSD", "GBPUSDM": "GBPUSD",
+                "USDJPY": "USDJPY", "USDJPYM": "USDJPY",
+                # Indices / Commodities
+                "USTEC": "USTEC", "USTECM": "USTEC",
+                "USOIL": "USOIL", "USOILM": "USOIL",
             }
-            _lp_key = _alias_map.get(self.asset_type, self.asset_type)
+            _lp_key = _alias_map.get(self.asset_type.upper(), self.asset_type)
             _lp_cfg = _lp.get(_lp_key, _lp.get("BTC", {}))
             from src.execution.livermore_state_machine import make_livermore_pair
             self._livermore_4h, self._livermore_1h = make_livermore_pair(
@@ -3964,6 +3976,20 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             except Exception:
                 pass
 
+            # Extract Livermore 1H state for main.py Livermore block
+            # (composite_state may or may not be in governor_data depending on path)
+            _lsm_1h_for_details = None
+            _lsm_4h_for_details = None
+            try:
+                _cs_for_details = governor_data.get("composite_state") if governor_data else None
+                if _cs_for_details is None:
+                    _cs_for_details = getattr(self, "_cached_composite", None)
+                if _cs_for_details is not None:
+                    _lsm_1h_for_details = getattr(_cs_for_details, "livermore_state_1h", None)
+                    _lsm_4h_for_details = getattr(_cs_for_details, "livermore_state_4h", None)
+            except Exception:
+                pass
+
             details = {
                 "timestamp": timestamp,
                 "regime": regime_name,
@@ -3984,6 +4010,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "governor_data": governor_data, # Pass governor data through
                 "ai_validation": ai_validation_details,
                 "trade_type": trade_type,
+                "livermore_state_1h": _lsm_1h_for_details,  # for main.py Livermore block
+                "livermore_state_4h": _lsm_4h_for_details,
                 "viz_overlay": {
                     "divergence": div_res,
                     "break_retest": br_res
