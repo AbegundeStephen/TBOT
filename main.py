@@ -2260,7 +2260,9 @@ class TradingBot:
             except Exception as e:
                 logger.warning(f"[AI] Logging config failed: {e}")
 
-        if self.ai_validator and self.telegram_bot and self.analyst and self.sniper:
+        if self.ai_validator and self.telegram_bot and self.analyst:
+            # sniper may be None (disconnected in Phase 0B) — that's fine,
+            # visualization works without it.
             try:
                 logger.info("[VIZ] Initializing AI visualization system...")
                 self.chart_sender = create_visualization_system(

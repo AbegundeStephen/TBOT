@@ -2850,9 +2850,12 @@ class TradingTelegramBot:
                         await loop.run_in_executor(None, _generate_chart_data)
                     )
 
-                    await status_message.edit_text(
-                        f"🎨 Rendering {asset_name} chart..."
-                    )
+                    try:
+                        await status_message.edit_text(
+                            f"🎨 Rendering {asset_name} chart..."
+                        )
+                    except Exception:
+                        pass  # Status edit failure is cosmetic — continue
 
                     # Send chart
                     if self.trading_bot.chart_sender:
@@ -2865,14 +2868,29 @@ class TradingTelegramBot:
                             current_price=current_price,
                         )
                         charts_sent += 1
+                    else:
+                        # chart_sender unavailable — send raw signal summary instead
+                        sig_str = "🟢 BUY" if signal == 1 else "🔴 SELL" if signal == -1 else "⚪ HOLD"
+                        regime  = details.get("regime", "?")
+                        quality = details.get("signal_quality", 0)
+                        await update.message.reply_text(
+                            f"📊 *{asset_name}* — {sig_str}\n"
+                            f"Regime: {regime} | Quality: {quality:.0%}\n"
+                            f"_(Chart renderer not available — restart bot to enable)_",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                        charts_sent += 1  # count as sent so we don't show "failed"
 
                 except Exception as e:
                     logger.error(
                         f"[CHART CMD] Error for {asset_name}: {e}", exc_info=True
                     )
-                    await update.message.reply_text(
-                        f"❌ Error generating {asset_name} chart: {str(e)[:100]}"
-                    )
+                    try:
+                        await update.message.reply_text(
+                            f"❌ Error generating {asset_name} chart: {str(e)[:100]}"
+                        )
+                    except Exception:
+                        pass
 
             # Final status
             if charts_sent > 0:
