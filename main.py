@@ -3862,6 +3862,55 @@ class TradingBot:
         # Cooldown period has fully elapsed — allow trading.
         return True
 
+    def _check_natural_cycle_gate(
+        self,
+        asset_name: str,
+        current_lsm_state: str | None,
+        current_lsm_age: int,
+    ) -> bool:
+        """Natural cycle elapsed gate (Phase 4 second-position protection).
+
+        Returns True  → OK to proceed.
+        Returns False → blocked (same Livermore state as last entry, not yet aged).
+
+        Purpose: prevent immediately re-entering after a position closes while
+        the market is still in the same Livermore phase.  A "new" setup only
+        exists once the state has aged enough (≥ min_cycle_bars bars) — implying
+        the pullback/rebound has continued to develop rather than immediately
+        re-testing the failed entry level.
+
+        Only gates MR-type entries (NATURAL_RETRACEMENT / NATURAL_REBOUND states).
+        MAIN and SECONDARY states are not gated — trend continuation and counter-
+        trend entries have their own structural guards.
+        """
+        # Only applies to natural pullback/rebound phases
+        _natural_states = ("NATURAL_RETRACEMENT", "NATURAL_REBOUND")
+        if current_lsm_state not in _natural_states:
+            return True
+
+        # Only relevant if we have traded this asset before
+        if asset_name not in self._last_livermore_states:
+            return True
+
+        prev_state = self._last_livermore_states.get(asset_name)
+        if prev_state != current_lsm_state:
+            # State has changed since last entry — a genuine cycle has occurred.
+            return True
+
+        # Same state as last entry — require minimum age before allowing re-entry.
+        min_cycle_bars = self.config.get("trading", {}).get(
+            "natural_cycle_min_bars", 8
+        )  # default: 8 bars = ~8 hours on 1H timeframe
+        if current_lsm_age >= min_cycle_bars:
+            return True
+
+        logger.info(
+            f"[CYCLE_GATE] {asset_name}: re-entry in same Livermore state "
+            f"({current_lsm_state}) blocked — age={current_lsm_age} < "
+            f"min={min_cycle_bars} bars. Waiting for natural cycle to mature."
+        )
+        return False
+
     def _resolve_symbol(self, asset_name: str) -> str:
         """
         Return the correct trading symbol for the asset's configured exchange.
@@ -4701,6 +4750,36 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "cooldown_block", asset_cfg,
+                )
+                return
+
+            # ── Natural cycle elapsed gate ────────────────────────────────────
+            # Block MR re-entries in the same Livermore NATURAL phase until
+            # the state has aged sufficiently (≥ natural_cycle_min_bars, default 8).
+            _current_lsm_age = 0
+            try:
+                if hasattr(self, "_current_regime_data"):
+                    _cs_for_age = self._current_regime_data.get(asset_name, {}).get("composite_state")
+                    if _cs_for_age is not None:
+                        _current_lsm_age = getattr(_cs_for_age, "livermore_state_age_1h", 0) or 0
+            except Exception:
+                pass
+
+            if not self._check_natural_cycle_gate(asset_name, _current_lsm, _current_lsm_age):
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Natural Cycle Gate",
+                    block_reason=(
+                        f"Same Livermore state ({_current_lsm}) as last entry — "
+                        f"waiting for cycle to mature (age={_current_lsm_age})"
+                    ),
+                    details=details,
+                    price=details.get("price"),
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "natural_cycle_gate", asset_cfg,
                 )
                 return
 

@@ -1051,6 +1051,60 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.debug("[NR7-ID] compute error: %s", _nr7_err)
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── PHASE 3A: RANGE_CLASSIFICATION ───────────────────────────────────
+        # Classifies market context for MR routing and Council filtering.
+        # Priority order: SQUEEZE > PULLBACK > TRENDING > RANGING
+        #   SQUEEZE  — BB/KC squeeze active; volatility compressed, pre-breakout
+        #   PULLBACK — Livermore in NATURAL_RETRACEMENT or NATURAL_REBOUND
+        #   TRENDING — Livermore in MAIN_UP or MAIN_DOWN AND ADX > 25
+        #   RANGING  — Livermore in SECONDARY states or ADX < 20; no clear trend
+        try:
+            _rc_lsm = getattr(state, "livermore_state_1h", None)
+            _rc_adx = None
+            if df is not None and len(df) >= 15:
+                _rc_adx_arr = ta.ADX(
+                    df['high'].values, df['low'].values,
+                    df['close'].values, timeperiod=14
+                )
+                _v = _rc_adx_arr[-1]
+                _rc_adx = float(_v) if not np.isnan(_v) else None
+
+            if state.bb_kc_squeeze_active or state.nr7_active:
+                state.range_classification = "SQUEEZE"
+            elif _rc_lsm in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+                state.range_classification = "PULLBACK"
+            elif _rc_lsm in ("MAIN_UP", "MAIN_DOWN") and (_rc_adx is not None and _rc_adx > 25):
+                state.range_classification = "TRENDING"
+            else:
+                state.range_classification = "RANGING"
+
+            logger.debug(
+                "[RANGE_CLASS] %s: %s (lsm=%s adx=%s squeeze=%s nr7=%s)",
+                self.asset_type, state.range_classification, _rc_lsm,
+                f"{_rc_adx:.1f}" if _rc_adx is not None else "n/a",
+                state.bb_kc_squeeze_active, state.nr7_active,
+            )
+        except Exception as _rc_err:
+            logger.debug("[RANGE_CLASS] compute error: %s", _rc_err)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── PHASE 4: ema200_1d_dist_atr ──────────────────────────────────────
+        # Distance from current close to the 200-period EMA on the daily
+        # timeframe, normalised by the 1H ATR.  Computed by resampling the 1H
+        # dataframe to daily so no separate daily feed is required.
+        # Used by MR Mode 1 to apply a −0.10 confidence penalty when BTC is
+        # within 1 ATR of the daily EMA200 (historically a high-failure zone).
+        try:
+            if df is not None and len(df) >= 200 and _atr > 0:
+                _df_daily = df['close'].resample('1D').last().dropna()
+                if len(_df_daily) >= 50:
+                    _ema200_1d = _df_daily.ewm(span=200, adjust=False).mean().iloc[-1]
+                    _dist_1d   = abs(float(df['close'].iloc[-1]) - float(_ema200_1d))
+                    state.ema200_1d_dist_atr = _dist_1d / _atr
+        except Exception as _ema200_err:
+            logger.debug("[ema200_1d_dist_atr] compute error: %s", _ema200_err)
+        # ─────────────────────────────────────────────────────────────────────
+
         state.sanitise()
         return state
 

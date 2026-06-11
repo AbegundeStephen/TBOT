@@ -127,6 +127,13 @@ class CompositeState:
     nr7_id_active: bool = False
     # EMA 200 daily distance (Phase 4)
     ema200_1d_dist_atr: Optional[float] = None
+    # Range classification (Phase 3A)
+    # Values: TRENDING | PULLBACK | RANGING | SQUEEZE
+    # TRENDING  — Livermore MAIN state, ADX > 25
+    # PULLBACK  — Livermore NATURAL retracement/rebound within a MAIN leg
+    # RANGING   — Livermore SECONDARY states or ADX < 20
+    # SQUEEZE   — BB/KC squeeze active (pre-breakout, takes priority over RANGING)
+    range_classification: Optional[str] = None
     # ══════════════════════════════════════════════════════════════
     # PHASE 3B RESERVED — Retest Engine
     # entry_type: populated by retest_engine; consumed by VTM.
