@@ -440,6 +440,7 @@ class MeanReversionStrategy(BaseStrategy):
         """
         Mode 1 — Pullback Completion (1H NATURAL_RETRACEMENT, LONG only).
 
+        [MANDATORY] BB/KC squeeze OR NR7/NR7-ID active (compression required)
         [MANDATORY] Spring detected in last 1–3 bars
         [2 of 4]    Optional: vol_contraction, hidden_div, bb_contraction, ma_proximity
         [VETO]      vol_down_ratio > 1.2
@@ -458,6 +459,20 @@ class MeanReversionStrategy(BaseStrategy):
             if _vdr_valid and _vdr is not None and float(_vdr) > _veto_thr:
                 logger.info(
                     f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > {_veto_thr} → VETO"
+                )
+                return 0, 0.0
+
+        # ── Compression gate: BB/KC squeeze OR NR7/NR7-ID (mandatory) ─────
+        # Spring setups require prior volatility compression; without it the
+        # spring detection fires on ordinary pullbacks with no coiled energy.
+        if composite_state is not None:
+            _squeeze = getattr(composite_state, "bb_kc_squeeze_active", False)
+            _nr7     = getattr(composite_state, "nr7_active", False)
+            _nr7_id  = getattr(composite_state, "nr7_id_active", False)
+            if not (_squeeze or _nr7 or _nr7_id):
+                logger.info(
+                    f"[MR Mode1] {self.asset}: no compression "
+                    f"(squeeze={_squeeze} nr7={_nr7} nr7_id={_nr7_id}) → VETO"
                 )
                 return 0, 0.0
 
@@ -519,6 +534,7 @@ class MeanReversionStrategy(BaseStrategy):
         SECONDARY_RETRACEMENT → LONG  (counter the deep pullback)
         SECONDARY_REBOUND     → SHORT (counter the deep bounce)
 
+        [VETO]      range_classification == TRENDING (strong trend, counter-trend fatal)
         [MANDATORY] ADX < 25
         [MANDATORY] 4 of 4 optional conditions
         [MANDATORY] BB has closed back inside bands (was recently outside)
@@ -528,6 +544,15 @@ class MeanReversionStrategy(BaseStrategy):
         features = self.generate_features(df.tail(260))
         if len(features) < 50:
             return 0, 0.0
+
+        # ── TRENDING veto: counter-trend in a strong trend is fatal ──────────
+        if composite_state is not None:
+            _rc = getattr(composite_state, "range_classification", None)
+            if _rc == "TRENDING":
+                logger.info(
+                    f"[MR Mode2] {self.asset}: range_classification=TRENDING → VETO"
+                )
+                return 0, 0.0
 
         # Direction from Livermore state
         lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None

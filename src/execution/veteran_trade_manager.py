@@ -447,6 +447,8 @@ class VeteranTradeManager:
         # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
         #             RANGE_BOUNDARY / REJECT / None (no classification)
         self.vtm_entry_type             = _cs.get("entry_type")
+        # Squeeze flag — drives wider ATR selection in _calculate_atr()
+        self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
 
         # Livermore-aware ATR multiplier overlay — all values from config
         _lv4h   = self.livermore_state_4h
@@ -567,33 +569,49 @@ class VeteranTradeManager:
 
     def _calculate_atr(self) -> float:
         """
-        ✅ TASK 18: Regime-adaptive ATR: fast in expanding vol, slow in compressed vol.
+        Regime-adaptive ATR: fast in expanding vol, slow in compressed vol.
+        Squeeze-aware: when BB/KC squeeze is active, use ATR(50) so the stop
+        reflects pre-squeeze volatility rather than the compressed current range.
+        This prevents stops being placed inside the squeeze range and getting
+        hit on the first bar of the expected expansion.
         """
         try:
-            atr_fast = talib.ATR(self.high, self.low, self.close, timeperiod=7)[-1]
-            atr_mid  = talib.ATR(self.high, self.low, self.close, timeperiod=14)[-1]
-            atr_slow = talib.ATR(self.high, self.low, self.close, timeperiod=28)[-1]
-            
+            atr_fast  = talib.ATR(self.high, self.low, self.close, timeperiod=7)[-1]
+            atr_mid   = talib.ATR(self.high, self.low, self.close, timeperiod=14)[-1]
+            atr_slow  = talib.ATR(self.high, self.low, self.close, timeperiod=28)[-1]
+
             if np.isnan(atr_mid) or atr_slow == 0:
                 return self.entry_price * 0.015
-                
+
+            # Squeeze-aware path: ATR(50) captures pre-squeeze range
+            if getattr(self, "bb_kc_squeeze_active", False):
+                if len(self.close) >= 55:
+                    atr_squeeze = talib.ATR(
+                        self.high, self.low, self.close, timeperiod=50
+                    )[-1]
+                    if not np.isnan(atr_squeeze) and atr_squeeze > atr_mid:
+                        logger.info(
+                            f"[VTM] Squeeze-aware ATR: ATR(50)={atr_squeeze:.5f} "
+                            f"replaces ATR(14)={atr_mid:.5f} "
+                            f"(ratio {atr_squeeze/atr_mid:.2f}×)"
+                        )
+                        return atr_squeeze
+
             ratio = atr_fast / atr_slow
-            
+
             if ratio > 1.30:
-                # Expanding vol — tighten fast
                 selected_atr = atr_fast
                 reason = "Expanding Vol (Tighten)"
             elif ratio < 0.70:
-                # Compressed vol — breathe wide
                 selected_atr = atr_slow
                 reason = "Compressed Vol (Wide)"
             else:
                 selected_atr = atr_mid
                 reason = "Normal Vol"
-                
-            logger.debug(f"[VTM] Dynamic ATR Selection: {selected_atr:.4f} ({reason}, Ratio: {ratio:.2f})")
+
+            logger.debug(f"[VTM] Dynamic ATR Selection: {selected_atr:.5f} ({reason}, Ratio: {ratio:.2f})")
             return selected_atr
-            
+
         except Exception as e:
             logger.error(f"[VTM] ATR error: {e}")
             return self.entry_price * 0.02
@@ -786,8 +804,84 @@ class VeteranTradeManager:
                 # Global clamped final_sl assignment
                 self.initial_stop_loss = final_sl
 
-                # Structure-based targets (only when use_structure_targets=true)
-                if self.use_structure_targets:
+                # ── min_sl_pct floor ─────────────────────────────────────────────
+                # Hard minimum SL distance as a percentage of entry price.
+                # Prevents ATR-derived stops from being dangerously tight during
+                # volatility squeezes or low-spread exotic sessions.
+                # Sourced from risk_config["min_sl_pct"] per asset in config.json.
+                _min_sl_pct = self.risk_config.get("min_sl_pct", 0.0)
+                if _min_sl_pct > 0 and self.entry_price > 0:
+                    _min_sl_dist = self.entry_price * _min_sl_pct
+                    if self.side == "long":
+                        _floor_sl = self.entry_price - _min_sl_dist
+                        if self.initial_stop_loss > _floor_sl:
+                            logger.info(
+                                f"[VTM] min_sl_pct floor: SL {self.initial_stop_loss:.5f} → {_floor_sl:.5f} "
+                                f"({_min_sl_pct * 100:.2f}% of entry {self.entry_price:.5f})"
+                            )
+                            self.initial_stop_loss = _floor_sl
+                    else:
+                        _floor_sl = self.entry_price + _min_sl_dist
+                        if self.initial_stop_loss < _floor_sl:
+                            logger.info(
+                                f"[VTM] min_sl_pct floor: SL {self.initial_stop_loss:.5f} → {_floor_sl:.5f} "
+                                f"({_min_sl_pct * 100:.2f}% of entry {self.entry_price:.5f})"
+                            )
+                            self.initial_stop_loss = _floor_sl
+
+                # ── PHASE 4: Flagpole TP ladder (NATURAL_RETRACEMENT / REBOUND) ──
+                # When a trade is entered after a confirmed pullback within a MAIN
+                # Livermore leg, static ATR multiples under-estimate the available
+                # move.  The flagpole (distance from entry to the pre-retracement
+                # MAIN pivot) gives a market-derived target ladder:
+                #   TP1 = entry ± 0.5 × flagpole  (half-flag: midway to prev pivot)
+                #   TP2 = prev MAIN pivot          (full-flag: re-test prior extreme)
+                #   TP3 = prev pivot ± 0.5 × flagpole  (extension beyond pivot)
+                # Only fires when the anchor is available and flagpole > 1.0 × ATR
+                # (prevents firing on noise / anchor data lag).
+                _flagpole_used = False
+                try:
+                    _lsm4 = self.livermore_state_4h
+                    _is_nat_long  = (_lsm4 == "NATURAL_RETRACEMENT" and self.side == "long")
+                    _is_nat_short = (_lsm4 == "NATURAL_REBOUND"     and self.side == "short")
+
+                    if _is_nat_long and self.livermore_anchor_main_up is not None:
+                        _anchor   = float(self.livermore_anchor_main_up)
+                        _flagpole = _anchor - self.entry_price
+                        if _flagpole > atr:  # sanity: anchor must be meaningfully above entry
+                            _tp1 = self.entry_price + 0.5 * _flagpole
+                            _tp2 = _anchor
+                            _tp3 = _anchor + 0.5 * _flagpole
+                            self.take_profit_levels = [_tp1, _tp2, _tp3]
+                            self.partial_sizes      = [0.45, 0.30, 0.25]
+                            _flagpole_used = True
+                            logger.info(
+                                f"[VTM] 🎯 Flagpole ladder (LONG): anchor={_anchor:.5f} "
+                                f"flagpole={_flagpole:.5f} "
+                                f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                            )
+
+                    elif _is_nat_short and self.livermore_anchor_main_down is not None:
+                        _anchor   = float(self.livermore_anchor_main_down)
+                        _flagpole = self.entry_price - _anchor
+                        if _flagpole > atr:  # sanity: anchor must be meaningfully below entry
+                            _tp1 = self.entry_price - 0.5 * _flagpole
+                            _tp2 = _anchor
+                            _tp3 = _anchor - 0.5 * _flagpole
+                            self.take_profit_levels = [_tp1, _tp2, _tp3]
+                            self.partial_sizes      = [0.45, 0.30, 0.25]
+                            _flagpole_used = True
+                            logger.info(
+                                f"[VTM] 🎯 Flagpole ladder (SHORT): anchor={_anchor:.5f} "
+                                f"flagpole={_flagpole:.5f} "
+                                f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                            )
+                except Exception as _fp_err:
+                    logger.debug(f"[VTM] Flagpole ladder error (non-blocking): {_fp_err}")
+
+                # Structure-based targets (only when use_structure_targets=true
+                # and flagpole ladder was not used)
+                if not _flagpole_used and self.use_structure_targets:
                     tolerance = 0.5 * atr
                     structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
                     raw_targets, self.partial_sizes = calculate_hybrid_targets(
@@ -805,8 +899,10 @@ class VeteranTradeManager:
                     logger.debug("[VTM] Structure targets disabled — using ATR multiples only")
 
                 # ✅ PHASE 5: MA FRONT-RUN (Take Profit — only when use_ema_structure=true)
-                self.take_profit_levels = []
-                if self.use_ema_structure:
+                # Skip when flagpole ladder was used — those TPs are already optimised.
+                if not _flagpole_used:
+                    self.take_profit_levels = []
+                if not _flagpole_used and self.use_ema_structure:
                     for tp in raw_targets:
                         adjusted_tp = tp
                         for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
@@ -822,11 +918,11 @@ class VeteranTradeManager:
                                         if candidate_tp < self.entry_price - (0.5 * atr):
                                             adjusted_tp = min(adjusted_tp, candidate_tp)
                         self.take_profit_levels.append(adjusted_tp)
-                else:
+                elif not _flagpole_used:
                     # No EMA adjustment — use raw targets directly
                     self.take_profit_levels = list(raw_targets)
 
-                # Fallback targets
+                # Fallback targets (only when no flagpole and no other TPs set)
                 if not self.take_profit_levels:
                     self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
                     self.partial_sizes = [0.45, 0.30, 0.25]  # fallback only
