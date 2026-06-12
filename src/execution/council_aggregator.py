@@ -870,13 +870,13 @@ class InstitutionalCouncilAggregator:
             logger.debug(f"[MOMENTUM] Overrule check error: {e}")
             return False
 
-    def get_aggregated_signal(
-        self, 
+    def _get_aggregated_signal_impl(
+        self,
         df: pd.DataFrame,
-        current_regime: str = "NEUTRAL",  # ✨ NEW: Accepted from main.py
-        is_bull_market: bool = True,      # ✨ NEW: Accepted from main.py
-        governor_data: Optional[Dict] = None, # ✨ NEW: Accepted from main.py
-        live_price: Optional[float] = None     # ✨ NEW: For accurate staleness check
+        current_regime: str = "NEUTRAL",
+        is_bull_market: bool = True,
+        governor_data: Optional[Dict] = None,
+        live_price: Optional[float] = None,
     ) -> Tuple[int, Dict]:
         """
         Main council decision logic with bidirectional support
@@ -1944,7 +1944,53 @@ class InstitutionalCouncilAggregator:
                 judge_agreement = 0.5
             signal_quality = base_quality * (0.8 + 0.2 * judge_agreement)
             signal_quality = min(signal_quality, 1.0)
-            
+
+            # ── MR lean conflict gate ────────────────────────────────────────────
+            # When MR's Livermore routing wanted to go the OPPOSITE direction but
+            # was blocked by a mode gate (returned 0, 0.0), the council needs higher
+            # conviction before going against MR's structural read.
+            #
+            # Root cause of USOIL June-2026 loss: SECONDARY_RETRACEMENT→MR lean LONG,
+            # council SELL scored exactly 3.50 (threshold=3.50) → trade executed.
+            # Price went up; the bounce MR identified was real.
+            #
+            # States:
+            #   SECONDARY_RETRACEMENT → MR leans LONG  → council SELL needs +0.5
+            #   NATURAL_RETRACEMENT   → MR leans LONG  → council SELL needs +0.5
+            #   SECONDARY_REBOUND     → MR leans SHORT → council BUY  needs +0.5
+            # Excluded: NATURAL_REBOUND (MR silent by design), MAIN_UP/MAIN_DOWN
+            #   (if Mode-3 climax-fade fails, council going WITH the trend is correct).
+            if signal != 0 and mr_signal == 0 and mr_conf == 0.0:
+                _lsm_lean = getattr(_composite_state, "livermore_state_1h", None) if _composite_state else None
+                _MR_LEAN_LONG  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT"}
+                _MR_LEAN_SHORT = {"SECONDARY_REBOUND"}
+                _lean_conflict = (
+                    (signal == -1 and _lsm_lean in _MR_LEAN_LONG)
+                    or (signal == +1 and _lsm_lean in _MR_LEAN_SHORT)
+                )
+                if _lean_conflict:
+                    _lean_dir    = "LONG" if _lsm_lean in _MR_LEAN_LONG else "SHORT"
+                    _council_dir = "SELL" if signal == -1 else "BUY"
+                    # Use fixed base threshold (trend_aligned_threshold), not the
+                    # already-adjusted required_score — prevents lifecycle and other
+                    # adjustments from stacking and compounding the raise.
+                    _conflict_req = min(self.trend_aligned_threshold + 0.50, 5.0)
+                    if total_score < _conflict_req:
+                        logger.warning(
+                            f"[COUNCIL] 🛑 MR lean conflict: LSM={_lsm_lean} → MR leans "
+                            f"{_lean_dir} but council wants {_council_dir}. "
+                            f"Score {total_score:.2f} < {_conflict_req:.2f} — signal blocked."
+                        )
+                        signal = 0
+                        signal_quality = 0.0
+                        decision_type  = f"HOLD (MR lean conflict — {_lsm_lean})"
+                    else:
+                        logger.info(
+                            f"[COUNCIL] ⚠️ MR lean conflict: LSM={_lsm_lean} → MR leans "
+                            f"{_lean_dir} vs council {_council_dir} — cleared elevated bar "
+                            f"{total_score:.2f} ≥ {_conflict_req:.2f}."
+                        )
+
             # Enhance reasoning with specific bonuses
             main_reasoning = f"{decision_type} (Score: {total_score:.2f}/{required_score:.1f})"
             bonus_tags = []
@@ -2089,10 +2135,67 @@ class InstitutionalCouncilAggregator:
                 'reasoning': f"error: {str(e)[:50]}",
             }
     
+    def _build_ai_validation_stub(self, signal: int, details: dict) -> dict:
+        """
+        Lightweight ai_validation stub for paths where the AI validator never ran
+        (early-return vetos: CMR, governor, MR lean conflict, opposite-trend, etc.).
+        Built purely from the details dict that's already been computed — no AI calls.
+        """
+        decision_type = details.get("decision_type", "")
+        is_blocked = "BLOCKED" in decision_type or "HOLD" in decision_type
+        action = "hold" if signal == 0 else "approved"
+
+        # Extract a human-readable rejection reason from decision_type when blocked
+        rejection_reasons: list = []
+        if is_blocked and decision_type:
+            # Strip wrapper text: "BLOCKED (Candle Momentum Reversal)" → the inner label
+            inner = decision_type
+            if "(" in inner:
+                inner = inner.split("(", 1)[-1].rstrip(")")
+            if inner and inner != decision_type:
+                rejection_reasons = [inner]
+
+        return {
+            "pattern_detected": False,
+            "pattern_name": "None",
+            "pattern_confidence": 0.0,
+            "validation_passed": signal != 0,
+            "action": action,
+            "rejection_reasons": rejection_reasons,
+            "top3_patterns": [],
+            "top3_confidences": [],
+            "sr_analysis": {},
+        }
+
+    def get_aggregated_signal(
+        self,
+        df: pd.DataFrame,
+        current_regime: str = "NEUTRAL",
+        is_bull_market: bool = True,
+        governor_data: Optional[Dict] = None,
+        live_price: Optional[float] = None,
+    ) -> Tuple[int, Dict]:
+        """
+        Public entry point — guaranteed to always return details with 'ai_validation'.
+        Delegates to _get_aggregated_signal_impl; early-return veto paths inside that
+        method skip the AI validator, so we patch in a lightweight stub here rather
+        than letting main.py re-run _format_ai_validation_for_viz as a fallback.
+        """
+        signal, details = self._get_aggregated_signal_impl(
+            df,
+            current_regime=current_regime,
+            is_bull_market=is_bull_market,
+            governor_data=governor_data,
+            live_price=live_price,
+        )
+        if not isinstance(details.get("ai_validation"), dict):
+            details["ai_validation"] = self._build_ai_validation_stub(signal, details)
+        return signal, details
+
     # ========================================================================
     # BIDIRECTIONAL JUDGES
     # ========================================================================
-    
+
     def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float, consensus_regime: str = "NEUTRAL") -> Tuple[float, float, Dict]:
         """
         JUDGE 1: TREND (Bidirectional)

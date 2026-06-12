@@ -1201,6 +1201,8 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper
                     )
+                    # Fix 1: inject phase_config so CompositeState carries gate flags
+                    self.aggregators[asset_name].phase_config = self.config.get("phase_config", {})
 
                     logger.info(f"  Type:       Performance Aggregator")
                     logger.info(
@@ -1888,44 +1890,31 @@ class TradingBot:
             logger.info(f"[PERFORMANCE] Reasoning: {details.get('reasoning', 'N/A')}")
 
         # ================================================================
-        # ✅ FIX: ALWAYS format AI validation (don't rely on aggregator)
+        # AI validation is now guaranteed by the aggregator contract:
+        # council_aggregator.get_aggregated_signal always injects
+        # ai_validation (real or stub) before returning.
+        # Keep a lightweight safety net for the performance-aggregator
+        # path and any future aggregator that doesn't follow the contract.
         # ================================================================
         ai_validation = details.get("ai_validation")
 
-        if ai_validation is None or not isinstance(ai_validation, dict):
-            logger.warning(
-                f"[HYBRID] ⚠️ No AI validation from {selected_mode} aggregator, "
-                f"generating manually..."
+        if not isinstance(ai_validation, dict):
+            # Aggregator didn't provide ai_validation — build a minimal stub
+            # rather than re-running _format_ai_validation_for_viz (which is
+            # expensive and was causing spurious warnings every veto cycle).
+            actual_aggregator = (
+                aggregators.get(selected_mode)
+                if isinstance(aggregators, dict) else aggregators
             )
-
-            # Get the actual aggregator instance
-            actual_aggregator = aggregators.get(selected_mode)
-
-            # Try aggregator's method first
-            if actual_aggregator and hasattr(
-                actual_aggregator, "_format_ai_validation_for_viz"
-            ):
-                try:
-                    ai_validation = actual_aggregator._format_ai_validation_for_viz(
-                        final_signal=signal, details=details.copy(), df=df
-                    )
-                    logger.info(
-                        f"[HYBRID] ✅ AI validation from {selected_mode} aggregator"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"[HYBRID] Aggregator method failed: {e}, using fallback"
-                    )
-                    ai_validation = None
-
-            # Fallback: Use direct AI validation
-            if ai_validation is None:
-                logger.info(f"[HYBRID] Using direct AI validation fallback")
+            if actual_aggregator and hasattr(actual_aggregator, "_build_ai_validation_stub"):
+                ai_validation = actual_aggregator._build_ai_validation_stub(signal, details)
+            else:
                 ai_validation = self._format_ai_validation_direct(asset_name, signal, df)
-
-            # Store in details
             details["ai_validation"] = ai_validation
-
+            logger.debug(
+                f"[HYBRID] ai_validation stub injected for {asset_name} "
+                f"({selected_mode} — veto/early-return path)"
+            )
         else:
             logger.info(
                 f"[HYBRID] ✅ AI validation present from {selected_mode} aggregator"
@@ -2140,12 +2129,28 @@ class TradingBot:
                     )
                 elif _lsm_1h_state in _MR_ACTIVE_STATES:
                     # MR had a structural context but mode conditions weren't met.
-                    # Modest raise: Livermore-backed TF signal is stronger than TF alone.
-                    min_quality = 0.45
-                    logger.info(
-                        f"[PERFORMANCE] {asset_name}: MR conditions unmet "
-                        f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
+                    # Direction-aware raise:
+                    #   • Opposite to MR's lean → 0.60 (strong conviction required)
+                    #   • Same direction or MAIN_UP/MAIN_DOWN → 0.45 (modest raise)
+                    _MR_LEAN_LONG_PERF  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT"}
+                    _MR_LEAN_SHORT_PERF = {"SECONDARY_REBOUND"}
+                    _perf_lean_conflict = (
+                        (signal == -1 and _lsm_1h_state in _MR_LEAN_LONG_PERF)
+                        or (signal == +1 and _lsm_1h_state in _MR_LEAN_SHORT_PERF)
                     )
+                    if _perf_lean_conflict:
+                        min_quality = 0.60
+                        logger.warning(
+                            f"[PERFORMANCE] {asset_name}: MR lean conflict "
+                            f"(LSM={_lsm_1h_state}, signal={'SELL' if signal == -1 else 'BUY'}) "
+                            f"— gate: 0.28 → 0.60 (opposite-lean)"
+                        )
+                    else:
+                        min_quality = 0.45
+                        logger.info(
+                            f"[PERFORMANCE] {asset_name}: MR conditions unmet "
+                            f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
+                        )
                 else:
                     # No Livermore state (warmup/legacy) — full raise, MR has no opinion.
                     min_quality = 0.60
@@ -4618,20 +4623,34 @@ class TradingBot:
                 is_blocked = (original_sig != 0) or (reasoning and "hold" not in reasoning.lower())
 
                 if is_blocked:
-                    # Determine block source and reason
+                    # Determine block source and reason.
+                    # Priority: council decision_type (most specific) → AI rejection
+                    # → general reasoning string.  AI stub must NOT win when an
+                    # explicit council veto (CMR, MR lean, governor, etc.) fired.
                     block_source = "Signal Aggregator"
-                    
-                    # If it was specifically an AI validation rejection
-                    if ai_details.get("action") == "rejected" and ai_details.get("rejection_reasons"):
+                    _dt = details.get("decision_type", "")
+                    raw_reason = reasoning or "Signal blocked by aggregator filters"
+
+                    if "Candle Momentum Reversal" in _dt:
+                        block_source = "Candle Momentum Reversal"
+                        block_reason = "Recent candles opposing signal direction"
+                    elif "Opposite Trend" in _dt:
+                        block_source = "Opposite Trend Veto"
+                        block_reason = "TF signal strongly opposes council direction"
+                    elif "MR lean conflict" in _dt:
+                        block_source = "MR Lean Conflict"
+                        block_reason = _dt.replace("HOLD (", "").rstrip(")")
+                    elif "BLOCKED" in _dt and "(" in _dt:
+                        # Generic council early-return block — extract label from parens
+                        block_source = _dt.split("(", 1)[-1].rstrip(")")
+                        block_reason = block_source
+                    elif ai_details.get("action") == "rejected" and ai_details.get("rejection_reasons"):
+                        # Only attribute to AI when it genuinely rejected (not a stub)
                         block_source = "AI Validation"
                         block_reason = ", ".join(ai_details.get("rejection_reasons"))
                     else:
-                        # General aggregator block (volatility, governor, etc)
-                        # Clean up technical reasoning strings for humans
-                        raw_reason = reasoning or "Signal blocked by aggregator filters"
+                        # General aggregator block — clean up technical strings
                         block_reason = raw_reason.replace("_", " ").title()
-                        
-                        # Special handling for common technical reasons
                         if "low_volatility" in raw_reason:
                             block_reason = "Market volatility below minimum threshold"
                         elif "no_sniper_confirmation" in raw_reason:
@@ -5808,6 +5827,46 @@ class TradingBot:
         except Exception as _wdog_err:
             logger.debug("[VALIDATOR] watchdog_tick error: %s", _wdog_err)
 
+    # ── Fix 7: Connection watchdog ────────────────────────────────────────────
+
+    def _run_connection_watchdog(self) -> None:
+        """
+        Fix 7: Periodic connection health check — runs every 5 minutes via scheduler.
+        Pings MT5 and Binance; logs a warning and attempts reconnect if either is down.
+        Non-fatal: never raises, never blocks trading.
+        """
+        import time as _time
+        try:
+            # ── MT5 ──────────────────────────────────────────────────────────
+            if self.mt5_handler:
+                try:
+                    ok = self.mt5_handler._check_connection()
+                    if not ok:
+                        logger.warning("[WATCHDOG] MT5 connection lost — attempting reconnect.")
+                        try:
+                            self.data_manager.initialize_mt5()
+                        except Exception as _rc_err:
+                            logger.warning("[WATCHDOG] MT5 reconnect failed: %s", _rc_err)
+                except Exception as _mt5_err:
+                    logger.warning("[WATCHDOG] MT5 ping failed: %s", _mt5_err)
+
+            # ── Binance ───────────────────────────────────────────────────────
+            if self.binance_handler:
+                try:
+                    if hasattr(self.binance_handler, 'client') and self.binance_handler.client:
+                        self.binance_handler.client.ping()
+                except Exception as _bn_err:
+                    logger.warning("[WATCHDOG] Binance ping failed: %s", _bn_err)
+                    # Attempt handler reconnect if method exists
+                    if hasattr(self.binance_handler, 'reconnect'):
+                        try:
+                            self.binance_handler.reconnect()
+                        except Exception:
+                            pass
+
+        except Exception as _wdog_err:
+            logger.debug("[WATCHDOG] connection_watchdog error: %s", _wdog_err)
+
     # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
 
     def _load_lsm_csv(self, asset_name: str, symbol: str, tf_suffix: str, expected_hours: int):
@@ -6077,6 +6136,8 @@ class TradingBot:
 
             # Phase 2: System Validator watchdog — runs every 5 minutes
             schedule.every(5).minutes.do(self._run_validator_watchdog)
+            # Fix 7: Connection watchdog — pings MT5/Binance, attempts reconnect on failure
+            schedule.every(5).minutes.do(self._run_connection_watchdog)
 
             self.is_running = True
             self._main_loop_running = True

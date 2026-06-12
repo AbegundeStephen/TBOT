@@ -141,6 +141,8 @@ class CompositeState:
     #         RANGE_BOUNDARY / REJECT / None (no classification yet)
     # ══════════════════════════════════════════════════════════════
     entry_type: Optional[str] = None
+    # ── Fix 1: phase_config gate flags (populated by main.py → consumed by aggregator + VTM)
+    phase_config: dict = field(default_factory=dict)
 
     def sanitise(self) -> None:
         """

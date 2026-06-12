@@ -449,6 +449,12 @@ class VeteranTradeManager:
         self.vtm_entry_type             = _cs.get("entry_type")
         # Squeeze flag — drives wider ATR selection in _calculate_atr()
         self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
+        # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
+        _cs_phase_cfg = _cs.get("phase_config", {})
+        if _cs_phase_cfg:
+            self.risk_config = {**self.risk_config, "phase_config": {
+                **self.risk_config.get("phase_config", {}), **_cs_phase_cfg
+            }}
 
         # Livermore-aware ATR multiplier overlay — all values from config
         _lv4h   = self.livermore_state_4h
@@ -926,6 +932,30 @@ class VeteranTradeManager:
                 if not self.take_profit_levels:
                     self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
                     self.partial_sizes = [0.45, 0.30, 0.25]  # fallback only
+
+                # ── min_rr enforcement on TP1 ─────────────────────────────────
+                # When min_sl_pct widens the SL, the ATR-derived TP1 may produce
+                # a sub-1R trade. Enforce minimum R:R on TP1 only; TP2/TP3 are
+                # structure/flagpole targets and are left untouched.
+                # Sourced from risk_config["min_rr"] per asset in config.json.
+                _min_rr = self.risk_config.get("min_rr", 1.5)
+                if _min_rr > 0 and self.take_profit_levels and self.entry_price > 0:
+                    _sl_dist = abs(self.entry_price - self.initial_stop_loss)
+                    if _sl_dist > 0:
+                        _tp1_current      = self.take_profit_levels[0]
+                        _tp1_current_dist = abs(_tp1_current - self.entry_price)
+                        _tp1_floor_dist   = _sl_dist * _min_rr
+                        if _tp1_current_dist < _tp1_floor_dist:
+                            _tp1_floor = (
+                                self.entry_price + _tp1_floor_dist if self.side == "long"
+                                else self.entry_price - _tp1_floor_dist
+                            )
+                            logger.info(
+                                f"[VTM] min_rr floor: TP1 {_tp1_current:.5f} → {_tp1_floor:.5f} "
+                                f"(R:R {_tp1_current_dist / _sl_dist:.2f} → {_min_rr:.1f}, "
+                                f"SL dist={_sl_dist:.5f})"
+                            )
+                            self.take_profit_levels[0] = _tp1_floor
 
             # STEP 3 — Lot Sanitizer
             # Reason: Ensures position size is valid for broker submission.
