@@ -465,11 +465,19 @@ class MeanReversionStrategy(BaseStrategy):
         # ── Compression gate: BB/KC squeeze OR NR7/NR7-ID (mandatory) ─────
         # Spring setups require prior volatility compression; without it the
         # spring detection fires on ordinary pullbacks with no coiled energy.
+        # Togglable via phase_config.bb_kc_squeeze_gate_enabled (default: True).
         if composite_state is not None:
+            _phase_cfg = getattr(composite_state, "phase_config", {}) or {}
+            _squeeze_gate_on = _phase_cfg.get("bb_kc_squeeze_gate_enabled", True)
+            _nr7_gate_on     = _phase_cfg.get("nr7_gate_enabled", True)
             _squeeze = getattr(composite_state, "bb_kc_squeeze_active", False)
             _nr7     = getattr(composite_state, "nr7_active", False)
             _nr7_id  = getattr(composite_state, "nr7_id_active", False)
-            if not (_squeeze or _nr7 or _nr7_id):
+            _compression_ok = (
+                (_squeeze_gate_on and _squeeze)
+                or (_nr7_gate_on and (_nr7 or _nr7_id))
+            )
+            if not _compression_ok:
                 logger.info(
                     f"[MR Mode1] {self.asset}: no compression "
                     f"(squeeze={_squeeze} nr7={_nr7} nr7_id={_nr7_id}) → VETO"

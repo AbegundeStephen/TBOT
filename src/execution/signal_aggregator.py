@@ -625,6 +625,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         import talib as ta
         from datetime import datetime
         state = CompositeState()
+        # Fix 1: propagate phase_config gate flags into CompositeState
+        state.phase_config = getattr(self, "phase_config", {})
 
         if df is None or len(df) < 20:
             return state
