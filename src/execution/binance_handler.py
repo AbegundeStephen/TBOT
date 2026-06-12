@@ -427,6 +427,16 @@ class BinanceExecutionHandler:
             logger.info("[INIT] Auto-syncing positions with Binance...")
             self.sync_positions_with_binance("BTC")
 
+    def _resolve_symbol(self, asset_name: str) -> str:
+        """Return the Binance symbol for the given asset name.
+        Reads from config["assets"][asset_name]["symbol"]; falls back to self.symbol (BTCUSDT).
+        BinanceHandler only manages BTC, so this almost always returns 'BTCUSDT'."""
+        return (
+            self.config.get("assets", {})
+            .get(asset_name, {})
+            .get("symbol", self.symbol)
+        )
+
     def can_open_position_side(self, asset_name: str, side: str) -> Tuple[bool, str]:
         """Check if we can open a position on a specific SIDE"""
         if side == "short":

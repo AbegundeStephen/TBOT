@@ -68,7 +68,7 @@
       "leverage": 20,
       "margin_type": "ISOLATED",
       "symbol": "BTCUSDT",
-      "exchange": "mt5",
+      "exchange": "binance",
       "interval": "1h",
       "min_bars_training": 5000,
       "lookback_days": 730,
@@ -142,7 +142,6 @@
           "old_state_min_age": 20
         }
       },
-      "mt5_symbol": "BTCUSDm",
       "asset_type": "crypto",
       "timeframe": "H1"
     },
@@ -1688,11 +1687,16 @@
     }
   },
   "phase_config": {
-    "_note": "Controls which phases are active. Never flip manually without completing the gate criteria. shadow_only must remain true until Gate 1 passes.",
+    "_note": "Controls which phases are active. Flip flags here instead of touching source code. current_phase is informational only.",
     "current_phase": "1",
-    "shadow_only": true,
     "autotrainer_enabled": false,
     "structural_stops_enabled": false,
-    "per_tick_livermore_enabled": false
+    "per_tick_livermore_enabled": false,
+    "bb_kc_squeeze_gate_enabled": true,
+    "nr7_gate_enabled": true,
+    "natural_cycle_second_pos_gate_enabled": false,
+    "continuation_targets_enabled": false,
+    "min_sl_pct_enabled": true,
+    "min_rr_enabled": true
   }
 }
