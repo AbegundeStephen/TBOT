@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 class BaseStrategy(ABC):
     """Abstract base class for trading strategies with ML integration"""
 
+    # Override to False in purely rule-based strategies that don't use a
+    # trained sklearn model.  The startup model loader will skip these so
+    # they don't generate spurious "[FAIL] Not found: …" errors.
+    requires_trained_model: bool = True
+
     def __init__(self, config: Dict, name: str):
         self.config = config
         self.name = name

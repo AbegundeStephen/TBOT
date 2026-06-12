@@ -1264,6 +1264,12 @@ class TradingBot:
                         "livermore": _lsm_companion,
                         "mode": "council",
                     }
+                    # Fix 1 (council path): inject phase_config so the LSM companion
+                    # propagates it into composite_state.phase_config when
+                    # _build_composite_state runs in the trading loop.
+                    _pc = self.config.get("phase_config", {})
+                    _council_agg.phase_config = _pc
+                    _lsm_companion.phase_config = _pc
 
                     logger.info(f"  Type:       Council Aggregator + LSM companion")
                     logger.info(
@@ -2193,6 +2199,11 @@ class TradingBot:
         # Load strategy models
         for asset_name, strategies in self.strategies.items():
             for strategy_name, strategy in strategies.items():
+                # Skip rule-based strategies that don't use a trained .pkl model
+                if not getattr(strategy, "requires_trained_model", True):
+                    logger.info(f"[SKIP] {strategy_name}_{asset_name.lower()} — rule-based, no model needed")
+                    continue
+
                 expected += 1
 
                 model_filename = f"{strategy_name}_{asset_name.lower()}.pkl"
@@ -2729,6 +2740,10 @@ class TradingBot:
                     "livermore": lsm_companion,
                     "mode": "council",
                 }
+                # Fix 1 (council auto-preset reinit): same as initial setup path.
+                _pc = self.config.get("phase_config", {})
+                new_aggregator.phase_config = _pc
+                lsm_companion.phase_config = _pc
                 logger.info(
                     f"[AUTO PRESET] ✓ Council aggregator + LSM companion refreshed for {asset_name}"
                 )

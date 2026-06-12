@@ -2288,6 +2288,14 @@ class InstitutionalCouncilAggregator:
                 elif level_defended:
                     buy_score = weight * 0.7
                     buy_exp   = f"STRUCT BUY: ⚠️ Level defended ({buy_score:.1f})"
+                elif is_breakout_mode and not failed_breakout and len(df) >= 21:
+                    # Donchian breakout detected but no SMC BOS yet — partial credit
+                    _h20 = df['high'].iloc[-21:-1].max()
+                    if float(df['close'].iloc[-1]) > _h20:
+                        buy_score = weight * 0.8
+                        buy_exp   = f"STRUCT BUY: ⚡ Donchian breakout, no SMC BOS ({buy_score:.1f})"
+                    else:
+                        buy_exp   = "STRUCT BUY: ❌ No structural signal"
                 else:
                     buy_exp   = "STRUCT BUY: ❌ No structural signal"
                 # Bullish spring bonus (wick swept lows, recovered above level)
@@ -2302,6 +2310,14 @@ class InstitutionalCouncilAggregator:
                 elif rej_at_level:
                     sell_score = weight * 0.7
                     sell_exp   = f"STRUCT SELL: ⚠️ Rejected at level ({sell_score:.1f})"
+                elif is_breakout_mode and len(df) >= 21:
+                    # Donchian breakdown detected but no SMC failed_breakout yet — partial credit
+                    _l20 = df['low'].iloc[-21:-1].min()
+                    if float(df['close'].iloc[-1]) < _l20:
+                        sell_score = weight * 0.8
+                        sell_exp   = f"STRUCT SELL: ⚡ Donchian breakdown, no SMC BOS ({sell_score:.1f})"
+                    else:
+                        sell_exp   = "STRUCT SELL: ❌ No structural signal"
                 else:
                     sell_exp   = "STRUCT SELL: ❌ No structural signal"
                 # Bearish upthrust bonus (wick swept highs, rejected back below)

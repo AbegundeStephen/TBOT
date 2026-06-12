@@ -18,7 +18,11 @@ class VolumeOrderFlowStrategy(BaseStrategy):
     Volume and Order Flow Strategy
     Signals based on OBV trend, MFI momentum, CMF net flow, volume surges,
     and price-OBV divergence. Completely orthogonal to EMA and TrendFollowing.
+
+    This is a pure rule-based strategy — no trained sklearn model is used.
     """
+
+    requires_trained_model = False  # no .pkl needed; signals are computed from indicators
 
     def __init__(self, config: dict):
         super().__init__(config, "VolumeFlow")
