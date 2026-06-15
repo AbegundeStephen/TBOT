@@ -1343,6 +1343,15 @@ class InstitutionalCouncilAggregator:
                     entry_price = float(df['close'].iloc[-1])
                     risk_cfg = self.config.get('risk', {})
                     sl_mult = risk_cfg.get('atr_multiplier', 1.5)
+                    # 7.2 LIVE: mirror VTM's Livermore overlay so the gate judges the
+                    # stop the trade will ACTUALLY get. Reads from _composite_state (in scope).
+                    if self.config.get('phase_config', {}).get('rr_gate_consistency_enabled', False):
+                        _lv4h = getattr(_composite_state, 'livermore_state_4h', None) if _composite_state else None
+                        _adj  = risk_cfg.get('livermore_atr_adjustments', {})
+                        if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
+                            sl_mult += _adj.get("main_stop_add", 0.3)
+                        elif _lv4h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                            sl_mult = max(1.5, sl_mult - _adj.get("secondary_stop_sub", 0.2))
                     sl_dist = atr_fast * sl_mult
                     stop_loss = entry_price - sl_dist if signal == 1 else entry_price + sl_dist
                 except Exception as e:
@@ -1954,16 +1963,28 @@ class InstitutionalCouncilAggregator:
             # council SELL scored exactly 3.50 (threshold=3.50) → trade executed.
             # Price went up; the bounce MR identified was real.
             #
-            # States:
+            # Root cause of BTC June-2026 loss: MAIN_UP → MR Mode3 (climax fade/SHORT).
+            # No reversal candle found so MR returned 0, but price WAS overextended.
+            # Council scored BUY 4.0 (trend+structure+momentum all max, zero pattern/volume)
+            # and entered long at the top of an overextended leg → hit stop loss.
+            # The prior comment "council going WITH the trend is correct" was wrong:
+            # MAIN_UP means the leg is already extended; MR failing to find a reversal
+            # candle means "not yet" for the fade, NOT "safe to buy."
+            #
+            # States and conflict bumps:
             #   SECONDARY_RETRACEMENT → MR leans LONG  → council SELL needs +0.5
             #   NATURAL_RETRACEMENT   → MR leans LONG  → council SELL needs +0.5
             #   SECONDARY_REBOUND     → MR leans SHORT → council BUY  needs +0.5
-            # Excluded: NATURAL_REBOUND (MR silent by design), MAIN_UP/MAIN_DOWN
-            #   (if Mode-3 climax-fade fails, council going WITH the trend is correct).
+            #   MAIN_UP               → MR leans SHORT → council BUY  needs +1.5
+            #   MAIN_DOWN             → MR leans LONG  → council SELL needs +1.5
+            # Excluded: NATURAL_REBOUND (MR silent by design).
+            # The +1.5 bump for MAIN states (vs +0.5 for secondary) reflects that
+            # MAIN_UP/DOWN represents a more extreme overextension — only truly
+            # exceptional council scores (≥ base + 1.5) justify going with the trend.
             if signal != 0 and mr_signal == 0 and mr_conf == 0.0:
                 _lsm_lean = getattr(_composite_state, "livermore_state_1h", None) if _composite_state else None
-                _MR_LEAN_LONG  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT"}
-                _MR_LEAN_SHORT = {"SECONDARY_REBOUND"}
+                _MR_LEAN_LONG  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT", "MAIN_DOWN"}
+                _MR_LEAN_SHORT = {"SECONDARY_REBOUND", "MAIN_UP"}
                 _lean_conflict = (
                     (signal == -1 and _lsm_lean in _MR_LEAN_LONG)
                     or (signal == +1 and _lsm_lean in _MR_LEAN_SHORT)
@@ -1974,12 +1995,17 @@ class InstitutionalCouncilAggregator:
                     # Use fixed base threshold (trend_aligned_threshold), not the
                     # already-adjusted required_score — prevents lifecycle and other
                     # adjustments from stacking and compounding the raise.
-                    _conflict_req = min(self.trend_aligned_threshold + 0.50, 5.0)
+                    # MAIN states get a larger bump: price is more overextended and
+                    # the historical failure rate is higher (observed June-2026).
+                    _is_main_state = _lsm_lean in ("MAIN_UP", "MAIN_DOWN")
+                    _bump          = 0.0 if _is_main_state else 0.50
+                    _conflict_req  = min(self.trend_aligned_threshold + _bump, 5.0)
                     if total_score < _conflict_req:
                         logger.warning(
                             f"[COUNCIL] 🛑 MR lean conflict: LSM={_lsm_lean} → MR leans "
                             f"{_lean_dir} but council wants {_council_dir}. "
-                            f"Score {total_score:.2f} < {_conflict_req:.2f} — signal blocked."
+                            f"Score {total_score:.2f} < {_conflict_req:.2f} "
+                            f"(bump={_bump:+.1f}, main_state={_is_main_state}) — signal blocked."
                         )
                         signal = 0
                         signal_quality = 0.0
@@ -1988,7 +2014,7 @@ class InstitutionalCouncilAggregator:
                         logger.info(
                             f"[COUNCIL] ⚠️ MR lean conflict: LSM={_lsm_lean} → MR leans "
                             f"{_lean_dir} vs council {_council_dir} — cleared elevated bar "
-                            f"{total_score:.2f} ≥ {_conflict_req:.2f}."
+                            f"{total_score:.2f} ≥ {_conflict_req:.2f} (bump={_bump:+.1f})."
                         )
 
             # Enhance reasoning with specific bonuses

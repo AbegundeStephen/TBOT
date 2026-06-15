@@ -3152,66 +3152,61 @@ class PortfolioManager:
 
         return trade_result
 
-    def reconcile_positions(self, asset: str, broker_positions: List[Dict]):
+    def reconcile_positions(self, asset: str, broker_positions: List[Dict]) -> List:
         """
-        ✅ RECONCILIATION: Ensure local positions match broker reality.
-        Syncs local state if mismatches are detected.
-        Returns (orphan_id_removed, orphan_side_removed, bulk_cleared) counts.
+        S2.1: Detect positions closed on the broker and return them for recording.
+        Returns a list of (position, reason) tuples — does NOT pop the positions.
+        The caller is responsible for calling the appropriate recorder and then
+        close_position(already_closed_on_exchange=True) for each entry.
+        Returns [] when broker_positions is None (caller's broker fetch failed).
         """
-        # Fix 2: None-guard — caller may pass None when broker fetch fails
+        # None-guard — caller may pass None when broker fetch fails
         if broker_positions is None:
             logger.warning(f"[RECONCILE] broker_positions is None for {asset} — skipping reconcile.")
-            return (0, 0, 0)
+            return []
 
         local_positions = self.get_asset_positions(asset)
-
-        orphan_id_removed   = 0
-        orphan_side_removed = 0
-        bulk_cleared        = 0
+        to_close = []
 
         # 1. Check for orphaned local positions (exist here but not on broker)
-        # We check by specific exchange ID if available
         broker_ids = [str(p.get('id')) for p in broker_positions if p.get('id')]
 
         for pos in list(local_positions):
-            # A. If we have a specific exchange ID, use it for exact matching
+            # A. Exact ID match (MT5 ticket or Binance order id)
             local_exchange_id = str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
 
             if local_exchange_id != "None" and broker_ids:
                 if local_exchange_id not in broker_ids:
-                    logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
-                    self.positions.pop(pos.position_id, None)
-                    # Flag as manual so the cooldown bypass does NOT fire on the
-                    # next cycle — the user closed this position outside the bot.
+                    logger.warning(
+                        f"[RECONCILE] Ticket {local_exchange_id} ({pos.position_id}) "
+                        f"missing from broker — queueing for recorder."
+                    )
                     self.last_close_was_manual[pos.asset] = True
-                    orphan_id_removed += 1
-                    continue
+                    to_close.append((pos, "closed_on_exchange"))
                 else:
-                    # Fix 2: ID verified alive on broker — skip the side-check below
-                    # to avoid double-closing a position when sides aren't reported identically.
+                    # ID alive on broker — skip side-check
                     continue
 
-            # B. If no IDs (rare) or for Binance where positions are aggregated by side
-            # Check if at least one broker position exists for this side
-            broker_sides = [p.get('side').lower() for p in broker_positions if p.get('side')]
-            if pos.side.lower() not in broker_sides:
-                logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
-                self.positions.pop(pos.position_id, None)
-                # Flag as manual — broker-side close (SL/TP set in MT5 terminal,
-                # or manual close) must still respect the cooldown window.
-                self.last_close_was_manual[pos.asset] = True
-                orphan_side_removed += 1
+            else:
+                # B. Side-level check (Binance aggregated / no IDs)
+                broker_sides = [p.get('side', '').lower() for p in broker_positions if p.get('side')]
+                if pos.side.lower() not in broker_sides:
+                    logger.warning(
+                        f"[RECONCILE] Side {pos.side.upper()} ({pos.position_id}) "
+                        f"missing from broker — queueing for recorder."
+                    )
+                    self.last_close_was_manual[pos.asset] = True
+                    to_close.append((pos, "closed_on_exchange"))
 
-        # 2. Final check: If broker has 0 positions but we still have local ones, clear them
+        # 2. Broker reports 0 positions — queue everything
         if not broker_positions and local_positions:
-            logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
+            logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset} — queueing all for recorder.")
             for pos in local_positions:
-                self.positions.pop(pos.position_id, None)
-                # All of these were closed outside the bot — treat as manual.
-                self.last_close_was_manual[pos.asset] = True
-                bulk_cleared += 1
+                if not any(p is pos for p, _ in to_close):
+                    self.last_close_was_manual[pos.asset] = True
+                    to_close.append((pos, "closed_on_exchange"))
 
-        return (orphan_id_removed, orphan_side_removed, bulk_cleared)
+        return to_close
 
     @handle_errors(
         component="portfolio_manager",

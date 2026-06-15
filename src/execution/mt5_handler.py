@@ -1632,6 +1632,16 @@ class MT5ExecutionHandler:
             # Cap to remaining broker volume to avoid INVALID_VOLUME errors
             partial_lots = min(partial_lots, mt5_pos.volume)
 
+            # S6 guard: if partial_lots == full position volume this is a fake-partial
+            # that would close the entire position.  Skip it so VTM doesn't
+            # accidentally wipe a position on a min-lot account.
+            if partial_lots >= mt5_pos.volume:
+                logger.warning(
+                    f"[PARTIAL-MT5] SKIP: partial_lots ({partial_lots:.4f}) >= full position "
+                    f"({mt5_pos.volume:.4f}) — would full-close; aborting partial for {asset_name}"
+                )
+                return False
+
             request = {
                 "action":      mt5.TRADE_ACTION_DEAL,
                 "symbol":      symbol,
@@ -1949,7 +1959,9 @@ class MT5ExecutionHandler:
                     # Convert to simple dicts for PortfolioManager
                     # Match by ticket ID for MT5
                     broker_data = [{'id': str(p.ticket), 'side': 'long' if p.type == mt5.POSITION_TYPE_BUY else 'short', 'quantity': p.volume} for p in broker_positions]
-                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    _to_close = self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    for _pos, _reason in _to_close:
+                        self._handle_mt5_exchange_close(_pos, asset_name, symbol, _reason)
             except Exception as e:
                 logger.debug(f"[RECONCILE] MT5 fetch failed: {e}")
 
@@ -2324,6 +2336,52 @@ class MT5ExecutionHandler:
             else:
                 _raw_profit = (exit_price - pos.entry_price) * pos.quantity
         return exit_price, broker_data, _raw_profit
+
+    def _handle_mt5_exchange_close(self, pos, asset: str, symbol: str, reason: str):
+        """
+        S2.3: Recorder for a position detected closed on MT5 by reconcile_positions.
+        Fetches authoritative fill price, sends Telegram alert, and calls close_position.
+        """
+        try:
+            current_price = self.get_current_price(symbol)
+            exit_price, broker_data, _raw_profit = \
+                self._record_mt5_external_close(pos, asset, current_price, symbol)
+
+            # Telegram alert
+            try:
+                _bot = getattr(self, 'trading_bot', None)
+                _telegram = getattr(_bot, 'telegram_bot', None)
+                _send_fn = getattr(_bot, '_send_telegram_notification', None)
+                if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                    _pnl_str = (
+                        f"{'🟢 +' if (_raw_profit or 0) >= 0 else '🔴 '}"
+                        f"${abs(_raw_profit or 0):.2f}"
+                    )
+                    _msg = (
+                        f"⚠️ <b>POSITION CLOSED BY MT5</b>\n"
+                        f"Asset:  <b>{asset}</b> {pos.side.upper()}\n"
+                        f"Ticket: #{pos.mt5_ticket}\n"
+                        f"Entry:  ${pos.entry_price:.4g}\n"
+                        f"Exit:   ${exit_price:.4g}\n"
+                        f"P&L:    {_pnl_str}\n"
+                        f"Reason: SL/TP hit or manual close on broker"
+                    )
+                    _coro = _telegram.send_message(text=_msg, parse_mode="HTML")
+                    if _coro:
+                        _send_fn(_coro)
+            except Exception as _tg:
+                logger.debug(f"[RECONCILE] MT5 Telegram alert failed: {_tg}")
+
+            self.portfolio_manager.close_position(
+                position_id=pos.position_id,
+                exit_price=exit_price,
+                reason=reason,
+                already_closed_on_exchange=True,
+                preloaded_broker_data=broker_data,
+            )
+        except Exception as e:
+            logger.error(f"[RECONCILE] _handle_mt5_exchange_close failed for {pos.position_id}: {e}")
+
     def _verify_vtm_status_after_sync(self, asset: str):
         """Verify VTM is working after position sync"""
         try:
