@@ -124,7 +124,7 @@
         "max_hold_bars": 72,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.012,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.02,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -140,7 +140,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.006,
+        "min_rr": 1.5
       }
     },
     "GOLD": {
@@ -203,7 +205,7 @@
         "max_hold_bars": 60,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.01,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.015,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -219,7 +221,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0035,
+        "min_rr": 1.5
       }
     },
     "USTEC": {
@@ -280,7 +284,7 @@
         "max_hold_bars": 60,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.012,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.02,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -296,7 +300,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0025,
+        "min_rr": 1.5
       }
     },
     "EURJPY": {
@@ -359,7 +365,7 @@
         "max_hold_bars": 60,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.008,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.012,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -375,7 +381,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0015,
+        "min_rr": 1.5
       }
     },
     "EURUSD": {
@@ -444,7 +452,10 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0012,
+        "min_rr": 1.5,
+        "early_scale_enabled": false
       }
     },
     "USOIL": {
@@ -507,7 +518,7 @@
         "max_hold_bars": 60,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.012,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.018,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -523,7 +534,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0055,
+        "min_rr": 2.0
       }
     },
     "GBPAUD": {
@@ -586,7 +599,7 @@
         "max_hold_bars": 60,
         "breakeven_after_bars": 8,
         "breakeven_profit_threshold": 0.008,
-        "early_scale_enabled": true,
+        "early_scale_enabled": false,
         "early_scale_threshold": 0.012,
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
@@ -602,7 +615,9 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        }
+        },
+        "min_sl_pct": 0.0025,
+        "min_rr": 2.0
       }
     }
   },
@@ -1192,10 +1207,24 @@
     "check_interval_seconds": 300,
     "max_positions_per_asset": 3,
     "small_account_protocol": true,
-    "place_vtm_sl_on_exchange": false,
-    "place_vtm_tp_on_exchange": false,
+    "place_vtm_sl_on_exchange": true,
+    "place_vtm_tp_on_exchange": true,
     "task_scheduler_name": "TBOT",
-    "enabled": true
+    "enabled": true,
+    "natural_cycle_min_bars": 8,
+    "allow_hedging": false,
+    "min_regime_confidence": 0.6,
+    "vtm_update_interval_seconds": 5,
+    "vtm_pyramiding_enabled": false,
+    "exchange_reconcile_interval_seconds": 60,
+    "session_filter_enabled": true,
+    "profit_alert_thresholds": [
+      10,
+      15,
+      20,
+      25,
+      30
+    ]
   },
   "risk_management": {
     "max_daily_trades": 30,
@@ -1272,6 +1301,12 @@
     "natural_cycle_second_pos_gate_enabled": false,
     "continuation_targets_enabled": false,
     "min_sl_pct_enabled": true,
-    "min_rr_enabled": true
+    "min_rr_enabled": true,
+    "single_tp_blend_enabled": true,
+    "rr_gate_consistency_enabled": true,
+    "pullback_completion_enabled": false,
+    "mfe_logging_enabled": true,
+    "partials_enabled": false,
+    "pyramiding_enabled": false
   }
 }

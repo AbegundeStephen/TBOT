@@ -1501,16 +1501,34 @@ class BinanceExecutionHandler:
         try:
             pid = position.position_id
 
+            # Last-TP-only guard: only place a TP order on exchange once all
+            # intermediate partials have been notionally fired by VTM.
+            # Placing TP1/TP2 as LIMIT orders would cause partial broker fills
+            # that the Binance handler can't reconcile (no partial-close path).
+            # Once all but the last rung are done, push the final target so the
+            # exchange acts as a safety net for the full close.
+            tm = getattr(position, "trade_manager", None)
+            if tm is not None:
+                _n_levels = len(getattr(tm, "take_profit_levels", []))
+                _n_hit    = len(getattr(tm, "partials_hit", []))
+                _is_last  = _n_levels > 0 and _n_hit >= _n_levels - 1
+                if not _is_last:
+                    logger.debug(
+                        f"[VTM-TP] {pid}: deferring TP push — "
+                        f"only {_n_hit}/{_n_levels} rungs notionally hit, "
+                        f"waiting for last rung before placing on exchange"
+                    )
+                    return False
+
             # Guard: skip micro-movements
             last = self._last_pushed_tp.get(pid)
             if last is not None and abs(last - new_tp) < 0.01:
                 return False
 
-            # Remaining quantity
-            remaining_qty = position.quantity
-            if position.trade_manager:
-                remaining_qty = position.quantity * position.trade_manager.remaining_position
-            remaining_qty = self.futures_handler._round_quantity(remaining_qty)
+            # Use full position quantity — all intermediate partials were skipped
+            # on exchange, so the broker still holds the entire original lot.
+            # VTM's remaining_position tracks notional state only on Binance.
+            remaining_qty = self.futures_handler._round_quantity(position.quantity)
             if remaining_qty <= 0:
                 return False
 
@@ -1594,13 +1612,15 @@ class BinanceExecutionHandler:
                     # Pass None straight through — reconcile_positions has its own None-guard
                     if active_positions is not None:
                         broker_data = [
-                            {'side': p['side'], 'id': p.get('orderId', p.get('symbol', '')),
+                            {'side': p['side'], 'id': None,
                              'quantity': abs(float(p['positionAmt']))}
                             for p in active_positions
                         ]
                     else:
                         broker_data = None
-                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    _to_close = self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    for _pos, _reason in _to_close:
+                        self._handle_binance_exchange_close(_pos, asset_name, symbol, _reason)
                 except Exception as e:
                     logger.debug(f"[RECONCILE] Binance fetch failed: {e}")
 
@@ -1661,6 +1681,18 @@ class BinanceExecutionHandler:
                             exit_reason_str = exit_reason.value
                         else:
                             exit_reason_str = str(exit_reason)
+
+                        # S6 guard: partial exit (size < 1.0) — Binance has no
+                        # partial-close path so skip the broker close.  VTM already
+                        # decremented remaining_position internally; we just log and
+                        # let the position continue until full exit.
+                        _exit_size = exit_signal.get("size", 1.0) if isinstance(exit_signal, dict) else 1.0
+                        if _exit_size < 1.0:
+                            logger.info(
+                                f"[VTM] {position.position_id} partial {exit_reason_str.upper()} "
+                                f"({_exit_size:.0%}) — skipping broker close (Binance no partial path)"
+                            )
+                            continue
 
                         logger.info(
                             f"[VTM] {position.position_id} triggered {exit_reason_str.upper()}"
@@ -1771,6 +1803,62 @@ class BinanceExecutionHandler:
             f"after {max_attempts} attempts"
         )
         return None
+
+    def _handle_binance_exchange_close(
+        self, pos, asset: str, symbol: str, reason: str
+    ) -> None:
+        """
+        S2.2 Binance: Called when reconcile_positions detects a position
+        closed externally on Binance (SL/TP hit, manual close, liquidation).
+        Fetches authoritative fill price, records via portfolio_manager,
+        and logs the event.  Mirrors _handle_mt5_exchange_close.
+        """
+        try:
+            logger.warning(
+                f"[RECONCILE] {asset} {getattr(pos, 'side', '?').upper()} position "
+                f"(id={pos.position_id}) closed externally on Binance — recording."
+            )
+
+            # 1. Fetch authoritative fill price from Binance trade history
+            broker_data = self._fetch_broker_close_data(
+                symbol=symbol,
+                position_side=getattr(pos, "side", "long"),
+                opened_at=getattr(pos, "entry_time", None),
+            )
+
+            fill_price = None
+            if broker_data:
+                fill_price = broker_data.get("fill_price")
+                logger.info(
+                    f"[RECONCILE] Binance fill for {asset}: "
+                    f"price=${fill_price}, pnl=${broker_data.get('profit', 'n/a')}, "
+                    f"commission=${broker_data.get('commission', 0)}"
+                )
+
+            if not fill_price or fill_price <= 0:
+                fill_price = self.get_current_price(symbol=symbol, force_live=True) or 0.0
+                logger.debug(
+                    f"[RECONCILE] No fill from trade history — using market price ${fill_price:.4g}"
+                )
+
+            # 2. Record in portfolio (already closed on exchange)
+            self.portfolio_manager.close_position(
+                position_id=pos.position_id,
+                exit_price=fill_price,
+                reason=reason,
+                already_closed_on_exchange=True,
+                preloaded_broker_data=broker_data,
+            )
+            logger.info(
+                f"[RECONCILE] ✅ {asset} {getattr(pos, 'side', '?').upper()} recorded "
+                f"closed @ ${fill_price:.4g} (reason={reason})"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[RECONCILE] _handle_binance_exchange_close failed for {asset}: {e}",
+                exc_info=True,
+            )
 
     def _record_exchange_close(
         self,
@@ -2023,24 +2111,6 @@ class BinanceExecutionHandler:
                 )
                 if not import_enabled:
                     return True
-
-                for fut_pos in active_futures:
-                    success = self.portfolio_manager.add_position(
-                        asset=asset_name,
-                        symbol=symbol,
-                        side=fut_pos["side"],
-                        entry_price=fut_pos["entry_price"],
-                        position_size_usd=fut_pos["quantity"] * fut_pos["entry_price"],
-                        stop_loss=None,
-                        take_profit=None,
-                        trailing_stop_pct=None,
-                        binance_order_id=None,
-                        ohlc_data=None,
-                        use_dynamic_management=True,
-                        entry_time=datetime.now(),
-                        signal_details={"imported": True},
-                    )
-                return True
 
             return True
 

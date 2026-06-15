@@ -248,7 +248,7 @@ class TradingBot:
             ai_sr_threshold=0.020,
             ai_pattern_confidence=0.50,
             ai_enable_adaptive=True,
-            ai_strong_signal_bypass=0.55,  # Lowered from 0.70 — high-conviction signals were still being blocked
+            ai_strong_signal_bypass=1.01,  # S10.1: bypass disabled — threshold unreachable (was 0.55, caused AI to be skipped too easily)
         )
         self.detailed_logging = True
 
@@ -2018,6 +2018,44 @@ class TradingBot:
 
         merged_details.update(hybrid_metadata)
 
+        # 7.3 SHADOW→LIVE: pullback completion discount.
+        # Advisory, multiplicative, fail-open (errors never block a signal).
+        # Flag stays false until validation gate clears (see S7.3 spec).
+        if self.config.get("phase_config", {}).get("pullback_completion_enabled", False):
+            try:
+                from src.strategies.pullback_completion import pullback_completion_score
+                _sig = merged_details.get("signal", 0)
+                if _sig != 0:
+                    _tm   = self.config.get("trade_management", {})
+                    _agg  = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
+                    _cs   = {}
+                    if _agg and getattr(_agg, "_cached_composite", None) is not None:
+                        try:
+                            _cs = _agg._cached_composite.to_dict()
+                        except Exception:
+                            _cs = {}
+                    _side   = "long" if _sig == 1 else "short"
+                    _anchor = (_cs.get("livermore_anchor_main_up") if _side == "long"
+                               else _cs.get("livermore_anchor_main_down"))
+                    _cpb, _bd = pullback_completion_score(
+                        df, _side,
+                        _cs.get("livermore_state_4h"),
+                        _cs.get("livermore_state_age_4h"),
+                        _anchor,
+                        _tm.get("pullback_factor_weights", {}),
+                    )
+                    _k = _tm.get("pullback_integration_k", 0.5)
+                    _q = merged_details.get("signal_quality", 0)
+                    merged_details["signal_quality"]      = _q * (_k + (1 - _k) * _cpb)
+                    merged_details["pullback_completion"] = _bd
+                    logger.info(
+                        f"[7.3] C_pb={_cpb:.2f} {_bd} "
+                        f"-> quality {_q:.2f}->{merged_details['signal_quality']:.2f}"
+                    )
+            except Exception as _e73:
+                logger.debug(f"[7.3] pullback failed (non-blocking): {_e73}")
+
+
         # ================================================================
         # ✅ CRITICAL: Verify ai_validation is in merged_details
         # ================================================================
@@ -3258,20 +3296,23 @@ class TradingBot:
         until the next bot restart, corrupting risk calculations.
         """
         try:
-            if not self.mt5_handler:
-                return
             for asset_name, asset_cfg in self.config.get("assets", {}).items():
                 if not asset_cfg.get("enabled", False):
                     continue
-                if asset_cfg.get("exchange", "mt5") != "mt5":
-                    continue
+                exchange = asset_cfg.get("exchange", "mt5")
                 symbol = self._resolve_symbol(asset_name)
                 if not symbol:
                     continue
                 positions = self.portfolio_manager.get_asset_positions(asset_name)
                 if not positions:
                     continue
-                self.mt5_handler.sync_positions_with_mt5(asset_name, symbol)
+                # S2.3: reconcile both MT5 and Binance assets
+                if exchange == "mt5":
+                    if self.mt5_handler:
+                        self.mt5_handler.sync_positions_with_mt5(asset_name, symbol)
+                elif exchange == "binance":
+                    if self.binance_handler:
+                        self.binance_handler.sync_positions_with_binance(asset_name, symbol)
         except Exception as e:
             logger.error(f"[RECONCILE] Periodic reconcile error: {e}")
 
@@ -3288,10 +3329,27 @@ class TradingBot:
                 if not self.config["assets"].get(asset_name, {}).get("enabled", False):
                     continue
 
+                # Skip positions with no real quantity (closed/ghost entries)
+                if not getattr(position, "quantity", None) or position.quantity <= 0:
+                    continue
+
                 # --------------------------------------------------------
-                # ✅ NEW: Attempt to re-initialize VTM if missing
+                # ✅ NEW: Attempt to re-initialize VTM if missing OR broken
                 # (Common for synced/imported positions or reloads)
+                # A VTM is "broken" if it exists but initial_stop_loss is None,
+                # meaning _calculate_initial_levels() never completed (e.g. S6.3 regression).
                 # --------------------------------------------------------
+                _vtm_broken = (
+                    position.trade_manager is not None
+                    and getattr(position.trade_manager, "initial_stop_loss", None) is None
+                )
+                if _vtm_broken:
+                    logger.warning(
+                        f"[VTM LOOP] ⚠️ Broken VTM detected for {position_id} "
+                        f"(initial_stop_loss=None) — forcing re-init."
+                    )
+                    position.trade_manager = None  # clear so re-init block fires
+
                 if not position.trade_manager:
                     # ✅ Re-initialize VTM using the CORRECT trading timeframe (1H),
                     # not 4H regime data.  Mixing timeframes corrupts ATR/ADX.
@@ -4158,8 +4216,18 @@ class TradingBot:
                 self._current_regime_data[asset_name]["df_4h"] = self._df_4h_cache.get(asset_name)
 
             if len(df) < 250:
+                _diag = ""
+                if len(df) == 0:
+                    # S10.7: 0-row diagnostic — log data source details
+                    _csv_path = self.config.get("assets", {}).get(asset_name, {}).get("data_file", "unknown")
+                    _ex = self.config.get("assets", {}).get(asset_name, {}).get("exchange", "unknown")
+                    _sym = symbol or "unknown"
+                    _diag = (
+                        f" | ZERO ROWS — symbol={_sym}, exchange={_ex}, "
+                        f"data_file={_csv_path}. Check data feed / symbol spelling."
+                    )
                 logger.warning(
-                    f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250)"
+                    f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250){_diag}"
                 )
                 return
 
@@ -4381,14 +4449,16 @@ class TradingBot:
                         (_lsm_post == "MAIN_UP"   and signal > 0)
                     )
                     _council_score  = details.get("total_score", 0) or details.get("sell_score" if signal < 0 else "buy_score", 0)
-                    _strong_council = _council_score >= 3.0
-                    _conf_mode_ok   = details.get("mode_confidence", 0) >= 0.60
+                    # Council aggregator uses a 0–5 scale; performance aggregator uses 0–1.
+                    # Normalise to 0–1 so the threshold works in both modes.
+                    _score_normalised = _council_score / 5.0 if _council_score > 1.0 else _council_score
+                    _strong_council = _score_normalised >= 0.60  # ≥60% confidence in either scale
 
-                    if _lsm_main and _signal_aligned and _strong_council and _conf_mode_ok:
+                    if _lsm_main and _signal_aligned and _strong_council:
                         logger.info(
                             f"[CONFIDENCE GATE] {asset_name}: NEUTRAL 4H regime bypassed — "
                             f"1H LSM={_lsm_post} aligned with signal, "
-                            f"council={_council_score:.2f}, mode_conf={details.get('mode_confidence',0):.0%}. "
+                            f"score={_council_score:.2f} (norm={_score_normalised:.0%}). "
                             f"4H detector likely lagging post-event."
                         )
                     else:
@@ -4434,7 +4504,16 @@ class TradingBot:
                     _new_side = "long" if signal == 1 else "short"
                     _opposite = "short" if _new_side == "long" else "long"
 
-                    if _opposite in _active_sides:
+                    # S10.3 same-side guard: suppress if same-direction already open
+                    if _new_side in _active_sides:
+                        logger.info(
+                            f"[SUPPRESS] {asset_name}: {_new_side.upper()} signal suppressed — "
+                            f"same-side {_new_side.upper()} position already active (no pyramiding)."
+                        )
+                        signal = 0
+                        details["same_side_suppressed"] = True
+
+                    elif _opposite in _active_sides:
                         # Determine if regime is confirmed directional
                         _regime_data = getattr(self, "_current_regime_data", {}).get(asset_name, {})
                         _regime_confirmed = _regime_data.get("is_bullish") or _regime_data.get("is_bearish")
@@ -5868,8 +5947,12 @@ class TradingBot:
             # ── Binance ───────────────────────────────────────────────────────
             if self.binance_handler:
                 try:
-                    if hasattr(self.binance_handler, 'client') and self.binance_handler.client:
-                        self.binance_handler.client.ping()
+                    fh = getattr(self.binance_handler, "futures_handler", None)
+                    if fh and hasattr(fh, "client") and fh.client:
+                        # Use futures server time — avoids 403 on spot endpoint
+                        fh.client.futures_time()
+                    elif hasattr(self.binance_handler, 'client') and self.binance_handler.client:
+                        self.binance_handler.client.get_server_time()
                 except Exception as _bn_err:
                     logger.warning("[WATCHDOG] Binance ping failed: %s", _bn_err)
                     # Attempt handler reconnect if method exists
@@ -6583,6 +6666,7 @@ def main():
 
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
                 required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
+
 
     missing = [m for m in required_models if not Path(m).exists()]
     if missing:

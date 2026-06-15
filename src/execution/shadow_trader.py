@@ -286,16 +286,20 @@ class ShadowTradingEngine:
         self,
         max_positions: int = 500,
         max_closed: int = 10000,
+        cooldown_minutes: int = 60,
     ):
         self.open_positions: List[ShadowPosition] = []
         self.closed_results: List[dict] = []
         self._max_positions = max_positions
         self._max_closed    = max_closed
+        self._cooldown_minutes = cooldown_minutes
+        # last close time per asset (for cooldown gate)
+        self._last_close_time: Dict[str, datetime] = {}
 
         logger.info(
             f"[SHADOW] ShadowTradingEngine initialised "
             f"(max_open={max_positions}, max_closed={max_closed}, "
-            f"no cooldown, no per-asset cap)"
+            f"cooldown={cooldown_minutes}min)"
         )
 
     def open_position(
@@ -335,6 +339,26 @@ class ShadowTradingEngine:
 
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
+
+        # S5.1 — Dedup: skip if a shadow position already open for same asset+side
+        for _existing in self.open_positions:
+            if _existing.asset.upper() == asset_key and _existing.side == side:
+                logger.debug(
+                    f"[SHADOW] Dedup: {asset_key} {side.upper()} already open, skipping"
+                )
+                return None
+
+        # S5.2 — Cooldown: skip if a shadow closed for this asset within cooldown window
+        _last_close = self._last_close_time.get(asset_key)
+        if _last_close is not None:
+            from datetime import timedelta as _td
+            _elapsed = (now - _last_close).total_seconds() / 60
+            if _elapsed < self._cooldown_minutes:
+                logger.debug(
+                    f"[SHADOW] Cooldown: {asset_key} last closed {_elapsed:.0f}min ago "
+                    f"(need {self._cooldown_minutes}min), skipping"
+                )
+                return None
 
         # Compute SL/TP using VTM's formula:
         #   SL distance = atr × atr_multiplier  (clamped: min 0.5×atr, max 5.0×atr)
@@ -456,6 +480,8 @@ class ShadowTradingEngine:
         # Keep results bounded
         if len(self.closed_results) > self._max_closed:
             self.closed_results = self.closed_results[-self._max_closed:]
+        # S5.2 — record close time for per-asset cooldown
+        self._last_close_time[pos.asset.upper()] = datetime.now(timezone.utc)
 
     def get_gate_scorecard(self) -> Dict[str, dict]:
         """

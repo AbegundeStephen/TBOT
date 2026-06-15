@@ -70,12 +70,12 @@ class BinanceFuturesHandler:
             # --- NEW: Get actual current position mode from Binance ---
             try:
                 position_mode_info = self.client.futures_get_position_mode()
-                self._actual_hedge_mode_enabled = position_mode_info.get('dualSidePosition', True) # Default to True (HEDGE) if not found
+                self._actual_hedge_mode_enabled = position_mode_info.get('dualSidePosition', False) # Default to False (ONE-WAY) if not found
                 logger.info(f"[FUTURES] Actual Binance Futures Mode: {'HEDGE' if self._actual_hedge_mode_enabled else 'ONE-WAY'} (from API)")
             except Exception as e:
                 logger.error(f"[FUTURES] Failed to get actual position mode: {e}")
-                self._actual_hedge_mode_enabled = True # Assume HEDGE mode as fallback to be safe
-                logger.warning("[FUTURES] Assuming HEDGE mode due to error fetching actual mode.")
+                self._actual_hedge_mode_enabled = False  # S1.3: assume ONE-WAY on failure — safe default
+                logger.critical("[FUTURES] Could not read position mode from Binance — assuming ONE-WAY (one-way is safer; hedge fields cause -4061 on one-way accounts).")
             # --- END NEW ---
 
         except Exception as e:
@@ -218,15 +218,15 @@ class BinanceFuturesHandler:
         try:
             stop_price_str = str(self._round_price(stop_price))
             qty_str        = str(self._round_quantity(quantity))
-            order = self.client.futures_create_order(
-                symbol       = self.symbol,
-                side         = order_side,
-                type         = "STOP_MARKET",
-                stopPrice    = stop_price_str,
-                quantity     = qty_str,
-                reduceOnly   = True,
-                positionSide = position_side.upper(),
-            )
+            order_params = {
+                "symbol": self.symbol, "side": order_side, "type": "STOP_MARKET",
+                "stopPrice": stop_price_str, "quantity": qty_str, "reduceOnly": True,
+            }
+            if getattr(self, "_actual_hedge_mode_enabled", False):
+                order_params["positionSide"] = position_side.upper()
+                order_params.pop("reduceOnly", None)
+            order = self.client.futures_create_order(**order_params)
+            self.last_sl_order_id = order.get("orderId"); self.last_sl_price = str(stop_price)
             logger.info(
                 f"[STOP LOSS] STOP_MARKET placed: side={order_side} stopPrice={stop_price_str} "
                 f"qty={qty_str} orderId={order.get('orderId')} status={order.get('status')}"
@@ -395,13 +395,17 @@ class BinanceFuturesHandler:
 
                     close_side = SIDE_SELL if side == "long" else SIDE_BUY
                     try:
-                        emergency_order = self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=close_side,
-                            positionSide=position_side,
-                            type=FUTURE_ORDER_TYPE_MARKET,
-                            quantity=quantity,
-                        )
+                        _em_params = {
+                            "symbol": self.symbol,
+                            "side": close_side,
+                            "type": FUTURE_ORDER_TYPE_MARKET,
+                            "quantity": quantity,
+                        }
+                        if getattr(self, "_actual_hedge_mode_enabled", False):
+                            _em_params["positionSide"] = position_side
+                        else:
+                            _em_params["reduceOnly"] = True
+                        emergency_order = self.client.futures_create_order(**_em_params)
                         logger.critical(
                             f"[FUTURES] ✓ EMERGENCY CLOSE: {emergency_order.get('orderId')}"
                         )
@@ -409,7 +413,7 @@ class BinanceFuturesHandler:
                         logger.critical(
                             f"[FUTURES] ☠️ EMERGENCY CLOSE FAILED: {close_error}"
                         )
-                    return None
+                    return {"emergency_closed": True, "reason": "sl_placement_failed"}
 
             # 3. Take profit (optional)
             if take_profit:
@@ -422,16 +426,19 @@ class BinanceFuturesHandler:
 
                 if take_profit:
                     try:
-                        tp_order = self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=tp_side,
-                            positionSide=position_side,
-                            type=FUTURE_ORDER_TYPE_LIMIT,
-                            price=take_profit,
-                            quantity=quantity,
-                            timeInForce="GTC",
-                            reduceOnly=True,
-                        )
+                        _tp_params = {
+                            "symbol": self.symbol,
+                            "side": tp_side,
+                            "type": FUTURE_ORDER_TYPE_LIMIT,
+                            "price": take_profit,
+                            "quantity": quantity,
+                            "timeInForce": "GTC",
+                        }
+                        if getattr(self, "_actual_hedge_mode_enabled", False):
+                            _tp_params["positionSide"] = position_side
+                        else:
+                            _tp_params["reduceOnly"] = True
+                        tp_order = self.client.futures_create_order(**_tp_params)
                         logger.info(f"  ✓ TP: ${take_profit:,.{self.price_precision}f}")
                     except Exception as e:
                         logger.warning(f"  ⚠️ TP Failed: {e}")

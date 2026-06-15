@@ -504,6 +504,9 @@ class VeteranTradeManager:
         # ─────────────────────────────────────────────────────────────────────
 
         # Early Scale: lock in a small partial exit within the first N bars
+        # S6.3: phase-level locks (triple-lock with _can_partial / _can_add_position)
+        self.partials_enabled   = self.risk_config.get("phase_config", {}).get("partials_enabled",   False)
+        self.pyramiding_enabled = self.risk_config.get("phase_config", {}).get("pyramiding_enabled", False)
         self.early_scale_enabled = self.risk_config.get("early_scale_enabled", False)
         self.early_scale_threshold = self.risk_config.get("early_scale_threshold", 0.02)
         self.early_scale_bars = self.risk_config.get("early_scale_bars", 4)
@@ -524,22 +527,21 @@ class VeteranTradeManager:
         self.runner_activated = False
         self.has_pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
-        
-        # Calculate levels
+
+        # Calculate initial SL/TP levels (must be last step of __init__)
         try:
             self._calculate_initial_levels()
         except Exception as e:
             logger.error(f"[VTM] Initialization error: {e}")
             raise
 
-        # Log initialization
+        # Log initialization summary
         logger.info("=" * 80)
         logger.info(f"🎯 VTM - {self.asset} {side.upper()} [{self.trade_type}]")
         logger.info("=" * 80)
         logger.info(f"Entry:    ${entry_price:,.2f}")
         logger.info(f"Stop:     ${self.initial_stop_loss:,.2f} (-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)")
         logger.info(f"Quantity: {self.position_size:.6f} units")
-
         logger.info(f"\n📊 TARGETS:")
         if not self.take_profit_levels or not self.partial_sizes:
             logger.info("  No take profit targets calculated or partial sizes defined.")
@@ -553,6 +555,44 @@ class VeteranTradeManager:
                 pct_str = ""
             logger.info(f"  {i}. {target_str} {pct_str} → Exit {size_str}")
         logger.info("=" * 80)
+
+    # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
+    def _lot_geom(self):
+        """Return (precision, min_lot) for this asset — single source of truth."""
+        precision = self.lot_precision_override if self.lot_precision_override is not None \
+            else {'BTC': 4, 'GOLD': 2, 'USTEC': 2, 'EURJPY': 2, 'EURUSD': 2,
+                  'GBPUSD': 2, 'USDJPY': 2, 'USOIL': 2, 'GBPAUD': 2}.get(self.asset.upper(), 2)
+        raw_min = self.min_lot_override if (self.min_lot_override is not None and self.min_lot_override > 0) \
+            else {'BTC': 0.003, 'GOLD': 0.01, 'USTEC': 0.02, 'EURJPY': 0.02, 'EURUSD': 0.01,
+                  'GBPUSD': 0.01, 'USDJPY': 0.01, 'USOIL': 0.01, 'GBPAUD': 0.01}.get(self.asset.upper(), 0.01)
+        return precision, raw_min
+
+    def _can_partial(self, fraction: float) -> bool:
+        """True only if peeling `fraction` of position rounds to >= min_lot AND leaves
+        a legal remainder. On min-lot accounts no fraction < 1.0 passes → partials
+        no-op until the account can subdivide. Full closes never call this.
+        Fails closed on any doubt."""
+        try:
+            precision, min_lot = self._lot_geom()
+            total = round(self.position_size, precision)
+            if total <= 0:
+                return False
+            peel = round(total * fraction, precision)
+            rem  = round(total - peel, precision)
+            return peel >= min_lot - 1e-9 and rem >= min_lot - 1e-9
+        except Exception:
+            return False
+
+    def _can_add_position(self) -> bool:
+        """True only when pyramiding is enabled AND half the current position is still
+        a legal lot. Both conditions must hold — the flag alone is not enough."""
+        if not getattr(self, "pyramiding_enabled", False):
+            return False
+        try:
+            precision, min_lot = self._lot_geom()
+            return round(self.position_size * 0.5, precision) >= min_lot - 1e-9
+        except Exception:
+            return False
 
     @property
     def profit_locked(self) -> bool:
@@ -933,6 +973,13 @@ class VeteranTradeManager:
                     self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
                     self.partial_sizes = [0.45, 0.30, 0.25]  # fallback only
 
+                # ── 7.1 LIVE: expectancy-weighted single-TP blend ─────────────
+                # Runs before min_rr so the floor can raise the blend if needed.
+                if self.risk_config.get("phase_config", {}).get("single_tp_blend_enabled", False):
+                    _b = self._blend_single_tp()
+                    if _b is not None and self.take_profit_levels:
+                        self.take_profit_levels[0] = _b
+
                 # ── min_rr enforcement on TP1 ─────────────────────────────────
                 # When min_sl_pct widens the SL, the ATR-derived TP1 may produce
                 # a sub-1R trade. Enforce minimum R:R on TP1 only; TP2/TP3 are
@@ -1055,6 +1102,9 @@ class VeteranTradeManager:
                     )
 
             if self.side == "long":
+                # Guard: highest_price_reached may be None if entry_price was None at construction
+                if self.highest_price_reached is None:
+                    self.highest_price_reached = current_price
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
@@ -1063,6 +1113,9 @@ class VeteranTradeManager:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
             else:
+                # Guard: lowest_price_reached may be None if entry_price was None at construction
+                if self.lowest_price_reached is None:
+                    self.lowest_price_reached = current_price
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
@@ -1213,6 +1266,52 @@ class VeteranTradeManager:
             logger.error(f"[VTM] ATR Slow error: {e}")
             return self.entry_price * 0.02
 
+
+    def _blend_single_tp(self):
+        """7.1 LIVE. Collapse the target candidates already computed into ONE
+        expectancy-weighted TP, conservative-biased for fill probability.
+        Forward-compatible: this candidate dict seeds a real [TP1,TP2,TP3] ladder
+        when partials turn on. Returns None if candidates cannot be built."""
+        try:
+            _tm   = self.risk_config.get("trade_management", {})
+            w     = _tm.get("single_tp_weights",
+                            {"struct": 0.30, "mm": 0.25, "fib": 0.15, "rmult": 0.15, "mfe": 0.15})
+            risk  = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss else 0.0
+            if risk <= 0:
+                return None
+            sign  = 1.0 if self.side == "long" else -1.0
+            cands = {}
+            if self.take_profit_levels:
+                cands["struct"] = self.take_profit_levels[0]
+            _anchor = (getattr(self, "livermore_anchor_main_up",   None) if self.side == "long"
+                       else getattr(self, "livermore_anchor_main_down", None))
+            if _anchor:
+                cands["mm"]  = float(_anchor)
+                cands["fib"] = self.entry_price + sign * 1.272 * abs(self.entry_price - float(_anchor))
+            _rm = (self.partial_targets or [1.5])[0]
+            cands["rmult"] = self.entry_price + sign * _rm * risk
+            _mfe_r = getattr(self, "_mfe_target_r", None)   # absent until 7.4 has >=30 rows; skipped safely
+            if _mfe_r:
+                cands["mfe"] = self.entry_price + sign * _mfe_r * risk
+            if not cands:
+                return None
+            tot     = sum(w.get(k, 0.0) for k in cands) or 1.0
+            blended = sum(w.get(k, 0.0) * v for k, v in cands.items()) / tot
+            lo, hi  = min(cands.values()), max(cands.values())
+            blended = max(lo, min(hi, blended))
+            if _tm.get("single_tp_conservative_clamp", True):
+                mid     = (lo + hi) / 2.0
+                blended = min(blended, mid) if self.side == "long" else max(blended, mid)
+            logger.info(
+                f"[7.1] single-TP blend "
+                f"{{ {', '.join(f'{k}:{round(v, 5)}' for k, v in cands.items())} }} "
+                f"-> {blended:.5f}"
+            )
+            return blended
+        except Exception as _e71:
+            logger.debug(f"[7.1] _blend_single_tp failed (non-blocking): {_e71}")
+            return None
+
     def cancel_take_profit(self):
         """Cancel all remaining take profit targets."""
         self.take_profit_levels = []
@@ -1355,7 +1454,13 @@ class VeteranTradeManager:
         # which closes below the SL and also happens to meet pyramid conditions is
         # always treated as a stop-loss, never as a scale-in signal.
         try:
-            if (self.side == "long" and current_price <= self.current_stop_loss) or \
+            # current_stop_loss is None on freshly-imported positions (set to initial on first trail tick).
+            # Fall back to initial_stop_loss so the SL check is never skipped.
+            if self.current_stop_loss is None:
+                self.current_stop_loss = self.initial_stop_loss
+            if self.current_stop_loss is None:
+                logger.warning("[VTM] SL check skipped — both current and initial stop_loss are None")
+            elif (self.side == "long" and current_price <= self.current_stop_loss) or \
                (self.side == "short" and current_price >= self.current_stop_loss):
                 reason = ExitReason.STOP_LOSS
                 offset = 0.125 * atr_value
@@ -1394,10 +1499,13 @@ class VeteranTradeManager:
                     (self.side == "short" and current_price < self.entry_price - 2 * atr_value)
                 )
                 if atr_value > 2.0 * atr_slow and not is_winning:
-                    self._vol_spike_exited = True
-                    vol_exit_size = min(0.75, self.remaining_position)
-                    if vol_exit_size > 0:
-                        self.remaining_position = max(0.0, self.remaining_position - vol_exit_size)
+                    if not (self.partials_enabled and self._can_partial(0.75)):
+                        logger.debug(f"[VTM] Vol Spike partial suppressed — letting trade run.")
+                    else:
+                        self._vol_spike_exited = True
+                        vol_exit_size = min(0.75, self.remaining_position)
+                        if vol_exit_size > 0:
+                            self.remaining_position = max(0.0, self.remaining_position - vol_exit_size)
                         logger.warning(
                             f"[VTM] ⚡ VOLATILITY SPIKE: {self.asset} — "
                             f"ATR {atr_value:.5f} > 2× slow-ATR {atr_slow:.5f}. "
@@ -1433,8 +1541,11 @@ class VeteranTradeManager:
                 )
 
                 if bearish_reversal or bullish_reversal:
-                    self._reversal_candle_exited = True
-                    rev_size = min(0.50, self.remaining_position)
+                    if not (self.partials_enabled and self._can_partial(0.50)):
+                        logger.debug(f"[VTM] Reversal Candle partial suppressed — letting trade run.")
+                    else:
+                        self._reversal_candle_exited = True
+                        rev_size = min(0.50, self.remaining_position)
                     if rev_size > 0:
                         self.remaining_position = max(0.0, self.remaining_position - rev_size)
                         # Tighten SL on the runner to 0.8×ATR inside break-even
@@ -1534,10 +1645,13 @@ class VeteranTradeManager:
                         _macd_counter  = _h1 < _h2 < 0      # histogram falling into negative = bearish
 
                     if _rsi_counter and _macd_counter:
-                        self._counter_momentum_cut = True
-                        cut_size = min(0.60, self.remaining_position)
-                        if cut_size > 0:
-                            self.remaining_position = max(0.0, self.remaining_position - cut_size)
+                        if not (self.partials_enabled and self._can_partial(0.60)):
+                            logger.debug(f"[VTM] Counter-momentum cut suppressed — letting trade run.")
+                        else:
+                            self._counter_momentum_cut = True
+                            cut_size = min(0.60, self.remaining_position)
+                            if cut_size > 0:
+                                self.remaining_position = max(0.0, self.remaining_position - cut_size)
                             # Tighten remaining SL to entry ± 0.5×ATR so runner risk is minimal
                             if self.side == "short":
                                 _tight_sl = self.entry_price + 0.5 * atr_value
@@ -1650,8 +1764,13 @@ class VeteranTradeManager:
                     else (self.entry_price - current_price) / self.entry_price
                 )
                 if early_pnl_pct >= self.early_scale_threshold:
-                    self._early_scaled = True
-                    early_size = 0.20  # Fixed 20% early exit
+                    if not (self.partials_enabled and self._can_partial(0.20)):
+                        logger.debug(f"[VTM] Early Scale suppressed — partials_enabled={self.partials_enabled}, "
+                                     f"_can_partial(0.20)={self._can_partial(0.20)} — letting trade run.")
+                        pass   # suppressed: do NOT set _early_scaled, do NOT touch remaining_position
+                    else:
+                        self._early_scaled = True
+                        early_size = 0.20  # Fixed 20% early exit
                     self.remaining_position = max(0.0, self.remaining_position - early_size)
 
                     # Tighten SL to lock in partial profit
@@ -1685,7 +1804,11 @@ class VeteranTradeManager:
         # safe (Step 2 above) so a fast reversal bar cannot be misclassified as a pyramid.
         if self.trade_type == "TREND" and not self.has_pyramided:
             if current_profit >= (1.0 * atr_value) and adx_value > 25:
-                logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
+                if not self._can_add_position():
+                    logger.debug(f"[VTM] Pyramiding suppressed — pyramiding_enabled={self.pyramiding_enabled} "
+                                 f"or position too small to add legal lot.")
+                else:
+                    logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
                 # Move SL of position 1 to entry before adding exposure
                 self.current_stop_loss = self.entry_price
                 self.has_pyramided = True
@@ -1746,10 +1869,13 @@ class VeteranTradeManager:
                     )
 
                     if rsi_exhausted and macd_dying and adx_weakening:
-                        self._momentum_exhausted = True
-                        exhaust_size = min(0.50, self.remaining_position)
-                        if exhaust_size > 0:
-                            self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
+                        if not (self.partials_enabled and self._can_partial(0.50)):
+                            logger.debug(f"[VTM] Momentum Exhaustion partial suppressed — letting trade run.")
+                        else:
+                            self._momentum_exhausted = True
+                            exhaust_size = min(0.50, self.remaining_position)
+                            if exhaust_size > 0:
+                                self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
                             # Lock SL to break-even so runner can only win or scratch
                             if self.side == "long" and self.current_stop_loss < self.entry_price:
                                 self.current_stop_loss = self.entry_price
@@ -1797,11 +1923,54 @@ class VeteranTradeManager:
 
         # --- STEP 7: TP Partial Exits ---
         try:
+            _is_last_rung = lambda idx: idx == len(self.take_profit_levels) - 1
             for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):
                 if i in self.partials_hit: continue
                 if (self.side == "long" and current_price >= target) or (self.side == "short" and current_price <= target):
                     self.partials_hit.append(i)
-                    self.remaining_position -= size
+
+                    # S10.2: Last rung — signal size=1.0 so handlers treat it as a
+                    # full close regardless of the fractional partial_sizes value.
+                    # This matters for Binance which has no partial-close path and
+                    # gates on size < 1.0 to skip partials; the last rung must
+                    # always pass that gate to exit cleanly.
+                    # Also prevents floating-point dust on MT5 partial ladders.
+                    if _is_last_rung(i):
+                        size = 1.0   # full close — consume entire remaining position
+                        self.remaining_position = 0.0
+                        # 7.4 LIVE: MFE/MAE instrumentation — records only, never changes behaviour.
+                        if self.risk_config.get("phase_config", {}).get("mfe_logging_enabled", False):
+                            try:
+                                _risk = abs(self.entry_price - self.initial_stop_loss) or 1e-9
+                                if self.side == "long":
+                                    _mfe_r = (self.highest_price_reached - self.entry_price) / _risk
+                                    _mae_r = (self.entry_price - self.lowest_price_reached) / _risk
+                                else:
+                                    _mfe_r = (self.entry_price - self.lowest_price_reached) / _risk
+                                    _mae_r = (self.highest_price_reached - self.entry_price) / _risk
+                                import csv as _csv, os as _os, datetime as _dt
+                                _path = "logs/mfe_mae_log.csv"
+                                _os.makedirs("logs", exist_ok=True)
+                                _new_file = not _os.path.exists(_path)
+                                with open(_path, "a", newline="") as _f:
+                                    _w = _csv.writer(_f)
+                                    if _new_file:
+                                        _w.writerow(["ts", "asset", "setup", "side",
+                                                     "mfe_r", "mae_r", "result_r"])
+                                    _w.writerow([
+                                        _dt.datetime.now().isoformat(),
+                                        getattr(self, "asset", ""),
+                                        getattr(self, "trade_type", ""),
+                                        self.side,
+                                        round(_mfe_r, 3),
+                                        round(_mae_r, 3),
+                                        getattr(self, "_realized_pnl_r", ""),
+                                    ])
+                                logger.info(f"[7.4] MFE={_mfe_r:.2f}R MAE={_mae_r:.2f}R logged → {_path}")
+                            except Exception as _e74:
+                                logger.debug(f"[7.4] MFE log failed (non-blocking): {_e74}")
+                    else:
+                        self.remaining_position = max(0.0, self.remaining_position - size)
 
                     # After TP1 (first partial), attempt early runner promotion based on
                     # volume strength and candle conviction. Falls back to mechanical

@@ -176,35 +176,15 @@ class HybridSignalValidator:
         if signal == 0:
             return self._skip_validation(signal, signal_details, "hold_signal")
 
-        # Layer 1: Circuit Breaker
+        # Layer 1: Circuit Breaker (S10.1 — log-only, never skip validation)
+        # bypass_mode flag is still SET by _check_circuit_breaker when rejection rate is high,
+        # but it no longer causes validation to be skipped — it just logs a warning.
         if self.bypass_mode:
-            self.bypass_cooldown -= 1
-            if self.bypass_cooldown <= 0:
-                self._reset_circuit_breaker()
-            else:
-                result = self._bypass_validation(
-                    signal,
-                    signal_details,
-                    reason="circuit_breaker",
-                    cooldown=self.bypass_cooldown,
-                )
-                self.stats["bypassed_circuit_breaker"] += 1
-                self.strategy_stats[strategy]["approved"] += 1
-                return result
-
-        # Layer 1.5: Strong Signal Bypass
-        signal_quality = signal_details.get("signal_quality", 0.0)
-        if signal_quality >= self.strong_signal_bypass:
-            result = self._bypass_validation(
-                signal,
-                signal_details,
-                reason="strong_signal",
-                quality=signal_quality,
-                threshold=self.strong_signal_bypass,
+            self.stats["circuit_breaker_warnings"] = self.stats.get("circuit_breaker_warnings", 0) + 1
+            logger.warning(
+                "[AI] Circuit-breaker active (high rejection rate) — validation CONTINUES. "
+                f"Warnings: {self.stats['circuit_breaker_warnings']}"
             )
-            self.stats["bypassed_strong_signal"] += 1
-            self.strategy_stats[strategy]["approved"] += 1
-            return result
 
         # Layer 2: Adaptive Thresholds
         if self.enable_adaptive:
@@ -840,17 +820,26 @@ class HybridSignalValidator:
         return signal, {**details, "ai_validation": f"bypassed_{reason}"}
 
     def _check_circuit_breaker(self):
-        if len(self.rejection_window) < 30: return
-        if sum(self.rejection_window) / len(self.rejection_window) > self.bypass_threshold:
+        # S10.1: circuit breaker now warns only — never bypasses validation.
+        if len(self.rejection_window) < 30:
+            return
+        rate = sum(self.rejection_window) / len(self.rejection_window)
+        if rate > self.bypass_threshold and not self.bypass_mode:
             self.bypass_mode = True
-            # AI-4 Fix: raised from 15 to 30 cycles (was 75 min, now 150 min).
-            # At 15 cycles the circuit breaker reset too quickly — the model would
-            # re-enter rejection mode within the same session if the root cause
-            # (bad market regime, stale model) hadn't been resolved.
-            self.bypass_cooldown = 30
+            self.stats["circuit_breaker_warnings"] = self.stats.get("circuit_breaker_warnings", 0) + 1
+            logger.warning(
+                f"[AI] Circuit-breaker threshold crossed: {rate:.0%} rejects of last "
+                f"{len(self.rejection_window)} signals (thr {self.bypass_threshold:.0%}). "
+                "Validation CONTINUES — investigate model or regime quality."
+            )
+        elif rate <= self.bypass_threshold and self.bypass_mode:
+            self.bypass_mode = False
+            self.rejection_window.clear()
+            logger.info("[AI] Circuit-breaker cleared — rejection rate back below threshold.")
 
     def _reset_circuit_breaker(self):
         self.bypass_mode = False
+        self.bypass_cooldown = 0
         self.rejection_window.clear()
 
     def get_statistics(self) -> dict:
