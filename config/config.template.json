@@ -554,7 +554,7 @@
         "tp_ratio": 2.5,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0055,
-        "min_rr": 2.0
+        "min_rr": 1.5
       }
     },
     "GBPAUD": {
@@ -637,7 +637,7 @@
         "tp_ratio": 2.2,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0025,
-        "min_rr": 2.0
+        "min_rr": 1.3
       }
     },
     "GBPUSD": {

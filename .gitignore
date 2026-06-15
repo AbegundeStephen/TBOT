@@ -62,4 +62,6 @@ models/ai/*_mapping.pkl
 
 
 data/historical/
-data/raw/
+data/raw/*.ps1
+run_bot.ps1
+restart.bat

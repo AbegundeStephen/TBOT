@@ -536,7 +536,7 @@
           "old_state_min_age": 20
         },
         "min_sl_pct": 0.0055,
-        "min_rr": 2.0
+        "min_rr": 1.5
       }
     },
     "GBPAUD": {
@@ -617,7 +617,7 @@
           "old_state_min_age": 20
         },
         "min_sl_pct": 0.0025,
-        "min_rr": 2.0
+        "min_rr": 1.3
       }
     }
   },

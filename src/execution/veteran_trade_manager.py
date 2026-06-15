@@ -1765,39 +1765,46 @@ class VeteranTradeManager:
                 )
                 if early_pnl_pct >= self.early_scale_threshold:
                     if not (self.partials_enabled and self._can_partial(0.20)):
-                        logger.debug(f"[VTM] Early Scale suppressed — partials_enabled={self.partials_enabled}, "
-                                     f"_can_partial(0.20)={self._can_partial(0.20)} — letting trade run.")
-                        pass   # suppressed: do NOT set _early_scaled, do NOT touch remaining_position
+                        # Suppressed — cannot subdivide this lot.
+                        # Do NOT set _early_scaled, do NOT touch remaining_position,
+                        # do NOT tighten SL here. Trade continues to real full-close exits.
+                        logger.debug(
+                            f"[VTM] Early Scale suppressed — "
+                            f"partials_enabled={self.partials_enabled}, "
+                            f"_can_partial(0.20)={self._can_partial(0.20)} — letting trade run."
+                        )
                     else:
+                        # Can subdivide — execute the partial and lock the stop.
                         self._early_scaled = True
-                        early_size = 0.20  # Fixed 20% early exit
-                    self.remaining_position = max(0.0, self.remaining_position - early_size)
+                        early_size = 0.20
 
-                    # Tighten SL to lock in partial profit
-                    lock_offset = self.early_lock_atr_multiplier * atr_value
-                    if self.side == "long":
-                        lock_sl = self.entry_price + lock_offset
-                        if lock_sl > self.current_stop_loss:
-                            logger.info(
-                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
-                                f"(entry + {self.early_lock_atr_multiplier}x ATR)"
-                            )
-                            self.current_stop_loss = lock_sl
-                    else:
-                        lock_sl = self.entry_price - lock_offset
-                        if lock_sl < self.current_stop_loss:
-                            logger.info(
-                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
-                                f"(entry - {self.early_lock_atr_multiplier}x ATR)"
-                            )
-                            self.current_stop_loss = lock_sl
+                        self.remaining_position = max(0.0, self.remaining_position - early_size)
 
-                    logger.info(
-                        f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
-                        f"exiting {early_size:.0%} at ${current_price:,.2f} "
-                        f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
-                    )
-                    return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
+                        # Tighten SL to lock in partial profit
+                        lock_offset = self.early_lock_atr_multiplier * atr_value
+                        if self.side == "long":
+                            lock_sl = self.entry_price + lock_offset
+                            if lock_sl > self.current_stop_loss:
+                                logger.info(
+                                    f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                    f"(entry + {self.early_lock_atr_multiplier}x ATR)"
+                                )
+                                self.current_stop_loss = lock_sl
+                        else:
+                            lock_sl = self.entry_price - lock_offset
+                            if lock_sl < self.current_stop_loss:
+                                logger.info(
+                                    f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                    f"(entry - {self.early_lock_atr_multiplier}x ATR)"
+                                )
+                                self.current_stop_loss = lock_sl
+
+                        logger.info(
+                            f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
+                            f"exiting {early_size:.0%} at ${current_price:,.2f} "
+                            f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
+                        )
+                        return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
 
         # --- STEP 4: Trend Pyramiding ---
         # Objective: Scale into strong breakout trends. Fires only after SL is confirmed
