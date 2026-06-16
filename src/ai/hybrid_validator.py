@@ -265,6 +265,13 @@ class HybridSignalValidator:
         )
         h1_momentum_confirmed = h1_momentum_aligned and h1_dir != "FLAT"
 
+        # Signal quality (0–1), computed upstream in council_aggregator and
+        # passed through signal_details. Needed below for the high-confidence
+        # trend-bypass check — was previously read bare/undefined here, which
+        # raised NameError and got swallowed by council_aggregator's outer
+        # except, silently forcing every such signal to 0 (HOLD).
+        signal_quality = signal_details.get("signal_quality", 0.0)
+
         if sr_passed and pattern_passed:
             # Full approval — both layers confirmed
             pass  # fall through to _approve_signal
