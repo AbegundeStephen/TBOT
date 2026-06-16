@@ -1214,6 +1214,7 @@
     "natural_cycle_min_bars": 8,
     "allow_hedging": false,
     "min_regime_confidence": 0.6,
+    "confidence_gate_pattern_veto": -1.0,
     "vtm_update_interval_seconds": 5,
     "vtm_pyramiding_enabled": false,
     "exchange_reconcile_interval_seconds": 60,

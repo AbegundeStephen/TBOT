@@ -752,27 +752,42 @@ class MeanReversionStrategy(BaseStrategy):
             return 0, 0.0
 
         # ── High-rank reversal candle ──────────────────────────────────────
+        # Checked over the last candle_lookback_bars bars (default 3) so the
+        # gate doesn't require the pattern to land on the exact current bar.
+        # Only engulfing and morning/evening star — shooting star excluded
+        # (lower historical reliability ~59%).
         _n  = min(len(features), 30)
         _o  = features["open"].values[-_n:]
         _h  = features["high"].values[-_n:]
         _l  = features["low"].values[-_n:]
         _c  = features["close"].values[-_n:]
 
-        reversal_ok = False
+        _candle_lb = max(1, int(cfg.get("candle_lookback_bars", 1)))
+        reversal_ok  = False
+        reversal_bar = None   # track which bar triggered (for logging)
+
         if direction == -1:   # MAIN_UP → SHORT
-            # Bearish engulfing (historical win rate ~79%) or evening star (~72%)
-            # Shooting star excluded: lower reliability (~59%)
             _eng = ta.CDLENGULFING(_o, _h, _l, _c)
             _eve = ta.CDLEVENINGSTAR(_o, _h, _l, _c, penetration=0.3)
-            reversal_ok = int(_eng[-1]) < 0 or int(_eve[-1]) < 0
+            for _k in range(_candle_lb):
+                if int(_eng[-(_k + 1)]) < 0 or int(_eve[-(_k + 1)]) < 0:
+                    reversal_ok  = True
+                    reversal_bar = _k   # 0 = current bar, 1 = one bar ago, etc.
+                    break
         elif direction == 1:  # MAIN_DOWN → LONG
-            # Bullish engulfing or morning star (symmetric equivalents)
             _eng  = ta.CDLENGULFING(_o, _h, _l, _c)
             _morn = ta.CDLMORNINGSTAR(_o, _h, _l, _c, penetration=0.3)
-            reversal_ok = int(_eng[-1]) > 0 or int(_morn[-1]) > 0
+            for _k in range(_candle_lb):
+                if int(_eng[-(_k + 1)]) > 0 or int(_morn[-(_k + 1)]) > 0:
+                    reversal_ok  = True
+                    reversal_bar = _k
+                    break
 
         if not reversal_ok:
-            logger.info(f"[MR Mode3] {self.asset}: no high-rank reversal candle (engulfing/star) → 0")
+            logger.info(
+                f"[MR Mode3] {self.asset}: no high-rank reversal candle "
+                f"(engulfing/star) in last {_candle_lb} bars → 0"
+            )
             return 0, 0.0
 
         # ── Above-average volume ───────────────────────────────────────────
@@ -795,10 +810,12 @@ class MeanReversionStrategy(BaseStrategy):
         dist_factor = min(1.5, _anchor_dist_atr / _atr_mult)
         confidence  = float(min(1.0, 0.60 + (dist_factor - 1.0) * 0.15))
 
-        _dir_str = "SHORT" if direction == -1 else "LONG"
+        _dir_str  = "SHORT" if direction == -1 else "LONG"
+        _bar_str  = "current bar" if reversal_bar == 0 else f"{reversal_bar} bar(s) ago"
         logger.info(
             f"[MR Mode3] {self.asset}: {_dir_str} climax fade "
-            f"anchor_dist={_anchor_dist_atr:.1f}×ATR conf={confidence:.2f}"
+            f"anchor_dist={_anchor_dist_atr:.1f}×ATR "
+            f"reversal_candle={_bar_str} conf={confidence:.2f}"
         )
         return direction, confidence
 
