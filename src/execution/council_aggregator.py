@@ -1791,33 +1791,41 @@ class InstitutionalCouncilAggregator:
                             logger.info(f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}")
 
                     # 2. MT5/Exness Assets - Apply Session Penalties
+                    #
+                    # NOTE: This used to hardcode its own hour ranges per asset,
+                    # duplicating (and drifting from) MarketHours.PREFERRED_SESSIONS
+                    # in market_hours.py. Found 2026-06-16: OIL here was stuck at a
+                    # stale "13-19 UTC" guess while market_hours.py had been updated
+                    # to the data-derived (6,20) window — the same asset/cycle could
+                    # be judged in-session by one gate and off-session by this one.
+                    # Now delegates to MarketHours so there's a single source of
+                    # truth; only the category-matching (which canonical key this
+                    # asset maps to) stays local, since self.asset_type spelling
+                    # varies (e.g. "GOLD" vs "XAUUSD").
                     else:
                         is_off_session = False
                         asset = self.asset_type.upper()
 
+                        _session_key = None
                         if any(x in asset for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")):
-                            # FX Pairs: Best during London (07-12) and NY (13-17)
-                            if _hour_utc_s < 7 or _hour_utc_s >= 20:
-                                is_off_session = True
-                                logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC)")
-
+                            # Each FX pair has its own window in PREFERRED_SESSIONS;
+                            # use the exact pair if recognized, else fall back to
+                            # the generic EURUSD window.
+                            _session_key = asset if asset in MarketHours.PREFERRED_SESSIONS else "EURUSD"
                         elif "GOLD" in asset or "XAU" in asset:
-                            # GOLD: Best 07-12 and 13-17 UTC
-                            if _hour_utc_s < 7 or _hour_utc_s >= 20:
-                                is_off_session = True
-                                logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC)")
-
+                            _session_key = "GOLD"
                         elif any(x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
-                            # Indices: Best 13-21 UTC (NY Session)
-                            if _hour_utc_s < 13 or _hour_utc_s >= 21:
-                                is_off_session = True
-                                logger.info(f"[SESSION] ⚠️ INDEX off-session ({_hour_utc_s}:00 UTC)")
-
+                            _session_key = "USTEC"
                         elif "OIL" in asset:
-                            # OIL: Best 13-19 UTC
-                            if _hour_utc_s < 13 or _hour_utc_s >= 19:
-                                is_off_session = True
-                                logger.info(f"[SESSION] ⚠️ OIL off-session ({_hour_utc_s}:00 UTC)")
+                            _session_key = "USOIL"
+
+                        if _session_key and not MarketHours.is_preferred_session(_session_key):
+                            is_off_session = True
+                            _window = MarketHours.PREFERRED_SESSIONS.get(_session_key)
+                            logger.info(
+                                f"[SESSION] ⚠️ {_session_key} off-session "
+                                f"({_hour_utc_s}:00 UTC, window={_window})"
+                            )
 
                         if is_off_session:
                             required_score += 0.5
@@ -1997,8 +2005,12 @@ class InstitutionalCouncilAggregator:
                     # adjustments from stacking and compounding the raise.
                     # MAIN states get a larger bump: price is more overextended and
                     # the historical failure rate is higher (observed June-2026).
+                    # FIX 2026-06-16: this was inverted (0.0 for MAIN, 0.50 for
+                    # non-MAIN) — backwards from the comment's stated intent and
+                    # from the June-2026 USOIL post-mortem this gate exists for.
+                    # MAIN states now correctly get the larger bump.
                     _is_main_state = _lsm_lean in ("MAIN_UP", "MAIN_DOWN")
-                    _bump          = 0.0 if _is_main_state else 0.50
+                    _bump          = 0.50 if _is_main_state else 0.0
                     _conflict_req  = min(self.trend_aligned_threshold + _bump, 5.0)
                     if total_score < _conflict_req:
                         logger.warning(
