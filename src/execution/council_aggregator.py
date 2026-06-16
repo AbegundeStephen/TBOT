@@ -2005,12 +2005,16 @@ class InstitutionalCouncilAggregator:
                     # adjustments from stacking and compounding the raise.
                     # MAIN states get a larger bump: price is more overextended and
                     # the historical failure rate is higher (observed June-2026).
-                    # FIX 2026-06-16: this was inverted (0.0 for MAIN, 0.50 for
-                    # non-MAIN) — backwards from the comment's stated intent and
-                    # from the June-2026 USOIL post-mortem this gate exists for.
-                    # MAIN states now correctly get the larger bump.
+                    # FIX 2026-06-16 (first pass): swapped from inverted (0.0 for
+                    # MAIN, 0.50 for non-MAIN) to (0.50 for MAIN, 0.0 for non-MAIN).
+                    # FIX 2026-06-16 (second pass): first pass only fixed which side
+                    # got a bump, not the magnitudes — the comment block above (see
+                    # "States and conflict bumps") documents a 0.5 / 1.5 split, not
+                    # 0.0 / 0.5. Caught live: USTEC MAIN_UP conflict scored 4.25,
+                    # cleared the old 3.5 bar (3.0+0.5) and executed, but would have
+                    # failed the documented 4.5 bar (3.0+1.5). Now matches the spec.
                     _is_main_state = _lsm_lean in ("MAIN_UP", "MAIN_DOWN")
-                    _bump          = 0.50 if _is_main_state else 0.0
+                    _bump          = 1.50 if _is_main_state else 0.50
                     _conflict_req  = min(self.trend_aligned_threshold + _bump, 5.0)
                     if total_score < _conflict_req:
                         logger.warning(
