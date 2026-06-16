@@ -4455,12 +4455,44 @@ class TradingBot:
                     _strong_council = _score_normalised >= 0.60  # ≥60% confidence in either scale
 
                     if _lsm_main and _signal_aligned and _strong_council:
-                        logger.info(
-                            f"[CONFIDENCE GATE] {asset_name}: NEUTRAL 4H regime bypassed — "
-                            f"1H LSM={_lsm_post} aligned with signal, "
-                            f"score={_council_score:.2f} (norm={_score_normalised:.0%}). "
-                            f"4H detector likely lagging post-event."
+                        # ── PATTERN-CONFLUENCE VETO (added 2026-06-16) ──────────
+                        # This bypass only checks LSM structural alignment + the
+                        # aggregator's own score — it never consults the
+                        # independent pattern-confluence engine in
+                        # signal_aggregator._score_confluence. That let the
+                        # 2026-06-16 GOLD trade pass with 0/5 institutional
+                        # patterns matched and net_conviction=-1.5 (unanimous
+                        # exhaustion read), because LSM+score alone qualified.
+                        # Veto the bypass when the pattern engine unanimously
+                        # disagrees, so one score variable can't override a
+                        # 5-template structural rejection.
+                        _composite = details.get("composite_state", {}) or {}
+                        _inst_pattern = details.get("institutional_pattern")
+                        _net_conviction = _composite.get("net_conviction", 0.0)
+                        _pattern_veto_threshold = self.config.get("trading", {}).get(
+                            "confidence_gate_pattern_veto", -1.0
                         )
+                        _pattern_unanimous_reject = (
+                            _inst_pattern is None and _net_conviction <= _pattern_veto_threshold
+                        )
+
+                        if _pattern_unanimous_reject:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: Bypass VETOED — "
+                                f"LSM={_lsm_post} aligned, score norm={_score_normalised:.0%} "
+                                f"qualified, but pattern-confluence engine unanimously rejected "
+                                f"(no institutional pattern matched, net_conviction="
+                                f"{_net_conviction:.1f} <= {_pattern_veto_threshold:.1f})."
+                            )
+                            signal = 0
+                            details["reasoning"] = "low_regime_confidence_pattern_veto"
+                        else:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: NEUTRAL 4H regime bypassed — "
+                                f"1H LSM={_lsm_post} aligned with signal, "
+                                f"score={_council_score:.2f} (norm={_score_normalised:.0%}). "
+                                f"4H detector likely lagging post-event."
+                            )
                     else:
                         logger.info(
                             f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "

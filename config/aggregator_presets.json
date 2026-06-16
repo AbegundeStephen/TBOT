@@ -475,21 +475,22 @@
       "btc_ema200_4h_modifier": -0.1
     },
     "mode2": {
-      "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT.",
+      "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT. optional_min_count lowered 4\u21923: requiring all 4 simultaneously is statistically near-impossible on hourly data.",
       "adx_max": 25,
-      "optional_min_count": 4,
+      "optional_min_count": 3,
       "bb_inside_required": true,
       "btc_long_zscore_threshold": -2.0,
       "btc_short_zscore_threshold": 3.5
     },
     "mode3": {
-      "_comment": "Climax Fade \u2014 MAIN states. MAIN_UP\u2192SHORT, MAIN_DOWN\u2192LONG. Target is EMA20, NOT a reversal call.",
+      "_comment": "Climax Fade \u2014 MAIN states. MAIN_UP\u2192SHORT, MAIN_DOWN\u2192LONG. Target is EMA20, NOT a reversal call. candle_lookback_bars=3: reversal candle accepted within last 3 bars, not just the current bar \u2014 otherwise the gate fires only ~1-2% of eligible cycles. require_above_avg_volume=false: MT5 tick volume is not real market volume; unreliable for this gate.",
       "leg_stretch_ratio_min": 1.5,
       "leg_stretch_window": 10,
       "leg_stretch_lookback": 50,
       "price_anchor_atr_mult": 2.5,
-      "require_above_avg_volume": true,
-      "volume_avg_lookback": 20
+      "require_above_avg_volume": false,
+      "volume_avg_lookback": 20,
+      "candle_lookback_bars": 3
     },
     "bb_kc_squeeze": {
       "_comment": "BB(20,2\u03c3) inside Keltner(20 EMA, 1.5\u00d7ATR14) for 5+ bars. bbw_percentile bottom 30th = compressed volatility.",
