@@ -260,10 +260,19 @@ class MarketRegimeAnalyzer:
             performance_score += 3
             performance_reasons.append("Weak/ranging market")
         
-        # High volatility (Performance handles uncertainty better)
-        if volatility_ratio > 1.15:  
+        # Volatility outside the "stable" band Council prefers — either a hot
+        # spike (>1.3x) or a compressed/quiet ranging tape (<0.8x). Performance
+        # handles both better than Council's structure judges, which assume a
+        # normal-volatility trend.
+        # BUGFIX: previously only rewarded ratio > 1.15, which is mutually
+        # exclusive with regime_type == 'ranging_quiet' (defined elsewhere as
+        # volatility_ratio < 0.8) — the two conditions could never both be
+        # true, making the highest-value Performance combo unreachable and
+        # leaving every asset stuck in Council once switched in. See thresholds
+        # in analyze_market_state()'s volatility_regime classification.
+        if volatility_ratio > 1.3 or volatility_ratio < 0.8:
             performance_score += 2
-            performance_reasons.append(f"High volatility ({volatility_ratio:.2f}x)")
+            performance_reasons.append(f"Volatility outside stable band ({volatility_ratio:.2f}x)")
         
         # Noisy price action (Performance uses statistical filters)
         if price_clarity == 'noisy':
@@ -275,10 +284,14 @@ class MarketRegimeAnalyzer:
             performance_score += 1
             performance_reasons.append("Mixed momentum signals")
         
-        # Mean-reversion setup (Performance's strength)
-        if regime_type in ['ranging_quiet', 'reversal_setup']:
+        # Mean-reversion / non-trending setup (Performance's strength).
+        # BUGFIX: 'volatile_choppy' and 'mixed_signals' are just as clearly
+        # non-Council regimes as 'ranging_quiet'/'reversal_setup' but were
+        # previously excluded, denying Performance its regime bonus in two of
+        # the five possible regime buckets for no principled reason.
+        if regime_type in ['ranging_quiet', 'reversal_setup', 'volatile_choppy', 'mixed_signals']:
             performance_score += 2
-            performance_reasons.append(f"Mean-reversion setup ({regime_type})")
+            performance_reasons.append(f"Non-trending setup ({regime_type})")
         
         # ============================================================
         # DECISION
