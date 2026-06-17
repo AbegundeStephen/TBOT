@@ -587,7 +587,7 @@ class MeanReversionStrategy(BaseStrategy):
             _bc = self._check_bb_contraction(features, direction)
             _mp = self._check_ma_proximity(features, direction)
             logger.info(
-                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need all 4) → 0 "
+                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need all {min_opt}) → 0 "
                 f"[vol={'✓' if _vc else '✗'} "
                 f"hdiv={'✓' if _hd else '✗'} "
                 f"bbc={'✓' if _bc else '✗'} "

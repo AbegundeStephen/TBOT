@@ -6196,13 +6196,34 @@ class TradingBot:
             # Running asyncio.run() inside a daemon thread gives the coroutine its own event loop.
             try:
                 self.cvd_consumer = CVDConsumer()
+
+                def _cvd_supervisor():
+                    # RECONNECT FIX: CVDConsumer.start() returns (rather than raising)
+                    # whenever the websocket drops — without a supervisor the daemon
+                    # thread exits silently and FLOW/cvd_trend stay stale at 0 for the
+                    # rest of the process lifetime. Loop forever with capped exponential
+                    # backoff so a transient network blip doesn't permanently kill the
+                    # order-flow feed.
+                    backoff = 5
+                    max_backoff = 60
+                    while True:
+                        try:
+                            asyncio.run(self.cvd_consumer.start())
+                        except Exception as _loop_err:
+                            logger.warning(f"[CVD] Supervisor caught exception: {_loop_err}")
+                        logger.warning(
+                            f"[CVD] WebSocket disconnected — reconnecting in {backoff}s"
+                        )
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, max_backoff)
+
                 self.cvd_thread = threading.Thread(
-                    target=lambda: asyncio.run(self.cvd_consumer.start()),
+                    target=_cvd_supervisor,
                     daemon=True,
                     name="cvd-websocket",
                 )
                 self.cvd_thread.start()
-                logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread")
+                logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread (auto-reconnect enabled)")
             except Exception as _cvd_err:
                 logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
                 self.cvd_consumer = None
