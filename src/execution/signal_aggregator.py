@@ -3724,10 +3724,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     try:
                         if final_signal == 1 and _pending_retest_buy is not None:
                             state.entry_type = _pending_retest_buy.entry_type
+                            state.range_high = _pending_retest_buy.range_high
+                            state.range_low  = _pending_retest_buy.range_low
                         elif final_signal == -1 and _pending_retest_sell is not None:
                             state.entry_type = _pending_retest_sell.entry_type
+                            state.range_high = _pending_retest_sell.range_high
+                            state.range_low  = _pending_retest_sell.range_low
                         else:
                             state.entry_type = None
+                            state.range_high = None
+                            state.range_low  = None
                     except Exception:
                         pass
 

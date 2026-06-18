@@ -1291,6 +1291,16 @@
       "market_status_changes": false
     }
   },
+  "scalp_alerts": {
+    "_note": "Personal-use only. Notifies via Telegram when 1H and 4H regime structurally align, with ADX/RSI levels, their rising/falling direction, and a go-in/wait advisory. Off by default.",
+    "enabled": false,
+    "assets": [],
+    "min_adx": 20,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "history_window_cycles": 6,
+    "fire_once_per_alignment_event": true
+  },
   "phase_config": {
     "_note": "Controls which phases are active. Flip flags here instead of touching source code. current_phase is informational only.",
     "current_phase": "1",

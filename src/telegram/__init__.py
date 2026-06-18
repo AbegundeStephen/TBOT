@@ -326,6 +326,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("preset_history", self.cmd_preset_history))
         # /debug_positions removed — no implementation existed, caused AttributeError on use
         self.application.add_handler(CommandHandler("test_viz", self.cmd_test_viz))
+        self.application.add_handler(CommandHandler("scalp", self.cmd_scalp))
 
 
         # Admin Commands
@@ -473,7 +474,8 @@ class TradingTelegramBot:
             "/regimes — Regime change log per asset\n"
             "/overrides — Signal override events log\n"
             "/lastdecision — Most recent decision + filter that fired\n"
-            "/chart [ASSET] — Live AI decision chart (all assets if no arg)\n\n"
+            "/chart [ASSET] — Live AI decision chart (all assets if no arg)\n"
+            "/scalp ASSET — On-demand 1H/4H alignment check + GO IN/WAIT (works even when scalp_alerts is off)\n\n"
 
             "📈 <b>Positions &amp; Trades</b>\n"
             "/positions — Open positions with P&amp;L, SL, TP, VTM state\n"
@@ -2525,6 +2527,50 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"[TG] /regimes error: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching regime info")
+
+    async def cmd_scalp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle /scalp <ASSET> — on-demand 1H/4H scalp alignment check.
+
+        Read-only: calls ScalpAlertEngine.peek(), which never touches the
+        engine's ADX/RSI history or fire-once dedup state, so checking here
+        can't suppress or double-fire the automatic push alert. Works
+        regardless of config["scalp_alerts"]["enabled"] or the asset
+        whitelist — those only gate the automatic push, not a manual check.
+        """
+        try:
+            if not context.args:
+                await update.message.reply_text(
+                    "⚠️ Usage: <code>/scalp BTC</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset = context.args[0].upper()
+            valid_assets = list(self.trading_bot.config["assets"].keys())
+            if asset not in valid_assets:
+                await update.message.reply_text(
+                    f"⚠️ Invalid asset. Available: {valid_assets}"
+                )
+                return
+
+            engine = getattr(self.trading_bot, "scalp_alert_engine", None)
+            if engine is None:
+                await update.message.reply_text(
+                    "⚠️ Scalp engine isn't initialized yet — try again once the bot is fully up."
+                )
+                return
+
+            mtf_regime = self.trading_bot._current_regime_data.get(asset) if hasattr(
+                self.trading_bot, "_current_regime_data"
+            ) else None
+
+            msg = engine.peek(asset, mtf_regime)
+            await update.message.reply_text(msg, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"[TG] /scalp error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error checking scalp alignment")
 
     async def cmd_overrides(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /overrides — signal override events (Golden Cross etc.)"""

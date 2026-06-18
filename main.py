@@ -90,6 +90,7 @@ from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
 from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
+from src.execution.scalp_alert_engine import ScalpAlertEngine
 from src.training.autotrainer import ContinuousLearningPipeline
 from src.execution.cvd_consumer import CVDConsumer
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
@@ -332,6 +333,7 @@ class TradingBot:
         self._initialize_strategies()
         self.mtf_integration = None
         self._current_regime_data = {}
+        self.scalp_alert_engine = None  # personal scalp-alignment alerts; off by default
 
         # ✅ FIX: Dedup tracker for blocked-signal Telegram notifications.
         # Key: asset name. Value: (signal_direction, block_reason) tuple.
@@ -995,6 +997,11 @@ class TradingBot:
 
             logger.info("[MTF] ✅ Multi-Timeframe Regime Detection Ready")
             logger.info("=" * 70 + "\n")
+
+            # Personal scalp-alignment alert engine — config-gated, off by default.
+            self.scalp_alert_engine = ScalpAlertEngine(
+                config=self.config.get("scalp_alerts", {})
+            )
 
             return True
 
@@ -4278,6 +4285,21 @@ class TradingBot:
                         asset_name=asset_name, symbol=symbol, exchange=exchange
                     )
                     self._current_regime_data[asset_name] = mtf_regime
+
+                    # Personal scalp-alignment alert (off by default, see
+                    # config["scalp_alerts"]). Pure observer — never affects
+                    # signal, sizing, or execution below.
+                    if self.scalp_alert_engine and self.scalp_alert_engine.enabled:
+                        try:
+                            scalp_msg = self.scalp_alert_engine.process(asset_name, mtf_regime)
+                            if scalp_msg and self.telegram_bot:
+                                self._send_telegram_notification(
+                                    self.telegram_bot.send_notification(
+                                        scalp_msg, parse_mode="HTML"
+                                    )
+                                )
+                        except Exception as e:
+                            logger.error(f"[SCALP ALERT] Failed for {asset_name}: {e}")
                 except Exception as e:
                     logger.error(f"[MTF] Failed to update regime for {asset_name}: {e}")
                     mtf_regime = self._current_regime_data.get(asset_name, {})
