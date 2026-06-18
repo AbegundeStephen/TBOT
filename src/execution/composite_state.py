@@ -137,10 +137,16 @@ class CompositeState:
     # ══════════════════════════════════════════════════════════════
     # PHASE 3B RESERVED — Retest Engine
     # entry_type: populated by retest_engine; consumed by VTM.
-    # Values: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
-    #         RANGE_BOUNDARY / REJECT / None (no classification yet)
+    # Values: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY / RANGE_BOUNDARY /
+    #         CONTINUATION / REJECT / None (no classification yet)
     # ══════════════════════════════════════════════════════════════
     entry_type: Optional[str] = None
+    # Target-ladder box (Phase 4 ext, gated by phase_config.continuation_targets_enabled,
+    # default OFF). Populated by retest_engine for RANGE_BOUNDARY/SPRING_ENTRY —
+    # the structural range top/bottom used to build the midpoint/top/measured-move
+    # ladder in VTM. None when the feature is off or no box was computed.
+    range_high: Optional[float] = None
+    range_low: Optional[float] = None
     # ── Fix 1: phase_config gate flags (populated by main.py → consumed by aggregator + VTM)
     phase_config: dict = field(default_factory=dict)
 
@@ -186,6 +192,12 @@ class CompositeState:
 
         if _nan(self.bbw_percentile):
             self.bbw_percentile = None
+
+        if _nan(self.range_high):
+            self.range_high = None
+
+        if _nan(self.range_low):
+            self.range_low = None
 
     def to_dict(self) -> Dict:
         """For shadow trader logging."""

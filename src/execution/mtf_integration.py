@@ -142,8 +142,13 @@ class MTFRegimeIntegration:
                         "timestamp": regime_status.timestamp.isoformat(),
                         "consensus_regime": regime_status.consensus_regime,
                         "consensus_confidence": confidence,
-                        "timeframe_agreement": confidence, 
-                        "trend_coherence": confidence,     
+                        # Real cross-timeframe comparison (fraction of 1h/4h/1d
+                        # whose own trend_direction matches the consensus
+                        # direction) — previously aliased to `confidence`,
+                        # which only measures how far the consensus itself
+                        # leans, not whether timeframes agree with each other.
+                        "timeframe_agreement": regime_status.timeframe_agreement,
+                        "trend_coherence": regime_status.timeframe_agreement,
                         "risk_level": "low" if confidence > 0.5 else "high",
                         "volatility_regime": "normal" if confidence > 0.5 else "high",
                         "recommended_mode": "council",
@@ -336,7 +341,9 @@ class MTFRegimeIntegration:
                 "ema_4h_200": regime_status.ema_4h_200,
                 "ema_4h_50": regime_status.ema_4h_50,
                 "confidence": confidence,
-                "timeframe_agreement": confidence, # Proxy for agreement in 5-tier
+                # Real cross-timeframe direction match (1h/4h/1d vs consensus),
+                # not a proxy for consensus strength. See RegimeStatus.timeframe_agreement.
+                "timeframe_agreement": regime_status.timeframe_agreement,
                 "recommended_mode": "council",
                 "risk_level": risk_level,
                 "volatility": volatility,

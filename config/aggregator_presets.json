@@ -564,6 +564,20 @@
         "breakout_proximity_atr_mult": 1.5,
         "modifier_no_level": 0.35
       }
+    },
+    "continuation": {
+      "_comment": "Phase 4 ext: CONTINUATION entry_type (Scenario B - tight 1H consolidation breaking out inside an established 4H MAIN leg). Gated entirely by phase_config.continuation_targets_enabled (default OFF) - these thresholds have no effect while the flag is off.",
+      "min_bars": 4,
+      "max_bars": 15,
+      "max_range_atr_mult": 2.0,
+      "breakout_buffer_atr_mult": 0.1,
+      "min_flagpole_atr_mult": 1.0,
+      "modifier_aligned_btc": 0.1,
+      "modifier_aligned_fx": 0.2
+    },
+    "range_ladder": {
+      "_comment": "Phase 4 ext: range top/bottom lookback for the RANGE_BOUNDARY/SPRING_ENTRY target ladder (midpoint/top/measured-move). Gated by phase_config.continuation_targets_enabled (default OFF).",
+      "lookback_bars": 30
     }
   }
 }

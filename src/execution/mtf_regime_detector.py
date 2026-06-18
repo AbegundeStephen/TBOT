@@ -40,6 +40,10 @@ class GovernorStatus:
     reasoning: str
     ema_200: Optional[float] = None
     trade_type: TradeType = TradeType.TREND
+    # 1D ADX/RSI, captured here since _analyze_governor is the only place
+    # that runs _calculate_indicators() on the daily dataframe.
+    adx: Optional[float] = None
+    rsi: Optional[float] = None
 
 
 @dataclass
@@ -61,6 +65,11 @@ class RegimeStatus:
     # Granular Timeframe Data
     timeframe_data: Dict[str, Dict] = field(default_factory=dict)
     df_4h: Optional[pd.DataFrame] = None
+
+    # Fraction of {1h, 4h, 1d} whose own trend_direction matches the
+    # consensus direction (BULLISH/BEARISH/NEUTRAL). Distinct from `score`:
+    # this is a real cross-timeframe comparison, not abs(score) reused.
+    timeframe_agreement: float = 0.0
 
 
 class MultiTimeFrameRegimeDetector:
@@ -324,8 +333,16 @@ class MultiTimeFrameRegimeDetector:
                 f"with {'positive' if ema_slope > 0 else 'negative' if ema_slope < 0 else 'flat'} slope."
             )
 
+            daily_adx = (
+                float(latest["adx"]) if "adx" in latest and pd.notna(latest["adx"]) else None
+            )
+            daily_rsi = (
+                float(latest["rsi"]) if "rsi" in latest and pd.notna(latest["rsi"]) else None
+            )
+
             return GovernorStatus(
-                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200, trade_type=trade_type
+                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200,
+                trade_type=trade_type, adx=daily_adx, rsi=daily_rsi
             )
 
         except Exception as e:
@@ -373,6 +390,24 @@ class MultiTimeFrameRegimeDetector:
 
         latest_1h = df_1h_with_ema.iloc[-1]
         latest_4h = df_4h_with_ema.iloc[-1]
+
+        # [ADX-DEBUG] Temporary instrumentation — confirms/refutes whether
+        # talib's Wilder-smoothed ADX/RSI for the "same" closed bar drifts
+        # between cycles because the CSV gets rewritten by
+        # historical_updater.py mid-read. Compare bars/last_bar/adx/rsi
+        # across consecutive cycles for the same asset: if last_bar is
+        # unchanged but adx/rsi or bar count differs, that's the race.
+        # Remove once confirmed/fixed.
+        try:
+            logger.info(
+                f"[ADX-DEBUG] {asset_type} "
+                f"1H: bars={len(df_1h_with_ema)} last_bar={df_1h_with_ema.index[-1]} "
+                f"adx={latest_1h['adx']:.2f} rsi={latest_1h['rsi']:.2f} | "
+                f"4H: bars={len(df_4h_with_ema)} last_bar={df_4h_with_ema.index[-1]} "
+                f"adx={latest_4h['adx']:.2f} rsi={latest_4h['rsi']:.2f}"
+            )
+        except Exception as _dbg_err:
+            logger.debug(f"[ADX-DEBUG] logging failed: {_dbg_err}")
 
         price_1h = latest_1h["close"]
         price_4h = latest_4h["close"]
@@ -581,11 +616,34 @@ class MultiTimeFrameRegimeDetector:
             "1d": {
                 "regime": "BULLISH" if macro_bullish else "BEARISH" if macro_bearish else "NEUTRAL",
                 "confidence": 1.0 if (macro_bullish or macro_bearish) else 0.0,
-                "adx": None, # Will be filled if we calculate 1D indicators
-                "rsi": None,
+                "adx": governor_status.adx,
+                "rsi": governor_status.rsi,
                 "trend_direction": "UP" if macro_bullish else "DOWN" if macro_bearish else "SIDEWAYS"
             }
         }
+
+        # ── Real cross-timeframe agreement ──────────────────────────────────
+        # Previously this slot was filled with abs(score), which only reflects
+        # how far the *consensus* leans, not whether 1H/4H/1D actually agree
+        # with each other. That made it possible to show e.g. "1H DOWN, 4H
+        # DOWN, Agreement: 0%" whenever the macro consensus landed on NEUTRAL
+        # — technically consistent with the old formula, but misleading on
+        # the dashboard. This instead counts how many of the three
+        # timeframes' own trend_direction matches the consensus direction.
+        def _dir_of(trend_direction: str) -> str:
+            if trend_direction == "UP":
+                return "BULLISH"
+            if trend_direction == "DOWN":
+                return "BEARISH"
+            return "NEUTRAL"  # SIDEWAYS / N/A
+
+        consensus_dir = "BULLISH" if is_bullish else "BEARISH" if is_bearish else "NEUTRAL"
+        _tf_dirs = [
+            _dir_of(timeframe_data["1h"]["trend_direction"]),
+            _dir_of(timeframe_data["4h"]["trend_direction"]),
+            _dir_of(timeframe_data["1d"]["trend_direction"]),
+        ]
+        timeframe_agreement = sum(1 for d in _tf_dirs if d == consensus_dir) / len(_tf_dirs)
 
         return RegimeStatus(
             asset=asset_type,
@@ -600,7 +658,8 @@ class MultiTimeFrameRegimeDetector:
             ema_4h_50=ema_4h_slow,
             trade_type=trade_type,
             timeframe_data=timeframe_data,
-            df_4h=df_4h_with_ema # ✨ Pass 4H data with features
+            df_4h=df_4h_with_ema, # ✨ Pass 4H data with features
+            timeframe_agreement=timeframe_agreement
         )
 
     def analyze_regime(

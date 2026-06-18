@@ -132,6 +132,13 @@ class InstitutionalCouncilAggregator:
         # Decision history
         self.decision_history = deque(maxlen=100)
 
+        # T4.0: Score trajectory history — per-judge, per-side RAW scores
+        # (captured before the trajectory modifier itself runs) from each
+        # cycle, so the next cycle can tell a judge that is "forming"
+        # (rising) from one "losing steam" (falling) instead of scoring
+        # blind off a single-bar snapshot every time.
+        self.score_history = deque(maxlen=20)
+
         # Regime tracking
         self.previous_regime = None
         self.regime_initialized = False
@@ -1274,6 +1281,64 @@ class InstitutionalCouncilAggregator:
                     if _dxy_falling:
                         buy_scores['momentum'] = min(w_momentum, buy_scores['momentum'] + _boost)
                         logger.debug(f"[DXY] Weak dollar: EURJPY BUY momentum +{_boost:.2f}")
+
+            # ════════════════════════════════════════════════════════════════
+            # T4.0: SCORE TRAJECTORY AWARENESS (Momentum-of-Conviction)
+            # Reason: every judge above recomputes purely from the current bar.
+            # A side that just flipped from near-zero to a high score this one
+            # cycle looks IDENTICAL to the council as a side that has been
+            # building steadily for 10 cycles — there was no memory of last
+            # cycle's scores anywhere in this class (self.decision_history is
+            # write-only/log-only; self.previous_regime is dead state). That's
+            # exactly the "doesn't know what has been happening" gap.
+            #
+            # Fix: compare each judge's RAW score (pre-modifier, this cycle)
+            # against its own reading from the previous cycle. A judge that
+            # rose gets a small same-direction boost (forming); a judge that
+            # fell gets a small same-direction penalty (losing steam). Capped
+            # per-judge at that judge's own weight ceiling, symmetric, and
+            # applied the same additive way as the existing ADX-slope /
+            # funding / DXY modifiers above — it nudges the scorecard, it
+            # never blocks a trade outright on its own.
+            # ════════════════════════════════════════════════════════════════
+            _raw_buy_scores = dict(buy_scores)
+            _raw_sell_scores = dict(sell_scores)
+            _TRAJ_GAIN = 0.15  # 15% of a judge's own cycle-over-cycle delta
+            _judge_weight_cap = {
+                'trend': w_trend,
+                'structure': min(w_structure, 1.0),  # STRUCTURE judge hard-caps its own return at 1.0
+                'momentum': w_momentum,
+                'pattern': w_pattern,
+                'volume': w_volume,
+            }
+
+            _prev_cycle = self.score_history[-1] if self.score_history else None
+            if _prev_cycle:
+                _prev_buy = _prev_cycle.get('buy_scores', {})
+                _prev_sell = _prev_cycle.get('sell_scores', {})
+                for _j in list(buy_scores.keys()):
+                    _cap = _judge_weight_cap.get(_j, 5.0)
+                    _pb = _prev_buy.get(_j)
+                    if _pb is not None:
+                        _adj = (_raw_buy_scores[_j] - _pb) * _TRAJ_GAIN
+                        if _adj != 0.0:
+                            buy_scores[_j] = float(np.clip(buy_scores[_j] + _adj, 0.0, _cap))
+                    _ps = _prev_sell.get(_j)
+                    if _ps is not None:
+                        _adj = (_raw_sell_scores[_j] - _ps) * _TRAJ_GAIN
+                        if _adj != 0.0:
+                            sell_scores[_j] = float(np.clip(sell_scores[_j] + _adj, 0.0, _cap))
+
+            # Persist this cycle's RAW (pre-trajectory-adjustment) scores for next
+            # cycle's comparison — diffing against already-adjusted values would
+            # compound the nudge instead of measuring fresh judge-level momentum.
+            self.score_history.append({
+                'timestamp': timestamp,
+                'buy_scores': _raw_buy_scores,
+                'sell_scores': _raw_sell_scores,
+                'buy_total': sum(_raw_buy_scores.values()),
+                'sell_total': sum(_raw_sell_scores.values()),
+            })
 
             # Calculate total scores
             buy_total = sum(buy_scores.values())

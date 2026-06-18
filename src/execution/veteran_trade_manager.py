@@ -445,8 +445,12 @@ class VeteranTradeManager:
         self.level_defended             = bool(_cs.get("level_defended",  False))
         self.sweep_level                = _cs.get("sweep_level")
         # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
-        #             RANGE_BOUNDARY / REJECT / None (no classification)
+        #             RANGE_BOUNDARY / CONTINUATION / REJECT / None (no classification)
         self.vtm_entry_type             = _cs.get("entry_type")
+        # Target-ladder box (Phase 4 ext, gated by phase_config.continuation_targets_enabled).
+        # Populated only for RANGE_BOUNDARY/SPRING_ENTRY — None otherwise.
+        self.vtm_range_high             = _cs.get("range_high")
+        self.vtm_range_low              = _cs.get("range_low")
         # Squeeze flag — drives wider ATR selection in _calculate_atr()
         self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
         # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
@@ -924,6 +928,78 @@ class VeteranTradeManager:
                             )
                 except Exception as _fp_err:
                     logger.debug(f"[VTM] Flagpole ladder error (non-blocking): {_fp_err}")
+
+                # ── PHASE 4 ext: CONTINUATION + RANGE target ladders ──────────────
+                # Gated by phase_config.continuation_targets_enabled (default OFF).
+                # Does nothing while the flag is off — vtm_entry_type can only be
+                # CONTINUATION when retest_engine's matching tier was itself gated
+                # by the same flag, and vtm_range_high/low are only ever populated
+                # under the same gate, so this block is a no-op until both the
+                # flag is on AND the corresponding tier actually fired.
+                if not _flagpole_used and self.risk_config.get("phase_config", {}).get(
+                    "continuation_targets_enabled", False
+                ):
+                    try:
+                        _cl_cfg = self.risk_config.get("continuation_ladder", {})
+
+                        if self.vtm_entry_type == "CONTINUATION":
+                            # Flagpole = distance from the leg-origin pivot (the
+                            # NATURAL anchor that started the current MAIN leg) to
+                            # the entry price (near the top of the leg, at the
+                            # consolidation breakout). T1 = half flagpole (50%),
+                            # T2 = full flagpole (remaining 50%).
+                            _base_anchor = (
+                                self.livermore_anchor_nat_low if self.side == "long"
+                                else self.livermore_anchor_nat_high
+                            )
+                            if _base_anchor is not None:
+                                _base_anchor = float(_base_anchor)
+                                _flagpole = (
+                                    self.entry_price - _base_anchor if self.side == "long"
+                                    else _base_anchor - self.entry_price
+                                )
+                                _min_fp_mult = float(_cl_cfg.get("continuation_min_flagpole_atr_mult", 1.0))
+                                if _flagpole > _min_fp_mult * atr:
+                                    _sign = 1 if self.side == "long" else -1
+                                    _tp1 = self.entry_price + _sign * 0.5 * _flagpole
+                                    _tp2 = self.entry_price + _sign * 1.0 * _flagpole
+                                    self.take_profit_levels = [_tp1, _tp2]
+                                    self.partial_sizes = list(
+                                        _cl_cfg.get("continuation_partial_sizes", [0.50, 0.50])
+                                    )
+                                    _flagpole_used = True
+                                    logger.info(
+                                        f"[VTM] 🎯 CONTINUATION ladder ({self.side.upper()}): "
+                                        f"flagpole={_flagpole:.5f} TPs=[{_tp1:.5f}, {_tp2:.5f}]"
+                                    )
+
+                        elif (
+                            self.vtm_entry_type in ("RANGE_BOUNDARY", "SPRING_ENTRY")
+                            and self.vtm_range_high is not None
+                            and self.vtm_range_low is not None
+                        ):
+                            # Range midpoint (60%), range top/bottom, and the
+                            # height-measured-move extension beyond it.
+                            _rh, _rl = float(self.vtm_range_high), float(self.vtm_range_low)
+                            _range_height = _rh - _rl
+                            if _range_height > 0.25 * atr:  # sanity floor — avoid degenerate boxes
+                                _mid = (_rh + _rl) / 2.0
+                                if self.side == "long":
+                                    _tp1, _tp2, _tp3 = _mid, _rh, _rh + _range_height
+                                else:
+                                    _tp1, _tp2, _tp3 = _mid, _rl, _rl - _range_height
+                                self.take_profit_levels = [_tp1, _tp2, _tp3]
+                                self.partial_sizes = list(
+                                    _cl_cfg.get("range_partial_sizes", [0.60, 0.25, 0.15])
+                                )
+                                _flagpole_used = True
+                                logger.info(
+                                    f"[VTM] 🎯 RANGE ladder ({self.side.upper()}): "
+                                    f"box=[{_rl:.5f}, {_rh:.5f}] "
+                                    f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                                )
+                    except Exception as _cl_err:
+                        logger.debug(f"[VTM] Continuation/range ladder error (non-blocking): {_cl_err}")
 
                 # Structure-based targets (only when use_structure_targets=true
                 # and flagpole ladder was not used)
@@ -2289,6 +2365,9 @@ class VeteranTradeManager:
                              Invalidation = price returning back below/above the breakout.
           MR_PULLBACK      — Ensure stop clears the nearby_4h_level (level must sit
                              between stop and entry; don't place stop inside the level).
+          CONTINUATION     — Behind the 1H consolidation box that was broken
+                             (vtm_range_low/high — Phase 4 ext, gated by
+                             phase_config.continuation_targets_enabled).
           REJECT / None    — Return None → caller keeps ATR baseline.
         """
         _phase_cfg = self.risk_config.get("phase_config", {})
@@ -2346,6 +2425,16 @@ class VeteranTradeManager:
                 # cleared so the trade has breathing room).
                 # If ATR stop already clears the level, no change needed.
                 return candidate
+            return None
+
+        if entry_type == "CONTINUATION":
+            # Stop behind the 1H consolidation box that was broken (the box
+            # is populated on RetestResult only for the CONTINUATION tier;
+            # NOT the same box used by the RANGE target ladder).
+            level = self.vtm_range_low if side == "long" else self.vtm_range_high
+            if level is not None and atr > 0:
+                buf = 0.3 * atr
+                return (level - buf) if side == "long" else (level + buf)
             return None
 
         return None
