@@ -812,7 +812,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GOLD": {
         "bb_period": 20,
@@ -844,7 +846,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USTEC": {
         "bb_period": 20,
@@ -876,7 +880,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "EURJPY": {
         "bb_period": 20,
@@ -908,7 +914,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "EURUSD": {
         "bb_period": 20,
@@ -940,7 +948,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USOIL": {
         "bb_period": 20,
@@ -972,7 +982,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GBPAUD": {
         "bb_period": 20,
@@ -1004,7 +1016,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GBPUSD": {
         "bb_period": 20,
@@ -1036,7 +1050,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USDJPY": {
         "bb_period": 20,
@@ -1068,7 +1084,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       }
     },
     "trend_following": {

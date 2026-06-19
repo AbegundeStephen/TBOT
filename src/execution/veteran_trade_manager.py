@@ -1399,6 +1399,49 @@ class VeteranTradeManager:
         self.runner_activated = True
         logger.debug(f"[VTM] Trailing stop (Greed Mode) enabled for {self.asset}.")
 
+    def _log_mfe_mae(self, exit_reason: str) -> None:
+        """
+        Phase 7.4 ext: records the Maximum Favorable/Adverse Excursion (peak
+        unrealized profit/loss in R-multiples) reached during a trade's
+        lifetime, alongside the reason it actually closed. Records only —
+        never changes trading behaviour. Call sites only invoke this on a
+        full close (remaining_position == 0 after the exit), so partial
+        scale-outs do not produce a premature/incomplete MFE record.
+        Gated by phase_config.mfe_logging_enabled.
+        """
+        if not self.risk_config.get("phase_config", {}).get("mfe_logging_enabled", False):
+            return
+        try:
+            _risk = abs(self.entry_price - self.initial_stop_loss) or 1e-9
+            if self.side == "long":
+                _mfe_r = (self.highest_price_reached - self.entry_price) / _risk
+                _mae_r = (self.entry_price - self.lowest_price_reached) / _risk
+            else:
+                _mfe_r = (self.entry_price - self.lowest_price_reached) / _risk
+                _mae_r = (self.highest_price_reached - self.entry_price) / _risk
+            import csv as _csv, os as _os, datetime as _dt
+            _path = "logs/mfe_mae_log.csv"
+            _os.makedirs("logs", exist_ok=True)
+            _new_file = not _os.path.exists(_path)
+            with open(_path, "a", newline="") as _f:
+                _w = _csv.writer(_f)
+                if _new_file:
+                    _w.writerow(["ts", "asset", "setup", "side", "exit_reason",
+                                 "mfe_r", "mae_r", "result_r"])
+                _w.writerow([
+                    _dt.datetime.now().isoformat(),
+                    getattr(self, "asset", ""),
+                    getattr(self, "trade_type", ""),
+                    self.side,
+                    exit_reason,
+                    round(_mfe_r, 3),
+                    round(_mae_r, 3),
+                    getattr(self, "_realized_pnl_r", ""),
+                ])
+            logger.info(f"[7.4] MFE={_mfe_r:.2f}R MAE={_mae_r:.2f}R exit={exit_reason} -> {_path}")
+        except Exception as _e74:
+            logger.debug(f"[7.4] MFE log failed (non-blocking): {_e74}")
+
     def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
@@ -1550,6 +1593,7 @@ class VeteranTradeManager:
                         reason = ExitReason.TRAILING_STOP
                     elif self.runner_activated:
                         reason = ExitReason.BREAK_EVEN
+                self._log_mfe_mae(reason.value)
                 return {"reason": reason, "price": current_price, "size": self.remaining_position}
         except Exception as e:
             logger.error(f"[VTM] SL check error: {e}")
@@ -1587,6 +1631,8 @@ class VeteranTradeManager:
                             f"ATR {atr_value:.5f} > 2× slow-ATR {atr_slow:.5f}. "
                             f"Reducing {vol_exit_size:.0%}, keeping runner."
                         )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("VOLATILITY_SPIKE")
                         return {"reason": ExitReason.VOLATILITY_SPIKE, "price": current_price, "size": vol_exit_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Vol-spike check skipped: {_e}")
@@ -1640,6 +1686,8 @@ class VeteranTradeManager:
                             f"close={current_price:.5f} vs mid={bar_mid:.5f}. "
                             f"Closing {rev_size:.0%}, SL tightened to ${self.current_stop_loss:,.5f}."
                         )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("REVERSAL_CANDLE")
                         return {"reason": ExitReason.REVERSAL_CANDLE, "price": current_price, "size": rev_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Reversal-candle check skipped: {_e}")
@@ -1668,6 +1716,7 @@ class VeteranTradeManager:
                             f"3 consecutive bars against + ADX={adx_value:.1f} < 20. "
                             f"Full close ({ti_size:.0%})."
                         )
+                        self._log_mfe_mae("TREND_INVALIDATION")
                         return {"reason": ExitReason.TREND_INVALIDATION, "price": current_price, "size": ti_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Trend-invalidation check skipped: {_e}")
@@ -1743,6 +1792,8 @@ class VeteranTradeManager:
                                 f"RSI={_rsi:.1f}, MACD hist {_h1:+.4f}. "
                                 f"Closing {cut_size:.0%} early. SL tightened to ${self.current_stop_loss:,.5f}."
                             )
+                            if self.remaining_position <= 1e-9:
+                                self._log_mfe_mae("COUNTER_MOMENTUM_CUT")
                             return {"reason": ExitReason.TREND_INVALIDATION,
                                     "price": current_price, "size": cut_size}
             except Exception as _e:
@@ -1804,6 +1855,7 @@ class VeteranTradeManager:
                                 f"MACD flipped ({_h2_pg:+.4f}→{_h1_pg:+.4f}), "
                                 f"RSI={_rsi_now:.1f}. Full close at ${current_price:,.5f}."
                             )
+                            self._log_mfe_mae("PROFIT_GUARD")
                             return {
                                 "reason": ExitReason.TREND_INVALIDATION,
                                 "price": current_price,
@@ -1880,6 +1932,8 @@ class VeteranTradeManager:
                             f"exiting {early_size:.0%} at ${current_price:,.2f} "
                             f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
                         )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("EARLY_SCALE")
                         return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
 
         # --- STEP 4: Trend Pyramiding ---
@@ -1969,6 +2023,8 @@ class VeteranTradeManager:
                                 f"RSI={rsi_val:.1f}, MACD hist declining, ADX={adx_arr[-1]:.1f}↓. "
                                 f"Closing {exhaust_size:.0%}, SL locked to break-even ${self.entry_price:,.5f}."
                             )
+                            if self.remaining_position <= 1e-9:
+                                self._log_mfe_mae("MOMENTUM_EXHAUSTION")
                             return {"reason": ExitReason.MOMENTUM_EXHAUSTION, "price": current_price, "size": exhaust_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Momentum-exhaustion check skipped: {_e}")
@@ -2002,6 +2058,7 @@ class VeteranTradeManager:
                     f"{self.time_stop_bars + (24 if _extended else 0)}, "
                     f"pnl={_pnl_now * 100:+.2f}%)"
                 )
+                self._log_mfe_mae("TIME_STOP")
                 return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         # --- STEP 7: TP Partial Exits ---
@@ -2021,37 +2078,6 @@ class VeteranTradeManager:
                     if _is_last_rung(i):
                         size = 1.0   # full close — consume entire remaining position
                         self.remaining_position = 0.0
-                        # 7.4 LIVE: MFE/MAE instrumentation — records only, never changes behaviour.
-                        if self.risk_config.get("phase_config", {}).get("mfe_logging_enabled", False):
-                            try:
-                                _risk = abs(self.entry_price - self.initial_stop_loss) or 1e-9
-                                if self.side == "long":
-                                    _mfe_r = (self.highest_price_reached - self.entry_price) / _risk
-                                    _mae_r = (self.entry_price - self.lowest_price_reached) / _risk
-                                else:
-                                    _mfe_r = (self.entry_price - self.lowest_price_reached) / _risk
-                                    _mae_r = (self.highest_price_reached - self.entry_price) / _risk
-                                import csv as _csv, os as _os, datetime as _dt
-                                _path = "logs/mfe_mae_log.csv"
-                                _os.makedirs("logs", exist_ok=True)
-                                _new_file = not _os.path.exists(_path)
-                                with open(_path, "a", newline="") as _f:
-                                    _w = _csv.writer(_f)
-                                    if _new_file:
-                                        _w.writerow(["ts", "asset", "setup", "side",
-                                                     "mfe_r", "mae_r", "result_r"])
-                                    _w.writerow([
-                                        _dt.datetime.now().isoformat(),
-                                        getattr(self, "asset", ""),
-                                        getattr(self, "trade_type", ""),
-                                        self.side,
-                                        round(_mfe_r, 3),
-                                        round(_mae_r, 3),
-                                        getattr(self, "_realized_pnl_r", ""),
-                                    ])
-                                logger.info(f"[7.4] MFE={_mfe_r:.2f}R MAE={_mae_r:.2f}R logged → {_path}")
-                            except Exception as _e74:
-                                logger.debug(f"[7.4] MFE log failed (non-blocking): {_e74}")
                     else:
                         self.remaining_position = max(0.0, self.remaining_position - size)
 
@@ -2070,6 +2096,8 @@ class VeteranTradeManager:
 
                     tp_reasons = [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3]
                     reason = tp_reasons[i] if i < len(tp_reasons) else ExitReason.TAKE_PROFIT_3
+                    if _is_last_rung(i):
+                        self._log_mfe_mae(reason.value)
                     return {"reason": reason, "price": current_price, "size": size}
 
             return None
