@@ -3066,6 +3066,28 @@ class PortfolioManager:
         if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
             try:
                 holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
+
+                # MFE/MAE: peak favourable/adverse excursion in R-multiples,
+                # read off the VTM's own running price extremes (same source
+                # VTM._log_mfe_mae uses for its CSV row) so "highest profit
+                # realised even on a losing trade" surfaces on the dashboard
+                # without touching exit/trading logic.
+                _exit_meta = {"exit_time": datetime.now().isoformat(), "exchange_closed": exchange_closed}
+                _vtm = getattr(position, "trade_manager", None)
+                if _vtm is not None and getattr(_vtm, "highest_price_reached", None) is not None:
+                    try:
+                        _risk = abs(_vtm.entry_price - _vtm.initial_stop_loss) or 1e-9
+                        if _vtm.side == "long":
+                            _mfe_r = (_vtm.highest_price_reached - _vtm.entry_price) / _risk
+                            _mae_r = (_vtm.entry_price - _vtm.lowest_price_reached) / _risk
+                        else:
+                            _mfe_r = (_vtm.entry_price - _vtm.lowest_price_reached) / _risk
+                            _mae_r = (_vtm.highest_price_reached - _vtm.entry_price) / _risk
+                        _exit_meta["mfe_r"] = round(_mfe_r, 3)
+                        _exit_meta["mae_r"] = round(_mae_r, 3)
+                    except Exception as _mfe_e:
+                        logger.debug(f"[DB] MFE/MAE metadata calc skipped: {_mfe_e}")
+
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,
@@ -3074,7 +3096,7 @@ class PortfolioManager:
                     pnl_pct=pnl_pct,
                     holding_time_hours=holding_time,
                     final_quantity=position.quantity,
-                    metadata={"exit_time": datetime.now().isoformat(), "exchange_closed": exchange_closed},
+                    metadata=_exit_meta,
                 )
                 logger.debug(f"[DB] Trade exit logged: {position.db_trade_id}")
             except Exception as e:
