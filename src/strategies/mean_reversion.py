@@ -76,6 +76,12 @@ class MeanReversionStrategy(BaseStrategy):
         self.min_score_threshold = config.get("min_conditions", 3.0)
         self.use_4h_context = config.get("use_4h_context", True)
 
+        # Tier 2 Item 7: authorization gates for Mode 2 (counter-trend) and
+        # Mode 3 (climax fade). Both default True — no live behavior change
+        # on rollout; flip to False per-asset in config.json to disable.
+        self.mr_mode2_counter_trend_enabled = config.get("mr_mode2_counter_trend_enabled", True)
+        self.mr_mode3_climax_fade_enabled = config.get("mr_mode3_climax_fade_enabled", True)
+
         # Phase 3A thresholds — loaded once from presets JSON
         self._mr3_cfg = self._load_mr3_config()
 
@@ -998,9 +1004,15 @@ class MeanReversionStrategy(BaseStrategy):
                 return 0, 0.0
 
             elif lsm_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                if not self.mr_mode2_counter_trend_enabled:
+                    logger.debug(f"[MR GATE] {self.asset}: Mode 2 disabled by config — holding.")
+                    return 0, 0.0
                 return self._mode2_counter_trend(df, composite_state)
 
             elif lsm_state in ("MAIN_UP", "MAIN_DOWN"):
+                if not self.mr_mode3_climax_fade_enabled:
+                    logger.debug(f"[MR GATE] {self.asset}: Mode 3 disabled by config — holding.")
+                    return 0, 0.0
                 return self._mode3_climax_fade(df, composite_state)
 
             else:

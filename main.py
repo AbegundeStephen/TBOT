@@ -312,6 +312,7 @@ class TradingBot:
         self._log_all_signals = _db_cfg.get("log_all_signals", True)
         self._log_system_events = _db_cfg.get("log_system_events", True)
         self._df_4h_cache = {}
+        self._df_1h_cache = {}
         # Tracks last bar timestamp seen per asset — prevents on_new_bar() being
         # called multiple times within the same 1H candle (5-min cycle cadence).
         self._last_vtm_bar_ts: dict = {}
@@ -1838,6 +1839,7 @@ class TradingBot:
             # get Livermore state, hard-veto flags, and retest-engine entry_type.
             # This is the fix for GOLD/USOIL/GBPAUD/GBPUSD always running in legacy mode.
             _perf_agg = aggregators.get("performance")
+            _cs = None
             if _perf_agg is not None and hasattr(_perf_agg, '_build_composite_state'):
                 try:
                     _df4h_cs = mtf_regime.get("df_4h")
@@ -1846,14 +1848,33 @@ class TradingBot:
                 except Exception as _cs_err:
                     logger.debug("[HYBRID/council] composite_state build failed for %s: %s", asset_name, _cs_err)
 
-            # ✅ FIXED: Pass full market context to the Institutional Council
-            signal, details = aggregator.get_aggregated_signal(
-                df,
-                current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                is_bull_market=mtf_regime.get("is_bull", False),
-                governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
-                live_price=live_price      # ✨ NEW: For accurate staleness check
-            )
+            # Hold council signals until Livermore is warm — same rule
+            # performance mode already enforces internally.
+            if _perf_agg is not None and not getattr(_perf_agg, "_livermore_warmed", False):
+                logger.debug(
+                    "[HYBRID/council] %s Livermore not warmed — holding signal.",
+                    asset_name,
+                )
+                signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+            else:
+                # ✅ FIXED: Pass full market context to the Institutional Council
+                signal, details = aggregator.get_aggregated_signal(
+                    df,
+                    current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                    is_bull_market=mtf_regime.get("is_bull", False),
+                    governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
+                    live_price=live_price      # ✨ NEW: For accurate staleness check
+                )
+
+            # Surface Livermore context so the trade manager doesn't open
+            # council trades blind.
+            if _cs is not None and hasattr(_cs, "to_dict"):
+                details["composite_state"] = _cs.to_dict()
+                _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                    details["trade_type"] = "TREND"
+                elif _lsm1h is not None:
+                    details["trade_type"] = "REVERSION"
 
             logger.info(
                 f"[COUNCIL] Total Score: {details.get('total_score', 0):.2f}/5.0"
@@ -4230,6 +4251,9 @@ class TradingBot:
                 if df.index[-1] >= _now_floor:
                     df = df.iloc[:-1]
 
+            # Cache the closed 1H dataframe so the VTM circuit breaker can see it.
+            self._df_1h_cache[asset_name] = df
+
             # Fetch and cache 4H data for VTM loop
             self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
             # Propagate df_4h into the persistent regime dict so it's available
@@ -4322,20 +4346,41 @@ class TradingBot:
                 # Build composite_state from the companion PerformanceWeightedAggregator so
                 # MR/TF strategy routing and council judges receive Livermore context.
                 _lsm_comp = aggregator.get("livermore")
+                _cs = None
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
                         logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
-                signal, details = aggregator["council"].get_aggregated_signal(
-                    df,
-                    current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                    is_bull_market=mtf_regime.get("is_bull", False),
-                    governor_data=mtf_regime,
-                    live_price=current_price
-                )
+
+                # Hold council signals until Livermore is warm — same rule
+                # performance mode already enforces internally.
+                if _lsm_comp is not None and not getattr(_lsm_comp, "_livermore_warmed", False):
+                    logger.debug(
+                        "[council] %s Livermore not warmed — holding signal (warmup in progress).",
+                        asset_name,
+                    )
+                    signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+                else:
+                    signal, details = aggregator["council"].get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime,
+                        live_price=current_price
+                    )
                 details["aggregator_mode"] = "council"
+                # Surface Livermore context so the trade manager doesn't open
+                # council trades blind (no entry_type, no state-aware stops,
+                # mislabeled trade_type).
+                if _cs is not None and hasattr(_cs, "to_dict"):
+                    details["composite_state"] = _cs.to_dict()
+                    _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                    if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                        details["trade_type"] = "TREND"
+                    elif _lsm1h is not None:
+                        details["trade_type"] = "REVERSION"
 
             else:
                 # PERFORMANCE / plain council (non-dict) mode
@@ -4346,6 +4391,10 @@ class TradingBot:
                     governor_data=mtf_regime,
                     live_price=current_price
                 )
+                # Surface the composite_state the aggregator already built
+                # internally, so the validator, VTM tick loop, and council
+                # exemption logic can all see it on this and later cycles.
+                mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
                 details["aggregator_mode"] = (
                     "council"
                     if isinstance(aggregator, InstitutionalCouncilAggregator)
@@ -5578,20 +5627,41 @@ class TradingBot:
             elif isinstance(aggregator, dict) and aggregator.get("mode") == "council":
                 # COUNCIL MODE with LSM companion — build composite_state first.
                 _lsm_comp = aggregator.get("livermore")
+                _cs = None
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
                         logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
-                signal, details = aggregator["council"].get_aggregated_signal(
-                    df,
-                    current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                    is_bull_market=mtf_regime.get("is_bull", False),
-                    governor_data=mtf_regime,
-                    live_price=current_price
-                )
+
+                # Hold council signals until Livermore is warm — same rule
+                # performance mode already enforces internally.
+                if _lsm_comp is not None and not getattr(_lsm_comp, "_livermore_warmed", False):
+                    logger.debug(
+                        "[council] %s Livermore not warmed — holding signal (warmup in progress).",
+                        asset_name,
+                    )
+                    signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+                else:
+                    signal, details = aggregator["council"].get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime,
+                        live_price=current_price
+                    )
                 details["aggregator_mode"] = "council"
+                # Surface Livermore context so the trade manager doesn't open
+                # council trades blind (no entry_type, no state-aware stops,
+                # mislabeled trade_type).
+                if _cs is not None and hasattr(_cs, "to_dict"):
+                    details["composite_state"] = _cs.to_dict()
+                    _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                    if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                        details["trade_type"] = "TREND"
+                    elif _lsm1h is not None:
+                        details["trade_type"] = "REVERSION"
             else:
                 # PERFORMANCE or plain council (non-dict) mode
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
@@ -5613,6 +5683,9 @@ class TradingBot:
                         governor_data=mtf_regime,
                         live_price=current_price
                     )
+                    # Surface the composite_state the aggregator already built
+                    # internally (mirrors the injection done for Location A/B).
+                    mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
                     details["aggregator_mode"] = "performance"
             # T3.1: Shadow trade — open virtual position for every blocked signal
             # so we can measure what gates are costing us in real P&L terms.
@@ -6006,10 +6079,49 @@ class TradingBot:
                     ok = self.mt5_handler._check_connection()
                     if not ok:
                         logger.warning("[WATCHDOG] MT5 connection lost — attempting reconnect.")
+                        if not hasattr(self, "_mt5_down_since"):
+                            self._mt5_down_since = None
+                        if not hasattr(self, "_mt5_last_alert_time"):
+                            self._mt5_last_alert_time = None
+                        if self._mt5_down_since is None:
+                            self._mt5_down_since = datetime.now()
+
                         try:
                             self.data_manager.initialize_mt5()
                         except Exception as _rc_err:
                             logger.warning("[WATCHDOG] MT5 reconnect failed: %s", _rc_err)
+
+                        _down_seconds = (datetime.now() - self._mt5_down_since).total_seconds()
+                        _has_mt5_positions = any(
+                            getattr(p, "symbol", "") and not str(getattr(p, "symbol", "")).upper().startswith("BTC")
+                            for p in (self.portfolio_manager.positions.values() if self.portfolio_manager else [])
+                        )
+                        _should_alert = (
+                            _down_seconds >= 180
+                            and _has_mt5_positions
+                            and (
+                                self._mt5_last_alert_time is None
+                                or (datetime.now() - self._mt5_last_alert_time).total_seconds() >= 600
+                            )
+                        )
+                        if _should_alert and self.telegram_bot:
+                            self._mt5_last_alert_time = datetime.now()
+                            _alert_msg = (
+                                f"🔴 *CRITICAL: MT5 DISCONNECTED*\n\n"
+                                f"Down for {int(_down_seconds // 60)} minutes with open MT5 positions.\n"
+                                f"Reconnect attempts are failing. Manual check required."
+                            )
+                            try:
+                                self._send_telegram_notification(
+                                    self.telegram_bot.notify_error(_alert_msg)
+                                )
+                            except Exception as _tg_err:
+                                logger.error("[WATCHDOG] Failed to send MT5 outage alert: %s", _tg_err)
+                    else:
+                        if getattr(self, "_mt5_down_since", None) is not None:
+                            logger.info("[WATCHDOG] MT5 connection restored.")
+                        self._mt5_down_since = None
+                        self._mt5_last_alert_time = None
                 except Exception as _mt5_err:
                     logger.warning("[WATCHDOG] MT5 ping failed: %s", _mt5_err)
 

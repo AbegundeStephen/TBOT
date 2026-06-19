@@ -427,6 +427,37 @@ class BinanceExecutionHandler:
             logger.info("[INIT] Auto-syncing positions with Binance...")
             self.sync_positions_with_binance("BTC")
 
+    def reconnect(self) -> bool:
+        """
+        Rebuild the Binance client connection after a ping failure.
+        Only refreshes the HTTP client objects — does not touch open
+        positions, orders, or portfolio state.
+        """
+        if not self.data_manager:
+            logger.warning("[BINANCE] Cannot reconnect — no data_manager reference.")
+            return False
+        try:
+            ok = self.data_manager.initialize_binance()
+            if not ok:
+                logger.warning("[BINANCE] reconnect: initialize_binance() reported failure.")
+                return False
+
+            fresh_client = self.data_manager.get_futures_client()
+            if fresh_client is None:
+                logger.warning("[BINANCE] reconnect: no futures client available after re-init.")
+                return False
+
+            self.client = fresh_client
+            self.client.session.headers.update(CLOUDFRONT_HEADERS)
+            if self.futures_handler is not None:
+                self.futures_handler.client = fresh_client
+
+            logger.info("[BINANCE] ✅ Reconnected — client refreshed.")
+            return True
+        except Exception as e:
+            logger.error(f"[BINANCE] reconnect failed: {e}", exc_info=True)
+            return False
+
     def _resolve_symbol(self, asset_name: str) -> str:
         """Return the Binance symbol for the given asset name.
         Reads from config["assets"][asset_name]["symbol"]; falls back to self.symbol (BTCUSDT).
@@ -1839,6 +1870,30 @@ class BinanceExecutionHandler:
                 fill_price = self.get_current_price(symbol=symbol, force_live=True) or 0.0
                 logger.debug(
                     f"[RECONCILE] No fill from trade history — using market price ${fill_price:.4g}"
+                )
+
+            # 1.5. Cancel the orphaned sibling order(s) — the SL/TP that did NOT fire
+            # is still live on the exchange and can fill later, opening a reverse
+            # position. Cancel everything remaining for this symbol immediately.
+            try:
+                open_orders = self.futures_handler.client.futures_get_open_orders(symbol=symbol)
+                for o in (open_orders or []):
+                    try:
+                        self.futures_handler.client.futures_cancel_order(
+                            symbol=symbol, orderId=o["orderId"]
+                        )
+                        logger.warning(
+                            f"[RECONCILE] Cancelled orphaned sibling order "
+                            f"{o.get('type')} id={o['orderId']} for {asset} after exchange close"
+                        )
+                    except Exception as _cancel_err:
+                        logger.warning(
+                            f"[RECONCILE] Failed to cancel orphaned order {o.get('orderId')} "
+                            f"for {asset}: {_cancel_err}"
+                        )
+            except Exception as _oo_err:
+                logger.warning(
+                    f"[RECONCILE] Could not fetch open orders to clean up siblings for {asset}: {_oo_err}"
                 )
 
             # 2. Record in portfolio (already closed on exchange)

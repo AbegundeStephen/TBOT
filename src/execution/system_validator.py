@@ -578,11 +578,19 @@ class SystemValidator:
 
             fired = False
             for pos in open_positions:
-                pos_asset = pos.get("asset", pos.get("symbol", "")).upper()
+                # Accept both dict-style positions and real Position objects.
+                if isinstance(pos, dict):
+                    pos_asset_raw = pos.get("asset", pos.get("symbol", ""))
+                    direction_raw = pos.get("direction", pos.get("side", ""))
+                else:
+                    pos_asset_raw = getattr(pos, "asset", getattr(pos, "symbol", ""))
+                    direction_raw = getattr(pos, "side", getattr(pos, "direction", ""))
+
+                pos_asset = (pos_asset_raw or "").upper()
                 if asset.upper() not in pos_asset and pos_asset not in asset.upper():
                     continue  # Not this asset
 
-                direction = pos.get("direction", pos.get("side", "")).lower()
+                direction = (direction_raw or "").lower()
                 is_long   = direction in ("buy", "long", "1")
                 is_short  = direction in ("sell", "short", "-1")
 

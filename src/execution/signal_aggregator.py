@@ -3668,9 +3668,35 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             except Exception as _re_err:
                                 logger.debug("[RETEST] classify error (non-blocking): %s", _re_err)
 
+                        # Fix 6a: Mode1 spring exemption. Mode 1 (Pullback
+                        # Completion, mean_reversion.py) fires on 1H
+                        # NATURAL_RETRACEMENT only after its own mandatory
+                        # compression + spring + 2-of-4 optional gates already
+                        # passed. That spring is local 1H structure and routinely
+                        # has no nearby 4H level, so the Retest Engine's
+                        # NO_LEVEL_NEARBY tier (+0.35/+0.40) was stacking on top
+                        # of Mode1's own conviction check and raising
+                        # adj_buy_thresh enough that the signal never cleared it
+                        # — Mode 1 effectively never fired live. Widen the
+                        # exemption: a LONG retest classified NO_LEVEL_NEARBY
+                        # while Mode1 is the active 1H state pays no penalty.
+                        _is_mode1_spring_buy = (
+                            state is not None
+                            and getattr(state, "livermore_state_1h", None) == "NATURAL_RETRACEMENT"
+                            and mr_signal == 1
+                            and _pending_retest_buy is not None
+                            and _pending_retest_buy.retest_type == "NO_LEVEL_NEARBY"
+                        )
+                        if _is_mode1_spring_buy:
+                            logger.debug(
+                                "[RETEST] %s Mode1 spring exemption — NO_LEVEL_NEARBY penalty waived",
+                                self.asset_type,
+                            )
+
                         # ── Combine and apply ──────────────────────────────────────
                         _retest_buy_delta  = (
-                            _pending_retest_buy.modifier  if _pending_retest_buy  is not None else 0.0
+                            0.0 if _is_mode1_spring_buy
+                            else (_pending_retest_buy.modifier  if _pending_retest_buy  is not None else 0.0)
                         )
                         _retest_sell_delta = (
                             _pending_retest_sell.modifier if _pending_retest_sell is not None else 0.0

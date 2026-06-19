@@ -1032,9 +1032,11 @@ class PortfolioManager:
                 max_corr = 0.0
                 correlated_asset = None
                 
-                for pos_asset, position in self.positions.items():
-                    if pos_asset == asset: continue # Skip self
-                    
+                for position in self.positions.values():
+                    pos_asset = getattr(position, "asset", None)
+                    if not pos_asset or pos_asset == asset:
+                        continue  # Skip self / malformed entry
+
                     # Numerical Correlation check (Pearson)
                     num_corr = abs(self.check_correlation(asset, pos_asset))
                     if num_corr > max_corr:
