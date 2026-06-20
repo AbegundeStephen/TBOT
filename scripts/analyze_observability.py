@@ -208,8 +208,10 @@ def analyze_ai(days):
     out.append(f"total AI rejections: {len(rows)}")
     out.append("by asset: " + ", ".join(f"{a}={n}" for a, n in sorted(per_asset.items(), key=lambda x: -x[1])))
     out.append("by pattern: " + ", ".join(f"{p}={n}" for p, n in sorted(per_pattern.items(), key=lambda x: -x[1])[:10]))
-    out.append("\nNote: forward P&L on AI rejects is NOT yet tracked (they are zeroed")
-    out.append("inside the aggregator before the shadow engine sees them). Counts only.")
+    out.append("\nNote: AI-rejected signals now ALSO flow to the shadow engine under")
+    out.append("gate 'ai_validation' — see that row in the SHADOW scorecard above for")
+    out.append("their forward P&L (the true AI A/B). If it shows '>> RELAX?', the AI")
+    out.append("filter is vetoing net-winning trades and should be retuned/demoted.")
     return out
 
 
