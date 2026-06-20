@@ -208,6 +208,27 @@ class TradingBot:
             logger.debug(f"[MODEL AGE] check skipped: {_ma_e}")
         # ───────────────────────────────────────────────────────────────────
 
+        # ── Phase 6.4: Execution-vs-data mode banner ────────────────────────
+        # Data is always fetched from the LIVE feed; execution can run against
+        # testnet. The dangerous combo is trading.mode='live' while the Binance
+        # client is on testnet — orders fill on a fake venue while everything
+        # else behaves as if real. Surface it loudly at startup.
+        try:
+            _tmode = str(self.config.get("trading", {}).get("mode", "paper")).lower()
+            _btestnet = bool(self.config.get("api", {}).get("binance", {}).get("testnet", True))
+            logger.info(
+                f"[MODE] trading.mode={_tmode} | binance.testnet={_btestnet} | data=LIVE feed"
+            )
+            if _tmode == "live" and _btestnet:
+                logger.warning(
+                    "[MODE] ⚠️ trading.mode=live but binance.testnet=true — BTC orders "
+                    "will fill on the TESTNET venue (not real) while signals use live data. "
+                    "Set api.binance.testnet=false for real execution."
+                )
+        except Exception as _mode_e:
+            logger.debug(f"[MODE] banner skipped: {_mode_e}")
+        # ───────────────────────────────────────────────────────────────────
+
         # Override config with environment variables for security
         if os.getenv("SUPABASE_URL"):
             self.config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")

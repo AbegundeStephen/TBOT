@@ -638,8 +638,12 @@ class PortfolioManager:
             with open(temp_file_path, "wb") as f:
                 pickle.dump(self.positions, f)
             
-            # Atomically rename the temp file to the final file
-            temp_file_path.rename(self.state_file)
+            # Atomically replace the final file. MUST use replace(), not rename():
+            # on Windows Path.rename()/os.rename refuses to overwrite an existing
+            # target (WinError 183), whereas os.replace() overwrites atomically on
+            # both Windows and POSIX. With periodic saves the target always exists,
+            # so rename() failed every cycle.
+            os.replace(temp_file_path, self.state_file)
             logger.info(f"[STATE] Successfully saved {len(self.positions)} open positions to {self.state_file}")
 
             # ✨ NEW: Save non-picklable system metrics to JSON
