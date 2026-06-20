@@ -60,8 +60,18 @@ class FunnelLogger:
         if signal != 0:
             return "passed_to_execution"
 
+        # Ground-truth AI rejection first: the validator actively changed a real
+        # signal to a hold. We do NOT use `validation_passed` (several paths set
+        # it to simply `signal != 0`, which would mislabel every block as AI).
+        if details.get("ai_modified"):
+            return "blocked_ai_validation"
+
         reason = str(details.get("reasoning", "")).lower()
         # Map known veto reasons (set across both aggregators) to families.
+        # Order matters — first match wins. "quality" precedes "score"/"rejected"
+        # so "REJECTED (Quality: ...)" lands in low_quality, while
+        # "REJECTED (Score: ...)" lands in low_score (a consensus-threshold miss,
+        # NOT an AI rejection).
         families = {
             "stale_price": "blocked_stale_price",
             "flash_veto": "blocked_flash",
@@ -73,14 +83,12 @@ class FunnelLogger:
             "hard_veto": "blocked_hard_veto",
             "warmup": "blocked_warmup",
             "quality": "blocked_low_quality",
+            "score": "blocked_low_score",
+            "rejected": "blocked_low_score",
         }
         for key, fam in families.items():
             if key in reason:
                 return fam
-
-        ai = details.get("ai_validation") or {}
-        if ai.get("validation_passed") is False:
-            return "blocked_ai_validation"
 
         if not self._raw_fired(details):
             return "no_raw_signal"
@@ -113,14 +121,17 @@ class FunnelLogger:
                     "stage": stage,
                 })
 
-                # Phase 2.2: AI A/B — capture rejected signals + would-be entry.
+                # Phase 2.2: AI A/B — capture genuinely AI-rejected signals only
+                # (validator actively changed a real signal → hold), keyed off
+                # `ai_modified`, not the unreliable `validation_passed`.
                 ai = details.get("ai_validation") or {}
-                if ai.get("validation_passed") is False:
+                if details.get("ai_modified") and signal == 0:
                     self._append(day, "ai_rejects", {
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "asset": asset,
                         "intended_signal": (
-                            details.get("mr_signal")
+                            details.get("original_signal")
+                            or details.get("mr_signal")
                             or details.get("tf_signal")
                             or details.get("ema_signal")
                         ),

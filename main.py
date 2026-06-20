@@ -2355,6 +2355,36 @@ class TradingBot:
             except Exception as _fe:
                 logger.debug(f"[FUNNEL] record hook failed: {_fe}")
 
+        # Phase 2.2+: AI-filter A/B via shadow engine. The AI veto zeroes the
+        # signal INSIDE the aggregator, so the normal downstream
+        # _shadow_open_blocked calls never see it (they no-op on signal==0).
+        # Reconstruct the intended direction (council stores `original_signal`;
+        # otherwise infer from the dominant raw strategy vote) and open a shadow
+        # position tagged 'ai_validation' so the forward P&L of AI-rejected
+        # signals becomes measurable — the true test of whether the ~80%-reject
+        # AI filter adds or destroys edge. Observational only.
+        try:
+            # Ground-truth AI rejection = the validator actively changed a real
+            # signal to a hold (`ai_modified` + final 0). We deliberately do NOT
+            # key off `validation_passed`, which several code paths define as
+            # simply `signal != 0` and would mislabel every hard-veto/score/hold
+            # as an AI reject.
+            _ai_rejected = bool(merged_details.get("ai_modified")) and signal == 0
+            if _ai_rejected:
+                _intended = merged_details.get("original_signal") or 0
+                if _intended != 0:
+                    try:
+                        _cp = float(df["close"].iloc[-1]) if df is not None and len(df) else 0.0
+                    except Exception:
+                        _cp = 0.0
+                    self._shadow_open_blocked(
+                        asset_name, int(_intended), merged_details, df, _cp,
+                        "ai_validation",
+                        self.config.get("assets", {}).get(asset_name, {}),
+                    )
+        except Exception as _aie:
+            logger.debug(f"[SHADOW] AI-reject shadow open failed: {_aie}")
+
         return signal, merged_details
 
     def _signal_str(self, signal: int) -> str:
