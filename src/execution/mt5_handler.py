@@ -518,12 +518,25 @@ class MT5ExecutionHandler:
                 risk_config = asset_cfg.get("risk", {})
                 
                 # ATR-based adaptive stop loss distance
+                # Phase 1.1: size against the SAME effective ATR multiplier the
+                # VTM will actually place (regime floors included), not the raw
+                # config base — otherwise realized risk exceeds the budget.
                 atr_fast = signal_details.get("atr_fast") if signal_details else None
-                atr_multiplier = risk_config.get("atr_multiplier", 1.5)
-                
+                _config_base = risk_config.get("atr_multiplier", 1.5)
+                atr_multiplier = VeteranTradeManager.compute_effective_atr_multiplier(
+                    trade_type=trade_type,
+                    config_base=_config_base,
+                    regime=(signal_details.get("regime", "NEUTRAL") if signal_details else "NEUTRAL"),
+                    volatility_regime=(signal_details.get("volatility_regime", "normal") if signal_details else "normal"),
+                )
+
                 if atr_fast:
                     initial_sl_dist = atr_fast * atr_multiplier
-                    logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+                    logger.info(
+                        f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR "
+                        f"(config base {_config_base}x → effective {atr_multiplier}x) "
+                        f"({initial_sl_dist:.2f})"
+                    )
                 else:
                     sl_pct = risk_config.get("stop_loss_pct", 0.01)
                     initial_sl_dist = current_price * sl_pct
@@ -905,30 +918,79 @@ class MT5ExecutionHandler:
                 _asset_cfg_exchange = self.config.get("assets", {}).get(
                     asset, {}
                 ).get("exchange", "mt5")
-                
+
                 _push_sl = self.trading_config.get("place_vtm_sl_on_exchange", False)
                 _push_tp = self.trading_config.get("place_vtm_tp_on_exchange", False)
 
-                if _asset_cfg_exchange == "mt5" and (_push_sl or _push_tp):
-                    try:
-                        _new_pos = next(
-                            (p for p in self.portfolio_manager.positions.values()
-                             if p.mt5_ticket == mt5_ticket
-                             and getattr(p, "trade_manager", None) is not None),
-                            None
-                        )
-                        if _new_pos:
-                            if _push_sl:
-                                _initial_sl = _new_pos.trade_manager.current_stop_loss
-                                if _initial_sl:
-                                    self._push_sl_to_exchange(mt5_ticket, symbol, _initial_sl)
-                            
-                            if _push_tp:
-                                _initial_tp = _new_pos.trade_manager.current_take_profit
-                                if _initial_tp:
-                                    self._push_tp_to_exchange(mt5_ticket, symbol, _initial_tp)
-                    except Exception as _e:
-                        logger.warning(f"[VTM-EXCHANGE] Initial SL/TP push failed: {_e}")
+                # Phase 0.3: a live MT5 position is opened with sl=0.0, so the
+                # broker-side protective stop is placed HERE, after the fill. If
+                # that placement fails the position is running NAKED — a gap or
+                # news spike on leveraged FX/Gold can blow the account. When SL
+                # placement is required we now retry, and if it still cannot be
+                # placed (push failed, or no VTM/stop was produced) we
+                # EMERGENCY-CLOSE the position rather than leave it unprotected.
+                # Paper mode has no real broker stop, so the guarantee is skipped.
+                if (
+                    _asset_cfg_exchange == "mt5"
+                    and (_push_sl or _push_tp)
+                    and self.mode.lower() != "paper"
+                ):
+                    _pos_any = next(
+                        (p for p in self.portfolio_manager.positions.values()
+                         if p.mt5_ticket == mt5_ticket),
+                        None
+                    )
+                    _tm = getattr(_pos_any, "trade_manager", None) if _pos_any else None
+                    _initial_sl = _tm.current_stop_loss if _tm else None
+
+                    if _push_sl:
+                        _sl_placed = False
+                        if _initial_sl:
+                            for _att in range(3):
+                                try:
+                                    if self._push_sl_to_exchange(mt5_ticket, symbol, _initial_sl):
+                                        _sl_placed = True
+                                        break
+                                except Exception as _e:
+                                    logger.warning(f"[VTM-SL] push attempt {_att+1} raised: {_e}")
+                                time.sleep(0.5)
+
+                        if not _sl_placed:
+                            logger.critical(
+                                f"[VTM-SL] ❌ Could not place protective stop for {asset} "
+                                f"#{mt5_ticket} (sl={_initial_sl}). Position is NAKED — "
+                                f"emergency-closing to avoid unbounded risk."
+                            )
+                            self._emergency_close_mt5_position(
+                                symbol,
+                                volume_lots,
+                                mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL,
+                            )
+                            # Deregister the now-closed position so the bot does
+                            # not believe it holds a protected position.
+                            try:
+                                if _pos_any is not None:
+                                    self.portfolio_manager.close_position(
+                                        position_id=_pos_any.position_id,
+                                        reason="naked_stop_emergency_close",
+                                        already_closed_on_exchange=True,
+                                    )
+                            except Exception as _ce:
+                                logger.error(
+                                    f"[VTM-SL] Failed to deregister emergency-closed "
+                                    f"position #{mt5_ticket}: {_ce}"
+                                )
+                            return False
+
+                    # TP placement stays best-effort — a missing profit target is
+                    # not a risk event and must never trigger an emergency close.
+                    if _push_tp and _tm is not None:
+                        try:
+                            _initial_tp = _tm.current_take_profit
+                            if _initial_tp:
+                                self._push_tp_to_exchange(mt5_ticket, symbol, _initial_tp)
+                        except Exception as _e:
+                            logger.warning(f"[VTM-TP] Initial TP push failed (non-fatal): {_e}")
                 # ─────────────────────────────────────────────────────────────────
                 return True
             else:
@@ -1180,13 +1242,45 @@ class MT5ExecutionHandler:
         }
         MAX_RETRIES = 2
         result = None
-        
+
+        # Phase 1.3: idempotency. Snapshot our existing tickets (by magic) so a
+        # retry triggered by a failed RESPONSE on an order that actually filled
+        # can detect the landed position instead of sending a DUPLICATE.
+        _MAGIC = 234000
+        try:
+            _pre = mt5.positions_get(symbol=symbol) or []
+            _pre_tickets = {p.ticket for p in _pre if getattr(p, "magic", None) == _MAGIC}
+        except Exception:
+            _pre_tickets = set()
+
         for attempt in range(MAX_RETRIES):
+            # Before any RE-send, check whether the previous attempt actually
+            # opened a position despite reporting failure — adopt it if so.
+            if attempt > 0:
+                try:
+                    _cur = mt5.positions_get(symbol=symbol) or []
+                    _new = [
+                        p for p in _cur
+                        if getattr(p, "magic", None) == _MAGIC
+                        and p.ticket not in _pre_tickets
+                        and ((side == "long" and p.type == mt5.POSITION_TYPE_BUY)
+                             or (side == "short" and p.type == mt5.POSITION_TYPE_SELL))
+                    ]
+                    if _new:
+                        _p = _new[0]
+                        logger.warning(
+                            f"[RETRY] MT5 prior attempt actually filled — adopting "
+                            f"ticket #{_p.ticket} @ {_p.price_open} (no double fill)."
+                        )
+                        return _p.ticket, _p.price_open
+                except Exception as _ie:
+                    logger.warning(f"[RETRY] MT5 idempotency check failed: {_ie}")
+
             result = mt5.order_send(request)
-            
+
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 break
-                
+
             if attempt < MAX_RETRIES - 1:
                 logger.warning(
                     f"[RETRY] MT5 Order failed (Attempt {attempt+1}/{MAX_RETRIES}): "

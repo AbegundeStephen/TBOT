@@ -982,12 +982,25 @@ class BinanceExecutionHandler:
             risk_config = self.asset_config.get("risk", {})
             
             # ATR-based adaptive stop loss distance
+            # Phase 1.1: size against the SAME effective ATR multiplier the VTM
+            # will actually place (regime floors included), not the raw config
+            # base. Sizing on the narrower config base over-risked every trade.
             atr_fast = signal_details.get("atr_fast") if signal_details else None
-            atr_multiplier = risk_config.get("atr_multiplier", 1.8)
-            
+            _config_base = risk_config.get("atr_multiplier", 1.8)
+            atr_multiplier = VeteranTradeManager.compute_effective_atr_multiplier(
+                trade_type=trade_type,
+                config_base=_config_base,
+                regime=(signal_details.get("regime", "NEUTRAL") if signal_details else "NEUTRAL"),
+                volatility_regime=(signal_details.get("volatility_regime", "normal") if signal_details else "normal"),
+            )
+
             if atr_fast:
                 initial_sl_dist = atr_fast * atr_multiplier
-                logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+                logger.info(
+                    f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR "
+                    f"(config base {_config_base}x → effective {atr_multiplier}x) "
+                    f"({initial_sl_dist:.2f})"
+                )
             else:
                 sl_pct = risk_config.get("stop_loss_pct", 0.02)
                 initial_sl_dist = current_price * sl_pct
@@ -1139,6 +1152,35 @@ class BinanceExecutionHandler:
 
             for attempt in range(MAX_RETRIES):
                 try:
+                    # Phase 1.3: idempotency guard. A market order that raised on
+                    # the previous attempt may actually have FILLED before the
+                    # response failed — blindly re-sending would open a DOUBLE
+                    # (leveraged) position. We only reach this function after the
+                    # Fix-15 guard confirmed no same-side position existed, so if
+                    # one exists now the prior attempt went through: recover it
+                    # instead of sending again.
+                    if attempt > 0 and is_futures and not self.is_paper_mode:
+                        try:
+                            _landed = self.futures_handler.get_position_info(side)
+                        except Exception:
+                            _landed = None
+                        if _landed:
+                            _amt = abs(float(_landed.get("positionAmt", quantity)))
+                            _entry = float(_landed.get("entryPrice", current_price))
+                            logger.warning(
+                                f"[RETRY] Prior attempt actually filled — {side} position "
+                                f"exists on {self.symbol} (amt={_amt}, entry={_entry}). "
+                                f"Recovering instead of re-sending (no double fill)."
+                            )
+                            order = {
+                                "orderId": _landed.get("orderId", f"RECOVERED_{int(time.time())}"),
+                                "status": "FILLED",
+                                "avgPrice": _entry,
+                            }
+                            if _amt > 0:
+                                quantity = _amt
+                            break
+
                     if is_futures:
                         if side == "long":
                             order = self.futures_handler.open_long_position(
@@ -1277,11 +1319,17 @@ class BinanceExecutionHandler:
                 }
             )
 
+            # Phase 0.2: anchor the position to the ACTUAL fill price, not the
+            # pre-trade requested price. executed_price is resolved above from
+            # the order response (avgPrice / cumQuote / fetched fill) and only
+            # falls back to current_price when the exchange returned nothing.
+            # Using current_price here mis-anchored every BTC trade's SL
+            # distance, R:R and P&L by the slippage amount.
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
                 side=side,
-                entry_price=current_price,
+                entry_price=executed_price,
                 position_size_usd=position_size_usd,
                 stop_loss=None,  # VTM will calculate precise levels
                 take_profit=None,
@@ -1301,7 +1349,7 @@ class BinanceExecutionHandler:
                     "symbol": self.symbol,
                     "asset": asset_name,
                     "side": side,
-                    "price": current_price,
+                    "price": executed_price,
                     "size": quantity,
                     "trade_type": trade_type,
                     "position_id": order_id

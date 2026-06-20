@@ -281,6 +281,32 @@ class VeteranTradeManager:
             logger.error(f"[VTM PRE-FLIGHT] Error: {e}", exc_info=True)
             return False, f"Validation error: {str(e)}"
 
+    @staticmethod
+    def compute_effective_atr_multiplier(
+        trade_type: str,
+        config_base: float,
+        regime: str = "NEUTRAL",
+        volatility_regime: str = "normal",
+    ) -> float:
+        """
+        Phase 1.1: the regime-adaptive ATR multiplier the VTM uses for its
+        initial stop. Extracted so the order handlers can size against the
+        EXACT stop distance the VTM will place (single source of truth).
+
+        REVERSION              → max(config_base, 2.0)
+        TREND (bear/high-vol)  → max(config_base + 0.5, 2.5)
+        TREND (normal/bull)    → max(config_base + 0.3, 2.0)
+        other                  → config_base
+        """
+        tt = (trade_type or "TREND").upper()
+        if tt == "REVERSION":
+            return max(config_base, 2.0)
+        if tt == "TREND":
+            if "BEAR" in (regime or "").upper() or volatility_regime == "high":
+                return max(config_base + 0.5, 2.5)
+            return max(config_base + 0.3, 2.0)
+        return config_base
+
     def __init__(
         self,
         entry_price: float,
@@ -339,22 +365,17 @@ class VeteranTradeManager:
         # in config.json actually widens the SL rather than being silently ignored.
         config_base = self.risk_config.get("atr_multiplier", 1.8)
 
-        if self.trade_type == "REVERSION":
-            # Reversion trades need at least as much room as a trend trade: mean-reversion
-            # entries sit inside a range where a single wick routinely exceeds 1×ATR.
-            # Hard floor of 2.0 prevents the 1.5× tight-stop chop problem.
-            self.atr_multiplier = max(config_base, 2.0)
-        elif self.trade_type == "TREND":
-            regime = self.signal_details.get("regime", "NEUTRAL")
-            volatility = self.signal_details.get("volatility_regime", "normal")
-            if "BEAR" in regime or volatility == "high":
-                # Adverse conditions: add 0.5 on top of config, minimum floor 2.5
-                self.atr_multiplier = max(config_base + 0.5, 2.5)
-            else:
-                # Normal/bull: add 0.3 on top of config, minimum floor 2.0
-                self.atr_multiplier = max(config_base + 0.3, 2.0)
-        else:
-            self.atr_multiplier = config_base
+        # Phase 1.1: single source of truth for the effective ATR multiplier so
+        # position sizing (in the handlers) uses the SAME stop distance the VTM
+        # actually applies here. Previously sizing used config_base directly
+        # while the VTM widened it via the regime floors below, so realized risk
+        # ran 30–60% over the intended risk_pct.
+        self.atr_multiplier = self.compute_effective_atr_multiplier(
+            trade_type=self.trade_type,
+            config_base=config_base,
+            regime=self.signal_details.get("regime", "NEUTRAL"),
+            volatility_regime=self.signal_details.get("volatility_regime", "normal"),
+        )
 
         logger.info(
             f"[VTM] ATR Multiplier: config={config_base}× → effective={self.atr_multiplier}× "
