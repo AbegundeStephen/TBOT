@@ -93,25 +93,62 @@ class ContinuousLearningPipeline:
             logger.debug(f"[AUTO-TRAIN] Failed to send telegram update: {e}")
 
     def _wait_for_bot_readiness(self):
-        """✅ FIXED: The Handshake. Prevents the race condition at startup."""
-        logger.info("[AUTO-TRAIN] Waiting for main bot exchange connections...")
+        """
+        The Handshake. Prevents the race condition at startup.
+
+        Phase 6.1 FIX: previously required BOTH binance AND mt5 handlers. If
+        either exchange was unavailable (e.g. only crypto enabled, or MT5 not
+        connected), this timed out and the training loop returned immediately —
+        so the autotrainer never ran and models silently went stale. Now we wait
+        only for the handlers the ENABLED assets actually need, and after the
+        timeout we proceed with whatever connected instead of giving up.
+        """
+        # Which exchanges do enabled assets require?
+        need_binance = need_mt5 = False
+        for _a, _cfg in self.config.get("assets", {}).items():
+            if not _cfg.get("enabled", False):
+                continue
+            if str(_cfg.get("exchange", "binance")).lower() == "mt5":
+                need_mt5 = True
+            else:
+                need_binance = True
+
+        logger.info(
+            f"[AUTO-TRAIN] Waiting for connections (need binance={need_binance}, mt5={need_mt5})..."
+        )
         max_wait = 120  # Wait up to 2 minutes for main bot to boot
         waited = 0
-        
+
         while self.is_running and waited < max_wait:
-            # Check if main bot has successfully initialized the handlers
             has_binance = self.trading_bot.binance_handler is not None
             has_mt5 = self.trading_bot.mt5_handler is not None
-            
-            if has_binance and has_mt5:
-                logger.info("[AUTO-TRAIN] ✅ Main bot connections detected. Proceeding.")
-                time.sleep(5) # Buffer for absolute safety
+            ok_binance = has_binance or not need_binance
+            ok_mt5 = has_mt5 or not need_mt5
+
+            if ok_binance and ok_mt5:
+                logger.info(
+                    f"[AUTO-TRAIN] ✅ Required connections ready "
+                    f"(binance={has_binance}, mt5={has_mt5}). Proceeding."
+                )
+                time.sleep(5)  # Buffer for absolute safety
                 return True
-                
+
             time.sleep(2)
             waited += 2
-            
-        logger.error("[AUTO-TRAIN] Timed out waiting for bot connections.")
+
+        # Timeout: proceed with whatever is connected rather than disabling the
+        # whole pipeline. Training per-asset will skip assets whose data can't be
+        # fetched, so a partial connection still retrains what it can.
+        has_binance = self.trading_bot.binance_handler is not None
+        has_mt5 = self.trading_bot.mt5_handler is not None
+        if has_binance or has_mt5:
+            logger.warning(
+                f"[AUTO-TRAIN] Readiness timeout but proceeding with available "
+                f"handlers (binance={has_binance}, mt5={has_mt5})."
+            )
+            return True
+
+        logger.error("[AUTO-TRAIN] Timed out — no exchange handlers available. Pipeline idle.")
         return False
 
     def _get_metadata(self) -> Dict:
@@ -125,11 +162,24 @@ class ContinuousLearningPipeline:
         return {}
 
     def _get_last_training_time(self) -> datetime:
-        """Read the last training time from metadata."""
+        """
+        Read the last training time from metadata.
+
+        Phase 6.1: fall back to `training_date` (written by the manual
+        scripts/training/train.py run) when the autotrainer has not yet written
+        its own `last_trained`. Without this the timer always read year-2000 and
+        the autotrainer's own completion history was invisible.
+        """
         metadata = self._get_metadata()
-        return datetime.fromisoformat(
-            metadata.get("last_trained", "2000-01-01T00:00:00")
+        stamp = (
+            metadata.get("last_trained")
+            or metadata.get("training_date")
+            or "2000-01-01T00:00:00"
         )
+        try:
+            return datetime.fromisoformat(stamp)
+        except Exception:
+            return datetime.fromisoformat("2000-01-01T00:00:00")
 
     def _training_loop(self):
         """Main loop that checks if retraining is needed."""
@@ -144,13 +194,30 @@ class ContinuousLearningPipeline:
                 next_training = last_trained + timedelta(days=self.retrain_frequency_days)
                 now = datetime.now()
 
-                # ✅ CHANGE 2: Drift Detection
-                accuracy_drop = self._calculate_max_drift()
-                
+                # Drift detection — isolated so a failure here can NEVER block a
+                # scheduled retrain (Phase 6.1). Previously an exception in the
+                # drift calc fell through to the outer except and skipped the
+                # scheduled-retrain check entirely.
+                try:
+                    accuracy_drop = self._calculate_max_drift()
+                except Exception as _de:
+                    logger.warning(f"[AUTO-TRAIN] Drift calc failed (non-blocking): {_de}")
+                    accuracy_drop = 0.0
+
+                is_overdue = now >= next_training
+                is_sunday = now.weekday() == 6
+
+                # Phase 6.1: per-cycle visibility so silent staleness is diagnosable.
+                logger.info(
+                    f"[AUTO-TRAIN] check: last_trained={last_trained.date()} "
+                    f"overdue={is_overdue} weekday={now.weekday()}(sun={is_sunday}) "
+                    f"drift={accuracy_drop:.1%}"
+                )
+
                 if accuracy_drop > 0.05:
                     trigger_retrain = True  # drift detected
                     logger.info(f"🧠 [AUTO-TRAIN] DRIFT DETECTED (Max drop: {accuracy_drop:.1%}) - INITIATING IMMEDIATE RETRAIN")
-                elif now >= next_training and now.weekday() == 6:  # 6 = Sunday
+                elif is_overdue and is_sunday:  # scheduled, weekend-only
                     trigger_retrain = True  # scheduled retrain
                     logger.info(f"🧠 [AUTO-TRAIN] SCHEDULED BRAIN UPGRADE INITIATED")
                 else:
@@ -457,13 +524,25 @@ class ContinuousLearningPipeline:
             logger.error(f"[AUTO-TRAIN] Hot-swap failed: {e}", exc_info=True)
 
     def _reload_aggregator(self, aggregator, asset: str):
-        """Helper to reload model files for a specific aggregator."""
-        if hasattr(aggregator, "mr_strategy"):
-            aggregator.mr_strategy.load_model(f"models/mean_reversion_{asset.lower()}.pkl")
-        if hasattr(aggregator, "tf_strategy"):
-            aggregator.tf_strategy.load_model(f"models/trend_following_{asset.lower()}.pkl")
-        if hasattr(aggregator, "ema_strategy"):
-            aggregator.ema_strategy.load_model(f"models/ema_strategy_{asset.lower()}.pkl")
+        """
+        Helper to reload model files for a specific aggregator.
+
+        Phase 6.1 FIX: the aggregators expose their strategies as
+        `s_mean_reversion` / `s_trend_following` / `s_ema` (NOT `mr_strategy`
+        etc.), so the previous hasattr checks were always False and the hot-swap
+        was a silent no-op on BOTH the performance and council aggregators.
+        NOTE: this only takes effect once the concrete strategies actually
+        consume `self.model` at inference — today they override generate_signal
+        with rule-based logic and ignore the RandomForest model, so a hot-swap
+        does not yet change live signals. Tracked as a Phase-3+ design decision.
+        """
+        a = str(asset).lower()
+        if hasattr(aggregator, "s_mean_reversion") and hasattr(aggregator.s_mean_reversion, "load_model"):
+            aggregator.s_mean_reversion.load_model(f"models/mean_reversion_{a}.pkl")
+        if hasattr(aggregator, "s_trend_following") and hasattr(aggregator.s_trend_following, "load_model"):
+            aggregator.s_trend_following.load_model(f"models/trend_following_{a}.pkl")
+        if hasattr(aggregator, "s_ema") and hasattr(aggregator.s_ema, "load_model"):
+            aggregator.s_ema.load_model(f"models/ema_strategy_{a}.pkl")
 
     # ─────────────────────────────────────────────────────────────────────────
     # T4.1 — Shadow Label Generation

@@ -641,6 +641,19 @@ class DataManager:
         df = df.sort_index()
 
         if df.isnull().any().any():
+            # Phase 6.4: ffill carries the last good bar forward across gaps,
+            # which can create a phantom flat candle that misleads regime
+            # detection on the live path. We keep the fill (downstream code
+            # assumes no NaNs) but WARN so gap-fills are visible rather than
+            # silent. If this fires often on live data, investigate the feed
+            # before trusting regime/structure reads from that window.
+            _nan_rows = int(df.isnull().any(axis=1).sum())
+            if _nan_rows > 0:
+                logger.warning(
+                    f"[DATA] clean_data filled {_nan_rows} row(s) containing NaNs "
+                    f"via ffill — possible data gap; regime/structure reads on these "
+                    f"bars may be unreliable."
+                )
             df = df.ffill().dropna()
 
         # ✨ ENHANCED VALIDATION: Ensure no corrupted inputs
