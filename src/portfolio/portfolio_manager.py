@@ -4,6 +4,7 @@ Portfolio Manager - Enhanced with MT5 real-time profit tracking
 
 import logging
 import asyncio
+import os
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import numpy as np
