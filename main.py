@@ -142,6 +142,72 @@ class TradingBot:
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
 
+        # ── Phase 0.1: Risk-cap sanity guard ───────────────────────────────
+        # max_total_open_risk is a FRACTION of equity (e.g. 0.25 = 25%). A
+        # value > 1.0 means a fat-fingered decimal (e.g. 45 instead of 0.45)
+        # and would silently disable the aggregate risk cap. Fail closed.
+        # The value actually consumed by the cap logic lives under
+        # risk_management.* (portfolio_manager reads config["risk_management"]);
+        # the portfolio.* copy is an unused/legacy mirror — we validate both so
+        # a future loader change can't reintroduce the footgun.
+        for _sec in ("risk_management", "portfolio"):
+            _cap = self.config.get(_sec, {}).get("max_total_open_risk")
+            if _cap is None:
+                continue
+            if not isinstance(_cap, (int, float)) or not (0 < _cap <= 1.0):
+                raise ValueError(
+                    f"[CONFIG] Invalid {_sec}.max_total_open_risk={_cap!r} — "
+                    f"must be a fraction in (0, 1.0]. Refusing to start. "
+                    f"(e.g. 0.25 = 25% aggregate risk, not 25 or 45)."
+                )
+        logger.info(
+            "[CONFIG] ✓ Risk cap validated: "
+            f"active(risk_management)={self.config.get('risk_management', {}).get('max_total_open_risk')}"
+        )
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Phase 2.1/2.2: Signal funnel + AI-filter A/B observability ──────
+        # Purely observational — records how many opportunities each veto kills
+        # and which signals the AI filter rejected. Must exist before any alpha
+        # tuning so changes are data-driven, not guesses.
+        try:
+            from src.analytics.funnel_logger import FunnelLogger
+            self.funnel_logger = FunnelLogger(
+                summary_every=self.config.get("trading", {}).get("funnel_summary_every", 50)
+            )
+            logger.info("[CONFIG] ✓ Signal funnel logger active (logs/funnel/)")
+        except Exception as _fl_e:
+            self.funnel_logger = None
+            logger.warning(f"[CONFIG] Funnel logger unavailable: {_fl_e}")
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Phase 2.3: Model-freshness alert ────────────────────────────────
+        # The continuous-learning pipeline is enabled but models had not been
+        # refreshed in 5+ weeks (Audit §12.2). Warn loudly at startup if any
+        # model file is older than the configured max age so silent staleness
+        # is visible instead of quietly decaying the edge.
+        try:
+            import glob as _glob
+            _max_age_days = self.config.get("ml", {}).get("max_model_age_days", 10)
+            _now_ts = time.time()
+            _stale = []
+            for _mp in _glob.glob("models/*.pkl"):
+                _age_days = (_now_ts - os.path.getmtime(_mp)) / 86400.0
+                if _age_days > _max_age_days:
+                    _stale.append((os.path.basename(_mp), _age_days))
+            if _stale:
+                _stale.sort(key=lambda x: -x[1])
+                logger.warning(
+                    f"[MODEL AGE] ⚠️ {len(_stale)} model(s) older than {_max_age_days}d — "
+                    f"continuous-learning may not be promoting. Oldest: "
+                    + ", ".join(f"{n} ({a:.0f}d)" for n, a in _stale[:5])
+                )
+            else:
+                logger.info(f"[MODEL AGE] ✓ All models within {_max_age_days}d freshness window.")
+        except Exception as _ma_e:
+            logger.debug(f"[MODEL AGE] check skipped: {_ma_e}")
+        # ───────────────────────────────────────────────────────────────────
+
         # Override config with environment variables for security
         if os.getenv("SUPABASE_URL"):
             self.config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")
@@ -2260,6 +2326,14 @@ class TradingBot:
         # Update signal in details
         merged_details["signal"] = signal
 
+        # Phase 2.1/2.2: record this evaluation into the signal funnel (which
+        # stage it reached, and any AI rejection). Observational only.
+        if getattr(self, "funnel_logger", None) is not None:
+            try:
+                self.funnel_logger.record(asset_name, signal, merged_details)
+            except Exception as _fe:
+                logger.debug(f"[FUNNEL] record hook failed: {_fe}")
+
         return signal, merged_details
 
     def _signal_str(self, signal: int) -> str:
@@ -3299,10 +3373,20 @@ class TradingBot:
         update_interval = self.config["trading"].get("vtm_update_interval_seconds", 5)
         # Periodic exchange reconciliation — detects positions closed directly on broker
         reconcile_interval = self.config["trading"].get("exchange_reconcile_interval_seconds", 60)
+        # Phase 1.2: periodic portfolio-state persistence. save_portfolio_state()
+        # previously ran ONLY on graceful shutdown, so a crash / kill -9 / power
+        # loss lost all in-trade VTM progress (partials taken, breakeven, runner,
+        # trailed stop) — on restart the VTM was rebuilt from scratch at the
+        # initial ATR stop. Pickling the positions dict here captures the live
+        # VTM state (it is an attribute of each position) so a crash loses at
+        # most state_save_interval seconds of progress.
+        state_save_interval = self.config["trading"].get("state_save_interval_seconds", 30)
         logger.info(f"[VTM LOOP] Update interval set to {update_interval} seconds.")
         logger.info(f"[VTM LOOP] Exchange reconcile interval: {reconcile_interval} seconds.")
+        logger.info(f"[VTM LOOP] Portfolio state-save interval: {state_save_interval} seconds.")
 
         _last_reconcile = 0.0
+        _last_state_save = 0.0
 
         while self.is_running:
             try:
@@ -3317,6 +3401,15 @@ class TradingBot:
                     if _now - _last_reconcile >= reconcile_interval:
                         _last_reconcile = _now
                         self._reconcile_exchange_positions()
+
+                    # Phase 1.2: persist VTM/position state after the management
+                    # pass so an unclean shutdown does not reset trade lifecycle.
+                    if _now - _last_state_save >= state_save_interval:
+                        _last_state_save = _now
+                        try:
+                            self.portfolio_manager.save_portfolio_state()
+                        except Exception as _se:
+                            logger.error(f"[VTM LOOP] Periodic state save failed: {_se}")
 
                 # Sleep until the next update
                 time.sleep(update_interval)
@@ -5140,6 +5233,13 @@ class TradingBot:
             # 7. Handle Success & DB Logging
             # ============================================
             if success:
+                # Phase 2.1: close the funnel — this evaluation became a trade.
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.mark_executed(asset_name)
+                    except Exception:
+                        pass
+
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
                 position_ids_after = {p.position_id for p in positions_after}
                 new_position_ids = position_ids_after - position_ids_before
@@ -6321,7 +6421,16 @@ class TradingBot:
 
             # T3.1: Initialise shadow trading engine after exchanges are ready
             self.shadow_trader = ShadowTradingEngine()  # defaults: max_positions=500, max_closed=10000
-            logger.info("[SHADOW] Shadow trading engine started")
+            # Phase 2.4: restore prior closed-trade history so the gate scorecard
+            # accumulates across restarts (previously wiped on every restart).
+            try:
+                _restored = self.shadow_trader.load_state(
+                    lookback_days=self.config.get("trading", {}).get("shadow_archive_lookback_days", 30)
+                )
+                logger.info(f"[SHADOW] Shadow trading engine started (restored {_restored} closed trades)")
+            except Exception as _se:
+                logger.warning(f"[SHADOW] load_state at startup failed: {_se}")
+                logger.info("[SHADOW] Shadow trading engine started (fresh)")
 
             # F.4: Start CVD WebSocket for BTC real-time order flow
             # THREADING FIX: main.py's start() is synchronous and enters a blocking while-loop.

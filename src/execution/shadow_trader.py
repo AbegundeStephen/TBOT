@@ -287,6 +287,7 @@ class ShadowTradingEngine:
         max_positions: int = 500,
         max_closed: int = 10000,
         cooldown_minutes: int = 60,
+        archive_dir: str = "logs/shadow",
     ):
         self.open_positions: List[ShadowPosition] = []
         self.closed_results: List[dict] = []
@@ -296,10 +297,22 @@ class ShadowTradingEngine:
         # last close time per asset (for cooldown gate)
         self._last_close_time: Dict[str, datetime] = {}
 
+        # Phase 2.4: durable archive. Closed shadow trades were previously held
+        # only in memory and wiped on every restart, so the gate scorecard never
+        # accumulated the 200+ closed trades the calibration logic needs. We now
+        # append every closed trade to an append-only daily JSONL and reload the
+        # recent history on startup so the scorecard survives restarts.
+        self._archive_dir = archive_dir
+        try:
+            import os as _os
+            _os.makedirs(self._archive_dir, exist_ok=True)
+        except Exception as _e:
+            logger.warning(f"[SHADOW] Could not create archive dir {self._archive_dir}: {_e}")
+
         logger.info(
             f"[SHADOW] ShadowTradingEngine initialised "
             f"(max_open={max_positions}, max_closed={max_closed}, "
-            f"cooldown={cooldown_minutes}min)"
+            f"cooldown={cooldown_minutes}min, archive={self._archive_dir})"
         )
 
     def open_position(
@@ -475,13 +488,88 @@ class ShadowTradingEngine:
         self.open_positions = still_open
 
     def _archive(self, pos: ShadowPosition) -> None:
-        """Move a closed position to results store."""
-        self.closed_results.append(pos.to_dict())
+        """Move a closed position to results store (in-memory + durable JSONL)."""
+        _rec = pos.to_dict()
+        self.closed_results.append(_rec)
         # Keep results bounded
         if len(self.closed_results) > self._max_closed:
             self.closed_results = self.closed_results[-self._max_closed:]
         # S5.2 — record close time for per-asset cooldown
         self._last_close_time[pos.asset.upper()] = datetime.now(timezone.utc)
+
+        # Phase 2.4: append-only durable record so the gate scorecard survives
+        # restarts. One file per UTC day; failures never block trading.
+        try:
+            import os as _os
+            import json as _json
+            _day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _path = _os.path.join(self._archive_dir, f"closed_{_day}.jsonl")
+            with open(_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(_rec, default=str) + "\n")
+        except Exception as _e:
+            logger.debug(f"[SHADOW] archive append failed: {_e}")
+
+    def load_state(self, lookback_days: int = 30) -> int:
+        """
+        Phase 2.4: reload recently-closed shadow trades from the durable JSONL
+        archive so the gate scorecard persists across restarts. Loads at most
+        the last `lookback_days` files, bounded to `_max_closed`. Returns the
+        number of records restored. Never raises.
+        """
+        try:
+            import os as _os
+            import json as _json
+            import glob as _glob
+
+            files = sorted(_glob.glob(_os.path.join(self._archive_dir, "closed_*.jsonl")))
+            if lookback_days and len(files) > lookback_days:
+                files = files[-lookback_days:]
+
+            restored: List[dict] = []
+            for fp in files:
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                restored.append(_json.loads(line))
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+
+            if not restored:
+                logger.info("[SHADOW] No prior closed-trade archive to restore.")
+                return 0
+
+            # Bound to capacity (keep most recent)
+            if len(restored) > self._max_closed:
+                restored = restored[-self._max_closed:]
+            self.closed_results = restored + self.closed_results
+
+            # Rebuild per-asset cooldown timestamps from the restored records.
+            for r in restored:
+                try:
+                    _a = str(r.get("asset", "")).upper()
+                    _ct = r.get("close_time")
+                    if _a and _ct:
+                        _dt = datetime.fromisoformat(str(_ct).replace("Z", "+00:00"))
+                        prev = self._last_close_time.get(_a)
+                        if prev is None or _dt > prev:
+                            self._last_close_time[_a] = _dt
+                except Exception:
+                    continue
+
+            logger.info(
+                f"[SHADOW] Restored {len(restored)} closed shadow trades from "
+                f"{len(files)} archive file(s) - gate scorecard now persists across restarts."
+            )
+            return len(restored)
+        except Exception as _e:
+            logger.warning(f"[SHADOW] load_state failed: {_e}")
+            return 0
 
     def get_gate_scorecard(self) -> Dict[str, dict]:
         """
