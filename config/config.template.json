@@ -50,7 +50,10 @@
     "allow_scaled_positions": true,
     "min_position_scale": 0.5,
     "max_hedge_ratio": 0.0,
-    "max_total_open_risk": 0.25
+    "max_total_open_risk": 0.25,
+    "small_account_threshold_usd": 200,
+    "small_account_max_exposure_pct": 10.0,
+    "max_total_open_positions": 10
   },
   "_comment_short_portfolio": "=== SHORT POSITION PORTFOLIO RULES ===",
   "short_position_sizing": {
@@ -641,7 +644,7 @@
       }
     },
     "GBPUSD": {
-      "enabled": true,
+      "enabled": false,
       "allow_shorts": true,
       "symbol": "GBPUSDm",
       "exchange": "mt5",
@@ -712,7 +715,7 @@
       }
     },
     "USDJPY": {
-      "enabled": true,
+      "enabled": false,
       "allow_shorts": true,
       "symbol": "USDJPYm",
       "exchange": "mt5",
@@ -812,9 +815,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "GOLD": {
         "bb_period": 20,
@@ -846,9 +847,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "USTEC": {
         "bb_period": 20,
@@ -880,9 +879,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "EURJPY": {
         "bb_period": 20,
@@ -914,9 +911,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "EURUSD": {
         "bb_period": 20,
@@ -948,9 +943,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "USOIL": {
         "bb_period": 20,
@@ -982,9 +975,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "GBPAUD": {
         "bb_period": 20,
@@ -1016,9 +1007,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "GBPUSD": {
         "bb_period": 20,
@@ -1050,9 +1039,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       },
       "USDJPY": {
         "bb_period": 20,
@@ -1084,9 +1071,7 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        },
-        "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        }
       }
     },
     "trend_following": {
@@ -1752,6 +1737,18 @@
     "pullback_completion_enabled": false,
     "mfe_logging_enabled": true,
     "partials_enabled": false,
-    "pyramiding_enabled": false
+    "pyramiding_enabled": false,
+    "ai_third_path_structural_anchor_enabled": false,
+    "ai_validator_gates_performance_mode": false,
+    "lsm_regime_disagreement_gate_enabled": false,
+    "mr_mode2_counter_trend_enabled": false,
+    "mr_mode3_climax_fade_enabled": false,
+    "market_watcher_structural_awareness_enabled": false,
+    "vtm_structural_exit_awareness_enabled": false,
+    "ml_livermore_features_enabled": false,
+    "council_trend_judge_livermore_confirmation_enabled": false,
+    "council_lifecycle_livermore_guard_enabled": false,
+    "strategy_livermore_awareness_enabled": false,
+    "pyramid_livermore_maturity_gate_enabled": true
   }
 }

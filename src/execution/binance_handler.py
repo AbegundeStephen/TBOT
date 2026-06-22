@@ -1665,8 +1665,18 @@ class BinanceExecutionHandler:
             logger.error(f"[VTM-TP] Binance TP push error for {position.position_id}: {e}")
             return False
 
-    def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None):
-        """Check and update ALL positions with VTM"""
+    def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None, composite_state=None):
+        """
+        Check and update ALL positions with VTM.
+
+        L4 bugfix: main.py's VTM loop calls this with composite_state=_vtm_cs
+        for BOTH exchanges (binance and mt5), but this signature never accepted
+        the kwarg — every call raised TypeError, silently swallowed by the
+        broad try/except in main.py's VTM loop. Net effect: per-tick Livermore
+        refresh AND the new L4 structural-exit-awareness block were both
+        permanently dead for every Binance-handled asset (BTC), while working
+        for MT5 assets. Adding the param and threading it through below.
+        """
         try:
             positions = self.portfolio_manager.get_asset_positions(asset_name)
             if not positions:
@@ -1713,7 +1723,7 @@ class BinanceExecutionHandler:
                     _tp_before = position.trade_manager.current_take_profit
 
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h
+                        current_price, df_4h=df_4h, composite_state=composite_state
                     )
 
                     _sl_after = position.trade_manager.current_stop_loss

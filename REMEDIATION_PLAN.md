@@ -31,6 +31,20 @@ While Phase 3 waits on soak data, the soak-independent items were tackled:
 - **Phase 6.2 — DOCUMENTED, deletion deferred.** Confirmed `_check_sniper_filter_LEGACY` (signal_aggregator.py, ~227 lines) is unreferenced dead code. Physical deletion deferred: low value, and the 4,200-line file can't be compile-verified in the current sandbox — remove it in an environment where `py_compile` can confirm.
 - **Phase 5.2 — DEFERRED (not started).** Extracting/reconciling the drifted shared gates (stale 65 vs 30, NY-open lists, calendar fallback) is a behaviour-affecting refactor across two 3–4k-line live-signal files. Too risky to do blind without compile + integration tests; do it with a proper test harness. Spec retained in Phase 5 above.
 
+## Council scoring fixes (2026-06-20) — staged flag-gated, default-OFF
+Critique in AUDIT §12C. Implemented as opt-in so they change NOTHING live until backtested and the soak completes (do not flip mid-soak):
+- **Perf tracker extended** (`performance_tracker.py`, compiles + unit-tested): now retains P&L magnitudes → `get_profit_factor`, `get_expectancy`, `get_total_trades`. Backward-compatible. This is the foundation for expectancy weighting.
+- **Council fix #4 — conviction margin** (`council_aggregator.py`): require chosen side to beat the other by `phase_config.council_min_score_margin` (default **0.0** = current). Set ~0.5–0.75 post-backtest to stop trading coin-flip (buy≈sell) chop.
+- **Council fix #6 — expectancy weighting** (`council_aggregator.py`): when `phase_config.council_expectancy_weighting=true` (default **false**) and ≥ `council_dyn_weight_min_trades` (default 10; raise to ~20–30) trades exist, dynamic weight uses profit factor (PF 1.0→1.0×, 1.5→1.3×, 0.5→0.7×, clamped 0.7–1.3) instead of `0.5+winrate`. Falls back to win rate when off / no PF.
+
+**Deferred — need backtest-driven implementation, NOT coded blind** (the live aggregator can't be compile-verified in the current sandbox):
+- #1 **Decorrelate judges** (trend/momentum/structure all read price-vs-EMA → inflated confidence). Needs the soak/backtest to know which judges carry independent edge before re-weighting. Highest impact.
+- #2 **Graduated (magnitude-scaled) judge scoring** to kill threshold cliffs (replace full/half/zero with continuous distance-from-EMA / RSI-zone scaling).
+- #3 **Normalize quality & thresholds to achievable max** (fix the `/5.0` denominator given momentum/reversion share a slot + structure self-caps). Thorny interaction with the dynamic-weight multiplier — must be done with a compile + backtest harness.
+- Circuit-breaker sample size (WR<0.35 over 10 trades) — raise sample / move to expectancy.
+
+**New config flags (all default to current behaviour):** `phase_config.council_min_score_margin` (0.0), `phase_config.council_expectancy_weighting` (false), `phase_config.council_dyn_weight_min_trades` (10). Gate before enabling any: the soak's shadow scorecard should show the council out-earns the performance aggregator. `py_compile council_aggregator.py` before deploy.
+
 ## Guiding principles
 1. **Correctness before cleverness.** Fix the bugs that mis-price risk and leave positions unprotected *before* touching any strategy logic. There is no point tuning signals that get sized and stopped wrong.
 2. **Make it observable before you tune it.** You cannot improve a funnel you can't see or an ML filter you can't measure. Observability (Phase 2) precedes alpha changes (Phase 3).

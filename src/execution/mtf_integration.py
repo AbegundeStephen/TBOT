@@ -340,6 +340,11 @@ class MTFRegimeIntegration:
                 "ema_1d_200": regime_status.ema_1d_200,
                 "ema_4h_200": regime_status.ema_4h_200,
                 "ema_4h_50": regime_status.ema_4h_50,
+                # Item 19a: graduated EMA-200 burn-in observability. Not read by
+                # any gating logic today — for dashboard/logging visibility into
+                # how mature a 1D regime read is (1.0 = full 400-bar maturity).
+                "daily_bars_available": regime_status.daily_bars_available,
+                "regime_maturity": regime_status.regime_maturity,
                 "confidence": confidence,
                 # Real cross-timeframe direction match (1h/4h/1d vs consensus),
                 # not a proxy for consensus strength. See RegimeStatus.timeframe_agreement.

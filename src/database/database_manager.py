@@ -132,6 +132,13 @@ class TradingDatabaseManager:
         aggregator_mode: Optional[str] = None,
         council_score: Optional[float] = None,
         trade_type_label: Optional[str] = None,
+        # L1: Livermore state as top-level (indexed) columns, not buried in
+        # unindexed metadata JSON. Requires the ALTER TABLE migration in
+        # scripts/ — see add_livermore_state_columns.sql.
+        livermore_state_4h: Optional[str] = None,
+        livermore_state_1h: Optional[str] = None,
+        livermore_state_age_4h: Optional[int] = None,
+        livermore_state_age_1h: Optional[int] = None,
         metadata: Optional[Dict] = None,
         update_if_exists: bool = True,
     ) -> Tuple[Optional[int], bool]:
@@ -170,6 +177,10 @@ class TradingDatabaseManager:
                         "aggregator_mode": aggregator_mode,
                         "council_score": council_score,
                         "trade_type_label": trade_type_label,
+                        "livermore_state_4h": livermore_state_4h,
+                        "livermore_state_1h": livermore_state_1h,
+                        "livermore_state_age_4h": livermore_state_age_4h,
+                        "livermore_state_age_1h": livermore_state_age_1h,
                     }
 
                     if metadata:
@@ -192,7 +203,10 @@ class TradingDatabaseManager:
                         error_str = str(e)
                         if "PGRST204" in error_str or "column" in error_str.lower():
                             logger.warning("[DB] Schema mismatch on update. Stripping new fields and retrying...")
-                            new_fields = ["regime_at_entry", "session_quality", "aggregator_mode", "council_score", "trade_type_label"]
+                            new_fields = ["regime_at_entry", "session_quality", "aggregator_mode",
+                                          "council_score", "trade_type_label",
+                                          "livermore_state_4h", "livermore_state_1h",
+                                          "livermore_state_age_4h", "livermore_state_age_1h"]
                             for field in new_fields:
                                 update_data.pop(field, None)
                             result = (
@@ -241,6 +255,10 @@ class TradingDatabaseManager:
                 "aggregator_mode": aggregator_mode,
                 "council_score": council_score,
                 "trade_type_label": trade_type_label,
+                "livermore_state_4h": livermore_state_4h,
+                "livermore_state_1h": livermore_state_1h,
+                "livermore_state_age_4h": livermore_state_age_4h,
+                "livermore_state_age_1h": livermore_state_age_1h,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "status": "open",
                 "metadata": self._serialize_safely(metadata) if metadata else None,
@@ -253,7 +271,10 @@ class TradingDatabaseManager:
                 if "PGRST204" in error_str or "column" in error_str.lower():
                     logger.warning("[DB] Schema mismatch detected. Stripping new fields and retrying...")
                     # Strip fields that might not exist in older schemas
-                    new_fields = ["regime_at_entry", "session_quality", "aggregator_mode", "council_score", "trade_type_label"]
+                    new_fields = ["regime_at_entry", "session_quality", "aggregator_mode",
+                                  "council_score", "trade_type_label",
+                                  "livermore_state_4h", "livermore_state_1h",
+                                  "livermore_state_age_4h", "livermore_state_age_1h"]
                     for field in new_fields:
                         trade_data.pop(field, None)
                     result = self.supabase.table("trades").insert(trade_data).execute()
@@ -460,6 +481,25 @@ class TradingDatabaseManager:
 
         except Exception as e:
             logger.error(f"[DB] Error recording VTM event: {e}")
+            return False
+
+    def log_ai_validator_decision(self, data: Dict) -> bool:
+        """
+        Item 18e: calibration logging for HybridSignalValidator.validate_signal's
+        approval path. Requires a one-time `ai_validator_log` table created in
+        Supabase first (not something this code can do) — until that table
+        exists, the insert below fails and is caught here, logged at debug
+        level only, never raised. Non-blocking by design: a logging failure
+        must never affect a live trading decision.
+        """
+        try:
+            result = self.supabase.table("ai_validator_log").insert(data).execute()
+            if result.data:
+                logger.debug(f"[DB] ai_validator_log recorded: {data.get('action')}")
+                return True
+            return False
+        except Exception as e:
+            logger.debug(f"[DB] ai_validator_log insert failed (non-blocking): {e}")
             return False
 
     # ========================================================================
@@ -1062,6 +1102,49 @@ class TradingDatabaseManager:
         except Exception as e:
             logger.error(f"[DB] Error updating signal execution: {e}")
             return False
+
+    def get_historical_mfe_r(self, asset: str, min_samples: int = 30) -> Optional[float]:
+        """
+        Pull the median realized MFE-to-risk ratio for an asset's closed
+        trades, if at least min_samples rows exist. Returns None otherwise.
+
+        Reads the "mfe_r" metadata key — populated by
+        PortfolioManager.close_position's MFE/MAE block (peak favourable
+        excursion in R-multiples, off the VTM's own running price extremes).
+        Not "mfe_r_multiple" — that key was never written anywhere; this
+        reads the field that's actually on closed-trade rows.
+        """
+        try:
+            result = (
+                self.supabase.table("trades")
+                .select("metadata")
+                .eq("asset", asset)
+                .eq("status", "closed")
+                .execute()
+            )
+            if not result.data:
+                return None
+            values = []
+            for row in result.data:
+                meta = row.get("metadata")
+                if not meta:
+                    continue
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        continue
+                mfe_r = meta.get("mfe_r")
+                if mfe_r is not None:
+                    values.append(float(mfe_r))
+            if len(values) < min_samples:
+                return None
+            values.sort()
+            mid = len(values) // 2
+            return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0
+        except Exception as e:
+            logger.warning(f"[DB] get_historical_mfe_r failed for {asset}: {e}")
+            return None
 
     def get_performance_stats(
         self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None

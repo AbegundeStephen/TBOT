@@ -57,6 +57,8 @@ class MarketWatcher:
         binance_handler,            # BinanceHandler (may be None)
         telegram_bot=None,
         send_telegram_fn=None,      # callable(coro) — same helper used in main.py
+        composite_state_cache=None,  # L3: dict[asset] -> CompositeState.to_dict(),
+                                      # shared reference owned/refreshed by main.py.
     ):
         self.config           = config
         self.portfolio_manager = portfolio_manager
@@ -64,6 +66,10 @@ class MarketWatcher:
         self.binance_handler  = binance_handler
         self.telegram_bot     = telegram_bot
         self._send_telegram   = send_telegram_fn
+        # L3: read-only; main.py owns/refreshes this dict. Falls back to {} so
+        # the watcher degrades gracefully (structural awareness simply no-ops)
+        # if main.py is ever started without the new kwarg.
+        self._cs_cache        = composite_state_cache if composite_state_cache is not None else {}
 
         self._running = False
         self._thread  = None
@@ -131,6 +137,25 @@ class MarketWatcher:
                 }
                 for asset, d in self._momentum.items()
             }
+
+    def _get_live_composite_state(self, asset_name: str) -> Optional[dict]:
+        """
+        L3: last-known composite_state dict for `asset_name`, as refreshed by
+        main.py at each of its 3 injection points. May be stale by up to one
+        main-loop cycle (~5 min) — acceptable here since silent-zone/CHoCH
+        status doesn't flip on a 15-second cadence. Returns None if unknown.
+        """
+        try:
+            return self._cs_cache.get(asset_name)
+        except Exception:
+            return None
+
+    def _structural_awareness_enabled(self) -> bool:
+        return bool(
+            self.config.get("phase_config", {}).get(
+                "market_watcher_structural_awareness_enabled", False
+            )
+        )
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -457,6 +482,28 @@ class MarketWatcher:
                 if position.side == "long" and current_price >= sl:
                     # Price is above the LONG stop — SL is still valid, do nothing.
                     return
+            # L3: in a confirmed silent zone, or in the few bars right after a
+            # CHoCH, naive ATR-based SL tightening fights a structural move
+            # the main loop already recognized — it just clips a position
+            # that the regime context says deserves room. Soften (don't
+            # disable) the warn-tier reaction here; the extreme tier above
+            # still acts unconditionally regardless of this flag.
+            if self._structural_awareness_enabled():
+                _cs = self._get_live_composite_state(asset_name)
+                if _cs:
+                    if _cs.get("is_silent_zone"):
+                        logger.info(
+                            f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
+                            f"in a silent zone — holding off on SL tighten this tick."
+                        )
+                        return
+                    if _cs.get("choch_detected"):
+                        logger.info(
+                            f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
+                            f"right after a CHoCH — holding off on SL tighten this tick."
+                        )
+                        return
+
             # No SL set, or price has blown through the existing SL → tighten.
             self._handle_warn_adverse(position, current_price, adverse, atr, asset_name)
 
