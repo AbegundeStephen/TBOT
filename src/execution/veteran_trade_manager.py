@@ -1311,6 +1311,74 @@ class VeteranTradeManager:
                             " + SL locked to breakeven" if getattr(self, "_lv_breakeven_locked", False) else "",
                         )
 
+                # ── O1b: Orphan signal awareness ──────────────────────────
+                # Three additional signals that wave L4's structural-flag
+                # check doesn't capture. Each fires once per position via
+                # a dedicated flag — no per-tick re-triggering.
+
+                # 1. Rejection strength — price hard-rejected at a key level.
+                # Scale trail tighten proportionally to the rejection magnitude.
+                _rejection_str = float(getattr(composite_state, "rejection_strength", 0.0))
+                _rejection_at  = bool(getattr(composite_state, "rejection_at_level", False))
+                if _rejection_at and _rejection_str >= 0.60 and not getattr(self, "_rejection_trail_fired", False):
+                    _sweep_dir = getattr(composite_state, "sweep_direction", 0)
+                    _rejection_against = (
+                        (self.side == "long" and _sweep_dir <= 0) or
+                        (self.side == "short" and _sweep_dir >= 0)
+                    )
+                    if _rejection_against:
+                        self._rejection_trail_fired = True
+                        # 0.60 strength → 0.76× multiplier, 0.90 strength → 0.64×.
+                        # Calibrate via O1 telemetry after 30+ samples.
+                        _rejection_mult = max(0.64, 1.0 - (_rejection_str * 0.40))
+                        _new_mult = self.runner_trail_atr_multiplier * _rejection_mult
+                        logger.info(
+                            f"[VTM] {self.asset}: level rejection (strength={_rejection_str:.2f}) "
+                            f"against {self.side} — trail mult "
+                            f"{self.runner_trail_atr_multiplier:.2f}× → {_new_mult:.2f}×"
+                        )
+                        self.runner_trail_atr_multiplier = _new_mult
+
+                # 2. is_parabolic in position's favor — lock in gains.
+                # Parabolic extension is a take-profit-opportunity signal
+                # on the winning side. Tighten trail so gains don't evaporate
+                # when the extension inevitably reverses.
+                _is_parabolic = bool(getattr(composite_state, "is_parabolic", False))
+                if _is_parabolic and not getattr(self, "_parabolic_trail_locked", False):
+                    _entry = self.entry_price
+                    _min_profit_pct = 0.002  # 0.2% minimum profit to trigger
+                    _in_profit = (
+                        (self.side == "long" and
+                         self.highest_price_reached is not None and
+                         self.highest_price_reached > _entry * (1 + _min_profit_pct)) or
+                        (self.side == "short" and
+                         self.lowest_price_reached is not None and
+                         self.lowest_price_reached < _entry * (1 - _min_profit_pct))
+                    )
+                    if _in_profit:
+                        self._parabolic_trail_locked = True
+                        _locked_mult = min(self.runner_trail_atr_multiplier, 0.80)
+                        logger.info(
+                            f"[VTM] {self.asset}: parabolic extension in {self.side}'s "
+                            f"favor — locking trail "
+                            f"({self.runner_trail_atr_multiplier:.2f}× → {_locked_mult:.2f}×)"
+                        )
+                        self.runner_trail_atr_multiplier = _locked_mult
+
+                # 3. absorption_detected — institutional orders absorbing at price.
+                # Only act outside silent zones (normal retracements expect this).
+                _absorption = bool(getattr(composite_state, "absorption_detected", False))
+                _silent_now = bool(getattr(composite_state, "is_silent_zone", False))
+                if _absorption and not _silent_now and not getattr(self, "_absorption_warning_fired", False):
+                    self._absorption_warning_fired = True
+                    _abs_mult = min(self.runner_trail_atr_multiplier, 1.10)
+                    logger.info(
+                        f"[VTM] {self.asset}: absorption_detected against "
+                        f"{self.side} (outside silent zone) — mild trail tighten "
+                        f"({self.runner_trail_atr_multiplier:.2f}× → {_abs_mult:.2f}×)"
+                    )
+                    self.runner_trail_atr_multiplier = _abs_mult
+
             if self.side == "long":
                 # Guard: highest_price_reached may be None if entry_price was None at construction
                 if self.highest_price_reached is None:

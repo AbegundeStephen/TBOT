@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 class PerformanceWeightedAggregator:
     """
-Enhanced Signal Aggregator with World-Class Filters
-====================================================
-Adds Governor + Volatility + Sniper checks to existing aggregator
+    Enhanced Signal Aggregator with World-Class Filters
+    ====================================================
+    Adds Governor + Volatility + Sniper checks to existing aggregator
     """
 
     def __init__(
@@ -45,7 +45,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         enable_detailed_logging: bool = False,
         strong_signal_bypass_threshold: float = 0.70,
         use_macro_governor: bool = True,
-        use_gatekeeper: bool = True
+        use_gatekeeper: bool = True,
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -68,7 +68,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ================================================================
         self.ai_validator = None
         self.ai_enabled = True
-        
+
         # ✨ NEW: Store MTF integration for Governor
         self.mtf_integration = mtf_integration
         self.enable_filters = enable_world_class_filters
@@ -81,30 +81,36 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         #   Crypto (BTC*, ETH*, BNB*)                             → 0.20% (0.0020)
         # Config override still wins if explicitly set.
         _asset_upper = asset_type.upper()
-        _is_fx = any(
-            fx in _asset_upper
-            for fx in ("EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD")
-        ) and "BTC" not in _asset_upper and "ETH" not in _asset_upper
+        _is_fx = (
+            any(
+                fx in _asset_upper
+                for fx in ("EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD")
+            )
+            and "BTC" not in _asset_upper
+            and "ETH" not in _asset_upper
+        )
         _is_crypto = any(c in _asset_upper for c in ("BTC", "ETH", "BNB", "SOL", "XRP"))
         _is_metals_indices = any(
             m in _asset_upper
             for m in ("XAU", "GOLD", "USTEC", "NAS", "SP5", "GER", "UK1", "NDX")
         )
         if _is_fx:
-            _default_vol_threshold = 0.0003   # 0.03% — FX pairs
+            _default_vol_threshold = 0.0003  # 0.03% — FX pairs
         elif _is_metals_indices:
-            _default_vol_threshold = 0.0010   # 0.10% — metals / indices
+            _default_vol_threshold = 0.0010  # 0.10% — metals / indices
         elif _is_crypto:
-            _default_vol_threshold = 0.0020   # 0.20% — crypto (relaxed from original 0.35%)
+            _default_vol_threshold = (
+                0.0020  # 0.20% — crypto (relaxed from original 0.35%)
+            )
         else:
-            _default_vol_threshold = 0.0010   # 0.10% — safe generic fallback
+            _default_vol_threshold = 0.0010  # 0.10% — safe generic fallback
 
         self.filter_thresholds = {
-            'volatility_gate': config.get('world_class_filters', {}).get(
-                'volatility_gate_threshold', _default_vol_threshold
+            "volatility_gate": config.get("world_class_filters", {}).get(
+                "volatility_gate_threshold", _default_vol_threshold
             ),
-            'min_profit': config.get('world_class_filters', {}).get(
-                'min_profit_potential', 0.005
+            "min_profit": config.get("world_class_filters", {}).get(
+                "min_profit_potential", 0.005
             ),
         }
         # NOTE: sniper_confidence threshold removed — CNN-LSTM sniper disconnected
@@ -112,8 +118,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         if self.enable_filters:
             logger.info(f"[FILTERS] World-Class Filters ENABLED for {asset_type}")
-            logger.info(f"  Volatility Gate: {self.filter_thresholds['volatility_gate']:.3%}")
-            logger.info(f"  Min Profit:      {self.filter_thresholds['min_profit']:.2%}")
+            logger.info(
+                f"  Volatility Gate: {self.filter_thresholds['volatility_gate']:.3%}"
+            )
+            logger.info(
+                f"  Min Profit:      {self.filter_thresholds['min_profit']:.2%}"
+            )
             logger.info(f"  Sniper:          DISCONNECTED (Phase 0B)")
 
         if ai_validator is not None:
@@ -182,10 +192,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # CONFIGURATION MERGE (Safety Fix)
         # ================================================================
         # 1. Define Defaults first (guarantees all keys exist)
-        _is_fx_asset = any(
-            fx in self.asset_type.upper()
-            for fx in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")
-        ) and "BTC" not in self.asset_type.upper()
+        _is_fx_asset = (
+            any(
+                fx in self.asset_type.upper()
+                for fx in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")
+            )
+            and "BTC" not in self.asset_type.upper()
+        )
 
         if self.asset_type == "BTC":
             self.config = {
@@ -244,7 +257,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "hold_contribution_pct": 0.0,
                 "opposition_penalty": 0.40,
             }
-        
+
         # 2. Update with passed config (Merge instead of Overwrite)
         if config is not None:
             # This ensures keys missing from 'config' are filled by defaults above
@@ -298,17 +311,19 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # MT5 assets trade market hours only — 90 min avoids false stale alerts
         # across the overnight close gap. Crypto is 24/7 so 30 min is tight enough.
         self._last_prices = {}
-        self._stale_threshold_minutes = 65   # default — exceeds 1H candle duration
-        self._stale_thresholds = {           # per-asset overrides (MT5 = 90 min, crypto = default 65)
-            "GOLD":   90,
-            "USTEC":  90,
-            "EURUSD": 90,
-            "EURJPY": 90,
-            "USOIL":  90,
-            "GBPAUD": 90,
-            "GBPUSD": 90,
-            "USDJPY": 90,
-        }
+        self._stale_threshold_minutes = 65  # default — exceeds 1H candle duration
+        self._stale_thresholds = (
+            {  # per-asset overrides (MT5 = 90 min, crypto = default 65)
+                "GOLD": 90,
+                "USTEC": 90,
+                "EURUSD": 90,
+                "EURJPY": 90,
+                "USOIL": 90,
+                "GBPAUD": 90,
+                "GBPUSD": 90,
+                "USDJPY": 90,
+            }
+        )
 
         # T3.4: Economic calendar — loaded at startup, hot-reloaded by CalendarUpdater
         self._econ_cal_path = "config/economic_calendar.json"
@@ -318,22 +333,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── CONTEXT ENGINE: new infrastructure ──────────────────────────────
         # B.3: Dynamic thresholds
         from src.utils.dynamic_thresholds import DynamicThresholds
+
         self.dynamic_thresholds = DynamicThresholds(lookback=100, min_samples=5)
 
         # D.1: Trend Lifecycle tracking
-        self._previous_regime = {}    # {asset: regime_name}
+        self._previous_regime = {}  # {asset: regime_name}
         self._regime_start_time = {}  # {asset: datetime}
-        self._regime_durations = {}   # {asset: [list of durations in hours]}
+        self._regime_durations = {}  # {asset: [list of durations in hours]}
         self._transition_counts = {}  # {asset: {(from, to): count}}
 
         # E.2: MTF Structure Memory
-        self._structure_levels = {}   # {asset: [{price, tf, type, age_hours, tests}]}
+        self._structure_levels = {}  # {asset: [{price, tf, type, age_hours, tests}]}
 
         # G.1: Liquidity sweep tracking
-        self._pdh = {}         # {asset: price}
-        self._pdl = {}         # {asset: price}
+        self._pdh = {}  # {asset: price}
+        self._pdl = {}  # {asset: price}
         self._asian_high = {}  # {asset: price}
-        self._asian_low = {}   # {asset: price}
+        self._asian_low = {}  # {asset: price}
         self._pdh_date = None
 
         # G.5: Last loss tracking (populated externally by trade result callback)
@@ -364,9 +380,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         self._livermore_4h = None
         self._livermore_1h = None
         self._livermore_warmed = False
-        self._livermore_last_4h_ts = None   # deduplicate 4H bar updates
+        self._livermore_last_4h_ts = None  # deduplicate 4H bar updates
         try:
             import json as _json
+
             _presets_path = "config/aggregator_presets.json"
             with open(_presets_path) as _f:
                 _presets = _json.load(_f)
@@ -375,18 +392,28 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Include MT5 broker-suffix variants (e.g. XAUUSDm, EURUSDm)
             _alias_map = {
                 # BTC
-                "BTCUSDT": "BTC", "BTCUSDM": "BTC", "BTCUSDM": "BTC",
+                "BTCUSDT": "BTC",
+                "BTCUSDM": "BTC",
+                "BTCUSDM": "BTC",
                 # Gold
-                "XAUUSD": "GOLD", "XAUUSDM": "GOLD",
+                "XAUUSD": "GOLD",
+                "XAUUSDM": "GOLD",
                 # FX
-                "EURUSD": "EURUSD", "EURUSDM": "EURUSD",
-                "EURJPY": "EURJPY", "EURJPYM": "EURJPY",
-                "GBPAUD": "GBPAUD", "GBPAUDM": "GBPAUD",
-                "GBPUSD": "GBPUSD", "GBPUSDM": "GBPUSD",
-                "USDJPY": "USDJPY", "USDJPYM": "USDJPY",
+                "EURUSD": "EURUSD",
+                "EURUSDM": "EURUSD",
+                "EURJPY": "EURJPY",
+                "EURJPYM": "EURJPY",
+                "GBPAUD": "GBPAUD",
+                "GBPAUDM": "GBPAUD",
+                "GBPUSD": "GBPUSD",
+                "GBPUSDM": "GBPUSD",
+                "USDJPY": "USDJPY",
+                "USDJPYM": "USDJPY",
                 # Indices / Commodities
-                "USTEC": "USTEC", "USTECM": "USTEC",
-                "USOIL": "USOIL", "USOILM": "USOIL",
+                "USTEC": "USTEC",
+                "USTECM": "USTEC",
+                "USOIL": "USOIL",
+                "USOILM": "USOIL",
             }
             _lp_key = _alias_map.get(self.asset_type.upper(), self.asset_type)
             if _lp_key not in _lp:
@@ -398,6 +425,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 )
             _lp_cfg = _lp.get(_lp_key, _lp.get("BTC", {}))
             from src.execution.livermore_state_machine import make_livermore_pair
+
             self._livermore_4h, self._livermore_1h = make_livermore_pair(
                 asset=self.asset_type, pivots_config=_lp_cfg
             )
@@ -409,7 +437,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _lp_cfg.get("dual_confirm", 2),
             )
         except Exception as _lsm_err:
-            logger.error("[Livermore] Init failed — state machine disabled: %s", _lsm_err)
+            logger.error(
+                "[Livermore] Init failed — state machine disabled: %s", _lsm_err
+            )
         # ─────────────────────────────────────────────────────────────────────
 
         self._log_initialization()
@@ -420,6 +450,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         """Load cached state from disk to survive restarts."""
         try:
             import json, os
+
             if not os.path.exists(self._state_persistence_path):
                 logger.info("[STATE] No persisted state file found — starting fresh.")
                 return
@@ -428,7 +459,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 saved = json.load(f)
 
             # Restore dynamic threshold distributions
-            if hasattr(self, 'dynamic_thresholds'):
+            if hasattr(self, "dynamic_thresholds"):
                 for key_str, values in saved.get("threshold_cache", {}).items():
                     parts = key_str.split("|")
                     if len(parts) == 2:
@@ -443,11 +474,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             for k, v in saved.get("regime_start_times", {}).items():
                 try:
                     from datetime import datetime as _dtp
+
                     self._regime_start_time[k] = _dtp.fromisoformat(v)
                 except Exception:
                     pass
             self._regime_durations = saved.get("regime_durations", {})
-            
+
             # Restore transition counts (convert string keys back to tuples)
             saved_tc = saved.get("transition_counts", {})
             self._transition_counts = {}
@@ -473,8 +505,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Restore spread history (F.7)
             self._spread_history = saved.get("spread_history", {})
 
-            _n_levels = sum(len(v) for v in self._structure_levels.values()
-                            if isinstance(v, (list, dict)))
+            _n_levels = sum(
+                len(v)
+                for v in self._structure_levels.values()
+                if isinstance(v, (list, dict))
+            )
             _n_thresh = len(saved.get("threshold_cache", {}))
             logger.info(
                 f"[STATE] ✅ Loaded persisted state: "
@@ -483,7 +518,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 f"{len(self._previous_regime)} regime histories"
             )
         except Exception as e:
-            logger.warning(f"[STATE] Could not load persisted state: {e}. Starting fresh.")
+            logger.warning(
+                f"[STATE] Could not load persisted state: {e}. Starting fresh."
+            )
 
     def _persist_state(self):
         """Save critical state to disk. Called once per candle close."""
@@ -492,36 +529,39 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
             # Convert tuple keys to pipe-separated strings for JSON
             _tc = {}
-            if hasattr(self, 'dynamic_thresholds'):
+            if hasattr(self, "dynamic_thresholds"):
                 for key_tuple, values in self.dynamic_thresholds._cache.items():
                     if isinstance(key_tuple, tuple) and len(key_tuple) == 2:
                         _tc[f"{key_tuple[0]}|{key_tuple[1]}"] = list(values)[-100:]
 
             from datetime import datetime as _dtj
+
             state_data = {
                 "threshold_cache": _tc,
-                "structure_levels": getattr(self, '_structure_levels', {}),
-                "previous_regime": getattr(self, '_previous_regime', {}),
+                "structure_levels": getattr(self, "_structure_levels", {}),
+                "previous_regime": getattr(self, "_previous_regime", {}),
                 "regime_start_times": {
                     k: v.isoformat()
-                    for k, v in getattr(self, '_regime_start_time', {}).items()
+                    for k, v in getattr(self, "_regime_start_time", {}).items()
                 },
-                "regime_durations": getattr(self, '_regime_durations', {}),
+                "regime_durations": getattr(self, "_regime_durations", {}),
                 "transition_counts": {
                     asset: {f"{k[0]}|{k[1]}": v for k, v in counts.items()}
-                    for asset, counts in getattr(self, '_transition_counts', {}).items()
+                    for asset, counts in getattr(self, "_transition_counts", {}).items()
                 },
-                "pdh": getattr(self, '_pdh', {}),
-                "pdl": getattr(self, '_pdl', {}),
-                "asian_high": getattr(self, '_asian_high', {}),
-                "asian_low": getattr(self, '_asian_low', {}),
-                "squeeze_was_active": getattr(self, '_squeeze_was_active', {}),
-                "spread_history": getattr(self, '_spread_history', {}),
+                "pdh": getattr(self, "_pdh", {}),
+                "pdl": getattr(self, "_pdl", {}),
+                "asian_high": getattr(self, "_asian_high", {}),
+                "asian_low": getattr(self, "_asian_low", {}),
+                "squeeze_was_active": getattr(self, "_squeeze_was_active", {}),
+                "spread_history": getattr(self, "_spread_history", {}),
                 "saved_at": _dtj.now().isoformat(),
             }
 
-            os.makedirs(os.path.dirname(os.path.abspath(
-                self._state_persistence_path)), exist_ok=True)
+            os.makedirs(
+                os.path.dirname(os.path.abspath(self._state_persistence_path)),
+                exist_ok=True,
+            )
             tmp = self._state_persistence_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(state_data, f, default=str)
@@ -548,7 +588,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
     # ── PHASE 1: Livermore warm-start ────────────────────────────────────────
 
-    def warm_start_livermore(self, df_4h: "pd.DataFrame", df_1h: "pd.DataFrame") -> None:
+    def warm_start_livermore(
+        self, df_4h: "pd.DataFrame", df_1h: "pd.DataFrame"
+    ) -> None:
         """
         Replay historical bars through the Livermore state machines so they
         arrive at the correct state before the live loop begins.
@@ -565,16 +607,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             return
 
         from src.execution.livermore_state_machine import atr14 as _atr14
+
         try:
             if df_4h is not None and len(df_4h) >= 20:
                 _df4 = df_4h.copy()
                 _df4["atr"] = _atr14(_df4)
                 self._livermore_4h.update_from_series(_df4)
-                self._livermore_last_4h_ts = df_4h.index[-1] if not df_4h.empty else None
+                self._livermore_last_4h_ts = (
+                    df_4h.index[-1] if not df_4h.empty else None
+                )
                 snap4 = self._livermore_4h.snapshot()
                 logger.info(
                     "[Livermore] %s 4H warm-start complete | state=%s age=%d bars",
-                    self.asset_type, snap4.state, snap4.state_age,
+                    self.asset_type,
+                    snap4.state,
+                    snap4.state_age,
                 )
 
             if df_1h is not None and len(df_1h) >= 20:
@@ -584,7 +631,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 snap1 = self._livermore_1h.snapshot()
                 logger.info(
                     "[Livermore] %s 1H warm-start complete | state=%s age=%d bars",
-                    self.asset_type, snap1.state, snap1.state_age,
+                    self.asset_type,
+                    snap1.state,
+                    snap1.state_age,
                 )
 
             self._livermore_warmed = True
@@ -600,6 +649,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         """Load economic events from the JSON file on disk."""
         try:
             import json as _json
+
             with open(self._econ_cal_path, encoding="utf-8") as _f:
                 self._econ_events = _json.load(_f).get("events", [])
             logger.info(
@@ -631,6 +681,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         from src.execution.composite_state import CompositeState
         import talib as ta
         from datetime import datetime
+
         state = CompositeState()
         # Fix 1: propagate phase_config gate flags into CompositeState
         state.phase_config = getattr(self, "phase_config", {})
@@ -643,12 +694,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # is always "now" regardless of the bar's actual datetime).
         try:
             _bar_ts = df.index[-1] if not df.empty else None
-            if _bar_ts is not None and hasattr(_bar_ts, 'hour'):
+            if _bar_ts is not None and hasattr(_bar_ts, "hour"):
                 _hour = _bar_ts.hour
-                _dow  = _bar_ts.weekday()
+                _dow = _bar_ts.weekday()
             else:
                 _hour = datetime.utcnow().hour
-                _dow  = datetime.utcnow().weekday()
+                _dow = datetime.utcnow().weekday()
             if 0 <= _hour < 8:
                 state.session_name = "ASIAN"
             elif 8 <= _hour < 12:
@@ -659,21 +710,26 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 state.session_name = "NY_CLOSE"
             else:
                 state.session_name = "OFF_HOURS"
-            state.is_friday_pm = (_dow == 4 and _hour >= 15)
+            state.is_friday_pm = _dow == 4 and _hour >= 15
         except Exception:
             pass
 
         # ── D.2: MTF Slope Agreement ──────────────────────────────────────
         try:
-            _ema50_1h = df['close'].ewm(span=50, adjust=False).mean()
-            _slope_1h = (_ema50_1h.iloc[-1] - _ema50_1h.iloc[-6]) / max(_ema50_1h.iloc[-6], 1)
+            _ema50_1h = df["close"].ewm(span=50, adjust=False).mean()
+            _slope_1h = (_ema50_1h.iloc[-1] - _ema50_1h.iloc[-6]) / max(
+                _ema50_1h.iloc[-6], 1
+            )
 
             if df_4h is not None and len(df_4h) >= 10:
-                _ema50_4h = df_4h['close'].ewm(span=50, adjust=False).mean()
-                _slope_4h = (_ema50_4h.iloc[-1] - _ema50_4h.iloc[-6]) / max(_ema50_4h.iloc[-6], 1)
+                _ema50_4h = df_4h["close"].ewm(span=50, adjust=False).mean()
+                _slope_4h = (_ema50_4h.iloc[-1] - _ema50_4h.iloc[-6]) / max(
+                    _ema50_4h.iloc[-6], 1
+                )
 
-                state.slopes_aligned = (_slope_1h > 0 and _slope_4h > 0) or \
-                                       (_slope_1h < 0 and _slope_4h < 0)
+                state.slopes_aligned = (_slope_1h > 0 and _slope_4h > 0) or (
+                    _slope_1h < 0 and _slope_4h < 0
+                )
                 state.slope_diverging = not state.slopes_aligned
 
             # Structural decay = old regime + slopes fighting
@@ -685,8 +741,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── Shared ATR (used by multiple sub-modules) ─────────────────────
         _atr = 0.0
         try:
-            _atr_arr = ta.ATR(df['high'].values, df['low'].values,
-                              df['close'].values, timeperiod=14)
+            _atr_arr = ta.ATR(
+                df["high"].values, df["low"].values, df["close"].values, timeperiod=14
+            )
             _atr = float(_atr_arr[-1]) if not np.isnan(_atr_arr[-1]) else 0.0
         except Exception:
             pass
@@ -702,13 +759,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # ── E.4: Parabolic Space (Dynamic Z-Score) ────────────────────────
         try:
-            _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-            _price = df['close'].iloc[-1]
+            _ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+            _price = df["close"].iloc[-1]
             _distance = abs(_price - _ema50) / max(_atr, 0.0001)
 
             _extreme, _z, _thresh = self.dynamic_thresholds.check(
-                self.asset_type, "ema50_distance", _distance,
-                z_threshold=2.5, fallback=3.5
+                self.asset_type,
+                "ema50_distance",
+                _distance,
+                z_threshold=2.5,
+                fallback=3.5,
             )
             state.is_parabolic = _extreme
             state.distance_zscore = _z
@@ -718,10 +778,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── E.5: EMA Squeeze (ATR-Normalized) ────────────────────────────
         try:
             if _atr > 0:
-                _ema20 = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-                _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-                _ema200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
-                _spread = (max(_ema20, _ema50, _ema200) - min(_ema20, _ema50, _ema200)) / max(_atr, 0.0001)
+                _ema20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                _ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+                _ema200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+                _spread = (
+                    max(_ema20, _ema50, _ema200) - min(_ema20, _ema50, _ema200)
+                ) / max(_atr, 0.0001)
 
                 state.squeeze_active = _spread < 0.5
                 state.squeeze_strength = max(0.0, 1.0 - _spread)
@@ -736,11 +798,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── E.6: Inside/Outside Bar + Failed Breakout ─────────────────────
         try:
             if len(df) >= 4:
-                _prev_h = df['high'].iloc[-2]
-                _prev_l = df['low'].iloc[-2]
-                _curr_h = df['high'].iloc[-1]
-                _curr_l = df['low'].iloc[-1]
-                _curr_c = df['close'].iloc[-1]
+                _prev_h = df["high"].iloc[-2]
+                _prev_l = df["low"].iloc[-2]
+                _curr_h = df["high"].iloc[-1]
+                _curr_l = df["low"].iloc[-1]
+                _curr_c = df["close"].iloc[-1]
 
                 state.inside_bar = _curr_h <= _prev_h and _curr_l >= _prev_l
                 state.outside_bar = _curr_h > _prev_h and _curr_l < _prev_l
@@ -748,7 +810,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if state.squeeze_active and state.inside_bar:
                     state.coiled_spring = True
 
-                _recent_high = df['high'].iloc[-4:-1].max()
+                _recent_high = df["high"].iloc[-4:-1].max()
                 if _curr_h > _recent_high and _curr_c < _recent_high:
                     state.failed_breakout = True
         except Exception:
@@ -756,23 +818,26 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # ── F.1: Effort vs Result (All Assets) ────────────────────────────
         try:
-            _tick_vol = df['volume'].iloc[-1]
-            _body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+            _tick_vol = df["volume"].iloc[-1]
+            _body = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
             _er = _tick_vol / max(_body, 0.0001)
 
             _extreme, _z, _ = self.dynamic_thresholds.check(
-                self.asset_type, "effort_result", _er,
-                z_threshold=2.0, fallback=None
+                self.asset_type, "effort_result", _er, z_threshold=2.0, fallback=None
             )
             state.effort_result_zscore = _z
-            if _extreme and _z > 2.0 and abs(governor_data.get("regime_score", 0)) >= 0.5:
+            if (
+                _extreme
+                and _z > 2.0
+                and abs(governor_data.get("regime_score", 0)) >= 0.5
+            ):
                 state.absorption_detected = True
         except Exception:
             pass
 
         # ── F.2: Candle Body Ratio Trend ─────────────────────────────────
         try:
-            _bodies = abs(df['close'] - df['open']).tail(10).values
+            _bodies = abs(df["close"] - df["open"]).tail(10).values
             if len(_bodies) >= 8:
                 _recent = _bodies[-3:].mean()
                 _older = _bodies[:5].mean()
@@ -782,10 +847,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             pass
 
         # ── F.5: BTC VPD (Volume-Price Divergence) ────────────────────────
-        if self.asset_type == "BTC" and 'volume' in df.columns:
+        if self.asset_type == "BTC" and "volume" in df.columns:
             try:
-                _vol = df['volume'].iloc[-1]
-                _vol_sma = df['volume'].tail(20).mean()
+                _vol = df["volume"].iloc[-1]
+                _vol_sma = df["volume"].tail(20).mean()
                 _regime_score = governor_data.get("regime_score", 0)
 
                 if abs(_regime_score) >= 1.0 and _vol < _vol_sma * 0.80:
@@ -799,10 +864,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # ── G.2: Rejection Profiling ──────────────────────────────────────
         try:
             if _atr > 0:
-                _o = df['open'].iloc[-1]
-                _h = df['high'].iloc[-1]
-                _l = df['low'].iloc[-1]
-                _c = df['close'].iloc[-1]
+                _o = df["open"].iloc[-1]
+                _h = df["high"].iloc[-1]
+                _l = df["low"].iloc[-1]
+                _c = df["close"].iloc[-1]
                 _total = _h - _l
                 if _total > 0:
                     _upper_wick = _h - max(_o, _c)
@@ -810,7 +875,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     _wick_ratio = max(_upper_wick, _lower_wick) / _total
 
                     if _wick_ratio > 0.75 and state.nearby_4h_level is not None:
-                        _dist_to_level = abs(_c - state.nearby_4h_level) / max(_atr, 0.001)
+                        _dist_to_level = abs(_c - state.nearby_4h_level) / max(
+                            _atr, 0.001
+                        )
                         if _dist_to_level < 0.5:
                             state.rejection_at_level = True
                             state.rejection_strength = _wick_ratio
@@ -820,7 +887,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # ── G.3: Session VWAP ─────────────────────────────────────────────
         try:
-            if 'volume' in df.columns and _atr > 0:
+            if "volume" in df.columns and _atr > 0:
                 _midnight_mask = df.index.hour == 0
                 if _midnight_mask.any():
                     _session_start = df[_midnight_mask].index[-1]
@@ -828,10 +895,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     _session_start = df.index[0]
                 _session = df[df.index >= _session_start]
                 if len(_session) > 1:
-                    _vwap = (_session['close'] * _session['volume']).cumsum() / \
-                            _session['volume'].cumsum()
+                    _vwap = (
+                        _session["close"] * _session["volume"]
+                    ).cumsum() / _session["volume"].cumsum()
                     state.vwap_price = float(_vwap.iloc[-1])
-                    state.distance_to_vwap_atr = abs(df['close'].iloc[-1] - state.vwap_price) / max(_atr, 0.001)
+                    state.distance_to_vwap_atr = abs(
+                        df["close"].iloc[-1] - state.vwap_price
+                    ) / max(_atr, 0.001)
         except Exception:
             pass
 
@@ -839,36 +909,60 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         _last_loss = self._last_loss_time.get(self.asset_type)
         if _last_loss:
             from datetime import datetime as _dt2
-            state.time_since_last_loss_hours = (_dt2.now() - _last_loss).total_seconds() / 3600
+
+            state.time_since_last_loss_hours = (
+                _dt2.now() - _last_loss
+            ).total_seconds() / 3600
 
         # ── F.4: BTC CVD from WebSocket (injected via governor_data) ─────
         if self.asset_type in ("BTC", "BTCUSDT") and governor_data:
             _raw_cvd = governor_data.get("cvd_trend", 0)
             # Robust int conversion — backtest supplies "FLAT" string, live supplies int
             if isinstance(_raw_cvd, str):
-                _cvd_map = {"UP": 1, "BULL": 1, "BULLISH": 1,
-                            "DOWN": -1, "BEAR": -1, "BEARISH": -1,
-                            "FLAT": 0, "NEUTRAL": 0, "": 0}
+                _cvd_map = {
+                    "UP": 1,
+                    "BULL": 1,
+                    "BULLISH": 1,
+                    "DOWN": -1,
+                    "BEAR": -1,
+                    "BEARISH": -1,
+                    "FLAT": 0,
+                    "NEUTRAL": 0,
+                    "": 0,
+                }
                 state.cvd_trend = _cvd_map.get(_raw_cvd.upper(), 0)
             else:
                 state.cvd_trend = int(_raw_cvd)
             state.cvd_stale = bool(governor_data.get("cvd_stale", True))
             # ── F.6: L2 Order Book Imbalance ─────────────────────────────
-            state.order_book_imbalance = float(governor_data.get("order_book_imbalance", 0.0))
-            state.order_book_wall_detected = bool(governor_data.get("order_book_wall_detected", False))
+            state.order_book_imbalance = float(
+                governor_data.get("order_book_imbalance", 0.0)
+            )
+            state.order_book_wall_detected = bool(
+                governor_data.get("order_book_wall_detected", False)
+            )
 
         # ── TRANSITION EVIDENCE (SLIGHTLY + full trend regimes) ──────────────
         # Must run AFTER CVD/order-book fields are populated above so the
         # order_flow sub-score has live data. df_4h is already available as
         # the second parameter of _build_composite_state.
         state._transition_evidence = None
-        _regime_name = governor_data.get("consensus_regime", "UNKNOWN") if governor_data else "UNKNOWN"
+        _regime_name = (
+            governor_data.get("consensus_regime", "UNKNOWN")
+            if governor_data
+            else "UNKNOWN"
+        )
         # MRS §6 Phase 0: TRANSITION path removed. Transition evidence is now
         # only collected for directional (BEARISH/BULLISH) regimes where the
         # gatekeeper softener uses it to modulate counter-trend penalty scaling.
         # NEUTRAL regime no longer needs evidence — the Livermore Hard Veto
         # (is_silent_zone) handles structural gating for those assets.
-        if _regime_name in ("BEARISH", "SLIGHTLY_BEARISH", "BULLISH", "SLIGHTLY_BULLISH"):
+        if _regime_name in (
+            "BEARISH",
+            "SLIGHTLY_BEARISH",
+            "BULLISH",
+            "SLIGHTLY_BULLISH",
+        ):
             try:
                 _depth = governor_data.get("depth_data") if governor_data else None
                 state._transition_evidence = self._transition_detector.collect_evidence(
@@ -894,10 +988,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         self._spread_history[self.asset_type] = []
                     self._spread_history[self.asset_type].append(_current_spread)
                     if len(self._spread_history[self.asset_type]) > 20:
-                        self._spread_history[self.asset_type] =                             self._spread_history[self.asset_type][-20:]
+                        self._spread_history[self.asset_type] = self._spread_history[
+                            self.asset_type
+                        ][-20:]
                     _spreads = self._spread_history[self.asset_type]
                     if len(_spreads) >= 10:
                         import numpy as _np
+
                         _avg = _np.mean(_spreads)
                         state.spread_ratio = float(_current_spread) / max(_avg, 0.0001)
                         state.spread_velocity_spike = state.spread_ratio > 2.5
@@ -919,20 +1016,24 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     if _4h_ts != self._livermore_last_4h_ts:
                         # New 4H candle — compute ATR and update
                         _atr4_series = _atr14_lsm(df_4h)
-                        _atr4 = float(_atr4_series.iloc[-1]) if not np.isnan(_atr4_series.iloc[-1]) else 0.0
-                        _close4 = float(df_4h['close'].iloc[-1])
+                        _atr4 = (
+                            float(_atr4_series.iloc[-1])
+                            if not np.isnan(_atr4_series.iloc[-1])
+                            else 0.0
+                        )
+                        _close4 = float(df_4h["close"].iloc[-1])
                         snap4 = self._livermore_4h.update(_close4, _atr4)
                         self._livermore_last_4h_ts = _4h_ts
                     else:
                         snap4 = self._livermore_4h.snapshot()
 
-                    state.livermore_state_4h              = snap4.state
-                    state.livermore_state_age_4h          = snap4.state_age
-                    state.livermore_anchor_main_up_max    = snap4.anchor_main_up_max
-                    state.livermore_anchor_main_down_min  = snap4.anchor_main_down_min
-                    state.livermore_anchor_natural_high   = snap4.anchor_natural_high
-                    state.livermore_anchor_natural_low    = snap4.anchor_natural_low
-                    state.livermore_dual_confirmation     = snap4.dual_confirmation
+                    state.livermore_state_4h = snap4.state
+                    state.livermore_state_age_4h = snap4.state_age
+                    state.livermore_anchor_main_up_max = snap4.anchor_main_up_max
+                    state.livermore_anchor_main_down_min = snap4.anchor_main_down_min
+                    state.livermore_anchor_natural_high = snap4.anchor_natural_high
+                    state.livermore_anchor_natural_low = snap4.anchor_natural_low
+                    state.livermore_dual_confirmation = snap4.dual_confirmation
                     # is_silent_zone = True when in NATURAL_RETR or NATURAL_REBOUND
                     # (counter-trend signals suppressed by Hard Veto Layer — Phase 2)
                     state.is_silent_zone = snap4.is_silent_zone
@@ -940,14 +1041,20 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # ── 1H update ────────────────────────────────────────────────
                 if df is not None and len(df) >= 15:
                     _atr1_series = _atr14_lsm(df)
-                    _atr1 = float(_atr1_series.iloc[-1]) if not np.isnan(_atr1_series.iloc[-1]) else 0.0
-                    _close1 = float(df['close'].iloc[-1])
+                    _atr1 = (
+                        float(_atr1_series.iloc[-1])
+                        if not np.isnan(_atr1_series.iloc[-1])
+                        else 0.0
+                    )
+                    _close1 = float(df["close"].iloc[-1])
                     snap1 = self._livermore_1h.update(_close1, _atr1)
-                    state.livermore_state_1h     = snap1.state
+                    state.livermore_state_1h = snap1.state
                     state.livermore_state_age_1h = snap1.state_age
 
             except Exception as _lsm_err:
-                logger.debug("[Livermore] _build_composite_state update error: %s", _lsm_err)
+                logger.debug(
+                    "[Livermore] _build_composite_state update error: %s", _lsm_err
+                )
         # ─────────────────────────────────────────────────────────────────────
 
         # ── PHASE 2: vol_down_ratio ──────────────────────────────────────────
@@ -958,17 +1065,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # NOT a directional predictor. Only valid as a blocking filter.
         try:
             if df is not None and len(df) >= 10:
-                _vdr_n     = min(20, len(df))
-                _vdr_close = df['close'].values[-_vdr_n:]
-                _vdr_open  = df['open'].values[-_vdr_n:]
-                _vdr_vol   = df['volume'].values[-_vdr_n:].astype(float)
-                _down_vol  = float(np.sum(_vdr_vol[_vdr_close < _vdr_open]))
-                _up_vol    = float(np.sum(_vdr_vol[_vdr_close > _vdr_open]))
+                _vdr_n = min(20, len(df))
+                _vdr_close = df["close"].values[-_vdr_n:]
+                _vdr_open = df["open"].values[-_vdr_n:]
+                _vdr_vol = df["volume"].values[-_vdr_n:].astype(float)
+                _down_vol = float(np.sum(_vdr_vol[_vdr_close < _vdr_open]))
+                _up_vol = float(np.sum(_vdr_vol[_vdr_close > _vdr_open]))
                 if _up_vol > 0:
-                    state.vol_down_ratio       = _down_vol / _up_vol
+                    state.vol_down_ratio = _down_vol / _up_vol
                     state.vol_down_ratio_valid = True
                 else:
-                    state.vol_down_ratio       = None
+                    state.vol_down_ratio = None
                     state.vol_down_ratio_valid = False
         except Exception as _vdr_err:
             logger.debug("[vol_down_ratio] compute error: %s", _vdr_err)
@@ -983,43 +1090,46 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if df is not None and len(df) >= 25:
                 _bkc_bb_period = 20
                 _bkc_kc_period = 20
-                _bkc_kc_mult   = 1.5
-                _bkc_min_bars  = 5
+                _bkc_kc_mult = 1.5
+                _bkc_min_bars = 5
 
-                _bkc_close = df['close'].values
-                _bkc_high  = df['high'].values
-                _bkc_low   = df['low'].values
+                _bkc_close = df["close"].values
+                _bkc_high = df["high"].values
+                _bkc_low = df["low"].values
 
                 # Bollinger Bands (2-sigma)
                 _bb_u, _bb_m, _bb_l = ta.BBANDS(
-                    _bkc_close, timeperiod=_bkc_bb_period,
-                    nbdevup=2.0, nbdevdn=2.0
+                    _bkc_close, timeperiod=_bkc_bb_period, nbdevup=2.0, nbdevdn=2.0
                 )
                 # Keltner Channel: EMA(20) +/- 1.5xATR14
-                _kc_mid   = df['close'].ewm(span=_bkc_kc_period, adjust=False).mean().values
+                _kc_mid = (
+                    df["close"].ewm(span=_bkc_kc_period, adjust=False).mean().values
+                )
                 _kc_atr14 = ta.ATR(_bkc_high, _bkc_low, _bkc_close, timeperiod=14)
                 _kc_upper = _kc_mid + _bkc_kc_mult * _kc_atr14
                 _kc_lower = _kc_mid - _bkc_kc_mult * _kc_atr14
 
                 # Squeeze when BB is entirely inside KC
                 _valid_mask = (
-                    ~np.isnan(_bb_u) & ~np.isnan(_bb_l) &
-                    ~np.isnan(_kc_upper) & ~np.isnan(_kc_lower)
+                    ~np.isnan(_bb_u)
+                    & ~np.isnan(_bb_l)
+                    & ~np.isnan(_kc_upper)
+                    & ~np.isnan(_kc_lower)
                 )
                 _in_squeeze = np.where(
-                    _valid_mask,
-                    (_bb_u <= _kc_upper) & (_bb_l >= _kc_lower),
-                    False
+                    _valid_mask, (_bb_u <= _kc_upper) & (_bb_l >= _kc_lower), False
                 )
 
                 # Count consecutive squeeze bars (most-recent bar backwards)
                 _sq_dur = 0
-                for _sj in range(len(_in_squeeze) - 1, max(len(_in_squeeze) - 25, -1), -1):
+                for _sj in range(
+                    len(_in_squeeze) - 1, max(len(_in_squeeze) - 25, -1), -1
+                ):
                     if _in_squeeze[_sj]:
                         _sq_dur += 1
                     else:
                         break
-                state.bb_kc_squeeze_active   = _sq_dur >= _bkc_min_bars
+                state.bb_kc_squeeze_active = _sq_dur >= _bkc_min_bars
                 state.bb_kc_squeeze_duration = int(_sq_dur)
 
                 # BBW percentile: rank current bandwidth vs 6-month rolling window
@@ -1027,8 +1137,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _bbw = (_bb_u - _bb_l) / np.maximum(np.abs(_bb_m), 1e-10)
                 _bbw_curr = _bbw[-1] if not np.isnan(_bbw[-1]) else None
                 if _bbw_curr is not None:
-                    _hist_lb   = min(1095, len(_bbw))
-                    _bbw_hist  = _bbw[-_hist_lb:]
+                    _hist_lb = min(1095, len(_bbw))
+                    _bbw_hist = _bbw[-_hist_lb:]
                     _bbw_valid = _bbw_hist[~np.isnan(_bbw_hist)]
                     if len(_bbw_valid) >= 10:
                         state.bbw_percentile = float(
@@ -1044,17 +1154,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # Both flags indicate terminal tightness before breakout (Scenario B).
         try:
             if df is not None and len(df) >= 8:
-                _nr7_lb   = 7
-                _bar_rng  = df['high'].values - df['low'].values
+                _nr7_lb = 7
+                _bar_rng = df["high"].values - df["low"].values
                 _curr_rng = float(_bar_rng[-1])
-                _prior_rng = _bar_rng[-(_nr7_lb + 1):-1]
+                _prior_rng = _bar_rng[-(_nr7_lb + 1) : -1]
                 if len(_prior_rng) == _nr7_lb:
                     state.nr7_active = bool(_curr_rng <= float(np.min(_prior_rng)))
                 if state.nr7_active:
-                    _ph     = float(df['high'].iloc[-2])
-                    _pl     = float(df['low'].iloc[-2])
-                    _ch     = float(df['high'].iloc[-1])
-                    _cl_low = float(df['low'].iloc[-1])
+                    _ph = float(df["high"].iloc[-2])
+                    _pl = float(df["low"].iloc[-2])
+                    _ch = float(df["high"].iloc[-1])
+                    _cl_low = float(df["low"].iloc[-1])
                     state.nr7_id_active = bool(_ch <= _ph and _cl_low >= _pl)
         except Exception as _nr7_err:
             logger.debug("[NR7-ID] compute error: %s", _nr7_err)
@@ -1072,8 +1182,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             _rc_adx = None
             if df is not None and len(df) >= 15:
                 _rc_adx_arr = ta.ADX(
-                    df['high'].values, df['low'].values,
-                    df['close'].values, timeperiod=14
+                    df["high"].values,
+                    df["low"].values,
+                    df["close"].values,
+                    timeperiod=14,
                 )
                 _v = _rc_adx_arr[-1]
                 _rc_adx = float(_v) if not np.isnan(_v) else None
@@ -1082,16 +1194,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 state.range_classification = "SQUEEZE"
             elif _rc_lsm in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
                 state.range_classification = "PULLBACK"
-            elif _rc_lsm in ("MAIN_UP", "MAIN_DOWN") and (_rc_adx is not None and _rc_adx > 25):
+            elif _rc_lsm in ("MAIN_UP", "MAIN_DOWN") and (
+                _rc_adx is not None and _rc_adx > 25
+            ):
                 state.range_classification = "TRENDING"
             else:
                 state.range_classification = "RANGING"
 
             logger.debug(
                 "[RANGE_CLASS] %s: %s (lsm=%s adx=%s squeeze=%s nr7=%s)",
-                self.asset_type, state.range_classification, _rc_lsm,
+                self.asset_type,
+                state.range_classification,
+                _rc_lsm,
                 f"{_rc_adx:.1f}" if _rc_adx is not None else "n/a",
-                state.bb_kc_squeeze_active, state.nr7_active,
+                state.bb_kc_squeeze_active,
+                state.nr7_active,
             )
         except Exception as _rc_err:
             logger.debug("[RANGE_CLASS] compute error: %s", _rc_err)
@@ -1113,7 +1230,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         try:
             _ema200_1d = governor_data.get("ema_1d_200") if governor_data else None
             if _ema200_1d and df is not None and len(df) > 0 and _atr > 0:
-                _dist_1d = abs(float(df['close'].iloc[-1]) - float(_ema200_1d))
+                _dist_1d = abs(float(df["close"].iloc[-1]) - float(_ema200_1d))
                 state.ema200_1d_dist_atr = _dist_1d / _atr
         except Exception as _ema200_err:
             logger.debug("[ema200_1d_dist_atr] compute error: %s", _ema200_err)
@@ -1150,33 +1267,35 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                          wall-clock time.  Defaults to datetime.now() for live use.
         """
         from datetime import datetime, timezone
+
         asset = self.asset_type
 
         # ── PHASE 2: Livermore-based lifecycle derivation ────────────────────
         # When the state machine is warmed (livermore_state_4h is populated),
         # skip the regime-event logic entirely and derive from state age.
-        # Regime-age fields (regime_age_hours, transition_probability) still need
-        # updating so the confluence engine has valid context — handled below.
-        _lsm_state = getattr(state, 'livermore_state_4h', None)
-        _lsm_age   = getattr(state, 'livermore_state_age_4h', 0)
+        # regime_age_hours / regime_age_ratio still need updating so the
+        # confluence engine has valid context — handled below.
+        _lsm_state = getattr(state, "livermore_state_4h", None)
+        _lsm_age = getattr(state, "livermore_state_age_4h", 0)
         if _lsm_state is not None:
             if _lsm_state in ("MAIN_UP", "MAIN_DOWN"):
                 # Load per-asset age thresholds from config — avoids hardcoded 5/15.
                 try:
                     if not hasattr(self, "_lifecycle_age_cfg"):
                         import json as _json_lac
+
                         with open("config/aggregator_presets.json") as _lac_f:
                             _lac_data = _json_lac.load(_lac_f)
-                        self._lifecycle_age_cfg = (
-                            _lac_data
-                            .get("REQUIRED_SCORE_MODIFIER", {})
-                            .get("lifecycle_age_thresholds", {})
-                        )
+                        self._lifecycle_age_cfg = _lac_data.get(
+                            "REQUIRED_SCORE_MODIFIER", {}
+                        ).get("lifecycle_age_thresholds", {})
                     _asset_lac = self._lifecycle_age_cfg.get(
                         self.asset_type,
-                        self._lifecycle_age_cfg.get("default", {"pickup_max": 4, "confirmation_max": 12})
+                        self._lifecycle_age_cfg.get(
+                            "default", {"pickup_max": 4, "confirmation_max": 12}
+                        ),
                     )
-                    _pickup_max  = _asset_lac.get("pickup_max", 4)
+                    _pickup_max = _asset_lac.get("pickup_max", 4)
                     _confirm_max = _asset_lac.get("confirmation_max", 12)
                 except Exception:
                     _pickup_max, _confirm_max = 4, 12  # safe fallback
@@ -1194,7 +1313,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 state.lifecycle_phase = "ESTABLISHED"
             logger.debug(
                 "[LIFECYCLE] %s Livermore=%s age=%d → %s",
-                asset, _lsm_state, _lsm_age, state.lifecycle_phase,
+                asset,
+                _lsm_state,
+                _lsm_age,
+                state.lifecycle_phase,
             )
             # Still update regime-age fields for confluence engine downstream.
             # Fall through to the regime-age calculation block below.
@@ -1204,7 +1326,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # would keep regime_age_hours ≈ 0 for the entire run.
         now = current_dt if current_dt is not None else datetime.now()
         # Ensure tz-naive for consistent arithmetic
-        if hasattr(now, 'tzinfo') and now.tzinfo is not None:
+        if hasattr(now, "tzinfo") and now.tzinfo is not None:
             now = now.replace(tzinfo=None)
 
         prev = self._previous_regime.get(asset)
@@ -1212,7 +1334,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         # Detect transition
         if prev and prev != regime_name:
             _prev_start = self._regime_start_time.get(asset, now)
-            if hasattr(_prev_start, 'tzinfo') and _prev_start.tzinfo is not None:
+            if hasattr(_prev_start, "tzinfo") and _prev_start.tzinfo is not None:
                 _prev_start = _prev_start.replace(tzinfo=None)
             duration = (now - _prev_start).total_seconds() / 3600
             if asset not in self._regime_durations:
@@ -1224,8 +1346,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             trans_key = (prev, regime_name)
             if asset not in self._transition_counts:
                 self._transition_counts[asset] = {}
-            self._transition_counts[asset][trans_key] = \
+            self._transition_counts[asset][trans_key] = (
                 self._transition_counts[asset].get(trans_key, 0) + 1
+            )
 
             self._regime_start_time[asset] = now
             state.transition_type = f"{prev}→{regime_name}"
@@ -1237,12 +1360,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     state.lifecycle_phase = "PICKUP"
                 elif "SLIGHTLY" in prev and regime_name in ("BULLISH", "BEARISH"):
                     state.lifecycle_phase = "CONFIRMATION"
-                elif regime_name in ("BULLISH", "BEARISH") and prev in ("BULLISH", "BEARISH"):
+                elif regime_name in ("BULLISH", "BEARISH") and prev in (
+                    "BULLISH",
+                    "BEARISH",
+                ):
                     state.lifecycle_phase = "ESTABLISHED"
                 elif prev in ("BULLISH", "BEARISH") and "SLIGHTLY" in regime_name:
                     state.lifecycle_phase = "FADING"
-                elif prev in ("BULLISH", "BEARISH", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH") \
-                     and regime_name == "NEUTRAL":
+                elif (
+                    prev
+                    in ("BULLISH", "BEARISH", "SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH")
+                    and regime_name == "NEUTRAL"
+                ):
                     state.lifecycle_phase = "EXHAUSTION"
                 else:
                     state.lifecycle_phase = "ESTABLISHED"
@@ -1261,29 +1390,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # Regime age — uses bar timestamp in backtest, wall-clock in live
         _start = self._regime_start_time.get(asset, now)
-        if hasattr(_start, 'tzinfo') and _start.tzinfo is not None:
+        if hasattr(_start, "tzinfo") and _start.tzinfo is not None:
             _start = _start.replace(tzinfo=None)
         state.regime_age_hours = (now - _start).total_seconds() / 3600
 
         # Median regime duration (dynamic per asset)
         durations = self._regime_durations.get(asset, [])
-        state.median_regime_duration = float(np.median(durations)) if len(durations) >= 5 else 12.0
-        state.regime_age_ratio = state.regime_age_hours / max(state.median_regime_duration, 1.0)
-
-        # Transition probability (Markov)
-        if state.transition_type and asset in self._transition_counts:
-            total_from_current = sum(
-                c for (f, t), c in self._transition_counts[asset].items()
-                if f == regime_name
-            )
-            continues = sum(
-                c for (f, t), c in self._transition_counts[asset].items()
-                if f == regime_name and t == regime_name
-            )
-            if total_from_current >= 3:
-                state.transition_probability = continues / total_from_current
-            else:
-                state.transition_probability = 0.5
+        state.median_regime_duration = (
+            float(np.median(durations)) if len(durations) >= 5 else 12.0
+        )
+        state.regime_age_ratio = state.regime_age_hours / max(
+            state.median_regime_duration, 1.0
+        )
 
     # ── E.1: ChoCh / BOS Detection ───────────────────────────────────────
 
@@ -1292,34 +1410,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         try:
             if len(df) < 15:
                 return
-            highs = df['high'].values
-            lows = df['low'].values
+            highs = df["high"].values
+            lows = df["low"].values
 
             swing_highs = []
             swing_lows = []
             for i in range(len(highs) - 3, 4, -1):
-                if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-                   highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                if (
+                    highs[i] > highs[i - 1]
+                    and highs[i] > highs[i - 2]
+                    and highs[i] > highs[i + 1]
+                    and highs[i] > highs[i + 2]
+                ):
                     swing_highs.append(highs[i])
                     if len(swing_highs) >= 2:
                         break
 
             for i in range(len(lows) - 3, 4, -1):
-                if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-                   lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                if (
+                    lows[i] < lows[i - 1]
+                    and lows[i] < lows[i - 2]
+                    and lows[i] < lows[i + 1]
+                    and lows[i] < lows[i + 2]
+                ):
                     swing_lows.append(lows[i])
                     if len(swing_lows) >= 2:
                         break
 
             if len(swing_highs) >= 2:
                 if swing_highs[0] > swing_highs[1]:
-                    state.bos_detected = True    # Higher high = trend continuing
+                    state.bos_detected = True  # Higher high = trend continuing
                 elif swing_highs[0] < swing_highs[1]:
                     state.choch_detected = True  # Lower high = trend may be ending
 
             if len(swing_lows) >= 2:
                 if swing_lows[0] < swing_lows[1] and not state.bos_detected:
-                    state.bos_detected = True    # Lower low in downtrend = continuation
+                    state.bos_detected = True  # Lower low in downtrend = continuation
                 elif swing_lows[0] > swing_lows[1] and not state.choch_detected:
                     state.choch_detected = True  # Higher low in downtrend = reversal
         except Exception:
@@ -1330,21 +1456,24 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
     def _update_structure_memory(self, state, df, df_4h):
         """Track 4H swing levels. Delete broken ones. Link to state."""
         import talib as ta
+
         asset = self.asset_type
         if asset not in self._structure_levels:
             self._structure_levels[asset] = []
 
         try:
-            current_price = df['close'].iloc[-1]
-            _atr_arr = ta.ATR(df['high'].values, df['low'].values,
-                              df['close'].values, timeperiod=14)
+            current_price = df["close"].iloc[-1]
+            _atr_arr = ta.ATR(
+                df["high"].values, df["low"].values, df["close"].values, timeperiod=14
+            )
             _atr = float(_atr_arr[-1])
             if np.isnan(_atr) or _atr <= 0:
                 return
 
             # Garbage collection: remove broken and stale levels
             self._structure_levels[asset] = [
-                lvl for lvl in self._structure_levels[asset]
+                lvl
+                for lvl in self._structure_levels[asset]
                 if abs(current_price - lvl["price"]) / _atr <= 0.5
                 and lvl.get("age_hours", 0) < 336
             ]
@@ -1355,24 +1484,32 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
             # Add new 4H swing points if available
             if df_4h is not None and len(df_4h) >= 10:
-                _4h_highs = df_4h['high'].values
-                _4h_lows = df_4h['low'].values
+                _4h_highs = df_4h["high"].values
+                _4h_lows = df_4h["low"].values
                 for i in range(len(_4h_highs) - 3, 4, -1):
-                    if _4h_highs[i] > _4h_highs[i-1] and _4h_highs[i] > _4h_highs[i+1]:
+                    if (
+                        _4h_highs[i] > _4h_highs[i - 1]
+                        and _4h_highs[i] > _4h_highs[i + 1]
+                    ):
                         _exists = any(
                             abs(lvl["price"] - _4h_highs[i]) / _atr < 0.3
                             for lvl in self._structure_levels[asset]
                         )
                         if not _exists:
-                            self._structure_levels[asset].append({
-                                "price": _4h_highs[i], "tf": "4H",
-                                "type": "swing_high", "tests": 0, "age_hours": 0
-                            })
+                            self._structure_levels[asset].append(
+                                {
+                                    "price": _4h_highs[i],
+                                    "tf": "4H",
+                                    "type": "swing_high",
+                                    "tests": 0,
+                                    "age_hours": 0,
+                                }
+                            )
                         break
 
             # Find nearest level to current price
             nearest = None
-            nearest_dist = float('inf')
+            nearest_dist = float("inf")
             for lvl in self._structure_levels[asset]:
                 dist = abs(current_price - lvl["price"]) / _atr
                 if dist < nearest_dist and dist < 2.0:
@@ -1393,11 +1530,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         """Check if key EMAs were tested and defended on this closed candle."""
         try:
             candle = df.iloc[-1]
-            _o = candle['open']
-            _h = candle['high']
-            _l = candle['low']
-            _c = candle['close']
-            _ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            _o = candle["open"]
+            _h = candle["high"]
+            _l = candle["low"]
+            _c = candle["close"]
+            _ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
 
             _pierced_from_above = _l < _ema50 < _c  # Wick below, closed above
             _broke_down = _c < _ema50 and _o > _ema50
@@ -1405,8 +1542,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ATR needed to judge "distance" — recalculate a quick estimate here
             try:
                 import talib as _ta_ma
-                _atr14 = _ta_ma.ATR(df['high'].values, df['low'].values,
-                                    df['close'].values, timeperiod=14)
+
+                _atr14 = _ta_ma.ATR(
+                    df["high"].values,
+                    df["low"].values,
+                    df["close"].values,
+                    timeperiod=14,
+                )
                 _atr_val = float(_atr14[-1]) if not np.isnan(_atr14[-1]) else 0.0
             except Exception:
                 _atr_val = abs(_c - _ema50) * 0.5  # rough fallback
@@ -1431,10 +1573,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # trend-continuation scoring without requiring a pierce/defend event.
                 _dist_atr = (_c - _ema50) / _atr_val
                 if _dist_atr < 3.0:
-                    state.ema_50_status = "EMA_ABOVE"      # close proximity — continuation
-                    state.ema_50_reclassified = "SUPPORT"   # treat as dynamic support
+                    state.ema_50_status = "EMA_ABOVE"  # close proximity — continuation
+                    state.ema_50_reclassified = "SUPPORT"  # treat as dynamic support
                 else:
-                    state.ema_50_status = "EMA_ABOVE_FAR"   # extended from EMA50
+                    state.ema_50_status = "EMA_ABOVE_FAR"  # extended from EMA50
                     state.ema_50_reclassified = "LINE"
             elif _c < _ema50 and _atr_val > 0:
                 _dist_atr = (_ema50 - _c) / _atr_val
@@ -1465,14 +1607,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         asset = self.asset_type
         try:
             from datetime import datetime
-            _h = df['high'].iloc[-1]
-            _l = df['low'].iloc[-1]
-            _c = df['close'].iloc[-1]
+
+            _h = df["high"].iloc[-1]
+            _l = df["low"].iloc[-1]
+            _c = df["close"].iloc[-1]
 
             # Use bar timestamp when available so backtest reflects actual bar time.
             # df.index[-1] is a pd.Timestamp for both live and backtest DataFrames.
             _bar_ts = df.index[-1] if not df.empty else None
-            if _bar_ts is not None and hasattr(_bar_ts, 'hour'):
+            if _bar_ts is not None and hasattr(_bar_ts, "hour"):
                 _hour = _bar_ts.hour
                 _today = _bar_ts.date()
             else:
@@ -1482,14 +1625,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Update Asian range (00:00-08:00 UTC)
             if 0 <= _hour < 8:
                 self._asian_high[asset] = max(self._asian_high.get(asset, 0), _h)
-                self._asian_low[asset] = min(self._asian_low.get(asset, float('inf')), _l)
+                self._asian_low[asset] = min(
+                    self._asian_low.get(asset, float("inf")), _l
+                )
 
             # Update PDH/PDL daily — keyed on bar date not wall-clock date
             if self._pdh_date != _today:
                 if len(df) > 24:
                     _yesterday = df.iloc[-25:-1]
-                    self._pdh[asset] = _yesterday['high'].max()
-                    self._pdl[asset] = _yesterday['low'].min()
+                    self._pdh[asset] = _yesterday["high"].max()
+                    self._pdl[asset] = _yesterday["low"].min()
                 self._pdh_date = _today
 
             _asian_h = self._asian_high.get(asset)
@@ -1558,7 +1703,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # Evaluate each pattern and log which condition blocks it
         _dist_checks = {
-            "phase∈ESTABLISHED/FADING": state.lifecycle_phase in ("ESTABLISHED", "FADING"),
+            "phase∈ESTABLISHED/FADING": state.lifecycle_phase
+            in ("ESTABLISHED", "FADING"),
             f"age_ratio>{1.3}": state.regime_age_ratio > 1.3,
             "choch_or_decay": state.choch_detected or state.structural_decay,
             "absorption_or_dying": state.absorption_detected or state.conviction_dying,
@@ -1585,7 +1731,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         _ma_checks = {
             "ema50=DEFENDED/ABOVE": state.ema_50_status in ("DEFENDED", "EMA_ABOVE"),
             "ema50=SUPPORT": state.ema_50_reclassified == "SUPPORT",
-            "phase∈CONFIRM/ESTAB": state.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED"),
+            "phase∈CONFIRM/ESTAB": state.lifecycle_phase
+            in ("CONFIRMATION", "ESTABLISHED"),
             f"age_ratio<{1.5}": state.regime_age_ratio < 1.5,
         }
 
@@ -1599,7 +1746,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             _passed = sum(_pchecks.values())
             _total = len(_pchecks)
             _blocker = next((k for k, v in _pchecks.items() if not v), None)
-            _status = "✅ MATCHED" if all(_pchecks.values()) else f"❌ {_passed}/{_total}"
+            _status = (
+                "✅ MATCHED" if all(_pchecks.values()) else f"❌ {_passed}/{_total}"
+            )
             logger.info(
                 f"[PATTERN CHECK] {self.asset_type} {_pname}: {_status}"
                 + (f" — first blocker: {_blocker}" if _blocker else "")
@@ -1624,16 +1773,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             state.institutional_pattern = "LIQUIDITY_HUNT"
 
         # PATTERN D: Coiled Spring Breakout
-        elif (state.coiled_spring and state.bos_detected and state.slopes_aligned):
+        elif state.coiled_spring and state.bos_detected and state.slopes_aligned:
             tf_conf *= 1.25
             mr_conf *= 0.70
             state.institutional_pattern = "SPRING_BREAKOUT"
 
         # PATTERN E: MA Defense → Continuation (or EMA_ABOVE trend ride)
-        elif (state.ema_50_status in ("DEFENDED", "EMA_ABOVE") and
-              state.ema_50_reclassified == "SUPPORT" and
-              state.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED") and
-              state.regime_age_ratio < 1.5):
+        elif (
+            state.ema_50_status in ("DEFENDED", "EMA_ABOVE")
+            and state.ema_50_reclassified == "SUPPORT"
+            and state.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED")
+            and state.regime_age_ratio < 1.5
+        ):
             tf_conf *= 1.20
             state.institutional_pattern = "MA_DEFENSE"
 
@@ -1654,40 +1805,54 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 elif signal == -1:
                     _exhaust += 2.0
                 else:
-                    _exhaust += 1.0   # unknown direction — moderate penalty
-            if state.is_parabolic:              _exhaust += 1.5
-            if state.divergence_detected:       _exhaust += state.divergence_strength * 2
-            if state.regime_age_ratio > 1.5:    _exhaust += min(2.0, state.regime_age_ratio - 1.5)
-            if state.conviction_dying:          _exhaust += 1.0
-            if state.structural_decay:          _exhaust += 1.5
-            if state.absorption_detected:       _exhaust += 1.0
-            if state.vpd_diverging:             _exhaust += 1.5
+                    _exhaust += 1.0  # unknown direction — moderate penalty
+            if state.is_parabolic:
+                _exhaust += 1.5
+            if state.divergence_detected:
+                _exhaust += state.divergence_strength * 2
+            if state.regime_age_ratio > 1.5:
+                _exhaust += min(2.0, state.regime_age_ratio - 1.5)
+            if state.conviction_dying:
+                _exhaust += 1.0
+            if state.structural_decay:
+                _exhaust += 1.5
+            if state.absorption_detected:
+                _exhaust += 1.0
+            if state.vpd_diverging:
+                _exhaust += 1.5
             # F.6: Order book wall blocking the signal direction
             if state.order_book_wall_detected:
                 _tf_signal = 1 if tf_conf > 0 else -1  # approximate direction
-                if (_tf_signal == 1 and state.order_book_imbalance < -0.5):
-                    _exhaust += 1.5   # Sell wall blocking longs
-                elif (_tf_signal == -1 and state.order_book_imbalance > 0.5):
-                    _exhaust += 1.5   # Buy wall blocking shorts
+                if _tf_signal == 1 and state.order_book_imbalance < -0.5:
+                    _exhaust += 1.5  # Sell wall blocking longs
+                elif _tf_signal == -1 and state.order_book_imbalance > 0.5:
+                    _exhaust += 1.5  # Buy wall blocking shorts
             # F.7: Widening spread = liquidity withdrawal = volatility warning
             if state.spread_velocity_spike:
                 _exhaust += 1.0
-            if state.ai_reversal_probability > 0.75: _exhaust += 2.0
-            if state.outside_bar:               _exhaust += 0.5
+            if state.outside_bar:
+                _exhaust += 0.5
 
             _confirm = 0.0
-            if state.bos_detected:              _confirm += 2.0
-            if state.slopes_aligned:            _confirm += 1.0
-            if state.lifecycle_phase == "PICKUP":        _confirm += 1.5
-            if state.lifecycle_phase == "CONFIRMATION":  _confirm += 1.0
-            if state.squeeze_active:            _confirm += 0.5
-            if state.ema_50_status == "DEFENDED":          _confirm += 1.0
-            elif state.ema_50_status == "EMA_ABOVE":       _confirm += 0.5   # Trend continuation bonus
-            if state.cvd_trend != 0 and not state.cvd_stale: _confirm += 1.0
-            if state.level_defended:            _confirm += 1.5
+            if state.bos_detected:
+                _confirm += 2.0
+            if state.slopes_aligned:
+                _confirm += 1.0
+            if state.lifecycle_phase == "PICKUP":
+                _confirm += 1.5
+            if state.lifecycle_phase == "CONFIRMATION":
+                _confirm += 1.0
+            if state.squeeze_active:
+                _confirm += 0.5
+            if state.ema_50_status == "DEFENDED":
+                _confirm += 1.0
+            elif state.ema_50_status == "EMA_ABOVE":
+                _confirm += 0.5  # Trend continuation bonus
+            if state.cvd_trend != 0 and not state.cvd_stale:
+                _confirm += 1.0
+            if state.level_defended:
+                _confirm += 1.5
 
-            state.exhaustion_score = _exhaust
-            state.confirmation_score = _confirm
             _net = _confirm - _exhaust
             state.net_conviction = _net
 
@@ -1697,15 +1862,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             elif _net < 0:
                 _discount = max(0.40, 1.0 + (_net * 0.07))
                 tf_conf *= _discount
-                if _net < -3:
-                    mr_conf *= min(1.30, 1.0 + (abs(_net) - 3) * 0.08)
-
-        # ─── STEP 3: TRANSITION PROBABILITY MODIFIER ─────────────────────
-        if state.transition_probability < 0.35:
-            tf_conf *= 0.85
-            mr_conf *= 0.85
-        elif state.transition_probability > 0.70:
-            tf_conf *= 1.10
 
         # Friday PM flag for VTM
         state.friday_tighten = state.is_friday_pm
@@ -1713,7 +1869,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         logger.info(
             f"[CONFLUENCE] {self.asset_type}: Phase={state.lifecycle_phase} "
             f"Pattern={state.institutional_pattern} "
-            f"Exhaust={state.exhaustion_score:.1f} Confirm={state.confirmation_score:.1f} "
             f"Net={state.net_conviction:.1f} "
             f"TF={tf_conf:.3f} MR={mr_conf:.3f}"
         )
@@ -1762,7 +1917,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     else 0
                 ),
             }
-            
 
         return base_stats
 
@@ -1871,12 +2025,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Reason: Fixed thresholds fail in different volatility regimes.
             # We use the last 100 bars to find the 65th/35th percentiles.
             ema_diff_series = features_df["ema_diff_pct"].tail(100).dropna()
-            
-            if len(ema_diff_series) >= 50: # Minimum bars for meaningful quantile
+
+            if len(ema_diff_series) >= 50:  # Minimum bars for meaningful quantile
                 # Calculate percentiles
                 BULLISH_THRESHOLD = ema_diff_series.quantile(0.65)
                 BEARISH_THRESHOLD = ema_diff_series.quantile(0.35)
-                
+
                 # Clamp to institutional bounds [0.05, 0.40]
                 BULLISH_THRESHOLD = max(0.05, min(0.40, BULLISH_THRESHOLD))
                 BEARISH_THRESHOLD = min(-0.05, max(-0.40, BEARISH_THRESHOLD))
@@ -1907,9 +2061,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             adx = latest.get("adx", 20)
             macd_hist = latest.get("macd_hist", 0)
             rsi = latest.get("rsi", 50)
-            
+
             # Asset-specific ADX threshold
-            adx_threshold = getattr(self.s_trend_following, 'adx_threshold', 25)
+            adx_threshold = getattr(self.s_trend_following, "adx_threshold", 25)
 
             # ===============================
             # 4️⃣ Multi-factor scoring
@@ -2036,7 +2190,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 )
                 return fallback_regime, 0.3
 
-
     def calculate_regime_adjusted_thresholds(
         self, is_bull: bool, regime_confidence: float
     ) -> Tuple[float, float]:
@@ -2153,11 +2306,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # ✅ FIX: pattern_detected should be BOOL, not string
                 pattern_confirmed = pattern_result.get("pattern_confirmed", False)
                 pattern_name = pattern_result.get("pattern_name", "None")
-                
+
                 # Convert to proper bool
                 if isinstance(pattern_confirmed, str):
                     pattern_confirmed = pattern_confirmed not in ["None", "Noise", ""]
-                
+
                 viz_data["pattern_detected"] = bool(pattern_confirmed)  # ← Force bool
                 viz_data["pattern_name"] = pattern_name  # ← Separate field for name
                 viz_data["pattern_id"] = pattern_result.get("pattern_id")
@@ -2183,8 +2336,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     reasons.append("No nearby S/R level")
                 if not viz_data["pattern_detected"]:
                     reasons.append("No pattern detected")
-                if viz_data["pattern_confidence"] < self.ai_validator.current_pattern_threshold:
-                    reasons.append(f"Low confidence ({viz_data['pattern_confidence']:.1%})")
+                if (
+                    viz_data["pattern_confidence"]
+                    < self.ai_validator.current_pattern_threshold
+                ):
+                    reasons.append(
+                        f"Low confidence ({viz_data['pattern_confidence']:.1%})"
+                    )
 
                 viz_data["rejection_reasons"] = reasons
 
@@ -2206,7 +2364,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Ensure all bools are Python bool, not numpy.bool
             viz_data["pattern_detected"] = bool(viz_data["pattern_detected"])
             viz_data["validation_passed"] = bool(viz_data["validation_passed"])
-            viz_data["sr_analysis"]["near_sr_level"] = bool(viz_data["sr_analysis"]["near_sr_level"])
+            viz_data["sr_analysis"]["near_sr_level"] = bool(
+                viz_data["sr_analysis"]["near_sr_level"]
+            )
 
             return viz_data
 
@@ -2319,7 +2479,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 vf_signal, vf_conf = self.s_volume_flow.generate_signal(df)
                 if vf_signal == target_signal and vf_conf >= min_conf:
                     effective_conf = max(vf_conf, min_conf)
-                    contribution = effective_conf * (1 - self.config.get("opposition_penalty", 0.40))
+                    contribution = effective_conf * (
+                        1 - self.config.get("opposition_penalty", 0.40)
+                    )
                     total_score += contribution
                     components.append(f"VF_agree:{contribution:.3f}")
                     agreement_count += 1
@@ -2340,11 +2502,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # Agreement bonus — tiered (two_strategy_bonus and three_strategy_bonus now both active)
         if agreement_count == 4:
-            bonus = self.config.get("four_strategy_bonus", self.config.get("three_strategy_bonus", 0.35))
+            bonus = self.config.get(
+                "four_strategy_bonus", self.config.get("three_strategy_bonus", 0.35)
+            )
             total_score += bonus
             explanation += f" + bonus4({bonus:.2f})"
         elif agreement_count == 3:
-            bonus = self.config.get("three_strategy_bonus", self.config["two_strategy_bonus"])
+            bonus = self.config.get(
+                "three_strategy_bonus", self.config["two_strategy_bonus"]
+            )
             total_score += bonus
             explanation += f" + bonus3({bonus:.2f})"
         elif agreement_count == 2:
@@ -2361,7 +2527,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             else:
                 # ✨ NEW: Explosive Momentum Overrule
                 if self._is_explosive_momentum(df, target_signal):
-                    logger.info("[MOMENTUM] Skipping bear-regime penalty due to explosive BUY momentum")
+                    logger.info(
+                        "[MOMENTUM] Skipping bear-regime penalty due to explosive BUY momentum"
+                    )
                     regime_adj = 0
                     explanation += " + V-Shape Overrule"
                 else:
@@ -2372,7 +2540,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if is_bull:
                 # ✨ NEW: Explosive Momentum Overrule
                 if self._is_explosive_momentum(df, target_signal):
-                    logger.info("[MOMENTUM] Skipping bull-regime penalty due to explosive SELL momentum")
+                    logger.info(
+                        "[MOMENTUM] Skipping bull-regime penalty due to explosive SELL momentum"
+                    )
                     regime_adj = 0
                     explanation += " + V-Shape Overrule"
                 else:
@@ -2386,11 +2556,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         total_score = max(0.0, total_score)
         return total_score, explanation, agreement_count
-    
-    def _check_governor_filter(self, df: pd.DataFrame, signal: int) -> Tuple[bool, Optional[str]]:
+
+    def _check_governor_filter(
+        self, df: pd.DataFrame, signal: int
+    ) -> Tuple[bool, Optional[str]]:
         """
         Filter 1: Governor (Daily 200 EMA) Check
-        
+
         Returns:
             (passed, trade_type)
         """
@@ -2399,30 +2571,34 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         if not self.enable_filters or not self.mtf_integration:
             return True, "TREND"  # Skip if disabled
-        
+
         try:
             # Get Governor analysis from MTF
             regime_data = self.mtf_integration._current_regime_data.get(self.asset_type)
-            
+
             if not regime_data:
                 logger.debug(f"[GOV] No data for {self.asset_type}, allowing trade")
                 return True, "TREND"
-            
+
             # ✨ IMPROVED: Robust key check
-            governor = regime_data.get('governor') or regime_data.get('full_regime_status')
-            
+            governor = regime_data.get("governor") or regime_data.get(
+                "full_regime_status"
+            )
+
             if not governor:
-                logger.debug(f"[GOV] No governor object for {self.asset_type}, allowing trade")
+                logger.debug(
+                    f"[GOV] No governor object for {self.asset_type}, allowing trade"
+                )
                 return True, "TREND"
-            
+
             # ✨ IMPROVED: Handle Enum vs String vs Attribute
-            raw_trade_type = getattr(governor, 'trade_type', None)
+            raw_trade_type = getattr(governor, "trade_type", None)
             if raw_trade_type is None:
                 # Fallback to consensus_regime if trade_type is missing
-                regime_name = getattr(governor, 'consensus_regime', "NEUTRAL")
+                regime_name = getattr(governor, "consensus_regime", "NEUTRAL")
                 trade_type = "NEUTRAL" if regime_name == "NEUTRAL" else "TREND"
             else:
-                trade_type = getattr(raw_trade_type, 'value', str(raw_trade_type))
+                trade_type = getattr(raw_trade_type, "value", str(raw_trade_type))
 
             # TRANSITION path removed (Phase 0B — MRS §6).
             # NEUTRAL regime no longer maps to a half-size TRANSITION entry.
@@ -2436,50 +2612,52 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 return True, "NEUTRAL"
 
             return True, trade_type
-        
+
         except Exception as e:
             logger.error(f"[GOV] Error: {e}")
             return True, "TREND"  # Fail-open
-    
+
     def _check_volatility_filter(self, df: pd.DataFrame) -> Tuple[bool, float]:
         """
         Filter 2: Volatility Gate
-        
+
         Returns:
             (passed, atr_pct)
         """
         if not self.enable_filters:
             return True, 0.005
-        
+
         try:
             if len(df) < 20:
                 return True, 0.005
-            
+
             # Calculate ATR
-            high_low = df['high'] - df['low']
-            high_close = np.abs(df['high'] - df['close'].shift())
-            low_close = np.abs(df['low'] - df['close'].shift())
-            
+            high_low = df["high"] - df["low"]
+            high_close = np.abs(df["high"] - df["close"].shift())
+            low_close = np.abs(df["low"] - df["close"].shift())
+
             ranges = pd.concat([high_low, high_close, low_close], axis=1)
             true_range = ranges.max(axis=1)
             atr = true_range.rolling(14).mean().iloc[-1]
-            
-            current_price = df['close'].iloc[-1]
+
+            current_price = df["close"].iloc[-1]
             atr_pct = atr / current_price
-            
-            threshold = self.filter_thresholds['volatility_gate']
+
+            threshold = self.filter_thresholds["volatility_gate"]
             passed = atr_pct >= threshold
-            
+
             if not passed:
                 logger.info(f"[VOL] ❌ BLOCKED - ATR {atr_pct:.3%} < {threshold:.3%}")
-            
+
             return passed, atr_pct
-        
+
         except Exception as e:
             logger.error(f"[VOL] Error: {e}")
             return True, 0.005
-    
-    def _check_sniper_filter(self, df: pd.DataFrame, signal: int, governor_data: Dict = None) -> Tuple[bool, Dict]:
+
+    def _check_sniper_filter(
+        self, df: pd.DataFrame, signal: int, governor_data: Dict = None
+    ) -> Tuple[bool, Dict]:
         """
         DISCONNECTED — Phase 0B (MRS §6 Phase 0).
         CNN-LSTM sniper removed from scoring pipeline.
@@ -2488,9 +2666,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         Returns (True, {}) unconditionally if somehow invoked.
         """
-        return True, {'trigger_type': 'SNIPER_DISCONNECTED'}
+        return True, {"trigger_type": "SNIPER_DISCONNECTED"}
 
-    def _check_sniper_filter_LEGACY(self, df: pd.DataFrame, signal: int, governor_data: Dict = None) -> Tuple[bool, Dict]:
+    def _check_sniper_filter_LEGACY(
+        self, df: pd.DataFrame, signal: int, governor_data: Dict = None
+    ) -> Tuple[bool, Dict]:
         """
         LEGACY — kept for reference only. Not called anywhere.
         Original Filter 3: Sniper Lock - Institutional Edge Confirmation.
@@ -2498,7 +2678,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         Peak accuracy ~0.70 adds no edge over structural rules.
         """
         if not self.enable_filters:
-            return True, {'trigger_type': 'DISABLED'}
+            return True, {"trigger_type": "DISABLED"}
 
         try:
             latest = df.iloc[-1]
@@ -2507,36 +2687,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ================================================================
             # 1. AI Pattern Confidence
             # ================================================================
-            if self.ai_validator and hasattr(self.ai_validator, 'sniper'):
+            if self.ai_validator and hasattr(self.ai_validator, "sniper"):
                 pattern_result = self.ai_validator._check_pattern(
                     df=df,
                     signal=signal,
-                    min_confidence=0.60  # was self.filter_thresholds['sniper_confidence']
+                    min_confidence=0.60,  # was self.filter_thresholds['sniper_confidence']
                 )
-                if pattern_result.get('pattern_confirmed'):
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'AI_PATTERN',
-                        'pattern_name': pattern_result.get('pattern_name'),
-                        'confidence': pattern_result.get('confidence'),
-                    })
+                if pattern_result.get("pattern_confirmed"):
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "AI_PATTERN",
+                            "pattern_name": pattern_result.get("pattern_name"),
+                            "confidence": pattern_result.get("confidence"),
+                        }
+                    )
 
             # ================================================================
             # 2. Momentum Candle
             # ================================================================
             # Reason: Confirms strong conviction from buyers or sellers in the current period.
-            body = abs(latest['close'] - latest['open'])
-            total_range = latest['high'] - latest['low']
+            body = abs(latest["close"] - latest["open"])
+            total_range = latest["high"] - latest["low"]
             if total_range > 0:
                 body_ratio = body / total_range
                 if body_ratio >= 0.60:
-                    is_bullish_candle = latest['close'] > latest['open']
-                    if (signal == 1 and is_bullish_candle) or (signal == -1 and not is_bullish_candle):
-                        reasons.append({
-                            'passed': True,
-                            'trigger_type': 'MOMENTUM_CANDLE',
-                            'body_ratio': body_ratio,
-                        })
+                    is_bullish_candle = latest["close"] > latest["open"]
+                    if (signal == 1 and is_bullish_candle) or (
+                        signal == -1 and not is_bullish_candle
+                    ):
+                        reasons.append(
+                            {
+                                "passed": True,
+                                "trigger_type": "MOMENTUM_CANDLE",
+                                "body_ratio": body_ratio,
+                            }
+                        )
 
             # ================================================================
             # 3. Trend Momentum (Institutional Continuity)
@@ -2547,16 +2733,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # (live). Also derive h1_momentum_dir from df when not supplied by
             # governor (backtest governor doesn't compute it).
             if governor_data:
-                _regime = governor_data.get("consensus_regime",
-                           governor_data.get("regime", "NEUTRAL"))
+                _regime = governor_data.get(
+                    "consensus_regime", governor_data.get("regime", "NEUTRAL")
+                )
                 _is_bull = "BULL" in _regime.upper()
                 _is_bear = "BEAR" in _regime.upper()
 
                 # Derive 1H momentum from df close slope when governor doesn't supply it
                 _h1_dir = governor_data.get("h1_momentum_dir", "")
                 if not _h1_dir and len(df) >= 5:
-                    _slope = df['close'].iloc[-1] - df['close'].iloc[-5]
-                    _atr_est = (df['high'].iloc[-14:] - df['low'].iloc[-14:]).mean() if len(df) >= 14 else abs(_slope)
+                    _slope = df["close"].iloc[-1] - df["close"].iloc[-5]
+                    _atr_est = (
+                        (df["high"].iloc[-14:] - df["low"].iloc[-14:]).mean()
+                        if len(df) >= 14
+                        else abs(_slope)
+                    )
                     # Require slope to exceed 0.25 ATR to be directional (filters noise)
                     if _slope > _atr_est * 0.25:
                         _h1_dir = "UP"
@@ -2565,89 +2756,118 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     else:
                         _h1_dir = "FLAT"
 
-                _regime_aligned = (signal == 1 and _is_bull) or (signal == -1 and _is_bear)
-                _h1_aligned = (signal == 1 and _h1_dir == "UP") or (signal == -1 and _h1_dir == "DOWN")
+                _regime_aligned = (signal == 1 and _is_bull) or (
+                    signal == -1 and _is_bear
+                )
+                _h1_aligned = (signal == 1 and _h1_dir == "UP") or (
+                    signal == -1 and _h1_dir == "DOWN"
+                )
 
                 if _regime_aligned and _h1_aligned:
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'TREND_MOMENTUM',
-                        'regime': _regime,
-                        'h1_dir': _h1_dir,
-                    })
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "TREND_MOMENTUM",
+                            "regime": _regime,
+                            "h1_dir": _h1_dir,
+                        }
+                    )
 
             # Check if we have enough data for rolling indicators
-            if len(df) < 21: # Need 20 periods + current
+            if len(df) < 21:  # Need 20 periods + current
                 if reasons:
-                    logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {[r['trigger_type'] for r in reasons]}")
+                    logger.info(
+                        f"[SNIPER] ✅ PASSED - Trigger(s): {[r['trigger_type'] for r in reasons]}"
+                    )
                     return True, reasons[0]
                 else:
-                    logger.warning(f"[SNIPER] ❌ BLOCKED - Insufficient data for full institutional checks (need 21 bars, have {len(df)}).")
-                    return False, {'trigger_type': None, 'reason': f'Insufficient data for breakouts (have {len(df)})'}
+                    logger.warning(
+                        f"[SNIPER] ❌ BLOCKED - Insufficient data for full institutional checks (need 21 bars, have {len(df)})."
+                    )
+                    return False, {
+                        "trigger_type": None,
+                        "reason": f"Insufficient data for breakouts (have {len(df)})",
+                    }
 
             # ================================================================
             # 4. Turtle Breakout (20-period Donchian Channel)
             # ================================================================
             # Reason: Captures classic institutional breakout entries.
             # We look at the previous 20 candles to define the channel *before* the current candle.
-            high_20 = df['high'].iloc[-21:-1].max()
-            low_20 = df['low'].iloc[-21:-1].min()
+            high_20 = df["high"].iloc[-21:-1].max()
+            low_20 = df["low"].iloc[-21:-1].min()
 
-            if signal == 1 and latest['close'] > high_20:
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'TURTLE_BREAKOUT',
-                    'breakout_level': high_20,
-                    'price': latest['close'],
-                })
-            elif signal == -1 and latest['close'] < low_20:
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'TURTLE_BREAKOUT',
-                    'breakout_level': low_20,
-                    'price': latest['close'],
-                })
+            if signal == 1 and latest["close"] > high_20:
+                reasons.append(
+                    {
+                        "passed": True,
+                        "trigger_type": "TURTLE_BREAKOUT",
+                        "breakout_level": high_20,
+                        "price": latest["close"],
+                    }
+                )
+            elif signal == -1 and latest["close"] < low_20:
+                reasons.append(
+                    {
+                        "passed": True,
+                        "trigger_type": "TURTLE_BREAKOUT",
+                        "breakout_level": low_20,
+                        "price": latest["close"],
+                    }
+                )
 
             # ================================================================
             # 5. Volume Surge
             # ================================================================
             # Reason: Confirms institutional participation and conviction behind a move.
-            volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
-            if volume_rolling_avg > 0 and latest['volume'] >= (volume_rolling_avg * 1.5):
-                reasons.append({
-                    'passed': True,
-                    'trigger_type': 'VOLUME_SURGE',
-                    'volume': latest['volume'],
-                    'avg_volume': volume_rolling_avg,
-                    'surge_factor': latest['volume'] / volume_rolling_avg if volume_rolling_avg > 0 else 0,
-                })
+            volume_rolling_avg = df["volume"].iloc[-21:-1].mean()
+            if volume_rolling_avg > 0 and latest["volume"] >= (
+                volume_rolling_avg * 1.5
+            ):
+                reasons.append(
+                    {
+                        "passed": True,
+                        "trigger_type": "VOLUME_SURGE",
+                        "volume": latest["volume"],
+                        "avg_volume": volume_rolling_avg,
+                        "surge_factor": (
+                            latest["volume"] / volume_rolling_avg
+                            if volume_rolling_avg > 0
+                            else 0
+                        ),
+                    }
+                )
 
             # ================================================================
             # 6. Volatility Breach (Bollinger Bands)
             # ================================================================
             # Reason: Detects that price has moved into a new volatility regime.
-            close_rolling_mean = df['close'].iloc[-21:-1].mean()
-            close_rolling_std = df['close'].iloc[-21:-1].std()
-            
+            close_rolling_mean = df["close"].iloc[-21:-1].mean()
+            close_rolling_std = df["close"].iloc[-21:-1].std()
+
             if close_rolling_std > 0:
                 upper_band = close_rolling_mean + (2.0 * close_rolling_std)
                 lower_band = close_rolling_mean - (2.0 * close_rolling_std)
 
-                if signal == 1 and latest['close'] > upper_band:
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'VOLATILITY_BREACH',
-                        'band': 'upper',
-                        'price': latest['close'],
-                    })
-                elif signal == -1 and latest['close'] < lower_band:
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'VOLATILITY_BREACH',
-                        'band': 'lower',
-                        'price': latest['close'],
-                    })
-            
+                if signal == 1 and latest["close"] > upper_band:
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "VOLATILITY_BREACH",
+                            "band": "upper",
+                            "price": latest["close"],
+                        }
+                    )
+                elif signal == -1 and latest["close"] < lower_band:
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "VOLATILITY_BREACH",
+                            "band": "lower",
+                            "price": latest["close"],
+                        }
+                    )
+
             # ================================================================
             # 7. Established Trend + BOS / EMA Continuation (Institutional Continuation)
             # ================================================================
@@ -2658,7 +2878,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # rally where lower swing highs create CHoCH (not BOS) but the overall
             # trend and EMAs are clearly bullish. Without this path these setups are
             # silently blocked for assets like GOLD in a strong uptrend.
-            _cs = getattr(self, '_cached_composite', None)
+            _cs = getattr(self, "_cached_composite", None)
             if _cs is not None:
                 _bos_continuation = (
                     _cs.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED")
@@ -2674,7 +2894,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     and _cs.slopes_aligned
                     and not _cs.structural_decay
                     and _cs.regime_age_ratio < 1.8
-                    and signal == 1   # only valid as a long trigger
+                    and signal == 1  # only valid as a long trigger
                 )
                 _ema_below_continuation = (
                     _cs.lifecycle_phase in ("CONFIRMATION", "ESTABLISHED")
@@ -2685,73 +2905,82 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     and signal == -1  # only valid as a short trigger
                 )
                 if _bos_continuation:
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'ESTABLISHED_BOS',
-                        'phase': _cs.lifecycle_phase,
-                        'age_ratio': round(_cs.regime_age_ratio, 2),
-                    })
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "ESTABLISHED_BOS",
+                            "phase": _cs.lifecycle_phase,
+                            "age_ratio": round(_cs.regime_age_ratio, 2),
+                        }
+                    )
                 elif _ema_above_continuation or _ema_below_continuation:
-                    reasons.append({
-                        'passed': True,
-                        'trigger_type': 'EMA_TREND_CONTINUATION',
-                        'phase': _cs.lifecycle_phase,
-                        'ema_status': _cs.ema_50_status,
-                        'age_ratio': round(_cs.regime_age_ratio, 2),
-                    })
+                    reasons.append(
+                        {
+                            "passed": True,
+                            "trigger_type": "EMA_TREND_CONTINUATION",
+                            "phase": _cs.lifecycle_phase,
+                            "ema_status": _cs.ema_50_status,
+                            "age_ratio": round(_cs.regime_age_ratio, 2),
+                        }
+                    )
 
             # ================================================================
             # Final Decision
             # ================================================================
             if reasons:
                 # Log all triggers that passed
-                trigger_types = [r['trigger_type'] for r in reasons]
+                trigger_types = [r["trigger_type"] for r in reasons]
                 logger.info(f"[SNIPER] ✅ PASSED - Trigger(s): {trigger_types}")
                 # Return the details of the first trigger found
                 return True, reasons[0]
 
             logger.info(f"[SNIPER] ❌ BLOCKED - No institutional edge confirmed.")
-            return False, {'trigger_type': None, 'reason': 'No confirmation criteria met'}
+            return False, {
+                "trigger_type": None,
+                "reason": "No confirmation criteria met",
+            }
 
         except Exception as e:
-            logger.error(f"[SNIPER] Error in institutional edge check: {e}", exc_info=True)
+            logger.error(
+                f"[SNIPER] Error in institutional edge check: {e}", exc_info=True
+            )
             # Fail-open: If the filter fails, we allow the trade to avoid blocking valid signals due to code errors.
-            return True, {'trigger_type': 'ERROR_FALLBACK'}
-    
+            return True, {"trigger_type": "ERROR_FALLBACK"}
+
     def _check_profit_filter(self, df: pd.DataFrame) -> Tuple[bool, float]:
         """
         Filter 4: Minimum Profit Potential
-        
+
         Returns:
             (passed, potential_pct)
         """
         if not self.enable_filters:
             return True, 0.01
-        
+
         try:
             if len(df) < 20:
                 return True, 0.01
-            
+
             # Use ATR as proxy for potential move
-            high_low = df['high'] - df['low']
+            high_low = df["high"] - df["low"]
             atr = high_low.rolling(14).mean().iloc[-1]
-            
-            current_price = df['close'].iloc[-1]
+
+            current_price = df["close"].iloc[-1]
             potential_pct = atr / current_price
-            
-            threshold = self.filter_thresholds['min_profit']
+
+            threshold = self.filter_thresholds["min_profit"]
             passed = potential_pct >= threshold
-            
+
             if not passed:
-                logger.info(f"[PROFIT] ❌ BLOCKED - Potential {potential_pct:.2%} < {threshold:.2%}")
-            
+                logger.info(
+                    f"[PROFIT] ❌ BLOCKED - Potential {potential_pct:.2%} < {threshold:.2%}"
+                )
+
             return passed, potential_pct
-        
+
         except Exception as e:
             logger.error(f"[PROFIT] Error: {e}")
             return True, 0.01
-    
-
 
     def _check_atr_expansion_filter(self, df: pd.DataFrame, trade_type: str) -> bool:
         """
@@ -2776,23 +3005,33 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Calculate ADX (14)
             try:
                 import talib
-                adx_series = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+
+                adx_series = talib.ADX(
+                    df["high"].values,
+                    df["low"].values,
+                    df["close"].values,
+                    timeperiod=14,
+                )
                 adx = adx_series[-1]
             except Exception:
                 # Manual ADX fallback: use DM-based approximation via TR rolling
-                high_low = df['high'] - df['low']
-                high_close = np.abs(df['high'] - df['close'].shift())
-                low_close = np.abs(df['low'] - df['close'].shift())
+                high_low = df["high"] - df["low"]
+                high_close = np.abs(df["high"] - df["close"].shift())
+                low_close = np.abs(df["low"] - df["close"].shift())
                 tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
                 atr14 = tr.rolling(14).mean()
-                dm_plus = (df['high'].diff()).clip(lower=0)
-                dm_minus = (-df['low'].diff()).clip(lower=0)
+                dm_plus = (df["high"].diff()).clip(lower=0)
+                dm_minus = (-df["low"].diff()).clip(lower=0)
                 # Use only the dominant direction
                 dm_plus = dm_plus.where(dm_plus > dm_minus, 0)
                 dm_minus = dm_minus.where(dm_minus > dm_plus, 0)
                 di_plus = 100 * dm_plus.rolling(14).mean() / atr14
                 di_minus = 100 * dm_minus.rolling(14).mean() / atr14
-                dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus).replace(0, np.nan)
+                dx = (
+                    100
+                    * np.abs(di_plus - di_minus)
+                    / (di_plus + di_minus).replace(0, np.nan)
+                )
                 adx = dx.rolling(14).mean().iloc[-1]
 
             if pd.isna(adx):
@@ -2802,7 +3041,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             passed = adx >= ADX_MIN
 
             if not passed:
-                logger.info(f"[ADX_TREND] ❌ BLOCKED - ADX {adx:.1f} < {ADX_MIN} (insufficient trend strength)")
+                logger.info(
+                    f"[ADX_TREND] ❌ BLOCKED - ADX {adx:.1f} < {ADX_MIN} (insufficient trend strength)"
+                )
             else:
                 logger.debug(f"[ADX_TREND] ✅ PASSED - ADX {adx:.1f}")
 
@@ -2821,34 +3062,37 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         3. Alignment: Price > EMA20 > EMA50 (for Longs)
         """
         try:
-            if len(df) < 50: return False
-            
-            close = df['close'].values
-            high = df['high'].values
-            low = df['low'].values
-            
+            if len(df) < 50:
+                return False
+
+            close = df["close"].values
+            high = df["high"].values
+            low = df["low"].values
+
             # 1. Trend Strength
             adx = ta.ADX(high, low, close, timeperiod=14)[-1]
-            if adx < 30: return False
-            
+            if adx < 30:
+                return False
+
             # 2. ATR-Scaled Velocity
             atr = ta.ATR(high, low, close, timeperiod=14)[-1]
             move = close[-1] - close[-6]
             velocity_ratio = abs(move) / (atr if atr > 0 else 1)
-            
-            if velocity_ratio < 2.0: return False
-            
+
+            if velocity_ratio < 2.0:
+                return False
+
             # 3. Local Alignment
             ema20 = ta.EMA(close, timeperiod=20)[-1]
             ema50 = ta.EMA(close, timeperiod=50)[-1]
-            
-            if signal == 1: # Buying into a bear regime
+
+            if signal == 1:  # Buying into a bear regime
                 if move > 0 and close[-1] > ema20 > ema50:
                     return True
-            elif signal == -1: # Selling into a bull regime
+            elif signal == -1:  # Selling into a bull regime
                 if move < 0 and close[-1] < ema20 < ema50:
                     return True
-                    
+
             return False
         except Exception as e:
             logger.debug(f"[MOMENTUM] Overrule check error: {e}")
@@ -2860,7 +3104,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
         current_regime: str = "NEUTRAL",
         is_bull_market: bool = True,
         governor_data: Dict = None,
-        live_price: Optional[float] = None # ✨ NEW: For accurate staleness check
+        live_price: Optional[float] = None,  # ✨ NEW: For accurate staleness check
     ) -> Tuple[int, Dict]:
         """
         Main aggregation logic with AI validation and external regime context.
@@ -2870,7 +3114,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
             # AI-5: Clear per-cycle pattern cache so sniper filter and format_viz share results.
-            if self.ai_validator and hasattr(self.ai_validator, 'clear_pattern_cache'):
+            if self.ai_validator and hasattr(self.ai_validator, "clear_pattern_cache"):
                 self.ai_validator.clear_pattern_cache()
 
             # ═══════════════════════════════════════════════════════════════
@@ -2880,14 +3124,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # moved by even 1 pip in over 30 minutes.
             # ═══════════════════════════════════════════════════════════════
             from datetime import datetime as _dt
+
             # Use live_price if provided (from exchange), fallback to last closed bar
-            _current_price = live_price if live_price is not None else (float(df["close"].iloc[-1]) if len(df) > 0 else 0.0)
+            _current_price = (
+                live_price
+                if live_price is not None
+                else (float(df["close"].iloc[-1]) if len(df) > 0 else 0.0)
+            )
             _now = _dt.now()
             _last = self._last_prices.get(self.asset_type)
             if _last:
                 _last_price, _last_time = _last
                 _minutes_since_move = (_now - _last_time).total_seconds() / 60
-                _price_moved = abs(_current_price - _last_price) / max(_last_price, 1) > 0.00001
+                _price_moved = (
+                    abs(_current_price - _last_price) / max(_last_price, 1) > 0.00001
+                )
                 _stale_limit = self._stale_thresholds.get(
                     self.asset_type, self._stale_threshold_minutes
                 )
@@ -2902,9 +3153,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         "reasoning": f"stale_price_{_minutes_since_move:.0f}min",
                         "final_signal": 0,
                         "signal_quality": 0.0,
-                        "mr_signal": 0, "mr_confidence": 0.0,
-                        "tf_signal": 0, "tf_confidence": 0.0,
-                        "ema_signal": 0, "ema_confidence": 0.0,
+                        "mr_signal": 0,
+                        "mr_confidence": 0.0,
+                        "tf_signal": 0,
+                        "tf_confidence": 0.0,
+                        "ema_signal": 0,
+                        "ema_confidence": 0.0,
                     }
             # Update last-seen price only when it actually moves
             if not _last or abs(_current_price - _last[0]) / max(_last[0], 1) > 0.00001:
@@ -2916,19 +3170,25 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ═══════════════════════════════════════════════════════════════
             _candle_time = df.index[-1] if not df.empty else None
             _state_is_fresh = (
-                _candle_time is not None and
-                getattr(self, '_last_state_candle_time', None) == _candle_time
+                _candle_time is not None
+                and getattr(self, "_last_state_candle_time", None) == _candle_time
             )
 
             if not _state_is_fresh and _candle_time is not None:
                 # New candle closed — rebuild the full composite state
-                self._cached_composite = self._build_composite_state(df, governor_data.get('df_4h') if governor_data else None, governor_data or {})
+                self._cached_composite = self._build_composite_state(
+                    df,
+                    governor_data.get("df_4h") if governor_data else None,
+                    governor_data or {},
+                )
                 self._last_state_candle_time = _candle_time
                 self._persist_state()
-                logger.debug(f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}")
+                logger.debug(
+                    f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}"
+                )
 
             # Use cached state for all downstream logic
-            state = getattr(self, '_cached_composite', None)
+            state = getattr(self, "_cached_composite", None)
 
             # ═══════════════════════════════════════════════════════════════
             # FLASH VETO — abnormal candle body detection
@@ -2938,8 +3198,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             try:
                 if len(df) >= 15:
                     import numpy as _fnp
-                    _hi = df["high"].values; _lo = df["low"].values
-                    _cl = df["close"].values; _op = df["open"].values
+
+                    _hi = df["high"].values
+                    _lo = df["low"].values
+                    _cl = df["close"].values
+                    _op = df["open"].values
                     _tr = _fnp.maximum(
                         _hi[1:] - _lo[1:],
                         _fnp.abs(_hi[1:] - _cl[:-1]),
@@ -2955,12 +3218,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                 f"— news spike detected, blocking signal"
                             )
                             return 0, {
-                                "timestamp": timestamp, "regime": "UNKNOWN",
+                                "timestamp": timestamp,
+                                "regime": "UNKNOWN",
                                 "reasoning": f"flash_veto_{_body_ratio:.1f}x_atr",
-                                "final_signal": 0, "signal_quality": 0.0,
-                                "mr_signal": 0, "mr_confidence": 0.0,
-                                "tf_signal": 0, "tf_confidence": 0.0,
-                                "ema_signal": 0, "ema_confidence": 0.0,
+                                "final_signal": 0,
+                                "signal_quality": 0.0,
+                                "mr_signal": 0,
+                                "mr_confidence": 0.0,
+                                "tf_signal": 0,
+                                "tf_confidence": 0.0,
+                                "ema_signal": 0,
+                                "ema_confidence": 0.0,
                             }
                         elif _body_ratio > 3.0:
                             logger.warning(
@@ -2982,7 +3250,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # The stop-hunt data that justified this block was from USTEC/GOLD.
             # ═══════════════════════════════════════════════════════════════
             _hour_utc = _dt.utcnow().hour
-            if _hour_utc == 13 and self.asset_type in ("USTEC", "GOLD", "USOIL", "GBPAUD"):
+            if _hour_utc == 13 and self.asset_type in (
+                "USTEC",
+                "GOLD",
+                "USOIL",
+                "GBPAUD",
+            ):
                 logger.info(
                     f"[SESSION] ⏸️ NY open hour block — no new entries for {self.asset_type}"
                 )
@@ -2990,10 +3263,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     "timestamp": timestamp,
                     "regime": "UNKNOWN",
                     "reasoning": "ny_open_block",
-                    "final_signal": 0, "signal_quality": 0.0,
-                    "mr_signal": 0, "mr_confidence": 0.0,
-                    "tf_signal": 0, "tf_confidence": 0.0,
-                    "ema_signal": 0, "ema_confidence": 0.0,
+                    "final_signal": 0,
+                    "signal_quality": 0.0,
+                    "mr_signal": 0,
+                    "mr_confidence": 0.0,
+                    "tf_signal": 0,
+                    "tf_confidence": 0.0,
+                    "ema_signal": 0,
+                    "ema_confidence": 0.0,
                 }
 
             # ═══════════════════════════════════════════════════════════════
@@ -3003,11 +3280,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # ═══════════════════════════════════════════════════════════════
             if self._econ_events:
                 from datetime import timezone as _tz, timedelta as _td
+
                 _utc_now = _dt.now(_tz.utc)
                 _asset = self.asset_type
                 for _evt in self._econ_events:
                     try:
-                        _evt_time = _dt.fromisoformat(_evt["datetime"].replace("Z", "+00:00"))
+                        _evt_time = _dt.fromisoformat(
+                            _evt["datetime"].replace("Z", "+00:00")
+                        )
                         _hours_before = _evt.get("block_hours_before", 2)
                         _hours_after = _evt.get("block_hours_after", 0)
                         _block_start = _evt_time - _td(hours=_hours_before)
@@ -3018,17 +3298,36 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                 _affected = [_affected]
                             _affected = _affected or []
                             _blocked = (
-                                (_asset in ("BTC", "BTCUSDT") and "USD" in _affected) or
-                                (_asset in ("GOLD", "XAUUSD") and "USD" in _affected) or
-                                (_asset == "EURUSD" and ("EUR" in _affected or "USD" in _affected)) or
-                                (_asset == "EURJPY" and ("EUR" in _affected or "JPY" in _affected)) or
-                                (_asset in ("USTEC", "US100", "NAS100") and "USD" in _affected) or
-                                (_asset == "GBPAUD" and ("GBP" in _affected or "AUD" in _affected)) or
-                                (_asset in ("USOIL", "USOILM") and ("USD" in _affected or "OIL" in _affected)) or
-                                (not _affected)  # fallback: block all if no currencies listed
+                                (_asset in ("BTC", "BTCUSDT") and "USD" in _affected)
+                                or (_asset in ("GOLD", "XAUUSD") and "USD" in _affected)
+                                or (
+                                    _asset == "EURUSD"
+                                    and ("EUR" in _affected or "USD" in _affected)
+                                )
+                                or (
+                                    _asset == "EURJPY"
+                                    and ("EUR" in _affected or "JPY" in _affected)
+                                )
+                                or (
+                                    _asset in ("USTEC", "US100", "NAS100")
+                                    and "USD" in _affected
+                                )
+                                or (
+                                    _asset == "GBPAUD"
+                                    and ("GBP" in _affected or "AUD" in _affected)
+                                )
+                                or (
+                                    _asset in ("USOIL", "USOILM")
+                                    and ("USD" in _affected or "OIL" in _affected)
+                                )
+                                or (
+                                    not _affected
+                                )  # fallback: block all if no currencies listed
                             )
                             if _blocked:
-                                _mins_to_evt = (_evt_time - _utc_now).total_seconds() / 60
+                                _mins_to_evt = (
+                                    _evt_time - _utc_now
+                                ).total_seconds() / 60
                                 logger.warning(
                                     f"[CALENDAR] ⏸️ Blocking {_asset} — "
                                     f"{_evt['event']} in {_mins_to_evt:.0f}min"
@@ -3037,18 +3336,24 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                     "timestamp": timestamp,
                                     "regime": "UNKNOWN",
                                     "reasoning": f"econ_calendar_{_evt['event'].replace(' ', '_')}",
-                                    "final_signal": 0, "signal_quality": 0.0,
-                                    "mr_signal": 0, "mr_confidence": 0.0,
-                                    "tf_signal": 0, "tf_confidence": 0.0,
-                                    "ema_signal": 0, "ema_confidence": 0.0,
+                                    "final_signal": 0,
+                                    "signal_quality": 0.0,
+                                    "mr_signal": 0,
+                                    "mr_confidence": 0.0,
+                                    "tf_signal": 0,
+                                    "tf_confidence": 0.0,
+                                    "ema_signal": 0,
+                                    "ema_confidence": 0.0,
                                 }
                     except Exception:
                         continue
 
             # Step 1: Prepare context
             is_bull = is_bull_market
-            regime_conf = governor_data.get('confidence', 0.5) if governor_data else 0.5
-            regime_name = governor_data.get('regime', 'NEUTRAL') if governor_data else "NEUTRAL"
+            regime_conf = governor_data.get("confidence", 0.5) if governor_data else 0.5
+            regime_name = (
+                governor_data.get("regime", "NEUTRAL") if governor_data else "NEUTRAL"
+            )
 
             # ✨ NEW: Advanced Confluence Overlays
             div_res = self.divergence_detector.analyze(df)
@@ -3064,7 +3369,10 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if _ts:
                     try:
                         from datetime import datetime as _dtp
-                        _bar_dt = _dtp.fromisoformat(_ts) if isinstance(_ts, str) else _ts
+
+                        _bar_dt = (
+                            _dtp.fromisoformat(_ts) if isinstance(_ts, str) else _ts
+                        )
                     except Exception:
                         _bar_dt = None
 
@@ -3082,17 +3390,24 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             else:
                 self.stats["bear_regime_count"] += 1
 
-
             # STEP 2: Get strategy signals
             # Pass 4H context to strategies if available
-            df_4h = governor_data.get('df_4h') if governor_data else None
-            logger.debug(f"[MR INPUT] {self.asset_type}: df_4h={'present, ' + str(len(df_4h)) + ' bars' if df_4h is not None else 'MISSING'}")
-            
-            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h, composite_state=state)
+            df_4h = governor_data.get("df_4h") if governor_data else None
+            logger.debug(
+                f"[MR INPUT] {self.asset_type}: df_4h={'present, ' + str(len(df_4h)) + ' bars' if df_4h is not None else 'MISSING'}"
+            )
+
+            mr_signal, mr_conf = self.s_mean_reversion.generate_signal(
+                df, df_4h=df_4h, composite_state=state
+            )
             # L10: pass composite_state through so TF/EMA's Livermore awareness
             # nudge (flag-gated, see base_strategy.py) can see live LSM state.
-            tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h, composite_state=state)
-            ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h, composite_state=state)
+            tf_signal, tf_conf = self.s_trend_following.generate_signal(
+                df, df_4h=df_4h, composite_state=state
+            )
+            ema_signal, ema_conf = self.s_ema.generate_signal(
+                df, df_4h=df_4h, composite_state=state
+            )
 
             # Store originals for logging
             mr_original = mr_signal
@@ -3114,43 +3429,51 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             #   pullback) — the exact losing pattern identified in the MRS.
             # ═══════════════════════════════════════════════════════════════
             if state is not None:
-                _hv_1h   = state.livermore_state_1h
+                _hv_1h = state.livermore_state_1h
                 _hv_dual = state.livermore_dual_confirmation
 
                 # Block A: 1H NATURAL_REBOUND + any LONG
                 if _hv_1h == "NATURAL_REBOUND":
                     _blocked = []
                     if mr_signal > 0:
-                        mr_signal = 0; mr_conf = 0.0
+                        mr_signal = 0
+                        mr_conf = 0.0
                         _blocked.append("MR")
                     if tf_signal > 0:
-                        tf_signal = 0; tf_conf = 0.0
+                        tf_signal = 0
+                        tf_conf = 0.0
                         _blocked.append("TF")
                     if ema_signal > 0:
-                        ema_signal = 0; ema_conf = 0.0
+                        ema_signal = 0
+                        ema_conf = 0.0
                         _blocked.append("EMA")
                     if _blocked:
                         logger.info(
                             "[HARD_VETO] %s Block A: NATURAL_REBOUND+LONG → zeroed %s",
-                            self.asset_type, "+".join(_blocked),
+                            self.asset_type,
+                            "+".join(_blocked),
                         )
 
                 # Block B: 1H SECONDARY_REBOUND + LONG without dual confirmation
                 elif _hv_1h == "SECONDARY_REBOUND" and not _hv_dual:
                     _blocked = []
                     if mr_signal > 0:
-                        mr_signal = 0; mr_conf = 0.0
+                        mr_signal = 0
+                        mr_conf = 0.0
                         _blocked.append("MR")
                     if tf_signal > 0:
-                        tf_signal = 0; tf_conf = 0.0
+                        tf_signal = 0
+                        tf_conf = 0.0
                         _blocked.append("TF")
                     if ema_signal > 0:
-                        ema_signal = 0; ema_conf = 0.0
+                        ema_signal = 0
+                        ema_conf = 0.0
                         _blocked.append("EMA")
                     if _blocked:
                         logger.info(
                             "[HARD_VETO] %s Block B: SECONDARY_REBOUND+LONG+no_dual → zeroed %s",
-                            self.asset_type, "+".join(_blocked),
+                            self.asset_type,
+                            "+".join(_blocked),
                         )
 
                 # Block C: MR counter-trend during any NATURAL state
@@ -3160,15 +3483,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if _hv_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
                     _c_blocked = None
                     if _hv_1h == "NATURAL_RETRACEMENT" and mr_signal < 0:
-                        mr_signal = 0; mr_conf = 0.0
+                        mr_signal = 0
+                        mr_conf = 0.0
                         _c_blocked = "MR_SHORT in NATURAL_RETRACEMENT"
                     elif _hv_1h == "NATURAL_REBOUND" and mr_signal > 0:
-                        mr_signal = 0; mr_conf = 0.0
+                        mr_signal = 0
+                        mr_conf = 0.0
                         _c_blocked = "MR_LONG in NATURAL_REBOUND"
                     if _c_blocked:
                         logger.info(
                             "[HARD_VETO] %s Block C: %s → MR zeroed",
-                            self.asset_type, _c_blocked,
+                            self.asset_type,
+                            _c_blocked,
                         )
 
                 # Block D: TF and EMA shorts during NATURAL_RETRACEMENT
@@ -3178,15 +3504,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 if _hv_1h == "NATURAL_RETRACEMENT":
                     _d_blocked = []
                     if tf_signal < 0:
-                        tf_signal = 0; tf_conf = 0.0
+                        tf_signal = 0
+                        tf_conf = 0.0
                         _d_blocked.append("TF_SHORT")
                     if ema_signal < 0:
-                        ema_signal = 0; ema_conf = 0.0
+                        ema_signal = 0
+                        ema_conf = 0.0
                         _d_blocked.append("EMA_SHORT")
                     if _d_blocked:
                         logger.info(
                             "[HARD_VETO] %s Block D: NATURAL_RETRACEMENT+SHORT → zeroed %s",
-                            self.asset_type, "+".join(_d_blocked),
+                            self.asset_type,
+                            "+".join(_d_blocked),
                         )
             # ─────────────────────────────────────────────────────────────
 
@@ -3196,7 +3525,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Over-leveraged longs → MR short setups become highest probability.
             # Z-score adapts to sustained bull runs; static threshold doesn't.
             # ═══════════════════════════════════════════════════════════════
-            _funding_z = governor_data.get("funding_rate_zscore", 0.0) if governor_data else 0.0
+            _funding_z = (
+                governor_data.get("funding_rate_zscore", 0.0) if governor_data else 0.0
+            )
             if self.asset_type in ("BTC", "BTCUSDT") and abs(_funding_z) >= 2.0:
                 if mr_signal != 0:
                     mr_conf = min(1.0, mr_conf * 1.15)
@@ -3211,28 +3542,45 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # Computed from already-traded EUR/USD data — zero API cost.
             # ═══════════════════════════════════════════════════════════════
             _dxy_falling = governor_data.get("dxy_falling") if governor_data else None
-            if _dxy_falling is not None and self.asset_type in ("GOLD", "USTEC", "EURJPY", "USOIL"):
+            if _dxy_falling is not None and self.asset_type in (
+                "GOLD",
+                "USTEC",
+                "EURJPY",
+                "USOIL",
+            ):
                 if self.asset_type == "GOLD":
                     # Dollar weakness → gold strength
                     if _dxy_falling and tf_signal == 1:
                         tf_conf = min(1.0, tf_conf * 1.10)
-                        logger.debug(f"[DXY] Weak dollar: GOLD TF BUY conf boosted to {tf_conf:.2f}")
+                        logger.debug(
+                            f"[DXY] Weak dollar: GOLD TF BUY conf boosted to {tf_conf:.2f}"
+                        )
                     elif not _dxy_falling and tf_signal == -1:
                         tf_conf = min(1.0, tf_conf * 1.10)
-                        logger.debug(f"[DXY] Strong dollar: GOLD TF SELL conf boosted to {tf_conf:.2f}")
+                        logger.debug(
+                            f"[DXY] Strong dollar: GOLD TF SELL conf boosted to {tf_conf:.2f}"
+                        )
                 elif self.asset_type == "USTEC":
                     # Dollar weakness generally supportive of risk assets
                     if _dxy_falling and tf_signal == 1:
                         tf_conf = min(1.0, tf_conf * 1.05)
-                        logger.debug(f"[DXY] Weak dollar: USTEC TF BUY conf boosted to {tf_conf:.2f}")
+                        logger.debug(
+                            f"[DXY] Weak dollar: USTEC TF BUY conf boosted to {tf_conf:.2f}"
+                        )
                 elif self.asset_type == "USOIL":
                     # Dollar weakness = oil strength (inverse correlation)
-                    if _dxy_falling and tf_signal == 1:   # Weak dollar + BUY oil
+                    if _dxy_falling and tf_signal == 1:  # Weak dollar + BUY oil
                         tf_conf = min(1.0, tf_conf * 1.10)
-                        logger.debug(f"[DXY] Weak dollar: USOIL TF BUY conf boosted to {tf_conf:.2f}")
-                    elif not _dxy_falling and tf_signal == -1:  # Strong dollar + SELL oil
+                        logger.debug(
+                            f"[DXY] Weak dollar: USOIL TF BUY conf boosted to {tf_conf:.2f}"
+                        )
+                    elif (
+                        not _dxy_falling and tf_signal == -1
+                    ):  # Strong dollar + SELL oil
                         tf_conf = min(1.0, tf_conf * 1.10)
-                        logger.debug(f"[DXY] Strong dollar: USOIL TF SELL conf boosted to {tf_conf:.2f}")
+                        logger.debug(
+                            f"[DXY] Strong dollar: USOIL TF SELL conf boosted to {tf_conf:.2f}"
+                        )
 
             # ═══════════════════════════════════════════════════════════════
             # T2.6: CONSECUTIVE CANDLE CONFIDENCE MULTIPLIER
@@ -3243,7 +3591,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # This is a confidence bonus, not a new gate — fails silently.
             # ═══════════════════════════════════════════════════════════════
             try:
-                _closes = df['close'].values
+                _closes = df["close"].values
                 _consec = 0
                 for _i in range(len(_closes) - 1, max(len(_closes) - 10, 0), -1):
                     if _i == 0:
@@ -3263,8 +3611,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 _adx_guard = 25.0  # default if calculation fails
                 try:
                     import talib as _talib_c
+
                     _adx_raw = _talib_c.ADX(
-                        df['high'].values, df['low'].values, _closes, timeperiod=14
+                        df["high"].values, df["low"].values, _closes, timeperiod=14
                     )[-1]
                     if not np.isnan(_adx_raw):
                         _adx_guard = _adx_raw
@@ -3293,9 +3642,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 pass  # Bonus only — never block execution on failure
 
             # Extract regime score for Gatekeeper (Phase 3)
-            regime_score = governor_data.get("regime_score", 0.0) if governor_data else 0.0
-            regime_is_bullish = governor_data.get("is_bullish", False) if governor_data else False
-            regime_is_bearish = governor_data.get("is_bearish", False) if governor_data else False
+            regime_score = (
+                governor_data.get("regime_score", 0.0) if governor_data else 0.0
+            )
+            regime_is_bullish = (
+                governor_data.get("is_bullish", False) if governor_data else False
+            )
+            regime_is_bearish = (
+                governor_data.get("is_bearish", False) if governor_data else False
+            )
 
             # ── Item 19b: 4H Livermore / macro-regime disagreement gate ──────
             # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
@@ -3306,15 +3661,27 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # gatekeeper below falls back through to its NEUTRAL branch
             # instead of hard-blocking/penalising counter-trend signals on a
             # regime label the structural state machine actively contradicts.
-            _lsm_gate_enabled = bool(getattr(self, "phase_config", {}).get(
-                "lsm_regime_disagreement_gate_enabled", False
-            ))
+            _lsm_gate_enabled = bool(
+                getattr(self, "phase_config", {}).get(
+                    "lsm_regime_disagreement_gate_enabled", False
+                )
+            )
             if _lsm_gate_enabled:
-                _lsm_4h_for_regime = getattr(state, "livermore_state_4h", None) if state is not None else None
-                _lsm_lean_sa = (
-                    "bullish" if _lsm_4h_for_regime in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-                    else "bearish" if _lsm_4h_for_regime in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+                _lsm_4h_for_regime = (
+                    getattr(state, "livermore_state_4h", None)
+                    if state is not None
                     else None
+                )
+                _lsm_lean_sa = (
+                    "bullish"
+                    if _lsm_4h_for_regime
+                    in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+                    else (
+                        "bearish"
+                        if _lsm_4h_for_regime
+                        in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+                        else None
+                    )
                 )
                 if _lsm_lean_sa is not None:
                     if regime_is_bullish and _lsm_lean_sa != "bullish":
@@ -3361,9 +3728,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             self.asset_type,
                             state.livermore_state_4h or "NATURAL",
                         )
-                        mr_signal  = 0; mr_conf  = 0.0
-                        tf_signal  = 0; tf_conf  = 0.0
-                        ema_signal = 0; ema_conf = 0.0
+                        mr_signal = 0
+                        mr_conf = 0.0
+                        tf_signal = 0
+                        tf_conf = 0.0
+                        ema_signal = 0
+                        ema_conf = 0.0
                 # ─────────────────────────────────────────────────────────────
 
                 # FAIL-CLOSED guard: no governor data = no regime context.
@@ -3384,16 +3754,21 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         "reasoning": "no_governor_data",
                         "final_signal": 0,
                         "signal_quality": 0.0,
-                        "mr_signal": 0, "mr_confidence": 0.0,
-                        "tf_signal": 0, "tf_confidence": 0.0,
-                        "ema_signal": 0, "ema_confidence": 0.0,
+                        "mr_signal": 0,
+                        "mr_confidence": 0.0,
+                        "tf_signal": 0,
+                        "tf_confidence": 0.0,
+                        "ema_signal": 0,
+                        "ema_confidence": 0.0,
                     }
 
-                is_neutral = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
+                is_neutral = (regime_score == 0.0) or (
+                    not regime_is_bullish and not regime_is_bearish
+                )
                 regime_strength = abs(regime_score)  # 0.5 for SLIGHTLY, 1.0 for full
 
                 # Pull transition evidence if available
-                _te = getattr(state, '_transition_evidence', None) if state else None
+                _te = getattr(state, "_transition_evidence", None) if state else None
                 _transition_score = _te.total_score if _te else 0.0
                 _transition_conditions = _te.conditions_met if _te else 0
 
@@ -3404,16 +3779,22 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     # No hard block or boost — NEUTRAL stays permissive by design.
                     if _te and _transition_conditions >= 2:
                         _tilt = (
-                            f"BULLISH tilt ({_transition_score:+.3f})" if _transition_score > 0.15
-                            else f"BEARISH tilt ({_transition_score:+.3f})" if _transition_score < -0.15
-                            else f"no clear tilt ({_transition_score:+.3f})"
+                            f"BULLISH tilt ({_transition_score:+.3f})"
+                            if _transition_score > 0.15
+                            else (
+                                f"BEARISH tilt ({_transition_score:+.3f})"
+                                if _transition_score < -0.15
+                                else f"no clear tilt ({_transition_score:+.3f})"
+                            )
                         )
                         logger.info(
                             f"[GATEKEEPER] NEUTRAL+TRANSITION — all strategies allowed, "
                             f"evidence {_tilt} ({_transition_conditions}/4 conditions) [{self.asset_type}]"
                         )
                     else:
-                        logger.debug(f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})")
+                        logger.debug(
+                            f"[GATEKEEPER] NEUTRAL — all strategies allowed ({self.asset_type})"
+                        )
 
                 elif regime_is_bullish:
                     if regime_strength >= 1.0:
@@ -3427,7 +3808,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             and _transition_score < -0.30
                         )
                         if _strong_bearish_reversal:
-                            _full_bull_penalty = max(0.35, 0.55 + _transition_score * 0.5)
+                            _full_bull_penalty = max(
+                                0.35, 0.55 + _transition_score * 0.5
+                            )
                             logger.info(
                                 f"[GATEKEEPER] ⚡ FULL BULLISH softened by transition evidence "
                                 f"({_transition_conditions}/4 conditions, score={_transition_score:+.3f}) → "
@@ -3441,7 +3824,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                     f"conf reduced to {tf_conf:.2f}"
                                 )
                             if ema_signal < 0:
-                                ema_signal = 0; ema_conf = 0.0
+                                ema_signal = 0
+                                ema_conf = 0.0
                             if mr_signal < 0:
                                 mr_conf *= min(_full_bull_penalty + 0.10, 0.80)
                                 logger.info(
@@ -3449,25 +3833,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                     f"conf reduced to {mr_conf:.2f}"
                                 )
                             elif mr_signal > 0:
-                                logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in bullish+evidence for {self.asset_type}")
+                                logger.info(
+                                    f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in bullish+evidence for {self.asset_type}"
+                                )
                         else:
                             if tf_signal < 0:
                                 if self._is_explosive_momentum(df, -1):
-                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)")
+                                    logger.info(
+                                        f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (TF)"
+                                    )
                                 else:
-                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Strong bullish for {self.asset_type}")
-                                    tf_signal = 0; tf_conf = 0.0
+                                    logger.info(
+                                        f"[GATEKEEPER] ❌ BLOCKED SHORT (TF): Strong bullish for {self.asset_type}"
+                                    )
+                                    tf_signal = 0
+                                    tf_conf = 0.0
                             if ema_signal < 0:
                                 if self._is_explosive_momentum(df, -1):
-                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)")
+                                    logger.info(
+                                        f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bullish block for SHORT (EMA)"
+                                    )
                                 else:
-                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Strong bullish for {self.asset_type}")
-                                    ema_signal = 0; ema_conf = 0.0
+                                    logger.info(
+                                        f"[GATEKEEPER] ❌ BLOCKED SHORT (EMA): Strong bullish for {self.asset_type}"
+                                    )
+                                    ema_signal = 0
+                                    ema_conf = 0.0
                             if mr_signal < 0:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in strong Bullish for {self.asset_type}")
-                                mr_signal = 0; mr_conf = 0.0
+                                logger.info(
+                                    f"[GATEKEEPER] ❌ BLOCKED SHORT (MR): Counter-trend in strong Bullish for {self.asset_type}"
+                                )
+                                mr_signal = 0
+                                mr_conf = 0.0
                             elif mr_signal > 0:
-                                logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in strong Bullish for {self.asset_type}")
+                                logger.info(
+                                    f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in strong Bullish for {self.asset_type}"
+                                )
 
                     else:
                         # SLIGHTLY BULLISH: penalise shorts, don't kill them
@@ -3488,15 +3889,20 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             )
                         if ema_signal < 0:
                             # EMA is a slow-trend follower — still zero in counter trend
-                            ema_signal = 0; ema_conf = 0.0
+                            ema_signal = 0
+                            ema_conf = 0.0
                         if mr_signal < 0:
-                            mr_conf *= min(_penalty + 0.10, 0.80)  # MR slightly less penalised
+                            mr_conf *= min(
+                                _penalty + 0.10, 0.80
+                            )  # MR slightly less penalised
                             logger.info(
                                 f"[GATEKEEPER] ⚠️ PENALIZED SHORT (MR): Slightly bullish — "
                                 f"conf reduced to {mr_conf:.2f}"
                             )
                         elif mr_signal > 0:
-                            logger.info(f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in slightly Bullish for {self.asset_type}")
+                            logger.info(
+                                f"[GATEKEEPER] ✅ ALLOWED LONG (MR): Dip buy in slightly Bullish for {self.asset_type}"
+                            )
 
                 elif regime_is_bearish:
                     if regime_strength >= 1.0:
@@ -3513,7 +3919,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         )
                         if _strong_bullish_reversal:
                             # Treat like a SLIGHTLY_BEARISH with extra caution
-                            _full_bear_penalty = max(0.35, 0.55 - _transition_score * 0.5)
+                            _full_bear_penalty = max(
+                                0.35, 0.55 - _transition_score * 0.5
+                            )
                             logger.info(
                                 f"[GATEKEEPER] ⚡ FULL BEARISH softened by transition evidence "
                                 f"({_transition_conditions}/4 conditions, score={_transition_score:+.3f}) → "
@@ -3528,7 +3936,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                 )
                             if ema_signal > 0:
                                 # EMA is slow — zero it even with evidence; TF covers the bullish case
-                                ema_signal = 0; ema_conf = 0.0
+                                ema_signal = 0
+                                ema_conf = 0.0
                             if mr_signal > 0:
                                 mr_conf *= min(_full_bear_penalty + 0.10, 0.80)
                                 logger.info(
@@ -3536,25 +3945,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                     f"conf reduced to {mr_conf:.2f}"
                                 )
                             elif mr_signal < 0:
-                                logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in bearish+evidence for {self.asset_type}")
+                                logger.info(
+                                    f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in bearish+evidence for {self.asset_type}"
+                                )
                         else:
                             if tf_signal > 0:
                                 if self._is_explosive_momentum(df, 1):
-                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)")
+                                    logger.info(
+                                        f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (TF)"
+                                    )
                                 else:
-                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Strong bearish for {self.asset_type}")
-                                    tf_signal = 0; tf_conf = 0.0
+                                    logger.info(
+                                        f"[GATEKEEPER] ❌ BLOCKED LONG (TF): Strong bearish for {self.asset_type}"
+                                    )
+                                    tf_signal = 0
+                                    tf_conf = 0.0
                             if ema_signal > 0:
                                 if self._is_explosive_momentum(df, 1):
-                                    logger.info(f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)")
+                                    logger.info(
+                                        f"[GATEKEEPER] 🚀 EXPLOSIVE MOMENTUM - Overruling Bearish block for LONG (EMA)"
+                                    )
                                 else:
-                                    logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Strong bearish for {self.asset_type}")
-                                    ema_signal = 0; ema_conf = 0.0
+                                    logger.info(
+                                        f"[GATEKEEPER] ❌ BLOCKED LONG (EMA): Strong bearish for {self.asset_type}"
+                                    )
+                                    ema_signal = 0
+                                    ema_conf = 0.0
                             if mr_signal > 0:
-                                logger.info(f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in strong Bearish for {self.asset_type}")
-                                mr_signal = 0; mr_conf = 0.0
+                                logger.info(
+                                    f"[GATEKEEPER] ❌ BLOCKED LONG (MR): Counter-trend in strong Bearish for {self.asset_type}"
+                                )
+                                mr_signal = 0
+                                mr_conf = 0.0
                             elif mr_signal < 0:
-                                logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in strong Bearish for {self.asset_type}")
+                                logger.info(
+                                    f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in strong Bearish for {self.asset_type}"
+                                )
 
                     else:
                         # SLIGHTLY BEARISH: penalise longs, don't kill them
@@ -3574,7 +4000,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                 f"conf reduced to {tf_conf:.2f}"
                             )
                         if ema_signal > 0:
-                            ema_signal = 0; ema_conf = 0.0
+                            ema_signal = 0
+                            ema_conf = 0.0
                         if mr_signal > 0:
                             mr_conf *= min(_penalty + 0.10, 0.80)
                             logger.info(
@@ -3582,9 +4009,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                 f"conf reduced to {mr_conf:.2f}"
                             )
                         elif mr_signal < 0:
-                            logger.info(f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in slightly Bearish for {self.asset_type}")
+                            logger.info(
+                                f"[GATEKEEPER] ✅ ALLOWED SHORT (MR): Rally short in slightly Bearish for {self.asset_type}"
+                            )
             # --- End Enhanced Gatekeeper ---
-            
+
             # Initialize core variables for details building (prevents UnboundLocalError if we skip)
             buy_score = 0.0
             sell_score = 0.0
@@ -3597,7 +4026,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
             # COMPUTATIONAL OPTIMIZATION: If all signals are zero, skip heavy validation
             if mr_signal == 0 and tf_signal == 0 and ema_signal == 0:
-                logger.debug(f"[AGGREGATOR] {self.asset_type}: No signals to validate, skipping to end.")
+                logger.debug(
+                    f"[AGGREGATOR] {self.asset_type}: No signals to validate, skipping to end."
+                )
                 # We can skip to building the details dictionary
             else:
                 # Ranging Detection — keeps position limits, counter-trend blocking
@@ -3613,26 +4044,35 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                 # --- Directional Trap Filter Veto (T2.3: regime-aware) ---
                 if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
-                    test_direction = "long" if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0) else "short"
+                    test_direction = (
+                        "long"
+                        if (mr_signal > 0 or tf_signal > 0 or ema_signal > 0)
+                        else "short"
+                    )
                     # regime_aligned: signal direction matches macro regime.
                     # Fix #16: NEUTRAL regime has no directional opinion — both
                     # directions are valid so treat as aligned for both sides.
                     # Without this, LONG signals in NEUTRAL are always "not aligned"
                     # which triggers the 1.5× BTC volume check that doesn't apply
                     # to SHORT, creating a permanent short-bias in NEUTRAL.
-                    _is_neutral_regime = (regime_score == 0.0) or (not regime_is_bullish and not regime_is_bearish)
+                    _is_neutral_regime = (regime_score == 0.0) or (
+                        not regime_is_bullish and not regime_is_bearish
+                    )
                     _trap_aligned = (
-                        _is_neutral_regime or
-                        (test_direction == "long" and is_bull) or
-                        (test_direction == "short" and not is_bull)
+                        _is_neutral_regime
+                        or (test_direction == "long" and is_bull)
+                        or (test_direction == "short" and not is_bull)
                     )
                     if not validate_candle_structure(
-                        df, self.asset_type,
+                        df,
+                        self.asset_type,
                         direction=test_direction,
                         regime_confidence=regime_conf,
                         regime_aligned=_trap_aligned,
                     ):
-                        logger.info(f"[TRAP] VETO - Candidate rejected by structure check.")
+                        logger.info(
+                            f"[TRAP] VETO - Candidate rejected by structure check."
+                        )
                         # Pass the REAL strategy signals through so the shadow trader
                         # can record and learn from trap-filter blocks (Bug 2 fix).
                         # Zeroing these out was hiding ~47 signals/cycle from the
@@ -3642,7 +4082,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             "regime": regime_name,
                             "reasoning": "blocked_by_trap_filter",
                             "final_signal": 0,
-                            "original_signal": mr_signal or tf_signal or ema_signal, # Pass the intended direction
+                            "original_signal": mr_signal
+                            or tf_signal
+                            or ema_signal,  # Pass the intended direction
                             "signal_quality": 0.0,
                             "mr_signal": mr_signal,
                             "mr_confidence": mr_conf,
@@ -3665,11 +4107,33 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 ai_validation_details = {}
 
                 # STEP 4: Calculate scores (MR + TF + EMA all contribute)
-                buy_score, buy_explanation, buy_agreement = self._calculate_score(df, 1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
-                sell_score, sell_explanation, sell_agreement = self._calculate_score(df, -1, mr_signal, mr_conf, tf_signal, tf_conf, ema_signal, ema_conf, is_bull)
+                buy_score, buy_explanation, buy_agreement = self._calculate_score(
+                    df,
+                    1,
+                    mr_signal,
+                    mr_conf,
+                    tf_signal,
+                    tf_conf,
+                    ema_signal,
+                    ema_conf,
+                    is_bull,
+                )
+                sell_score, sell_explanation, sell_agreement = self._calculate_score(
+                    df,
+                    -1,
+                    mr_signal,
+                    mr_conf,
+                    tf_signal,
+                    tf_conf,
+                    ema_signal,
+                    ema_conf,
+                    is_bull,
+                )
 
                 # STEP 5: Dynamic thresholds
-                adj_buy_thresh, adj_sell_thresh = self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+                adj_buy_thresh, adj_sell_thresh = (
+                    self.calculate_regime_adjusted_thresholds(is_bull, regime_conf)
+                )
 
                 # STEP 5B: REQUIRED SCORE MODIFIER (Livermore state) + Retest Engine
                 # Layer 1: Livermore RSM — state-conditional base threshold delta.
@@ -3678,14 +4142,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 #   CHASE_SOFT / CHASE_HARD / NO_LEVEL_NEARBY).
                 # Both layers are additive; combined modifier capped at rsm_cap (1.50).
                 # All numeric values in aggregator_presets.json — no magic numbers.
-                _pending_retest_buy  = None   # RetestResult for LONG; set below
-                _pending_retest_sell = None   # RetestResult for SHORT; set below
+                _pending_retest_buy = None  # RetestResult for LONG; set below
+                _pending_retest_sell = None  # RetestResult for SHORT; set below
                 try:
                     _rsm_state = state.livermore_state_4h if state is not None else None
                     if _rsm_state is not None:
                         # ── Load config tables once (cached on instance) ────────────
-                        if not hasattr(self, '_rsm_table'):
+                        if not hasattr(self, "_rsm_table"):
                             import json as _json_rsm
+
                             try:
                                 with open("config/aggregator_presets.json") as _rsm_f:
                                     _rsm_cfg = _json_rsm.load(_rsm_f)
@@ -3696,31 +4161,37 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                     "REQUIRED_SCORE_MODIFIER", {}
                                 ).get("modifier_cap", 1.50)
                                 # Instantiate RetestEngine with its config section
-                                from src.analysis.retest_engine import RetestEngine as _RE
+                                from src.analysis.retest_engine import (
+                                    RetestEngine as _RE,
+                                )
+
                                 self._retest_engine = _RE(
                                     _rsm_cfg.get("RETEST_ENGINE", {})
                                 )
                             except Exception as _cfg_err:
                                 logger.debug("[RSM] config load error: %s", _cfg_err)
-                                self._rsm_table    = {}
-                                self._rsm_cap      = 1.50
+                                self._rsm_table = {}
+                                self._rsm_cap = 1.50
                                 self._retest_engine = None
 
                         # ── Layer 1: Livermore RSM delta ───────────────────────────
                         _rsm_delta = self._rsm_table.get(_rsm_state, 0.0)
 
                         # ── Layer 2: Retest Engine (directional) ───────────────────
-                        _re = getattr(self, '_retest_engine', None)
+                        _re = getattr(self, "_retest_engine", None)
                         if _re is not None and state is not None:
                             try:
-                                _pending_retest_buy  = _re.classify(
+                                _pending_retest_buy = _re.classify(
                                     df, state, self.asset_type, direction=+1
                                 )
                                 _pending_retest_sell = _re.classify(
                                     df, state, self.asset_type, direction=-1
                                 )
                             except Exception as _re_err:
-                                logger.debug("[RETEST] classify error (non-blocking): %s", _re_err)
+                                logger.debug(
+                                    "[RETEST] classify error (non-blocking): %s",
+                                    _re_err,
+                                )
 
                         # Fix 6a: Mode1 spring exemption. Mode 1 (Pullback
                         # Completion, mean_reversion.py) fires on 1H
@@ -3736,7 +4207,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         # while Mode1 is the active 1H state pays no penalty.
                         _is_mode1_spring_buy = (
                             state is not None
-                            and getattr(state, "livermore_state_1h", None) == "NATURAL_RETRACEMENT"
+                            and getattr(state, "livermore_state_1h", None)
+                            == "NATURAL_RETRACEMENT"
                             and mr_signal == 1
                             and _pending_retest_buy is not None
                             and _pending_retest_buy.retest_type == "NO_LEVEL_NEARBY"
@@ -3748,43 +4220,57 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                             )
 
                         # ── Combine and apply ──────────────────────────────────────
-                        _retest_buy_delta  = (
-                            0.0 if _is_mode1_spring_buy
-                            else (_pending_retest_buy.modifier  if _pending_retest_buy  is not None else 0.0)
+                        _retest_buy_delta = (
+                            0.0
+                            if _is_mode1_spring_buy
+                            else (
+                                _pending_retest_buy.modifier
+                                if _pending_retest_buy is not None
+                                else 0.0
+                            )
                         )
                         _retest_sell_delta = (
-                            _pending_retest_sell.modifier if _pending_retest_sell is not None else 0.0
+                            _pending_retest_sell.modifier
+                            if _pending_retest_sell is not None
+                            else 0.0
                         )
-                        _total_buy_delta  = _rsm_delta + _retest_buy_delta
+                        _total_buy_delta = _rsm_delta + _retest_buy_delta
                         _total_sell_delta = _rsm_delta + _retest_sell_delta
 
                         if _total_buy_delta != 0.0 or _total_sell_delta != 0.0:
-                            _base_buy  = self.config["buy_threshold"]
+                            _base_buy = self.config["buy_threshold"]
                             _base_sell = self.config["sell_threshold"]
-                            adj_buy_thresh  = min(
-                                _base_buy  + self._rsm_cap,
-                                adj_buy_thresh  + _total_buy_delta,
+                            adj_buy_thresh = min(
+                                _base_buy + self._rsm_cap,
+                                adj_buy_thresh + _total_buy_delta,
                             )
                             adj_sell_thresh = min(
                                 _base_sell + self._rsm_cap,
                                 adj_sell_thresh + _total_sell_delta,
                             )
-                            _buy_rt  = (
+                            _buy_rt = (
                                 _pending_retest_buy.retest_type
-                                if _pending_retest_buy  is not None else "N/A"
+                                if _pending_retest_buy is not None
+                                else "N/A"
                             )
                             _sell_rt = (
                                 _pending_retest_sell.retest_type
-                                if _pending_retest_sell is not None else "N/A"
+                                if _pending_retest_sell is not None
+                                else "N/A"
                             )
                             logger.info(
                                 "[RSM+RETEST] %s Livermore=%s rsm=%.2f | "
                                 "buy=%s(\u0394%.2f) sell=%s(\u0394%.2f) | "
                                 "buy_thresh=%.2f sell_thresh=%.2f",
-                                self.asset_type, _rsm_state, _rsm_delta,
-                                _buy_rt, _retest_buy_delta,
-                                _sell_rt, _retest_sell_delta,
-                                adj_buy_thresh, adj_sell_thresh,
+                                self.asset_type,
+                                _rsm_state,
+                                _rsm_delta,
+                                _buy_rt,
+                                _retest_buy_delta,
+                                _sell_rt,
+                                _retest_sell_delta,
+                                adj_buy_thresh,
+                                adj_sell_thresh,
                             )
                 except Exception as _rsm_err:
                     logger.debug("[RSM] modifier error (non-blocking): %s", _rsm_err)
@@ -3795,7 +4281,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 elif sell_score >= adj_sell_thresh and sell_score > buy_score:
                     final_signal = -1
 
-                reasoning = f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})" if final_signal == 1 else f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})" if final_signal == -1 else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
+                reasoning = (
+                    f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
+                    if final_signal == 1
+                    else (
+                        f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
+                        if final_signal == -1
+                        else f"hold (buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
+                    )
+                )
                 original_signal = final_signal
 
                 # Write entry_type to CompositeState for VTM routing (Phase 3B).
@@ -3805,15 +4299,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         if final_signal == 1 and _pending_retest_buy is not None:
                             state.entry_type = _pending_retest_buy.entry_type
                             state.range_high = _pending_retest_buy.range_high
-                            state.range_low  = _pending_retest_buy.range_low
+                            state.range_low = _pending_retest_buy.range_low
                         elif final_signal == -1 and _pending_retest_sell is not None:
                             state.entry_type = _pending_retest_sell.entry_type
                             state.range_high = _pending_retest_sell.range_high
-                            state.range_low  = _pending_retest_sell.range_low
+                            state.range_low = _pending_retest_sell.range_low
                         else:
                             state.entry_type = None
                             state.range_high = None
-                            state.range_low  = None
+                            state.range_low = None
                     except Exception:
                         pass
 
@@ -3826,32 +4320,42 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # BUY in BULLISH). Counter-trend setups are exempt — they
                 # intentionally trade against recent momentum.
                 if final_signal != 0:
-                    _cmr_trend_aligned = (
-                        (final_signal == -1 and not is_bull) or
-                        (final_signal ==  1 and is_bull)
+                    _cmr_trend_aligned = (final_signal == -1 and not is_bull) or (
+                        final_signal == 1 and is_bull
                     )
                     if _cmr_trend_aligned:
                         try:
-                            _cmr_cfg      = self.config.get("momentum_alignment", {})
-                            _cmr_enabled  = _cmr_cfg.get("enabled", True)
-                            _cmr_candles  = _cmr_cfg.get("candles", 3)
-                            _cmr_agree    = _cmr_cfg.get("min_agreement", 3)
+                            _cmr_cfg = self.config.get("momentum_alignment", {})
+                            _cmr_enabled = _cmr_cfg.get("enabled", True)
+                            _cmr_candles = _cmr_cfg.get("candles", 3)
+                            _cmr_agree = _cmr_cfg.get("min_agreement", 3)
 
                             if _cmr_enabled and len(df) >= _cmr_candles + 2:
-                                _cmr_recent = df.iloc[-(_cmr_candles + 1):-1]
-                                _cmr_opens  = _cmr_recent["open"].values
+                                _cmr_recent = df.iloc[-(_cmr_candles + 1) : -1]
+                                _cmr_opens = _cmr_recent["open"].values
                                 _cmr_closes = _cmr_recent["close"].values
-                                _cmr_bull   = int((_cmr_closes > _cmr_opens).sum())
-                                _cmr_bear   = int((_cmr_closes < _cmr_opens).sum())
+                                _cmr_bull = int((_cmr_closes > _cmr_opens).sum())
+                                _cmr_bear = int((_cmr_closes < _cmr_opens).sum())
 
                                 # Reuse _atr14 from flash-veto block above if present
                                 _cmr_atr = locals().get("_atr14", 0.0)
                                 if _cmr_atr <= 0:
                                     try:
                                         import numpy as _cnp
-                                        _hi = df["high"].values; _lo = df["low"].values; _cl = df["close"].values
-                                        _tr = _cnp.maximum(_hi[1:]-_lo[1:], _cnp.abs(_hi[1:]-_cl[:-1]), _cnp.abs(_lo[1:]-_cl[:-1]))
-                                        _cmr_atr = float(_cnp.nanmean(_tr[-14:])) if len(_tr) >= 14 else 0.0
+
+                                        _hi = df["high"].values
+                                        _lo = df["low"].values
+                                        _cl = df["close"].values
+                                        _tr = _cnp.maximum(
+                                            _hi[1:] - _lo[1:],
+                                            _cnp.abs(_hi[1:] - _cl[:-1]),
+                                            _cnp.abs(_lo[1:] - _cl[:-1]),
+                                        )
+                                        _cmr_atr = (
+                                            float(_cnp.nanmean(_tr[-14:]))
+                                            if len(_tr) >= 14
+                                            else 0.0
+                                        )
                                     except Exception:
                                         _cmr_atr = 0.0
 
@@ -3876,9 +4380,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                             "final_signal": 0,
                                             "original_signal": final_signal,
                                             "signal_quality": 0.0,
-                                            "mr_signal": mr_signal, "mr_confidence": mr_conf,
-                                            "tf_signal": tf_signal, "tf_confidence": tf_conf,
-                                            "ema_signal": ema_signal, "ema_confidence": ema_conf,
+                                            "mr_signal": mr_signal,
+                                            "mr_confidence": mr_conf,
+                                            "tf_signal": tf_signal,
+                                            "tf_confidence": tf_conf,
+                                            "ema_signal": ema_signal,
+                                            "ema_confidence": ema_conf,
                                             "cmr_reason": _cmr_reason,
                                         }
                                     elif final_signal == 1 and _cmr_bear >= _cmr_agree:
@@ -3898,35 +4405,83 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                                             "final_signal": 0,
                                             "original_signal": final_signal,
                                             "signal_quality": 0.0,
-                                            "mr_signal": mr_signal, "mr_confidence": mr_conf,
-                                            "tf_signal": tf_signal, "tf_confidence": tf_conf,
-                                            "ema_signal": ema_signal, "ema_confidence": ema_conf,
+                                            "mr_signal": mr_signal,
+                                            "mr_confidence": mr_conf,
+                                            "tf_signal": tf_signal,
+                                            "tf_confidence": tf_conf,
+                                            "ema_signal": ema_signal,
+                                            "ema_confidence": ema_conf,
                                             "cmr_reason": _cmr_reason,
                                         }
                         except Exception as _cmr_exc:
-                            logger.debug(f"[CMR] Check failed, allowing signal: {_cmr_exc}")
+                            logger.debug(
+                                f"[CMR] Check failed, allowing signal: {_cmr_exc}"
+                            )
                 # ── END CMR GATE ─────────────────────────────────────────────
 
                 # Fix F: removed hard cap at 0.7 — score can now reflect true 3-strategy consensus
                 raw_quality = max(buy_score, sell_score)
-                if buy_agreement < 2 and sell_agreement < 2: raw_quality *= 0.7
-                if (final_signal == 1 and is_bull) or (final_signal == -1 and not is_bull): raw_quality *= 1.15
+                if buy_agreement < 2 and sell_agreement < 2:
+                    raw_quality *= 0.7
+                if (final_signal == 1 and is_bull) or (
+                    final_signal == -1 and not is_bull
+                ):
+                    raw_quality *= 1.15
                 signal_quality = min(raw_quality, 1.0)
 
                 # Section 2.4B: Boost quality when transition evidence strongly agrees
-                if state and hasattr(state, '_transition_evidence') and state._transition_evidence:
+                if (
+                    state
+                    and hasattr(state, "_transition_evidence")
+                    and state._transition_evidence
+                ):
                     if state._transition_evidence.conditions_met >= 3:
                         _te_boost = abs(state._transition_evidence.total_score) * 0.15
                         _te_dir = state._transition_evidence.direction
-                        if (final_signal == 1 and _te_dir == "BULLISH_REVERSAL") or \
-                           (final_signal == -1 and _te_dir == "BEARISH_REVERSAL"):
-                            signal_quality = min(1.0, signal_quality * (1.0 + _te_boost))
+                        if (final_signal == 1 and _te_dir == "BULLISH_REVERSAL") or (
+                            final_signal == -1 and _te_dir == "BEARISH_REVERSAL"
+                        ):
+                            signal_quality = min(
+                                1.0, signal_quality * (1.0 + _te_boost)
+                            )
                             logger.debug(
                                 f"[QUALITY] Transition evidence boost: "
                                 f"×{1.0 + _te_boost:.3f} → {signal_quality:.2f}"
                             )
 
-                if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
+                # ── O3b: Liquidity and overextension quality gate ─────────────────
+                # Two orphaned signals that were computed but never fed into the
+                # quality pipeline that already has the flash-crash discount.
+                if state is not None and final_signal != 0:
+                    _spread_spike = bool(getattr(state, "spread_velocity_spike", False))
+                    _dist_z       = float(getattr(state, "distance_zscore", 0.0))
+
+                    # spread_velocity_spike = liquidity withdrawing fast.
+                    # Discount signal quality — entering into a spread spike risks
+                    # filling at a far worse price than the model expects.
+                    if _spread_spike:
+                        signal_quality = round(signal_quality * 0.80, 4)
+                        logger.debug(
+                            f"[QUALITY] {self.asset_type}: spread_velocity_spike — "
+                            f"quality discounted to {signal_quality:.3f}"
+                        )
+
+                    # distance_zscore > 2.5 = statistically overextended.
+                    # Reduces quality proportionally. Complements the existing
+                    # is_parabolic check (which is a harder threshold) with a
+                    # graduated quality reduction at lower Z-scores.
+                    if _dist_z > 2.5 and not bool(getattr(state, "is_parabolic", False)):
+                        _overext_discount = min(0.85, 1.0 - ((_dist_z - 2.5) * 0.06))
+                        signal_quality = round(signal_quality * _overext_discount, 4)
+                        logger.debug(
+                            f"[QUALITY] {self.asset_type}: distance_zscore={_dist_z:.2f} — "
+                            f"quality discounted to {signal_quality:.3f}"
+                        )
+
+                if (
+                    final_signal != 0
+                    and signal_quality < self.config["min_signal_quality"]
+                ):
                     final_signal = 0
                     reasoning = f"hold_lowquality (original:{reasoning}, quality:{signal_quality:.2f})"
 
@@ -3943,15 +4498,24 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
                     # TF: use post-gatekeeper signal (consistent with MR/EMA treatment).
                     # tf_original pre-bypass was causing asymmetric gatekeeper application.
-                    if tf_signal != 0 and tf_conf >= self.independent_thresholds["trend_following"]:
+                    if (
+                        tf_signal != 0
+                        and tf_conf >= self.independent_thresholds["trend_following"]
+                    ):
                         candidates.append(("TF", tf_signal, tf_conf))
 
                     # EMA: evaluated post-gatekeeper (gatekeeper treats EMA same as TF)
-                    if ema_signal != 0 and ema_conf >= self.independent_thresholds["ema"]:
+                    if (
+                        ema_signal != 0
+                        and ema_conf >= self.independent_thresholds["ema"]
+                    ):
                         candidates.append(("EMA", ema_signal, ema_conf))
 
                     # MR: use post-gatekeeper signal (Smart Gatekeeper already filtered it)
-                    if mr_signal != 0 and mr_conf >= self.independent_thresholds["mean_reversion"]:
+                    if (
+                        mr_signal != 0
+                        and mr_conf >= self.independent_thresholds["mean_reversion"]
+                    ):
                         candidates.append(("MR", mr_signal, mr_conf))
 
                     if candidates:
@@ -3959,7 +4523,9 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                         candidates.sort(key=lambda x: x[2], reverse=True)
                         best_name, best_signal, best_conf = candidates[0]
                         final_signal = best_signal
-                        signal_quality = best_conf * 0.85  # Solo signals get a small quality discount
+                        signal_quality = (
+                            best_conf * 0.85
+                        )  # Solo signals get a small quality discount
 
                         # Multi-strategy confirmation bonus: any agreeing strategy lifts quality
                         agreeing = [c for c in candidates if c[1] == best_signal]
@@ -3986,40 +4552,63 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 # valid signals in low-ATR trending regimes (e.g. GOLD steady grind moves).
                 # Fix C: ATR expansion filter replaced with ADX trend confirmation (see method).
                 if final_signal != 0 and self.enable_filters:
-                    gov_passed, trade_type = self._check_governor_filter(df, final_signal)
-                    if not gov_passed: final_signal = 0; reasoning = "blocked_by_governor"
+                    gov_passed, trade_type = self._check_governor_filter(
+                        df, final_signal
+                    )
+                    if not gov_passed:
+                        final_signal = 0
+                        reasoning = "blocked_by_governor"
                     else:
                         vol_passed, _ = self._check_volatility_filter(df)
-                        if not vol_passed: final_signal = 0; reasoning = "low_volatility"
+                        if not vol_passed:
+                            final_signal = 0
+                            reasoning = "low_volatility"
                         else:
                             # Sniper filter removed (Phase 0B) — CNN-LSTM disconnected.
                             # Filter chain: Governor → Volatility → ATR Expansion.
                             if final_signal != 0:
-                                atr_exp_passed = self._check_atr_expansion_filter(df, trade_type)
+                                atr_exp_passed = self._check_atr_expansion_filter(
+                                    df, trade_type
+                                )
                                 if not atr_exp_passed:
                                     # Same advisory logic for ADX filter
                                     if signal_quality >= self.strong_signal_bypass:
-                                        signal_quality *= 0.85   # −15% quality, still trades
+                                        signal_quality *= (
+                                            0.85  # −15% quality, still trades
+                                        )
                                         reasoning += "+adx_warning"
                                         logger.info(
                                             f"[ADX_TREND] ⚠️ Advisory downgrade "
                                             f"(quality={signal_quality:.2f})"
                                         )
                                     else:
-                                        final_signal = 0; reasoning = "insufficient_trend_strength"
+                                        final_signal = 0
+                                        reasoning = "insufficient_trend_strength"
                                 else:
                                     # Error 7: Profit Economics Monitor (non-blocking log)
                                     try:
                                         if final_signal != 0 and len(df) >= 14:
                                             import numpy as _pm_np
+
                                             _pm_tr = _pm_np.maximum(
-                                                df["high"].values[1:] - df["low"].values[1:],
-                                                _pm_np.abs(df["high"].values[1:] - df["close"].values[:-1]),
-                                                _pm_np.abs(df["low"].values[1:]  - df["close"].values[:-1]),
+                                                df["high"].values[1:]
+                                                - df["low"].values[1:],
+                                                _pm_np.abs(
+                                                    df["high"].values[1:]
+                                                    - df["close"].values[:-1]
+                                                ),
+                                                _pm_np.abs(
+                                                    df["low"].values[1:]
+                                                    - df["close"].values[:-1]
+                                                ),
                                             )
-                                            _pm_atr = float(_pm_np.nanmean(_pm_tr[-14:]))
+                                            _pm_atr = float(
+                                                _pm_np.nanmean(_pm_tr[-14:])
+                                            )
                                             if _pm_atr > 0:
-                                                _pm_rr = (2.5 * _pm_atr) / (1.5 * _pm_atr)
+                                                _pm_rr = (2.5 * _pm_atr) / (
+                                                    1.5 * _pm_atr
+                                                )
                                                 if _pm_rr < 1.5:
                                                     logger.warning(
                                                         f"[PROFIT] ⚠️ Low R:R {_pm_rr:.2f} — monitor only"
@@ -4038,46 +4627,73 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 try:
                     if final_signal != 0:
                         from src.utils.market_hours import MarketHours
+
                         _hour_utc_s = _dt.utcnow().hour
-                        
+
                         # 1. BTC (Binance) is 24/7 - only check for global liquidity lows
                         if "BTC" in self.asset_type:
                             session_quality = MarketHours.get_btc_session_quality()
                             if session_quality == "LOW":
                                 signal_quality *= 0.85
                                 reasoning += " [session:LOW_LIQ]"
-                                logger.info(f"[SESSION] ⚠️ BTC low liquidity: quality discounted")
+                                logger.info(
+                                    f"[SESSION] ⚠️ BTC low liquidity: quality discounted"
+                                )
 
                         # 2. MT5/Exness Assets - Apply Session Penalties
                         else:
                             is_off_session = False
                             asset = self.asset_type.upper()
 
-                            if any(x in asset for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")):
+                            if any(
+                                x in asset
+                                for x in (
+                                    "EUR",
+                                    "GBP",
+                                    "JPY",
+                                    "CHF",
+                                    "AUD",
+                                    "NZD",
+                                    "CAD",
+                                )
+                            ):
                                 if _hour_utc_s < 7 or _hour_utc_s >= 20:
                                     is_off_session = True
-                                    logger.info(f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC)")
+                                    logger.info(
+                                        f"[SESSION] ⚠️ FX off-session ({_hour_utc_s}:00 UTC)"
+                                    )
 
                             elif "GOLD" in asset or "XAU" in asset:
                                 if _hour_utc_s < 7 or _hour_utc_s >= 20:
                                     is_off_session = True
-                                    logger.info(f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC)")
+                                    logger.info(
+                                        f"[SESSION] ⚠️ GOLD off-session ({_hour_utc_s}:00 UTC)"
+                                    )
 
-                            elif any(x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
+                            elif any(
+                                x in asset
+                                for x in ("USTEC", "US100", "NAS", "US30", "SPX")
+                            ):
                                 if _hour_utc_s < 13 or _hour_utc_s >= 21:
                                     is_off_session = True
-                                    logger.info(f"[SESSION] ⚠️ INDEX off-session ({_hour_utc_s}:00 UTC)")
+                                    logger.info(
+                                        f"[SESSION] ⚠️ INDEX off-session ({_hour_utc_s}:00 UTC)"
+                                    )
 
                             elif "OIL" in asset:
                                 if _hour_utc_s < 13 or _hour_utc_s >= 19:
                                     is_off_session = True
-                                    logger.info(f"[SESSION] ⚠️ OIL off-session ({_hour_utc_s}:00 UTC)")
+                                    logger.info(
+                                        f"[SESSION] ⚠️ OIL off-session ({_hour_utc_s}:00 UTC)"
+                                    )
 
                             if is_off_session:
                                 # In Performance mode, we discount the final quality score
                                 signal_quality *= 0.80
                                 reasoning += " [session:OFF]"
-                                logger.info(f"[SESSION] Off-session discount applied to {asset}")
+                                logger.info(
+                                    f"[SESSION] Off-session discount applied to {asset}"
+                                )
 
                 except Exception as e:
                     logger.warning(f"[SESSION] Gate calculation failed: {e}")
@@ -4087,25 +4703,23 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             if state is not None:
                 try:
                     _mr_details = {}
-                    if hasattr(self.s_mean_reversion, '_last_divergence_info'):
+                    if hasattr(self.s_mean_reversion, "_last_divergence_info"):
                         _mr_details = self.s_mean_reversion._last_divergence_info or {}
                     if _mr_details.get("divergence_detected"):
                         state.divergence_detected = True
-                        state.divergence_strength = float(_mr_details.get("divergence_strength", 0.5))
+                        state.divergence_strength = float(
+                            _mr_details.get("divergence_strength", 0.5)
+                        )
                     if state.is_parabolic and state.divergence_detected:
                         state.reversal_imminent = True
                 except Exception:
                     pass
 
-                # H.1: Sniper composite state population removed (Phase 0B).
-                # CNN-LSTM sniper disconnected from scoring pipeline.
-                # ai_pattern_name / ai_pattern_confidence / ai_reversal_probability
-                # remain in CompositeState as reserved fields for future use.
-
                 # Section I: Confluence Engine — adjust tf_conf and mr_conf
                 try:
                     tf_conf, mr_conf, state = self._score_confluence(
-                        state, tf_conf, mr_conf, signal=final_signal)
+                        state, tf_conf, mr_conf, signal=final_signal
+                    )
                 except Exception as _ce:
                     logger.debug(f"[CONFLUENCE] Scoring failed: {_ce}")
 
@@ -4116,12 +4730,16 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             bonus_tags = []
             if div_res and div_res.type != "NONE":
                 # Only add if aligned with signal
-                if (final_signal == 1 and "BULLISH" in div_res.type) or (final_signal == -1 and "BEARISH" in div_res.type):
+                if (final_signal == 1 and "BULLISH" in div_res.type) or (
+                    final_signal == -1 and "BEARISH" in div_res.type
+                ):
                     tag = div_res.explanation.split(":")[-1].split("(")[0].strip()
                     bonus_tags.append(f"✨ {tag}")
-            
+
             if br_res and br_res.is_valid:
-                if (final_signal == 1 and br_res.type == "BULLISH_RETEST") or (final_signal == -1 and br_res.type == "BEARISH_RETEST"):
+                if (final_signal == 1 and br_res.type == "BULLISH_RETEST") or (
+                    final_signal == -1 and br_res.type == "BEARISH_RETEST"
+                ):
                     bonus_tags.append(f"🚀 {br_res.type.replace('_', ' ').title()}")
 
             if bonus_tags:
@@ -4143,10 +4761,11 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             _atr_fast_for_sl = None
             try:
                 import talib as _ta_atr
+
                 _atr_result = _ta_atr.ATR(
-                    df['high'].values.astype(float),
-                    df['low'].values.astype(float),
-                    df['close'].values.astype(float),
+                    df["high"].values.astype(float),
+                    df["low"].values.astype(float),
+                    df["close"].values.astype(float),
                     timeperiod=14,
                 )
                 _last = float(_atr_result[-1])
@@ -4160,12 +4779,18 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             _lsm_1h_for_details = None
             _lsm_4h_for_details = None
             try:
-                _cs_for_details = governor_data.get("composite_state") if governor_data else None
+                _cs_for_details = (
+                    governor_data.get("composite_state") if governor_data else None
+                )
                 if _cs_for_details is None:
                     _cs_for_details = getattr(self, "_cached_composite", None)
                 if _cs_for_details is not None:
-                    _lsm_1h_for_details = getattr(_cs_for_details, "livermore_state_1h", None)
-                    _lsm_4h_for_details = getattr(_cs_for_details, "livermore_state_4h", None)
+                    _lsm_1h_for_details = getattr(
+                        _cs_for_details, "livermore_state_1h", None
+                    )
+                    _lsm_4h_for_details = getattr(
+                        _cs_for_details, "livermore_state_4h", None
+                    )
             except Exception:
                 pass
 
@@ -4186,15 +4811,12 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "ema_signal": ema_signal,
                 "ema_confidence": ema_conf,
                 "atr_fast": _atr_fast_for_sl,
-                "governor_data": governor_data, # Pass governor data through
+                "governor_data": governor_data,  # Pass governor data through
                 "ai_validation": ai_validation_details,
                 "trade_type": trade_type,
                 "livermore_state_1h": _lsm_1h_for_details,  # for main.py Livermore block
                 "livermore_state_4h": _lsm_4h_for_details,
-                "viz_overlay": {
-                    "divergence": div_res,
-                    "break_retest": br_res
-                }
+                "viz_overlay": {"divergence": div_res, "break_retest": br_res},
             }
 
             # STEP 8 (item 18c): Real AI validation, flag-gated OFF by default.
@@ -4210,11 +4832,13 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             )
             if self.ai_validator and final_signal != 0 and _ai_gates_perf_mode:
                 try:
-                    _validated_signal, ai_validation_details = self.ai_validator.validate_signal(
-                        signal=final_signal,
-                        signal_details=details,
-                        df=df,
-                        composite_state=state,
+                    _validated_signal, ai_validation_details = (
+                        self.ai_validator.validate_signal(
+                            signal=final_signal,
+                            signal_details=details,
+                            df=df,
+                            composite_state=state,
+                        )
                     )
                     if _validated_signal != final_signal:
                         logger.warning(
@@ -4238,9 +4862,7 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 try:
                     # Pass copies to avoid accidental modification
                     ai_validation_details = self._format_ai_validation_for_viz(
-                        final_signal=final_signal,
-                        details={**details},
-                        df=df
+                        final_signal=final_signal, details={**details}, df=df
                     )
                 except Exception as e:
                     logger.error(f"[AGGREGATOR] AI formatting failed: {e}")
@@ -4251,22 +4873,31 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             # "approved"/"bypassed*" → AI allowed the signal through.
             # "rejected" → AI blocked it.
             # "skipped*"/"none"/"ai_disabled"/"hold" → AI was not in the loop.
-            _ai_action = ai_validation_details.get("action", "") if isinstance(ai_validation_details, dict) else ""
-            _ai_validated = _ai_action == "approved" or _ai_action.startswith("bypassed")
+            _ai_action = (
+                ai_validation_details.get("action", "")
+                if isinstance(ai_validation_details, dict)
+                else ""
+            )
+            _ai_validated = _ai_action == "approved" or _ai_action.startswith(
+                "bypassed"
+            )
 
-            details.update({
-                "ai_validation": ai_validation_details,
-                "ai_validated": _ai_validated,
-                "mr_signal_raw": mr_original,  # Ensure originals are present
-                "tf_signal_raw": tf_original,
-                # Composite state — used by VTM pattern-aware exits and shadow trader
-                "institutional_pattern": state.institutional_pattern if state else None,
-                "friday_tighten": state.friday_tighten if state else False,
-                "composite_state": state.to_dict() if state else {},
-            })
+            details.update(
+                {
+                    "ai_validation": ai_validation_details,
+                    "ai_validated": _ai_validated,
+                    "mr_signal_raw": mr_original,  # Ensure originals are present
+                    "tf_signal_raw": tf_original,
+                    # Composite state — used by VTM pattern-aware exits and shadow trader
+                    "institutional_pattern": (
+                        state.institutional_pattern if state else None
+                    ),
+                    "friday_tighten": state.friday_tighten if state else False,
+                    "composite_state": state.to_dict() if state else {},
+                }
+            )
 
             return final_signal, details
-        
 
         except Exception as e:
             logger.error(f"Error in aggregation: {e}", exc_info=True)
