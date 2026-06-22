@@ -225,14 +225,13 @@ class VeteranTradeManager:
                 atr_fast = entry_price * 0.01
 
             # ATR-based adaptive cap (Replacing static max_stop_pct)
-            max_stop_atr_mult = risk_config.get("max_stop_atr_mult", 5.0) if risk_config else 5.0
-            max_stop_dist = atr_fast * max_stop_atr_mult
-            min_rr = risk_config.get("min_rr", 1.5) if risk_config else 1.5
+            max_stop_dist = atr_fast * 5.0
+            min_rr = 1.5
 
             stop_distance = abs(entry_price - stop_loss)
 
             if stop_distance > max_stop_dist:
-                return False, f"Stop too wide: ${stop_distance:,.2f} > {max_stop_atr_mult}x ATR (${max_stop_dist:,.2f})"
+                return False, f"Stop too wide: ${stop_distance:,.2f} > 5.0 * ATR (${max_stop_dist:,.2f})"
 
             risk_multiples = risk_config.get("partial_targets", [1.0, 1.8, 3.0])
             partial_sizes  = risk_config.get("partial_sizes",   [0.45, 0.30, 0.25])
@@ -469,21 +468,6 @@ class VeteranTradeManager:
         # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
         #             RANGE_BOUNDARY / CONTINUATION / REJECT / None (no classification)
         self.vtm_entry_type             = _cs.get("entry_type")
-
-        # 7.4: Populate _mfe_target_r from real trade history once enough
-        # exists. Stays None (safely skipped by _blend_single_tp, see the
-        # getattr fallback at its call site) until then. NOTE: this is inert
-        # until something populates signal_details["db_manager_ref"] — no
-        # call site does that yet (Position has no db_manager reference of
-        # its own; only PortfolioManager does). Wiring that through is the
-        # deferred "Fix L1" work, intentionally not done here.
-        self._mfe_target_r = None
-        _db = self.signal_details.get("db_manager_ref")
-        if _db is not None:
-            try:
-                self._mfe_target_r = _db.get_historical_mfe_r(self.asset, min_samples=30)
-            except Exception:
-                pass
         # Target-ladder box (Phase 4 ext, gated by phase_config.continuation_targets_enabled).
         # Populated only for RANGE_BOUNDARY/SPRING_ENTRY — None otherwise.
         self.vtm_range_high             = _cs.get("range_high")
@@ -626,63 +610,14 @@ class VeteranTradeManager:
 
     def _can_add_position(self) -> bool:
         """True only when pyramiding is enabled AND half the current position is still
-        a legal lot AND (if the Livermore maturity gate is enabled) the live 4H
-        Livermore state isn't in a late/exhaustion-prone phase. All conditions must
-        hold — the flag alone is not enough.
-
-        L11: phase_config.pyramid_livermore_maturity_gate_enabled defaults to True
-        (unlike most new phase_config flags in this project, which default False).
-        Reason: pyramiding itself is already live (phase_config.pyramiding_enabled
-        =true in the running config) — this gate only *tightens* an already-active
-        behavior by blocking the worst-timed adds; it never loosens anything, so
-        there is no new risk to gate OFF by default. It can still be set false
-        independently if it misbehaves.
-        """
+        a legal lot. Both conditions must hold — the flag alone is not enough."""
         if not getattr(self, "pyramiding_enabled", False):
             return False
         try:
             precision, min_lot = self._lot_geom()
-            if round(self.position_size * 0.5, precision) < min_lot - 1e-9:
-                return False
+            return round(self.position_size * 0.5, precision) >= min_lot - 1e-9
         except Exception:
             return False
-
-        try:
-            _phase_cfg = self.risk_config.get("phase_config", {}) or {}
-            if not _phase_cfg.get("pyramid_livermore_maturity_gate_enabled", True):
-                return True
-
-            lv_state = getattr(self, "livermore_state_4h", None)
-            if not lv_state:
-                # No live Livermore read available yet (per_tick_livermore_enabled
-                # off, or composite_state never supplied at entry) — fail open so
-                # this new gate can't silently disable pyramiding everywhere.
-                return True
-
-            # Block adds during the late/violent corrective phases — this is the
-            # single riskiest moment to be scaling exposure into a trend.
-            if lv_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
-                logger.info(
-                    f"[VTM] 🚫 Pyramid maturity gate: blocked — Livermore state "
-                    f"{lv_state} is a late-cycle corrective phase."
-                )
-                return False
-
-            # Block adds into a trend that's already very old — most of the
-            # statistically expected move is likely behind it by this point.
-            max_age = _phase_cfg.get("pyramid_max_state_age_4h", 20)
-            age = int(getattr(self, "livermore_state_age_4h", 0) or 0)
-            if age > max_age:
-                logger.info(
-                    f"[VTM] 🚫 Pyramid maturity gate: blocked — Livermore state "
-                    f"{lv_state} age={age} bars exceeds max {max_age}."
-                )
-                return False
-
-            return True
-        except Exception as e:
-            logger.debug(f"[VTM] L11 pyramid maturity gate error, failing open: {e}")
-            return True
 
     @property
     def profit_locked(self) -> bool:
@@ -1262,54 +1197,6 @@ class VeteranTradeManager:
                         current_price=current_price,
                         atr=atr,
                     )
-
-            # ── L4: VTM structural exit awareness ──────────────────────────────
-            # CHoCH/BOS detection is finer-grained and faster than a discrete
-            # livermore_state_4h transition (which only updates on a 4H close).
-            # When a structural break shows up against the position's direction,
-            # lock in a one-time protective tighten — same mechanism as the
-            # MAIN→SECONDARY case above, but triggered by the structural-break
-            # flags directly instead of waiting for the state machine to catch up.
-            # _structural_warning_fired ensures this fires once per trade, not
-            # every tick the flags happen to still read true.
-            if (
-                composite_state is not None
-                and atr > 0
-                and self.risk_config.get("phase_config", {}).get(
-                    "vtm_structural_exit_awareness_enabled", False
-                )
-                and not getattr(self, "_structural_warning_fired", False)
-            ):
-                _choch = bool(getattr(composite_state, "choch_detected", False))
-                _bos = bool(getattr(composite_state, "bos_detected", False))
-                _sweep_dir = getattr(composite_state, "sweep_direction", 0) or 0
-                if _choch or _bos:
-                    is_long = self.side == "long"
-                    # against_position: sweep_direction < 0 means a bearish
-                    # break/sweep — adverse for a long, favorable for a short.
-                    _against_position = (
-                        (is_long and _sweep_dir < 0) or
-                        (not is_long and _sweep_dir > 0)
-                    )
-                    if _against_position:
-                        self._structural_warning_fired = True
-                        _in_profit = (
-                            (is_long and current_price > self.entry_price) or
-                            (not is_long and current_price < self.entry_price)
-                        )
-                        if _in_profit and not getattr(self, "_lv_breakeven_locked", False):
-                            self.current_stop_loss = self.entry_price
-                            self._lv_breakeven_locked = True
-                        self.runner_trail_atr_multiplier *= 0.5
-                        logger.warning(
-                            "[VTM STRUCTURAL] %s: %s detected against %s position — "
-                            "trail tightened to %.2f× ATR%s",
-                            self.asset,
-                            "CHoCH" if _choch else "BOS",
-                            self.side,
-                            self.runner_trail_atr_multiplier,
-                            " + SL locked to breakeven" if getattr(self, "_lv_breakeven_locked", False) else "",
-                        )
 
             if self.side == "long":
                 # Guard: highest_price_reached may be None if entry_price was None at construction
@@ -2076,26 +1963,20 @@ class VeteranTradeManager:
         if self.trade_type == "TREND" and not self.has_pyramided:
             if current_profit >= (1.0 * atr_value) and adx_value > 25:
                 if not self._can_add_position():
-                    # L11 fix: this branch previously only controlled which log
-                    # line printed — the pyramid block below ran unconditionally
-                    # regardless of _can_add_position()'s result. Now it actually
-                    # gates the action, so the lot-size check and the new
-                    # Livermore maturity gate inside _can_add_position() are
-                    # finally binding instead of cosmetic.
                     logger.debug(f"[VTM] Pyramiding suppressed — pyramiding_enabled={self.pyramiding_enabled} "
-                                 f"or position too small to add legal lot, or Livermore maturity gate blocked it.")
+                                 f"or position too small to add legal lot.")
                 else:
                     logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
-                    # Move SL of position 1 to entry before adding exposure
-                    self.current_stop_loss = self.entry_price
-                    self.has_pyramided = True
-                    return {
-                        "action": "pyramid",
-                        "asset": self.asset,
-                        "side": self.side,
-                        "new_size": self.position_size * 0.5,
-                        "reason": "Trend Pyramiding Triggered"
-                    }
+                # Move SL of position 1 to entry before adding exposure
+                self.current_stop_loss = self.entry_price
+                self.has_pyramided = True
+                return {
+                    "action": "pyramid",
+                    "asset": self.asset,
+                    "side": self.side,
+                    "new_size": self.position_size * 0.5,
+                    "reason": "Trend Pyramiding Triggered"
+                }
 
         # --- STEP 5: Trade State Mutation ---
         # Objective: Allow profitable Mean Reversion trades to convert into trend trades.

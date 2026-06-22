@@ -190,9 +190,6 @@ class MeanReversionStrategy(BaseStrategy):
         df["ema_50"]  = ta.EMA(close, timeperiod=50)
         df["ema_200"] = ta.EMA(close, timeperiod=200)
 
-        # L6: Livermore state one-hot ML features (flag-gated, see base_strategy.py)
-        df = self._add_livermore_features(df, timeframe="1H")
-
         return df
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1118,3 +1115,4 @@ class MeanReversionStrategy(BaseStrategy):
         logger.info(f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)")
         logger.info(f"  BUY:  {signal_count['buy']:>5}  ({signal_count['buy']/total*100:>5.2f}%)")
         return labels
+                                                                                                                                                                                                              

@@ -579,5 +579,50 @@
       "_comment": "Phase 4 ext: range top/bottom lookback for the RANGE_BOUNDARY/SPRING_ENTRY target ladder (midpoint/top/measured-move). Gated by phase_config.continuation_targets_enabled (default OFF).",
       "lookback_bars": 30
     }
+  },
+  "AI_VALIDATOR": {
+    "_bucket_a_data_backed": "Values below have real justification — see inline notes. Do not change without re-running the same analysis.",
+    "session_multipliers": {
+      "_data": "T2.7 simulation: TF Asian 00-08 UTC 62%WR/+114%P&L -> lower bar. MR London 08-12 UTC 48%WR/-6.5%P&L -> raise bar. MR NY-close 17-21 UTC 67%WR/+19.7%P&L -> lower bar.",
+      "asian_hour_start": 0, "asian_hour_end": 8, "asian_mult": 0.85,
+      "london_hour_start": 8, "london_hour_end": 12, "london_mult": 1.20,
+      "ny_close_hour_start": 17, "ny_close_hour_end": 21, "ny_close_mult": 0.85
+    },
+    "sr_ema_fallback_distance_atr_mult": 0.5,
+    "sr_ema_fallback_distance_note": "Widened from 0.25x after observed chain rejections in practice.",
+    "pattern_penetration": {"_data": "TA-Lib standard candlestick recognition parameters.", "penetration_1": 0.3, "penetration_2": 0.3, "penetration_3": 0.5},
+
+    "_bucket_b_convention_backed": "Common technical-analysis convention, not yet tested against our own trade history.",
+    "flash_crash_atr_mult": 4.0,
+    "flash_crash_ema_span": 20,
+    "atr_period": 14,
+    "volume_confirmation_mult": 2.0,
+
+    "_bucket_c_needs_real_calibration": "No stated rationale anywhere in the original code. Kept at current live values to avoid blind re-tuning. Logging added below so these get replaced with real numbers once enough trade outcomes accumulate.",
+    "soft_pass_penalty_sr_only": 0.05,
+    "soft_pass_penalty_pattern_only": 0.05,
+    "soft_pass_penalty_uncertain_sr": 0.05,
+    "soft_pass_penalty_momentum_partial": 0.04,
+    "third_path_penalty": 0.08,
+    "third_path_min_signal_quality": 0.65,
+    "circuit_breaker_threshold": 0.70,
+    "strategy_mult_default": 1.0,
+    "strategy_mult_mr": 1.5,
+    "strategy_mult_tf": 1.2,
+    "volatility_mult_low": 1.3,
+    "volatility_mult_normal": 1.15,
+    "volatility_mult_high": 0.9,
+    "sr_threshold_floor": 0.015,
+    "sr_threshold_ceiling": 0.060,
+    "regime_mult_aligned": 0.90,
+    "regime_mult_counter": 0.95,
+    "pattern_threshold_floor": 0.40,
+    "pattern_threshold_ceiling": 0.75,
+    "sr_cache_refresh_seconds": 3600,
+    "pattern_strength_magnitude_cutoff": 200,
+    "pattern_strength_high_confidence": 0.85,
+    "pattern_strength_low_confidence": 0.70,
+    "volume_boost_discount_floor": 0.45,
+    "volume_boost_discount_amount": 0.20
   }
 }

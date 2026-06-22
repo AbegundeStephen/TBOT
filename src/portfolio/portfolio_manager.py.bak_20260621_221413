@@ -1855,10 +1855,9 @@ class PortfolioManager:
         
         # ✅ SMALL ACCOUNT PROTOCOL: Increase allowed exposure for very small accounts
         # to prevent single positions from locking out the entire bot.
-        _small_acct_threshold = self.portfolio_config.get("small_account_threshold_usd", 200)
-        _small_acct_max_exposure = self.portfolio_config.get("small_account_max_exposure_pct", 10.0)
-        if self.current_capital < _small_acct_threshold:
-            max_exposure_pct = max(max_exposure_pct, _small_acct_max_exposure)
+        if self.current_capital < 200:
+            # Allow up to 10x leverage equivalent for small accounts
+            max_exposure_pct = max(max_exposure_pct, 10.0)
             
         max_exposure_usd = self.current_capital * max_exposure_pct
         
@@ -2126,10 +2125,6 @@ class PortfolioManager:
         # Check current open positions for this asset against the cap.
         current_total = self.get_asset_position_count(asset)
 
-        _max_total = self.portfolio_config.get("max_total_open_positions", 10)
-        if len(self.positions) >= _max_total:
-            return False, f"Portfolio-wide position cap reached ({len(self.positions)}/{_max_total})"
-
         if current_total >= self.max_positions_per_asset:
             logger.info(f"[PORTFOLIO] Max positions reached for {asset}: {current_total}")
             return False, f"Max positions reached for {asset}"
@@ -2303,9 +2298,6 @@ class PortfolioManager:
                 quality = signal_details.get("signal_quality", 0.0) if signal_details else 0.0
                 confidence = signal_details.get("mode_confidence", 0.0) if signal_details else 0.0
 
-                # L1: surface Livermore state as top-level DB columns (was
-                # only ever reachable inside unindexed metadata JSON before).
-                _cs_for_db = (signal_details or {}).get("composite_state", {}) or {}
                 trade_id, is_new = self.db_manager.insert_trade_entry(
                     asset=asset,
                     symbol=symbol,
@@ -2324,10 +2316,6 @@ class PortfolioManager:
                     mt5_ticket=mt5_ticket,
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
-                    livermore_state_4h=_cs_for_db.get("livermore_state_4h"),
-                    livermore_state_1h=_cs_for_db.get("livermore_state_1h"),
-                    livermore_state_age_4h=_cs_for_db.get("livermore_state_age_4h"),
-                    livermore_state_age_1h=_cs_for_db.get("livermore_state_age_1h"),
                     metadata={
                         "trailing_stop_pct": trailing_stop_pct,
                         "entry_time": position.entry_time.isoformat(),
@@ -2338,15 +2326,11 @@ class PortfolioManager:
                             if signal_details
                             else "manual"
                         ),
-                        "entry_type": _cs_for_db.get("entry_type"),
-                        "livermore_telemetry": (signal_details or {}).get("livermore_telemetry"),
                     },
                 )
 
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
-                if signal_details is not None:
-                    signal_details["db_manager_ref"] = self.db_manager
 
                 if is_new:
                     logger.debug(f"[DB] New trade created: {trade_id}")
@@ -3108,11 +3092,6 @@ class PortfolioManager:
                         _exit_meta["mae_r"] = round(_mae_r, 3)
                     except Exception as _mfe_e:
                         logger.debug(f"[DB] MFE/MAE metadata calc skipped: {_mfe_e}")
-                    # entry_type: lets get_historical_mfe_r (and any future
-                    # analysis) segment realized MFE-R by VTM entry classification
-                    # (MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY / etc.) instead
-                    # of pooling every entry style into one asset-wide median.
-                    _exit_meta["entry_type"] = getattr(_vtm, "vtm_entry_type", None)
 
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,

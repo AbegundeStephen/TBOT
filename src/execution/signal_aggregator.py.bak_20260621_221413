@@ -389,13 +389,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 "USOIL": "USOIL", "USOILM": "USOIL",
             }
             _lp_key = _alias_map.get(self.asset_type.upper(), self.asset_type)
-            if _lp_key not in _lp:
-                logger.warning(
-                    "[LSM CALIBRATION] %s has no entry in LIVERMORE_PIVOTS — "
-                    "falling back to BTC's calibration, which is tuned much "
-                    "tighter than most other assets need.",
-                    _lp_key,
-                )
             _lp_cfg = _lp.get(_lp_key, _lp.get("BTC", {}))
             from src.execution.livermore_state_machine import make_livermore_pair
             self._livermore_4h, self._livermore_1h = make_livermore_pair(
@@ -1099,22 +1092,17 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
 
         # ── PHASE 4: ema200_1d_dist_atr ──────────────────────────────────────
         # Distance from current close to the 200-period EMA on the daily
-        # timeframe, normalised by the 1H ATR.
-        # Item 19a: was resampling the 1H dataframe to daily bars itself (only
-        # ~50 synthetic daily candles from a typical 1H feed — a much noisier
-        # EMA200 than the real daily series the Constitution Gate already
-        # computes). Now reads the real 1D-feed EMA200 the governor produced
-        # (governor_data["ema_1d_200"], wired from GovernorStatus.ema_200 in
-        # mtf_regime_detector.py), falling back to skip (leaving
-        # ema200_1d_dist_atr at its default) if governor_data has no 1D read
-        # yet — e.g. very first cycle before MTF regime has run once.
+        # timeframe, normalised by the 1H ATR.  Computed by resampling the 1H
+        # dataframe to daily so no separate daily feed is required.
         # Used by MR Mode 1 to apply a −0.10 confidence penalty when BTC is
         # within 1 ATR of the daily EMA200 (historically a high-failure zone).
         try:
-            _ema200_1d = governor_data.get("ema_1d_200") if governor_data else None
-            if _ema200_1d and df is not None and len(df) > 0 and _atr > 0:
-                _dist_1d = abs(float(df['close'].iloc[-1]) - float(_ema200_1d))
-                state.ema200_1d_dist_atr = _dist_1d / _atr
+            if df is not None and len(df) >= 200 and _atr > 0:
+                _df_daily = df['close'].resample('1D').last().dropna()
+                if len(_df_daily) >= 50:
+                    _ema200_1d = _df_daily.ewm(span=200, adjust=False).mean().iloc[-1]
+                    _dist_1d   = abs(float(df['close'].iloc[-1]) - float(_ema200_1d))
+                    state.ema200_1d_dist_atr = _dist_1d / _atr
         except Exception as _ema200_err:
             logger.debug("[ema200_1d_dist_atr] compute error: %s", _ema200_err)
         # ─────────────────────────────────────────────────────────────────────
@@ -2189,14 +2177,14 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 viz_data["rejection_reasons"] = reasons
 
             elif final_signal != 0:
-                # Item 18c: removed dead "ai_bypassed"/quality-guess branch — that
-                # flag was never set anywhere in the codebase, and the quality-vs-
-                # strong_signal_bypass check below it was guessing a dashboard label
-                # without reflecting whether the real validator (now wired in STEP 8,
-                # flag-gated) actually ran. "approved" is the correct label whenever
-                # this cosmetic formatter sees a non-zero signal.
                 viz_data["validation_passed"] = True
-                viz_data["action"] = "approved"
+
+                if details.get("ai_bypassed", False):
+                    viz_data["action"] = "bypassed"
+                elif details.get("signal_quality", 0) >= self.strong_signal_bypass:
+                    viz_data["action"] = "bypassed_strong_signal"
+                else:
+                    viz_data["action"] = "approved"
             else:
                 viz_data["action"] = "hold"
 
@@ -3009,22 +2997,15 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                     try:
                         _evt_time = _dt.fromisoformat(_evt["datetime"].replace("Z", "+00:00"))
                         _hours_before = _evt.get("block_hours_before", 2)
-                        _hours_after = _evt.get("block_hours_after", 0)
                         _block_start = _evt_time - _td(hours=_hours_before)
-                        _block_end = _evt_time + _td(hours=_hours_after)
-                        if _block_start <= _utc_now < _block_end:
-                            _affected = _evt.get("currencies", _evt.get("currency"))
-                            if isinstance(_affected, str):
-                                _affected = [_affected]
-                            _affected = _affected or []
+                        if _block_start <= _utc_now < _evt_time:
+                            _affected = _evt.get("currencies", [])
                             _blocked = (
                                 (_asset in ("BTC", "BTCUSDT") and "USD" in _affected) or
                                 (_asset in ("GOLD", "XAUUSD") and "USD" in _affected) or
                                 (_asset == "EURUSD" and ("EUR" in _affected or "USD" in _affected)) or
                                 (_asset == "EURJPY" and ("EUR" in _affected or "JPY" in _affected)) or
                                 (_asset in ("USTEC", "US100", "NAS100") and "USD" in _affected) or
-                                (_asset == "GBPAUD" and ("GBP" in _affected or "AUD" in _affected)) or
-                                (_asset in ("USOIL", "USOILM") and ("USD" in _affected or "OIL" in _affected)) or
                                 (not _affected)  # fallback: block all if no currencies listed
                             )
                             if _blocked:
@@ -3089,10 +3070,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             logger.debug(f"[MR INPUT] {self.asset_type}: df_4h={'present, ' + str(len(df_4h)) + ' bars' if df_4h is not None else 'MISSING'}")
             
             mr_signal, mr_conf = self.s_mean_reversion.generate_signal(df, df_4h=df_4h, composite_state=state)
-            # L10: pass composite_state through so TF/EMA's Livermore awareness
-            # nudge (flag-gated, see base_strategy.py) can see live LSM state.
-            tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h, composite_state=state)
-            ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h, composite_state=state)
+            tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h)
+            ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h)
 
             # Store originals for logging
             mr_original = mr_signal
@@ -3296,39 +3275,6 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
             regime_score = governor_data.get("regime_score", 0.0) if governor_data else 0.0
             regime_is_bullish = governor_data.get("is_bullish", False) if governor_data else False
             regime_is_bearish = governor_data.get("is_bearish", False) if governor_data else False
-
-            # ── Item 19b: 4H Livermore / macro-regime disagreement gate ──────
-            # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
-            # default False — same switch used in council_aggregator.py and
-            # main.py for this item). When enabled and the live 4H Livermore
-            # state's lean disagrees with the EMA-derived macro regime lean,
-            # strip that lean's directional gating power here so the
-            # gatekeeper below falls back through to its NEUTRAL branch
-            # instead of hard-blocking/penalising counter-trend signals on a
-            # regime label the structural state machine actively contradicts.
-            _lsm_gate_enabled = bool(getattr(self, "phase_config", {}).get(
-                "lsm_regime_disagreement_gate_enabled", False
-            ))
-            if _lsm_gate_enabled:
-                _lsm_4h_for_regime = getattr(state, "livermore_state_4h", None) if state is not None else None
-                _lsm_lean_sa = (
-                    "bullish" if _lsm_4h_for_regime in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-                    else "bearish" if _lsm_4h_for_regime in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
-                    else None
-                )
-                if _lsm_lean_sa is not None:
-                    if regime_is_bullish and _lsm_lean_sa != "bullish":
-                        logger.info(
-                            f"[GATEKEEPER] {self.asset_type} 4H Livermore lean ({_lsm_lean_sa}) "
-                            f"disagrees with bullish regime — stripping bullish lean (lsm_regime_disagreement_gate_enabled)"
-                        )
-                        regime_is_bullish = False
-                    if regime_is_bearish and _lsm_lean_sa != "bearish":
-                        logger.info(
-                            f"[GATEKEEPER] {self.asset_type} 4H Livermore lean ({_lsm_lean_sa}) "
-                            f"disagrees with bearish regime — stripping bearish lean (lsm_regime_disagreement_gate_enabled)"
-                        )
-                        regime_is_bearish = False
 
             # ═══════════════════════════════════════════════════════════════
             # ENHANCED GATEKEEPER — Confidence Scaling + Transition Evidence
@@ -4197,44 +4143,8 @@ Adds Governor + Volatility + Sniper checks to existing aggregator
                 }
             }
 
-            # STEP 8 (item 18c): Real AI validation, flag-gated OFF by default.
-            # Performance-weighted mode previously NEVER called the real
-            # validate_signal() — only the cosmetic _format_ai_validation_for_viz
-            # formatter ran (council_aggregator.py is the only live caller of the
-            # real validator today). phase_config.ai_validator_gates_performance_mode
-            # defaults to False, which preserves that exact pre-existing behavior;
-            # flip to True only after a backtest/paper-soak watch window, per
-            # standing flag-gated rollout policy.
-            _ai_gates_perf_mode = getattr(self, "phase_config", {}).get(
-                "ai_validator_gates_performance_mode", False
-            )
-            if self.ai_validator and final_signal != 0 and _ai_gates_perf_mode:
-                try:
-                    _validated_signal, ai_validation_details = self.ai_validator.validate_signal(
-                        signal=final_signal,
-                        signal_details=details,
-                        df=df,
-                        composite_state=state,
-                    )
-                    if _validated_signal != final_signal:
-                        logger.warning(
-                            f"[AI VALIDATOR] {self.asset_type} signal overruled: "
-                            f"{final_signal} -> {_validated_signal} "
-                            f"({ai_validation_details.get('action', 'rejected')})"
-                        )
-                        final_signal = _validated_signal
-                        signal = _validated_signal
-                        details["ai_modified"] = True
-                        details["final_signal"] = final_signal
-                        details["reasoning"] = (
-                            f"ai_validator_rejected ({ai_validation_details.get('action', 'unknown')})"
-                        )
-                except Exception as e:
-                    logger.error(f"[AGGREGATOR] AI validation failed: {e}")
-                    ai_validation_details = {}
-            elif self.ai_validator:
-                # Flag off (default) or final_signal already 0 — unchanged
-                # cosmetic-only formatting, exactly as before item 18c.
+            # STEP 8: Format AI validation for visualization
+            if self.ai_validator:
                 try:
                     # Pass copies to avoid accidental modification
                     ai_validation_details = self._format_ai_validation_for_viz(

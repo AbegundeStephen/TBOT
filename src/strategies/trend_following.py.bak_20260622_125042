@@ -225,11 +225,6 @@ class TrendFollowingStrategy(BaseStrategy):
         bb_upper, bb_middle, bb_lower = ta.BBANDS(close, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
         df["bb_width_norm"] = (bb_upper - bb_lower) / bb_middle
 
-        # L6: Livermore state one-hot ML features (flag-gated, see base_strategy.py)
-        # No "atr" column exists in TF's own feature set — _add_livermore_features
-        # falls back to its own atr14() helper when the column is missing.
-        df = self._add_livermore_features(df, timeframe="1H")
-
         return df
 
     def _align_4h_to_1h(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
@@ -401,7 +396,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return labels
 
-    def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, silent: bool = False, composite_state=None) -> tuple[int, float]:
+    def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, silent: bool = False) -> tuple[int, float]:
         """Generate live signal without lookahead"""
         if len(df) < self.get_warmup_period():
             return 0, 0.0
@@ -522,11 +517,6 @@ class TrendFollowingStrategy(BaseStrategy):
                     bearish_score += self.h4_trend_weight
                     bullish_score -= self.h4_counter_penalty
 
-        # L10: Livermore 4H state awareness nudge (flag-gated, see base_strategy.py)
-        bullish_score, bearish_score = self._livermore_score_nudge(
-            bullish_score, bearish_score, composite_state=composite_state
-        )
-
         # FINAL SIGNAL
         normalization_factor = 6.5
         signal = 0
@@ -541,7 +531,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return signal, confidence
 
-    def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None, silent: bool = False, composite_state=None):
+    def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None, silent: bool = False):
         df = self.generate_features(df)
         if mode == "train": return self._generate_training_labels(df, df_4h)
-        return self._generate_live_signal(df, df_4h, silent=silent, composite_state=composite_state)
+        return self._generate_live_signal(df, df_4h, silent=silent)

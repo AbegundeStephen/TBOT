@@ -548,10 +548,6 @@ class MLStrategy(bt.Strategy):
         mr_config["asset"] = self.asset_key   # Fix #15: MR scorecard label
         tf_config  = config["strategy_configs"]["trend_following"][self.asset_key]
         ema_config = config["strategy_configs"]["exponential_moving_averages"][self.asset_key]
-        # L6: give strategies access to phase_config so ml_livermore_features_enabled
-        # behaves identically in backtest as in live trading.
-        for _sc in (mr_config, tf_config, ema_config):
-            _sc["phase_config"] = config.get("phase_config", {})
 
         # ── Per-asset risk params — override global defaults from config ────────
         # The backtest strategy params are global defaults. For GOLD, USOIL, etc.

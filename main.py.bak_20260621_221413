@@ -166,22 +166,6 @@ class TradingBot:
         )
         # ───────────────────────────────────────────────────────────────────
 
-        # ── Item 14: Pyramiding flag-consistency guard ──────────────────────
-        # trading.vtm_pyramiding_enabled and phase_config.pyramiding_enabled
-        # are two independent flags that both need to be true for pyramiding
-        # to actually run. They've drifted out of sync before — warn loudly
-        # rather than let one half silently no-op the other.
-        _trading_pyr = self.config.get("trading", {}).get("vtm_pyramiding_enabled", False)
-        _phase_pyr = self.config.get("phase_config", {}).get("pyramiding_enabled", False)
-        if _trading_pyr != _phase_pyr:
-            logger.warning(
-                "[CONFIG] Pyramiding flags disagree: trading.vtm_pyramiding_enabled=%s, "
-                "phase_config.pyramiding_enabled=%s — both need to be true for "
-                "pyramiding to actually work as intended.",
-                _trading_pyr, _phase_pyr,
-            )
-        # ───────────────────────────────────────────────────────────────────
-
         # ── Phase 2.1/2.2: Signal funnel + AI-filter A/B observability ──────
         # Purely observational — records how many opportunities each veto kills
         # and which signals the AI filter rejected. Must exist before any alpha
@@ -398,14 +382,6 @@ class TradingBot:
 
         # Market Watcher — real-time protective monitor
         self.market_watcher = None
-
-        # L3: last-known composite_state snapshot per asset, refreshed at each
-        # of the 3 composite_state injection points below. MarketWatcher polls
-        # every 15s in its own thread and cannot afford to recompute this (it
-        # would mean a second full df fetch + Livermore eval per asset); it
-        # reads this cache instead, accepting staleness up to one main-loop
-        # cycle (~5 min). Values are CompositeState.to_dict() dicts, not objects.
-        self._latest_composite_state: dict = {}
 
         # Main bot state
         self._shutdown_requested = False
@@ -856,7 +832,6 @@ class TradingBot:
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
                     cfg["asset"] = asset_name  # Fix #11: ensure MR knows which asset it trades
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
@@ -866,8 +841,6 @@ class TradingBot:
             if strategies_cfg.get("trend_following", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
-                    cfg["asset"] = asset_name
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Trend Following")
                 except Exception as e:
@@ -877,8 +850,6 @@ class TradingBot:
             if strategies_cfg.get("exponential_moving_averages", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(asset_name, {})
-                    cfg["asset"] = asset_name
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: EMA Strategy")
                 except Exception as e:
@@ -983,8 +954,6 @@ class TradingBot:
                     enable_adaptive_thresholds=self.params.ai_enable_adaptive,
                     strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,
                     use_ai_validation=self.params.use_ai_validation,
-                    phase_config=self.config.get("phase_config", {}),
-                    db_manager=self.db_manager,
                 )
 
                 logger.info("[AI] ✓ Validator initialized")
@@ -1456,17 +1425,6 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper
                     )
-
-                    # Fix 1 (hybrid path): same gap as the council path above — without
-                    # this, both hybrid-mode aggregators read phase_config as {} via
-                    # their getattr(self, "phase_config", {}) fallback, silently
-                    # disabling every phase_config flag (including the new item 18c/18d
-                    # ones) for any asset running in hybrid mode. "hybrid" is the
-                    # global default (aggregator_settings.mode), so this affected
-                    # every asset without a per-asset mode override.
-                    _pc = self.config.get("phase_config", {})
-                    perf_agg.phase_config = _pc
-                    council_agg.phase_config = _pc
 
                     # Store both in a dict
                     self.aggregators[asset_name] = {
@@ -1999,12 +1957,6 @@ class TradingBot:
             # council trades blind.
             if _cs is not None and hasattr(_cs, "to_dict"):
                 details["composite_state"] = _cs.to_dict()
-                # L2: VTM's pattern-aware exit management reads
-                # signal_details.get("institutional_pattern") as a flat key.
-                # Council mode never set it (only nested under composite_state).
-                details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                self._latest_composite_state[asset_name] = details["composite_state"]
                 _lsm1h = getattr(_cs, "livermore_state_1h", None)
                 if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                     details["trade_type"] = "TREND"
@@ -2198,8 +2150,8 @@ class TradingBot:
                         except Exception:
                             _cs = {}
                     _side   = "long" if _sig == 1 else "short"
-                    _anchor = (_cs.get("livermore_anchor_main_up_max") if _side == "long"
-                            else _cs.get("livermore_anchor_main_down_min"))
+                    _anchor = (_cs.get("livermore_anchor_main_up") if _side == "long"
+                               else _cs.get("livermore_anchor_main_down"))
                     _cpb, _bd = pullback_completion_score(
                         df, _side,
                         _cs.get("livermore_state_4h"),
@@ -2932,11 +2884,6 @@ class TradingBot:
                         f"for {asset_name}"
                     )
 
-                # Fix 1 (hybrid auto-preset reinit): same as initial setup path.
-                _pc = self.config.get("phase_config", {})
-                perf_agg.phase_config = _pc
-                council_agg.phase_config = _pc
-
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
                     "council": council_agg,
@@ -3037,10 +2984,6 @@ class TradingBot:
                         f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
                         f"for {asset_name}"
                     )
-                # Fix 1 (performance auto-preset reinit): same gap as hybrid/council
-                # reinit paths above — without this, the refreshed aggregator reads
-                # phase_config as {} via getattr(self, "phase_config", {}).
-                new_aggregator.phase_config = self.config.get("phase_config", {})
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(
                     f"[AUTO PRESET] ✓ Performance aggregator refreshed for {asset_name}"
@@ -3713,7 +3656,7 @@ class TradingBot:
                         self.system_validator.clear_vtm_cb_signal(asset_name)
 
                     # ✅ Handle Pyramid Requests (gated by config flag)
-                    _pyramiding_on = self.config.get("trading", {}).get("vtm_pyramiding_enabled", False)
+                    _pyramiding_on = self.config.get("trading", {}).get("vtm_pyramiding_enabled", True)
                     if _pyramiding_on and isinstance(vtm_result, dict) and "pyramid_requests" in vtm_result:
                         for req in vtm_result["pyramid_requests"]:
                             logger.info(f"[VTM LOOP] 🗼 Executing PYRAMID for {asset_name} ({req['side'].upper()})")
@@ -4577,12 +4520,6 @@ class TradingBot:
                 # mislabeled trade_type).
                 if _cs is not None and hasattr(_cs, "to_dict"):
                     details["composite_state"] = _cs.to_dict()
-                    # L2: VTM's pattern-aware exit management reads
-                    # signal_details.get("institutional_pattern") as a flat key.
-                    # Council mode never set it (only nested under composite_state).
-                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                    self._latest_composite_state[asset_name] = details["composite_state"]
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
@@ -4760,7 +4697,7 @@ class TradingBot:
                         # disagrees, so one score variable can't override a
                         # 5-template structural rejection.
                         _composite = details.get("composite_state", {}) or {}
-                        _inst_pattern = _composite.get("institutional_pattern")
+                        _inst_pattern = details.get("institutional_pattern")
                         _net_conviction = _composite.get("net_conviction", 0.0)
                         _pattern_veto_threshold = self.config.get("trading", {}).get(
                             "confidence_gate_pattern_veto", -1.0
@@ -4892,55 +4829,8 @@ class TradingBot:
                 # Filter 1: Counter-trend blocking
                 # --------------------------------------------------------
                 if not mtf_regime.get("allow_counter_trend", True):
-                    # Item 19b: 4H Livermore / macro-regime disagreement gate.
-                    # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
-                    # default False — same switch as signal_aggregator.py and
-                    # council_aggregator.py). When enabled and the live 4H
-                    # Livermore lean disagrees with mtf_regime's EMA-derived
-                    # is_bullish/is_bearish, this filter treats that lean as
-                    # stripped for THIS counter-trend check only — it does not
-                    # mutate the shared self._current_regime_data[asset_name]
-                    # dict (mtf_regime), since that same cached dict is read by
-                    # other consumers later in this cycle (e.g. the hedging
-                    # _regime_confirmed checks above and the supplementary
-                    # regime check further below).
-                    _mtf_is_bullish = mtf_regime.get("is_bullish")
-                    _mtf_is_bearish = mtf_regime.get("is_bearish")
-                    _lsm_gate_enabled_m = bool(self.config.get("phase_config", {}).get(
-                        "lsm_regime_disagreement_gate_enabled", False
-                    ))
-                    if _lsm_gate_enabled_m:
-                        _agg_m = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
-                        _cs_m = {}
-                        if _agg_m and getattr(_agg_m, "_cached_composite", None) is not None:
-                            try:
-                                _cs_m = _agg_m._cached_composite.to_dict()
-                            except Exception:
-                                _cs_m = {}
-                        _lsm_4h_m = _cs_m.get("livermore_state_4h")
-                        _lsm_lean_m = (
-                            "bullish" if _lsm_4h_m in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-                            else "bearish" if _lsm_4h_m in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
-                            else None
-                        )
-                        if _lsm_lean_m is not None:
-                            if _mtf_is_bullish and _lsm_lean_m != "bullish":
-                                logger.info(
-                                    f"[MTF FILTER] {asset_name} 4H Livermore lean ({_lsm_lean_m}) disagrees "
-                                    f"with bullish regime — stripping bullish lean for counter-trend check "
-                                    f"(lsm_regime_disagreement_gate_enabled)"
-                                )
-                                _mtf_is_bullish = False
-                            if _mtf_is_bearish and _lsm_lean_m != "bearish":
-                                logger.info(
-                                    f"[MTF FILTER] {asset_name} 4H Livermore lean ({_lsm_lean_m}) disagrees "
-                                    f"with bearish regime — stripping bearish lean for counter-trend check "
-                                    f"(lsm_regime_disagreement_gate_enabled)"
-                                )
-                                _mtf_is_bearish = False
-
-                    is_counter_trend = (signal == 1 and not _mtf_is_bullish) or \
-                                     (signal == -1 and _mtf_is_bullish)
+                    is_counter_trend = (signal == 1 and not mtf_regime.get("is_bullish")) or \
+                                     (signal == -1 and mtf_regime.get("is_bullish"))
 
                     if is_counter_trend:
                         logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
@@ -5918,12 +5808,6 @@ class TradingBot:
                 # mislabeled trade_type).
                 if _cs is not None and hasattr(_cs, "to_dict"):
                     details["composite_state"] = _cs.to_dict()
-                    # L2: VTM's pattern-aware exit management reads
-                    # signal_details.get("institutional_pattern") as a flat key.
-                    # Council mode never set it (only nested under composite_state).
-                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                    self._latest_composite_state[asset_name] = details["composite_state"]
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
@@ -5996,23 +5880,13 @@ class TradingBot:
                         _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
                         _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
 
-                        # J2.1: Pass CompositeState snapshot at entry.
-                        # Unwrap hybrid/council dict wrappers the same way
-                        # _shadow_open_blocked already does, so whichever of the
-                        # two shadow-open call sites runs first this cycle
-                        # produces a correctly-populated composite_state.
+                        # J2.1: Pass CompositeState snapshot at entry
                         _aggregator2 = self.aggregators.get(asset_name)
                         _comp_state_dict2 = {}
-                        _target_agg2 = _aggregator2
-                        if isinstance(_aggregator2, dict):
-                            _target_agg2 = (
-                                _aggregator2.get("performance")
-                                or _aggregator2.get("livermore")
-                            )
-                        if _target_agg2 is not None and hasattr(_target_agg2, '_cached_composite') and \
-                        _target_agg2._cached_composite is not None:
+                        if _aggregator2 and hasattr(_aggregator2, '_cached_composite') and \
+                           _aggregator2._cached_composite is not None:
                             try:
-                                _comp_state_dict2 = _target_agg2._cached_composite.to_dict()
+                                _comp_state_dict2 = _aggregator2._cached_composite.to_dict()
                             except Exception:
                                 pass
                         self.shadow_trader.open_position(
@@ -6746,12 +6620,6 @@ class TradingBot:
                     binance_handler=self.binance_handler,
                     telegram_bot=self.telegram_bot,
                     send_telegram_fn=self._send_telegram_notification,
-                    # L3: read-only snapshot cache, refreshed at each
-                    # composite_state injection point in the main loop. Lets
-                    # the watcher soften its naive ATR-based SL tightening
-                    # during silent zones / right after a CHoCH instead of
-                    # fighting a structural move the main loop already saw.
-                    composite_state_cache=self._latest_composite_state,
                 )
                 self.market_watcher.start()
                 logger.info("[WATCHER] ✅ MarketWatcher thread started.")
@@ -6906,10 +6774,7 @@ class TradingBot:
         # resumes immediately on next start rather than rebuilding from scratch.
         try:
             for _dt_asset, _dt_agg in (self.aggregators or {}).items():
-                _dt_target = _dt_agg
-                if isinstance(_dt_agg, dict):
-                    _dt_target = _dt_agg.get("performance") or _dt_agg.get("livermore")
-                _dt = getattr(_dt_target, "dynamic_thresholds", None)
+                _dt = getattr(_dt_agg, "dynamic_thresholds", None)
                 if _dt and hasattr(_dt, "save_cache"):
                     _dt.save_cache()
                     logger.info("[STOP] DynamicThresholds cache saved for %s", _dt_asset)

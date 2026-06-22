@@ -13,11 +13,10 @@ Key fixes:
 import pandas as pd
 import numpy as np
 import logging
-import json
 import talib as ta
 from typing import Tuple, Dict, Optional
 from collections import deque, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +71,7 @@ class HybridSignalValidator:
         strong_signal_bypass_threshold=0.85,
         circuit_breaker_threshold=0.70,
         enable_detailed_logging=False,
-        phase_config=None,
-        db_manager=None,
     ):
-        # Item 18d: phase_config gate flags (mirrors the pattern main.py already
-        # uses to inject phase_config into the aggregators/CompositeState). Lets
-        # validate_signal's third-path redesign stay OFF by default without a
-        # separate config-loading mechanism.
-        self.phase_config = phase_config or {}
-
-        # Item 18e: optional DB handle for calibration logging at the end of
-        # validate_signal. None-safe everywhere it's used — if the caller
-        # doesn't pass one (e.g. backtest.py, or main.py before Supabase is
-        # configured), logging is just skipped, never raises.
-        self.db_manager = db_manager
-
         self.analyst = analyst
         self.sniper = sniper
         self.pattern_id_map = pattern_id_map
@@ -99,38 +84,6 @@ class HybridSignalValidator:
         self.enable_adaptive = enable_adaptive_thresholds
         self.strong_signal_bypass = strong_signal_bypass_threshold
         self.bypass_threshold = circuit_breaker_threshold
-
-        # Item 18b: AI_VALIDATOR calibration block (config/aggregator_presets.json).
-        # Centralizes constants that were previously bare numeric literals scattered
-        # through this file (see AI_VALIDATOR._bucket_a/_bucket_b/_bucket_c comments
-        # in the json for which are data-backed vs. still-needs-real-calibration).
-        # Falls back to {} on any load error so a missing/malformed file degrades to
-        # the exact pre-existing hardcoded defaults rather than crashing the bot —
-        # every .get() below carries that original literal as its default.
-        try:
-            with open("config/aggregator_presets.json") as _av_f:
-                _av_cfg = json.load(_av_f).get("AI_VALIDATOR", {})
-        except Exception as _e:
-            logger.warning(
-                f"[AI VALIDATOR] Could not load AI_VALIDATOR calibration block from "
-                f"aggregator_presets.json ({_e}); using hardcoded defaults."
-            )
-            _av_cfg = {}
-        self._av_cfg = _av_cfg
-        self.bypass_threshold = _av_cfg.get("circuit_breaker_threshold", circuit_breaker_threshold)
-        self.flash_crash_atr_mult = _av_cfg.get("flash_crash_atr_mult", 4.0)
-        self.flash_crash_ema_span = _av_cfg.get("flash_crash_ema_span", 20)
-        self.atr_period = _av_cfg.get("atr_period", 14)
-        self.volume_confirmation_mult = _av_cfg.get("volume_confirmation_mult", 2.0)
-        self.sr_update_interval = _av_cfg.get("sr_cache_refresh_seconds", 3600)
-        self.sr_ema_fallback_atr_mult = _av_cfg.get("sr_ema_fallback_distance_atr_mult", 0.5)
-        self.third_path_min_quality = _av_cfg.get("third_path_min_signal_quality", 0.65)
-        self.third_path_penalty = _av_cfg.get("third_path_penalty", 0.08)
-        self.soft_pass_penalty_sr = _av_cfg.get("soft_pass_penalty_sr_only", 0.05)
-        self.soft_pass_penalty_pattern = _av_cfg.get("soft_pass_penalty_pattern_only", 0.05)
-        self.soft_pass_penalty_uncertain = _av_cfg.get("soft_pass_penalty_uncertain_sr", 0.05)
-        self.soft_pass_penalty_momentum = _av_cfg.get("soft_pass_penalty_momentum_partial", 0.04)
-
         self.detailed_logging = enable_detailed_logging
 
         # Current adaptive thresholds
@@ -139,7 +92,7 @@ class HybridSignalValidator:
 
         # S/R cache
         self.sr_cache: Dict[str, Dict] = {}
-        # sr_update_interval is set above from self._av_cfg (item 18b)
+        self.sr_update_interval = 3600  # 1 hour
 
         # Circuit breaker
         self.rejection_window = deque(maxlen=50)
@@ -207,7 +160,7 @@ class HybridSignalValidator:
         logger.info("")
 
     def validate_signal(
-        self, signal: int, signal_details: dict, df: pd.DataFrame, composite_state=None
+        self, signal: int, signal_details: dict, df: pd.DataFrame
     ) -> Tuple[int, dict]:
         validation_start = datetime.now()
         self.stats["total_checks"] += 1
@@ -239,29 +192,20 @@ class HybridSignalValidator:
 
         # Layer 2.5: Flash Crash Breaker (Extreme Dislocation)
         # Reason: Prevents mean reversion during vertical moves or liquidity voids.
-        # atr_fast is initialized here (item 18d) so a failure inside the try below
-        # leaves it as None rather than undefined — the third-path branch further
-        # down references atr_fast outside this try block, and an unset name there
-        # used to raise NameError, get swallowed by council_aggregator's outer
-        # except, and silently force the signal to 0 (HOLD).
-        atr_fast = None
         try:
             current_price = float(df["close"].iloc[-1])
-            ema_fast = df["close"].ewm(span=self.flash_crash_ema_span, adjust=False).mean().iloc[-1]
-            distance = abs(current_price - ema_fast)
-            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=self.atr_period)[-1]
-
-            if distance > (self.flash_crash_atr_mult * atr_fast):
+            ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+            distance = abs(current_price - ema_20)
+            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
+            
+            if distance > (4.0 * atr_fast):
                 if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
-                    logger.warning(
-                        f"[AI] Flash Crash VETO: Distance {distance:.2f} > "
-                        f"{self.flash_crash_atr_mult}xATR. Blocking REVERSION."
-                    )
+                    logger.warning(f"[AI] Flash Crash VETO: Distance {distance:.2f} > 4xATR. Blocking REVERSION.")
                     return self._reject_signal(
-                        signal_details,
-                        {"near_level": False, "reason": "flash_crash"},
-                        None,
-                        reason="flash_crash_breaker",
+                        signal_details, 
+                        {"near_level": False, "reason": "flash_crash"}, 
+                        None, 
+                        reason="flash_crash_breaker", 
                         strategy=strategy
                     )
         except Exception as e:
@@ -337,18 +281,18 @@ class HybridSignalValidator:
                 f"[AI] Soft-pass: S/R ✓ | Pattern ✗ ({pattern_result.get('reason','?')}) "
                 f"| regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_sr}
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
         elif pattern_passed and not sr_passed and regime_aligned:
             # Pattern confirmed, no nearby S/R level, but trend-aligned → soft pass
             logger.info(
                 f"[AI] Soft-pass: Pattern ✓ ({pattern_result.get('pattern_name','?')}) "
                 f"| S/R ✗ ({sr_result.get('reason','?')}) | regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_pattern}
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
         elif model_uncertain and sr_passed:
             # Model couldn't read the candle (uncertain output) but S/R is solid → soft pass
             logger.info(f"[AI] Soft-pass: S/R ✓ | Model uncertain → approve with quality penalty")
-            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_uncertain}
+            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
         elif regime_aligned and h1_momentum_confirmed and (sr_passed or pattern_passed):
             # ── 1H MOMENTUM SOFT-PASS (new) ──────────────────────────────────
             # Regime aligns with signal direction AND the 1H session is actively
@@ -365,62 +309,18 @@ class HybridSignalValidator:
                 f"1H dir={h1_dir} | lower_highs={h1_lower_highs} | higher_lows={h1_higher_lows} "
                 f"| regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_momentum, "h1_momentum_pass": True}
-        elif regime_aligned and h1_momentum_confirmed and signal_quality >= self.third_path_min_quality:
-            # ── PATH 3: HIGH CONFIDENCE TREND BYPASS ─────────────────────────
-            # item 18d redesign, flag-gated OFF by default (phase_config.
-            # ai_third_path_structural_anchor_enabled). Today this is a bare
-            # confidence bypass (regime+momentum+quality alone, no
-            # price-structure confirmation). The redesign below additionally
-            # requires a real, nearby Livermore structural anchor — which then
-            # doubles as the SL reference VTM uses — before approving. Default
-            # OFF because no live caller passes composite_state into this
-            # function yet without the flag, so flipping this on unguarded
-            # would turn every former bypass-approval into a reject.
-            if self.phase_config.get("ai_third_path_structural_anchor_enabled", False):
-                _anchor = None
-                _anchor_dist_atr = None
-                if composite_state is not None:
-                    _side_long = signal > 0
-                    _raw_anchor = (
-                        getattr(composite_state, "livermore_anchor_main_up_max", None) if _side_long
-                        else getattr(composite_state, "livermore_anchor_main_down_min", None)
-                    )
-                    if _raw_anchor and atr_fast and atr_fast > 0:
-                        _anchor_dist_atr = abs(current_price - _raw_anchor) / atr_fast
-                        if _anchor_dist_atr <= 6.0:
-                            _anchor = _raw_anchor
-
-                if _anchor is not None:
-                    logger.info(
-                        f"[AI] Structural-momentum pass: anchor={_anchor:.2f} "
-                        f"({_anchor_dist_atr:.2f}x ATR) | quality={signal_quality:.2f} | "
-                        f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
-                    )
-                    signal_details = {
-                        **signal_details,
-                        "ai_quality_penalty": self.third_path_penalty,
-                        "structural_anchor": _anchor,
-                        "anchor_distance_atr": round(_anchor_dist_atr, 2),
-                        "third_path_pass": True,
-                    }
-                else:
-                    logger.info(
-                        f"[AI] Structural-momentum reject: regime+1H momentum agreed "
-                        f"(quality={signal_quality:.2f}) but no nearby Livermore anchor "
-                        f"to set a stop from."
-                    )
-                    return self._reject_signal(
-                        signal_details, sr_result, pattern_result,
-                        reason="no_structural_anchor", strategy=strategy,
-                    )
-            else:
-                # Pre-existing behavior, unchanged while the flag is off.
-                logger.info(
-                    f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
-                    f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
-                )
-                signal_details = {**signal_details, "ai_quality_penalty": self.third_path_penalty, "trend_bypass": True}
+            signal_details = {**signal_details, "ai_quality_penalty": 0.04, "h1_momentum_pass": True}
+        elif regime_aligned and h1_momentum_confirmed and signal_quality >= 0.65:
+            # ── HIGH CONFIDENCE TREND BYPASS (new) ──────────────────────────
+            # If the 4H trend and 1H momentum are perfectly aligned and signal
+            # quality is high (>65%), we allow entry even if BOTH S/R and 
+            # pattern filters fail. This prevents being 'locked out' of strong
+            # moves that are mid-air (no S/R) and momentum-based (no pattern).
+            logger.info(
+                f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
+                f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
+            )
+            signal_details = {**signal_details, "ai_quality_penalty": 0.08, "trend_bypass": True}
         else:
             # Hard reject — either both failed, or counter-trend with one missing,
             # or 1H momentum contradicts the signal direction.
@@ -456,34 +356,6 @@ class HybridSignalValidator:
         self.stats["approved"] += 1
         self.strategy_stats[strategy]["approved"] += 1
         self.rejection_window.append(False)
-
-        # Item 18e: calibration logging (non-blocking, approval path only —
-        # the early returns above for ai_disabled/hold/flash-crash/no-anchor/
-        # hard-reject all bypass this and are NOT logged here).
-        # Note: the patch text this was based on referenced signal_details.get(
-        # "action") and a bare `quality_penalty` local, neither of which exist —
-        # _approve_signal/_reject_signal/_skip_validation all key off
-        # "ai_validation" (not "action"), and the penalty lives in signal_details
-        # under "ai_quality_penalty" (merged into result[1] by _approve_signal),
-        # not as a standalone local variable. Reading from result[1] below is the
-        # corrected version of that intent. Requires the ai_validator_log table
-        # to exist in Supabase — until then, self.db_manager.log_ai_validator_decision
-        # itself swallows the insert failure (logged at debug level) so this is
-        # always safe to deploy ahead of that one-time setup.
-        try:
-            if self.db_manager is not None:
-                self.db_manager.log_ai_validator_decision({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "asset": asset,
-                    "strategy": strategy,
-                    "action": result[1].get("ai_validation", "approved"),
-                    "signal_quality": signal_quality,
-                    "quality_penalty": result[1].get("ai_quality_penalty", 0.0),
-                    "sr_passed": sr_passed,
-                    "pattern_passed": pattern_passed,
-                })
-        except Exception:
-            pass
 
         return result
 

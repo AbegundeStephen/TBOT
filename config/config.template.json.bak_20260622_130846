@@ -1749,6 +1749,6 @@
     "council_trend_judge_livermore_confirmation_enabled": false,
     "council_lifecycle_livermore_guard_enabled": false,
     "strategy_livermore_awareness_enabled": false,
-    "pyramid_livermore_maturity_gate_enabled": true
+    "pyramid_livermore_maturity_gate_enabled": false
   }
-}
+}                                                                                                     

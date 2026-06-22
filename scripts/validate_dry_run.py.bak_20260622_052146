@@ -67,63 +67,8 @@ check(f"At least one asset enabled", bool(enabled_assets), f"enabled: {enabled_a
 pc = cfg.get("phase_config", {})
 for gate in ["autotrainer_enabled", "structural_stops_enabled",
              "per_tick_livermore_enabled", "bb_kc_squeeze_gate_enabled",
-             "nr7_gate_enabled", "mr_mode2_counter_trend_enabled",
-             "mr_mode3_climax_fade_enabled"]:
+             "nr7_gate_enabled"]:
     check(f"phase_config.{gate} present", gate in pc, str(pc.get(gate)))
-# NOTE: mr_mode2/mr_mode3 moved to phase_config (read live, per-call, by
-# mean_reversion.py) as of the 7a-7c fix. The strategy_configs.mean_reversion
-# per-asset checks further down test the old, now-orphaned per-asset copies —
-# harmless (mean_reversion.py no longer reads them) but no longer the real gate.
-
-# NOTE on the checks below: the source patch assumed allow_hedging /
-# place_vtm_sl_on_exchange / place_vtm_tp_on_exchange lived under
-# phase_config, and that mr_mode2/mr_mode3 were phase_config gates too.
-# Verified against the live config.json — none of that is true:
-#   - allow_hedging / place_vtm_sl_on_exchange / place_vtm_tp_on_exchange
-#     live under cfg["trading"], not cfg["phase_config"].
-#   - mr_mode2_counter_trend_enabled / mr_mode3_climax_fade_enabled are
-#     per-asset, under cfg["strategy_configs"]["mean_reversion"][ASSET].
-#   - min_time_between_trades_seconds doesn't exist; the real key is
-#     cfg["trading"]["min_time_between_trades_minutes"], and main.py's own
-#     check_min_time_between_trades() hard-floors it at 120 minutes.
-# Checks below read the real locations so they actually exercise the
-# settings instead of always reading None/False off the wrong dict.
-
-_trading_cfg = cfg.get("trading", {})
-check("trading.allow_hedging is False",
-      _trading_cfg.get("allow_hedging") is False,
-      f"current={_trading_cfg.get('allow_hedging')}")
-check("trading.place_vtm_sl_on_exchange is True",
-      _trading_cfg.get("place_vtm_sl_on_exchange") is True)
-check("trading.place_vtm_tp_on_exchange is True",
-      _trading_cfg.get("place_vtm_tp_on_exchange") is True)
-
-_min_time = _trading_cfg.get("min_time_between_trades_minutes", 0)
-check("trading.min_time_between_trades_minutes ≥ 120 (matches main.py's own hard floor)",
-      _min_time >= 120, f"current={_min_time}")
-
-_mr_cfg = cfg.get("strategy_configs", {}).get("mean_reversion", {})
-for _asset in enabled_assets:
-    _mr_asset_cfg = _mr_cfg.get(_asset, {})
-    check(f"strategy_configs.mean_reversion.{_asset}.mr_mode2_counter_trend_enabled present",
-          "mr_mode2_counter_trend_enabled" in _mr_asset_cfg,
-          str(_mr_asset_cfg.get("mr_mode2_counter_trend_enabled")))
-    check(f"strategy_configs.mean_reversion.{_asset}.mr_mode3_climax_fade_enabled present",
-          "mr_mode3_climax_fade_enabled" in _mr_asset_cfg,
-          str(_mr_asset_cfg.get("mr_mode3_climax_fade_enabled")))
-
-# The source patch asked to assert "EURUSD is disabled" — but EURUSD is one
-# of the bot's five documented target assets (CLAUDE.md: BTC/GOLD/EURUSD/
-# EURJPY/USTEC), just currently toggled off; asserting it must always be
-# disabled would be wrong and would start failing the day it's re-enabled
-# for FX hours. What actually matters for a pre-launch gate is that no
-# asset OUTSIDE that documented universe is live. Checking the real config
-# turned this up for real: GBPUSD and USDJPY are currently enabled, and
-# neither is part of the documented/tested asset scope.
-_DOCUMENTED_ASSETS = {"BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"}
-_undocumented_enabled = [a for a in enabled_assets if a not in _DOCUMENTED_ASSETS]
-check("no undocumented assets enabled (CLAUDE.md scope: BTC/GOLD/EURUSD/EURJPY/USTEC)",
-      not _undocumented_enabled, f"unexpected enabled: {_undocumented_enabled}")
 
 # risk_management sanity
 rm = cfg.get("risk_management", {})

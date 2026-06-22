@@ -399,14 +399,6 @@ class TradingBot:
         # Market Watcher — real-time protective monitor
         self.market_watcher = None
 
-        # L3: last-known composite_state snapshot per asset, refreshed at each
-        # of the 3 composite_state injection points below. MarketWatcher polls
-        # every 15s in its own thread and cannot afford to recompute this (it
-        # would mean a second full df fetch + Livermore eval per asset); it
-        # reads this cache instead, accepting staleness up to one main-loop
-        # cycle (~5 min). Values are CompositeState.to_dict() dicts, not objects.
-        self._latest_composite_state: dict = {}
-
         # Main bot state
         self._shutdown_requested = False
         self._main_loop_running = False
@@ -856,7 +848,6 @@ class TradingBot:
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
                     cfg["asset"] = asset_name  # Fix #11: ensure MR knows which asset it trades
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
@@ -866,8 +857,6 @@ class TradingBot:
             if strategies_cfg.get("trend_following", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
-                    cfg["asset"] = asset_name
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Trend Following")
                 except Exception as e:
@@ -877,8 +866,6 @@ class TradingBot:
             if strategies_cfg.get("exponential_moving_averages", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(asset_name, {})
-                    cfg["asset"] = asset_name
-                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: EMA Strategy")
                 except Exception as e:
@@ -1999,12 +1986,6 @@ class TradingBot:
             # council trades blind.
             if _cs is not None and hasattr(_cs, "to_dict"):
                 details["composite_state"] = _cs.to_dict()
-                # L2: VTM's pattern-aware exit management reads
-                # signal_details.get("institutional_pattern") as a flat key.
-                # Council mode never set it (only nested under composite_state).
-                details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                self._latest_composite_state[asset_name] = details["composite_state"]
                 _lsm1h = getattr(_cs, "livermore_state_1h", None)
                 if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                     details["trade_type"] = "TREND"
@@ -4577,12 +4558,6 @@ class TradingBot:
                 # mislabeled trade_type).
                 if _cs is not None and hasattr(_cs, "to_dict"):
                     details["composite_state"] = _cs.to_dict()
-                    # L2: VTM's pattern-aware exit management reads
-                    # signal_details.get("institutional_pattern") as a flat key.
-                    # Council mode never set it (only nested under composite_state).
-                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                    self._latest_composite_state[asset_name] = details["composite_state"]
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
@@ -5918,12 +5893,6 @@ class TradingBot:
                 # mislabeled trade_type).
                 if _cs is not None and hasattr(_cs, "to_dict"):
                     details["composite_state"] = _cs.to_dict()
-                    # L2: VTM's pattern-aware exit management reads
-                    # signal_details.get("institutional_pattern") as a flat key.
-                    # Council mode never set it (only nested under composite_state).
-                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
-                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
-                    self._latest_composite_state[asset_name] = details["composite_state"]
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
@@ -6746,12 +6715,6 @@ class TradingBot:
                     binance_handler=self.binance_handler,
                     telegram_bot=self.telegram_bot,
                     send_telegram_fn=self._send_telegram_notification,
-                    # L3: read-only snapshot cache, refreshed at each
-                    # composite_state injection point in the main loop. Lets
-                    # the watcher soften its naive ATR-based SL tightening
-                    # during silent zones / right after a CHoCH instead of
-                    # fighting a structural move the main loop already saw.
-                    composite_state_cache=self._latest_composite_state,
                 )
                 self.market_watcher.start()
                 logger.info("[WATCHER] ✅ MarketWatcher thread started.")
@@ -6906,10 +6869,7 @@ class TradingBot:
         # resumes immediately on next start rather than rebuilding from scratch.
         try:
             for _dt_asset, _dt_agg in (self.aggregators or {}).items():
-                _dt_target = _dt_agg
-                if isinstance(_dt_agg, dict):
-                    _dt_target = _dt_agg.get("performance") or _dt_agg.get("livermore")
-                _dt = getattr(_dt_target, "dynamic_thresholds", None)
+                _dt = getattr(_dt_agg, "dynamic_thresholds", None)
                 if _dt and hasattr(_dt, "save_cache"):
                     _dt.save_cache()
                     logger.info("[STOP] DynamicThresholds cache saved for %s", _dt_asset)
@@ -7023,181 +6983,4 @@ def start_dashboard_server():
                     )
                     logger.info("=" * 70)
                     return server_process
-            except requests.exceptions.RequestException:
-                if attempt < max_retries:
-                    logger.info(
-                        f"[DASHBOARD] Waiting for server... ({attempt}/{max_retries})"
-                    )
-                    time.sleep(2)
-                else:
-                    logger.warning("[DASHBOARD] ⚠️ Server may not be fully ready")
-
-        # Check if process is still running
-        if server_process.poll() is None:
-            logger.info(
-                "[DASHBOARD] ✅ Web dashboard available at http://localhost:5000"
-            )
-            logger.info("=" * 70)
-            return server_process
-        else:
-            logger.error("[DASHBOARD] ❌ Server process died immediately")
-            return None
-
-    except Exception as e:
-        logger.error(f"[DASHBOARD] Error starting server: {e}")
-        return None
-
-
-def start_dashboard_server_threaded():
-    """
-    Start Flask dashboard in a background thread.
-    Uses absolute project-root import so it works regardless of CWD.
-    """
-    import importlib.util as _ilu
-    import traceback as _tb
-
-    def run_flask():
-        try:
-            # Resolve server.py from the project root (same dir as main.py)
-            _root = Path(__file__).resolve().parent
-            _server_path = _root / "src" / "dashboard" / "server.py"
-
-            if not _server_path.exists():
-                logger.error(f"[DASHBOARD] server.py not found at {_server_path}")
-                return
-
-            # Insert project root so server.py's own imports work
-            import sys as _sys
-            if str(_root) not in _sys.path:
-                _sys.path.insert(0, str(_root))
-
-            # Load server module from absolute path
-            _spec = _ilu.spec_from_file_location("tbot_dashboard_server", str(_server_path))
-            _mod  = _ilu.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-
-            _app = _mod.app
-            logger.info("=" * 70)
-            logger.info("[DASHBOARD] 🚀 Starting Flask server on port 5000")
-            logger.info("[DASHBOARD] 📊 http://localhost:5000")
-            logger.info("=" * 70)
-
-            _app.run(
-                host="0.0.0.0",
-                port=5000,
-                debug=False,
-                threaded=True,
-                use_reloader=False,
-            )
-        except OSError as e:
-            if "address already in use" in str(e).lower() or "10048" in str(e):
-                logger.warning("[DASHBOARD] ⚠️ Port 5000 already in use — dashboard may already be running")
-            else:
-                logger.error(f"[DASHBOARD] OSError: {e}")
-                logger.error(_tb.format_exc())
-        except Exception as e:
-            logger.error(f"[DASHBOARD] Failed to start: {e}")
-            logger.error(_tb.format_exc())
-
-    try:
-        dashboard_thread = threading.Thread(
-            target=run_flask, daemon=True, name="DashboardServer"
-        )
-        dashboard_thread.start()
-
-        # Give Flask time to bind the port
-        time.sleep(4)
-
-        try:
-            response = requests.get("http://localhost:5000/api/health", timeout=3)
-            if response.status_code == 200:
-                logger.info("[DASHBOARD] ✅ Server ready at http://localhost:5000")
-            else:
-                logger.warning(f"[DASHBOARD] Health check returned {response.status_code}")
-        except requests.exceptions.ConnectionError:
-            logger.error("[DASHBOARD] ❌ Could not connect to dashboard on port 5000 — check logs above")
-        except Exception as e:
-            logger.warning(f"[DASHBOARD] Health check failed: {e}")
-
-        return dashboard_thread
-
-    except Exception as e:
-        logger.error(f"[DASHBOARD] Thread start error: {e}")
-        return None
-
-
-def main():
-    """Main entry point"""
-    Path("models").mkdir(exist_ok=True)
-    Path("data").mkdir(exist_ok=True)
-    Path("logs").mkdir(exist_ok=True)
-
-    # Write PID so the dashboard Control Center can check bot liveness
-    import os as _os
-    _pid_path = Path("logs") / "bot.pid"
-    _pid_path.write_text(str(_os.getpid()))
-    logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
-
-    try:
-        with open("config/config.json", encoding="utf-8") as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        print("[FAIL] config/config.json not found!")
-        sys.exit(1)
-
-    # Check required models exist
-    required_models = []
-    for asset_name, asset_cfg in config["assets"].items():
-        if asset_cfg.get("enabled", False):
-            strategies = asset_cfg.get("strategies", {})
-
-            if strategies.get("mean_reversion", {}).get("enabled", False):
-                required_models.append(
-                    f"models/mean_reversion_{asset_name.lower()}.pkl"
-                )
-
-            if strategies.get("trend_following", {}).get("enabled", False):
-                required_models.append(
-                    f"models/trend_following_{asset_name.lower()}.pkl"
-                )
-
-            if strategies.get("exponential_moving_averages", {}).get("enabled", False):
-                required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
-
-
-    missing = [m for m in required_models if not Path(m).exists()]
-    if missing:
-        print("=" * 70)
-        print("[FAIL] REQUIRED MODELS NOT FOUND")
-        print("=" * 70)
-        for model in missing:
-            print(f"  [X] {model}")
-        print("\nRun: python train.py")
-        print("=" * 70)
-        sys.exit(1)
-
-    ai_model = Path("models/ai/sniper_dual_timeframe_v1.weights.h5")
-    if not ai_model.exists():
-        print("=" * 70)
-        print("\u26a0\ufe0f  AI MODEL NOT FOUND (Optional)")
-        print("=" * 70)
-        print(f"  Missing: {ai_model}")
-        print("\nBot will run without AI validation (pattern detection disabled)")
-        print("Train AI: python train_ai.py")
-        print("=" * 70)
-
-    # Create and run the trading bot
-    try:
-        bot = TradingBot("config/config.json")
-        bot.start()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user (KeyboardInterrupt)")
-        print("\n[STOPPED] Bot stopped by user.")
-    except Exception as e:
-        logger.exception(f"Fatal error in bot: {e}")
-        print(f"\n[FATAL] Bot crashed: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+            except requests.exceptions:

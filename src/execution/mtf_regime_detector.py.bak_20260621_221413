@@ -44,12 +44,6 @@ class GovernorStatus:
     # that runs _calculate_indicators() on the daily dataframe.
     adx: Optional[float] = None
     rsi: Optional[float] = None
-    # Item 19a: graduated EMA-200 burn-in. daily_bars_available lets downstream
-    # code (e.g. the 19b Livermore-disagreement gate) know how immature a
-    # non-neutral read is; regime_maturity is the 0.0-1.0 scaled version
-    # (1.0 once 400+ daily bars are available).
-    daily_bars_available: Optional[int] = None
-    regime_maturity: float = 0.0
 
 
 @dataclass
@@ -71,16 +65,6 @@ class RegimeStatus:
     # Granular Timeframe Data
     timeframe_data: Dict[str, Dict] = field(default_factory=dict)
     df_4h: Optional[pd.DataFrame] = None
-
-    # Item 19a: propagated from GovernorStatus — neither dataclass is ever
-    # serialized via dataclasses.asdict()/vars() anywhere in the codebase
-    # (mtf_integration.py builds regime_data as a hand-written dict), so new
-    # fields here are invisible downstream unless threaded through explicitly
-    # at both this constructor call (mtf_regime_detector.py) and the regime_data
-    # dict build (mtf_integration.py). Observability-only — not read by any
-    # gating logic today.
-    daily_bars_available: Optional[int] = None
-    regime_maturity: float = 0.0
 
     # Fraction of {1h, 4h, 1d} whose own trend_direction matches the
     # consensus direction (BULLISH/BEARISH/NEUTRAL). Distinct from `score`:
@@ -306,32 +290,15 @@ class MultiTimeFrameRegimeDetector:
         """
         try:
             df_daily = self._fetch_data_from_csv(symbol, "1d", exchange)
-            # Item 19a: graduated EMA-200 burn-in (was a strict 400-bar minimum
-            # that always returned neutral below that, with no signal of how far
-            # off it was). 100-400 now produces a real-but-immature read instead
-            # of a hard block; the 19b Livermore-disagreement gate is the safety
-            # net for that immature window. Verified against current data/raw/*
-            # CSVs: every live-configured asset (BTCUSDm, XAUUSDm, USTECm,
-            # EURJPYm, EURUSDm, USOILm) already has 8000+ daily bars, so this is
-            # a no-op for current live trading — it only changes behavior for a
-            # newly onboarded asset or a daily-data gap/corruption scenario.
-            _daily_bars = len(df_daily)
-            _maturity = min(1.0, _daily_bars / 400.0)
 
-            if _daily_bars < 100:
+            # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
+            if len(df_daily) < 400:
                 logger.warning(
-                    f"[CONSTITUTION] Insufficient daily data: {_daily_bars} bars (need 100+ to start, "
-                    f"400 for full maturity). Defaulting to neutral."
+                    f"[CONSTITUTION] CRITICAL: Insufficient daily data: {len(df_daily)} bars (need 400+). "
+                    "Cannot establish reliable macro trend. Defaulting to neutral."
                 )
                 return GovernorStatus(
-                    is_bullish=False, is_bearish=False,
-                    reasoning=f"Insufficient 1D data ({_daily_bars}/100 minimum)", ema_200=None,
-                    daily_bars_available=_daily_bars, regime_maturity=_maturity,
-                )
-            if _daily_bars < 400:
-                logger.info(
-                    f"[CONSTITUTION] Producing a real read at {_daily_bars}/400 days "
-                    f"({_maturity:.0%} mature). Gated by Livermore agreement downstream."
+                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data (<400 bars)", ema_200=None
                 )
 
             df_daily = self._calculate_indicators(df_daily)
@@ -692,9 +659,7 @@ class MultiTimeFrameRegimeDetector:
             trade_type=trade_type,
             timeframe_data=timeframe_data,
             df_4h=df_4h_with_ema, # ✨ Pass 4H data with features
-            timeframe_agreement=timeframe_agreement,
-            daily_bars_available=governor_status.daily_bars_available,
-            regime_maturity=governor_status.regime_maturity,
+            timeframe_agreement=timeframe_agreement
         )
 
     def analyze_regime(

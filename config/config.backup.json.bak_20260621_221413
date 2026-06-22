@@ -50,10 +50,7 @@
     "allow_scaled_positions": true,
     "min_position_scale": 0.5,
     "max_hedge_ratio": 0.0,
-    "max_total_open_risk": 0.25,
-    "small_account_threshold_usd": 200,
-    "small_account_max_exposure_pct": 10.0,
-    "max_total_open_positions": 10
+    "max_total_open_risk": 0.25
   },
   "_comment_short_portfolio": "=== SHORT POSITION PORTFOLIO RULES ===",
   "short_position_sizing": {
@@ -70,8 +67,10 @@
       "use_futures_for_longs": true,
       "leverage": 20,
       "margin_type": "ISOLATED",
-      "symbol": "BTCUSDT",
-      "exchange": "binance",
+      "symbol": "BTCUSDm",
+      "exchange": "mt5",
+      "asset_type": "crypto",
+      "timeframe": "H1",
       "interval": "1h",
       "min_bars_training": 5000,
       "lookback_days": 730,
@@ -132,6 +131,8 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
+        "min_sl_pct": 0.006,
+        "min_rr": 1.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -143,12 +144,8 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "min_sl_pct": 0.006,
-        "min_rr": 1.5
-      },
-      "asset_type": "crypto",
-      "timeframe": "H1"
+        }
+      }
     },
     "GOLD": {
       "enabled": true,
@@ -188,6 +185,7 @@
         "stop_loss_pct": 0.008,
         "take_profit_pct": 0.025,
         "trailing_stop_pct": 0.012,
+        "tp_ratio": 2.5,
         "max_holding_hours": 72,
         "atr_multiplier": 2.5,
         "pivot_lookback": 25,
@@ -215,6 +213,9 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
+        "min_stop_atr_mult": 2.0,
+        "min_sl_pct": 0.0035,
+        "min_rr": 1.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -226,11 +227,7 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "tp_ratio": 2.5,
-        "min_stop_atr_mult": 2.0,
-        "min_sl_pct": 0.0035,
-        "min_rr": 1.5
+        }
       }
     },
     "USTEC": {
@@ -271,6 +268,7 @@
         "stop_loss_pct": 0.015,
         "take_profit_pct": 0.035,
         "trailing_stop_pct": 0.012,
+        "tp_ratio": 2.5,
         "max_holding_hours": 72,
         "atr_multiplier": 1.8,
         "pivot_lookback": 25,
@@ -296,6 +294,8 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
+        "min_sl_pct": 0.0025,
+        "min_rr": 1.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -307,14 +307,11 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "tp_ratio": 2.5,
-        "min_sl_pct": 0.0025,
-        "min_rr": 1.5
+        }
       }
     },
     "EURJPY": {
-      "enabled": true,
+      "enabled": false,
       "allow_shorts": true,
       "symbol": "EURJPYm",
       "exchange": "mt5",
@@ -378,6 +375,9 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 2.0,
         "runner_trail_atr_multiplier": 1.5,
+        "min_stop_atr_mult": 1.0,
+        "min_sl_pct": 0.0015,
+        "min_rr": 1.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -389,10 +389,7 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "min_stop_atr_mult": 1.0,
-        "min_sl_pct": 0.0015,
-        "min_rr": 1.5
+        }
       }
     },
     "EURUSD": {
@@ -433,6 +430,7 @@
         "stop_loss_pct": 0.004,
         "take_profit_pct": 0.016,
         "trailing_stop_pct": 0.005,
+        "tp_ratio": 2.0,
         "max_holding_hours": 72,
         "atr_multiplier": 2.0,
         "pivot_lookback": 25,
@@ -450,19 +448,6 @@
         "time_stop_bars": 48,
         "time_stop_trend": 72,
         "time_stop_reversion": 48,
-        "livermore_atr_adjustments": {
-          "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
-          "main_stop_add": 0.3,
-          "secondary_stop_sub": 0.2,
-          "main_trail_mult": 1.3,
-          "secondary_trail_mult": 0.7,
-          "breakeven_atr_young_state": 1.8,
-          "breakeven_atr_mid_state": 1.5,
-          "breakeven_atr_old_state": 1.2,
-          "young_state_max_age": 5,
-          "old_state_min_age": 20
-        },
-        "tp_ratio": 2.0,
         "use_ema_structure": true,
         "use_structure_targets": true,
         "breakeven_after_bars": 8,
@@ -474,7 +459,19 @@
         "runner_trail_atr_multiplier": 1.5,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0012,
-        "min_rr": 1.5
+        "min_rr": 1.5,
+        "livermore_atr_adjustments": {
+          "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
+          "main_stop_add": 0.3,
+          "secondary_stop_sub": 0.2,
+          "main_trail_mult": 1.3,
+          "secondary_trail_mult": 0.7,
+          "breakeven_atr_young_state": 1.8,
+          "breakeven_atr_mid_state": 1.5,
+          "breakeven_atr_old_state": 1.2,
+          "young_state_max_age": 5,
+          "old_state_min_age": 20
+        }
       }
     },
     "USOIL": {
@@ -515,6 +512,7 @@
         "stop_loss_pct": 0.01,
         "take_profit_pct": 0.035,
         "trailing_stop_pct": 0.015,
+        "tp_ratio": 2.5,
         "max_holding_hours": 72,
         "atr_multiplier": 2.5,
         "pivot_lookback": 25,
@@ -542,6 +540,9 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
+        "min_stop_atr_mult": 1.0,
+        "min_sl_pct": 0.0055,
+        "min_rr": 2.0,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -553,11 +554,7 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "tp_ratio": 2.5,
-        "min_stop_atr_mult": 1.0,
-        "min_sl_pct": 0.0055,
-        "min_rr": 1.5
+        }
       }
     },
     "GBPAUD": {
@@ -598,6 +595,7 @@
         "stop_loss_pct": 0.005,
         "take_profit_pct": 0.018,
         "trailing_stop_pct": 0.007,
+        "tp_ratio": 2.2,
         "max_holding_hours": 72,
         "atr_multiplier": 2.0,
         "pivot_lookback": 25,
@@ -625,6 +623,9 @@
         "early_scale_bars": 4,
         "early_lock_atr_multiplier": 2.0,
         "runner_trail_atr_multiplier": 1.5,
+        "min_stop_atr_mult": 1.0,
+        "min_sl_pct": 0.0025,
+        "min_rr": 2.0,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -636,15 +637,11 @@
           "breakeven_atr_old_state": 1.2,
           "young_state_max_age": 5,
           "old_state_min_age": 20
-        },
-        "tp_ratio": 2.2,
-        "min_stop_atr_mult": 1.0,
-        "min_sl_pct": 0.0025,
-        "min_rr": 1.3
+        }
       }
     },
     "GBPUSD": {
-      "enabled": false,
+      "enabled": true,
       "allow_shorts": true,
       "symbol": "GBPUSDm",
       "exchange": "mt5",
@@ -715,7 +712,7 @@
       }
     },
     "USDJPY": {
-      "enabled": false,
+      "enabled": true,
       "allow_shorts": true,
       "symbol": "USDJPYm",
       "exchange": "mt5",
@@ -815,7 +812,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GOLD": {
         "bb_period": 20,
@@ -847,7 +846,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USTEC": {
         "bb_period": 20,
@@ -879,7 +880,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "EURJPY": {
         "bb_period": 20,
@@ -911,7 +914,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "EURUSD": {
         "bb_period": 20,
@@ -943,7 +948,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USOIL": {
         "bb_period": 20,
@@ -975,7 +982,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GBPAUD": {
         "bb_period": 20,
@@ -1007,7 +1016,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "GBPUSD": {
         "bb_period": 20,
@@ -1039,7 +1050,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       },
       "USDJPY": {
         "bb_period": 20,
@@ -1071,7 +1084,9 @@
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
-        }
+        },
+        "mr_mode2_counter_trend_enabled": true,
+        "mr_mode3_climax_fade_enabled": true
       }
     },
     "trend_following": {
@@ -1610,7 +1625,6 @@
     "counter_trend_threshold": 3.5
   },
   "trading": {
-    "enabled": true,
     "mode": "live",
     "allow_short_positions": true,
     "allow_simultaneous_long_short": false,
@@ -1619,28 +1633,32 @@
     "allow_simultaneous_positions": true,
     "max_simultaneous_positions": 10,
     "position_timeout_hours": 720,
-    "min_time_between_trades_minutes": 480,
+    "min_time_between_trades_minutes": 240,
+    "natural_cycle_min_bars": 8,
+    "min_regime_confidence": 0.6,
+    "confidence_gate_pattern_veto": -1.0,
     "check_interval_seconds": 300,
     "max_positions_per_asset": 3,
+    "allow_hedging": false,
     "small_account_protocol": true,
     "place_vtm_sl_on_exchange": true,
     "place_vtm_tp_on_exchange": true,
     "task_scheduler_name": "TBOT",
+    "enabled": true,
+    "vtm_update_interval_seconds": 2,
+    "vtm_pyramiding_enabled": false,
+    "exchange_reconcile_interval_seconds": 60,
+    "session_filter_enabled": true,
+    "pullback_min_shadow_signals": 30,
+    "pullback_min_expectancy_ratio": 0.95,
+    "pullback_min_positive_rate": 0.6,
     "profit_alert_thresholds": [
       10,
       15,
       20,
       25,
       30
-    ],
-    "min_regime_confidence": 0.6,
-    "confidence_gate_pattern_veto": -1.0,
-    "vtm_update_interval_seconds": 5,
-    "vtm_pyramiding_enabled": false,
-    "exchange_reconcile_interval_seconds": 60,
-    "session_filter_enabled": true,
-    "natural_cycle_min_bars": 8,
-    "allow_hedging": false
+    ]
   },
   "risk_management": {
     "max_daily_trades": 30,
@@ -1667,7 +1685,7 @@
     "use_test_data": true
   },
   "data": {
-    "btc_source": "binance",
+    "btc_source": "mt5",
     "gold_source": "mt5",
     "update_frequency_seconds": 300,
     "cache_enabled": true,
@@ -1712,7 +1730,7 @@
   },
   "scalp_alerts": {
     "_note": "Personal-use only. Notifies via Telegram when 1H and 4H regime structurally align, with ADX/RSI levels, their rising/falling direction, and a go-in/wait advisory. Off by default.",
-    "enabled": false,
+    "enabled": true,
     "assets": [],
     "min_adx": 20,
     "rsi_overbought": 70,
@@ -1721,34 +1739,22 @@
     "fire_once_per_alignment_event": true
   },
   "phase_config": {
-    "_note": "Controls which phases are active. Flip flags here instead of touching source code. current_phase is informational only.",
-    "current_phase": "1",
-    "autotrainer_enabled": false,
-    "structural_stops_enabled": false,
-    "per_tick_livermore_enabled": false,
+    "_note": "Controls which phases are active. Set a flag to false to disable that feature without touching source code.",
+    "current_phase": "4",
+    "autotrainer_enabled": true,
+    "structural_stops_enabled": true,
+    "per_tick_livermore_enabled": true,
     "bb_kc_squeeze_gate_enabled": true,
     "nr7_gate_enabled": true,
-    "natural_cycle_second_pos_gate_enabled": false,
-    "continuation_targets_enabled": false,
+    "natural_cycle_second_pos_gate_enabled": true,
+    "continuation_targets_enabled": true,
     "min_sl_pct_enabled": true,
     "min_rr_enabled": true,
     "single_tp_blend_enabled": true,
     "rr_gate_consistency_enabled": true,
-    "pullback_completion_enabled": false,
+    "pullback_completion_enabled": true,
     "mfe_logging_enabled": true,
-    "partials_enabled": false,
-    "pyramiding_enabled": false,
-    "ai_third_path_structural_anchor_enabled": false,
-    "ai_validator_gates_performance_mode": false,
-    "lsm_regime_disagreement_gate_enabled": false,
-    "mr_mode2_counter_trend_enabled": false,
-    "mr_mode3_climax_fade_enabled": false,
-    "market_watcher_structural_awareness_enabled": false,
-    "vtm_structural_exit_awareness_enabled": false,
-    "ml_livermore_features_enabled": false,
-    "council_trend_judge_livermore_confirmation_enabled": false,
-    "council_lifecycle_livermore_guard_enabled": false,
-    "strategy_livermore_awareness_enabled": false,
-    "pyramid_livermore_maturity_gate_enabled": true
+    "partials_enabled": true,
+    "pyramiding_enabled": true
   }
 }

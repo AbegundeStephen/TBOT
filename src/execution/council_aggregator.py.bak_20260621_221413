@@ -75,14 +75,8 @@ class InstitutionalCouncilAggregator:
         self.asset_type = asset_type.upper()
         self.ai_validator = ai_validator
         self.detailed_logging = enable_detailed_logging
-        self.mtf_integration = mtf_integration
-        self.performance_tracker = performance_tracker
-        # L7: telemetry tag for the most recent TREND judge / Livermore agreement
-        # check — read by funnel/shadow logging, not behavior-critical itself.
-        self._last_trend_judge_tag: str = "LSM_UNAVAILABLE"
-        # L9: telemetry tag for the lifecycle-phase gate's Livermore overlay —
-        # read by funnel/shadow logging, not behavior-critical itself.
-        self._last_lifecycle_tag: str = "LSM_LIFECYCLE_UNAVAILABLE"
+        self.mtf_integration = mtf_integration 
+        self.performance_tracker = performance_tracker        
         self.use_macro_governor = use_macro_governor
         self.use_gatekeeper = use_gatekeeper
 
@@ -731,7 +725,6 @@ class InstitutionalCouncilAggregator:
         signal: int,
         adx: float,
         current_required_score: float,
-        governor_data: Optional[Dict] = None,
     ) -> Tuple[float, str]:
         """
         Lifecycle / Phase-Awareness Gate
@@ -750,13 +743,6 @@ class InstitutionalCouncilAggregator:
           EXTENDED     → required_score += 0.35
           ESTABLISHING → required_score -= 0.25  (reward fresh momentum)
           HEALTHY      → no change
-
-        L9: on top of this ADX-based read, _apply_lifecycle_livermore_overlay()
-        applies a small additive nudge sourced from the *already* Livermore-
-        derived composite_state.lifecycle_phase (PICKUP/CONFIRMATION/ESTABLISHED/
-        FADING/EXHAUSTION — see signal_aggregator.py's LSM state→phase mapping).
-        Gated by phase_config.council_lifecycle_livermore_guard_enabled (default
-        False); never changes the returned phase_label, only the score.
         """
         try:
             if len(df) < 60:
@@ -813,7 +799,7 @@ class InstitutionalCouncilAggregator:
                     f"[LIFECYCLE] 🌱 ESTABLISHING — ADX just crossed 20 and rising "
                     f"({adx_now:.1f}). required_score ↓ {current_required_score:.2f} → {adj_score:.2f}"
                 )
-                return self._apply_lifecycle_livermore_overlay(adj_score, "ESTABLISHING", governor_data)
+                return adj_score, "ESTABLISHING"
 
             # EXHAUSTED: ADX declined significantly from peak + price overextended + divergence
             if (adx_peak_decline_pct >= 0.15          # ADX fell ≥15% from recent peak
@@ -825,7 +811,7 @@ class InstitutionalCouncilAggregator:
                     f"z-score {directional_z:.2f}σ, RSI divergence confirmed. "
                     f"required_score ↑ {current_required_score:.2f} → {adj_score:.2f}"
                 )
-                return self._apply_lifecycle_livermore_overlay(adj_score, "EXHAUSTED", governor_data)
+                return adj_score, "EXHAUSTED"
 
             # EXTENDED: price stretched + ADX declining (but no divergence confirmation yet)
             if (adx_peak_decline_pct >= 0.12
@@ -837,76 +823,17 @@ class InstitutionalCouncilAggregator:
                     f"z-score {directional_z:.2f}σ (no divergence). "
                     f"required_score ↑ {current_required_score:.2f} → {adj_score:.2f}"
                 )
-                return self._apply_lifecycle_livermore_overlay(adj_score, "EXTENDED", governor_data)
+                return adj_score, "EXTENDED"
 
             logger.debug(
                 f"[LIFECYCLE] ✅ HEALTHY — ADX={adx_now:.1f} peak-decline={adx_peak_decline_pct:.0%} "
                 f"z={directional_z:.2f}σ divergence={rsi_divergence}. No score adjustment."
             )
-            return self._apply_lifecycle_livermore_overlay(current_required_score, "HEALTHY", governor_data)
+            return current_required_score, "HEALTHY"
 
         except Exception as e:
             logger.debug(f"[LIFECYCLE] Phase check error: {e}")
             return current_required_score, "HEALTHY"
-
-    def _apply_lifecycle_livermore_overlay(
-        self,
-        adj_score: float,
-        phase_label: str,
-        governor_data: Optional[Dict] = None,
-    ) -> Tuple[float, str]:
-        """
-        L9: nudges the ADX-based lifecycle required_score using the *already*
-        Livermore-derived composite_state.lifecycle_phase (PICKUP/CONFIRMATION/
-        ESTABLISHED/FADING/EXHAUSTION — see signal_aggregator.py's LSM
-        state-age mapping). Purely additive on top of whatever the ADX-based
-        classifier above produced; never changes phase_label so the existing
-        4-value contract for downstream consumers (e.g. funnel logging at
-        'lifecycle_phase') stays intact. Gated by
-        phase_config.council_lifecycle_livermore_guard_enabled (default False).
-        """
-        self._last_lifecycle_tag = "LSM_LIFECYCLE_UNAVAILABLE"
-        try:
-            cs = (governor_data or {}).get("composite_state") if governor_data else None
-            _phase_cfg = (governor_data or {}).get("phase_config") if governor_data else None
-            if _phase_cfg is None:
-                _phase_cfg = (cs.get("phase_config") if isinstance(cs, dict) else getattr(cs, "phase_config", None)) if cs is not None else None
-            _phase_cfg = _phase_cfg or {}
-
-            if not _phase_cfg.get("council_lifecycle_livermore_guard_enabled", False):
-                self._last_lifecycle_tag = "LSM_LIFECYCLE_DISABLED"
-                return adj_score, phase_label
-
-            if cs is None:
-                return adj_score, phase_label
-
-            lsm_phase = cs.get("lifecycle_phase") if isinstance(cs, dict) else getattr(cs, "lifecycle_phase", None)
-            if not lsm_phase:
-                return adj_score, phase_label
-
-            _phase_adjustments = {
-                "PICKUP": -0.20,
-                "CONFIRMATION": -0.10,
-                "ESTABLISHED": 0.0,
-                "FADING": 0.30,
-                "EXHAUSTION": 0.60,
-            }
-            delta = _phase_adjustments.get(lsm_phase)
-            if delta is None:
-                self._last_lifecycle_tag = f"LSM_LIFECYCLE_UNKNOWN({lsm_phase})"
-                return adj_score, phase_label
-
-            new_score = max(2.0, min(adj_score + delta, 5.0))
-            if abs(delta) > 1e-9:
-                logger.info(
-                    f"[LIFECYCLE] 🧭 Livermore overlay: lsm_phase={lsm_phase} adx_phase={phase_label} "
-                    f"required_score {adj_score:.2f} → {new_score:.2f} (Δ{delta:+.2f})"
-                )
-            self._last_lifecycle_tag = f"LSM_LIFECYCLE_{lsm_phase}"
-            return new_score, phase_label
-        except Exception as e:
-            logger.debug(f"[LIFECYCLE] L9 Livermore overlay skipped: {e}")
-            return adj_score, phase_label
 
     def _is_explosive_momentum(self, df: pd.DataFrame, signal: int) -> bool:
         """
@@ -1189,20 +1116,13 @@ class InstitutionalCouncilAggregator:
 
             if self.s_trend_following:
                 try:
-                    # L10: pass composite_state through so the TF strategy's
-                    # Livermore awareness nudge (flag-gated) can see live LSM state.
-                    tf_signal, tf_conf = self.s_trend_following.generate_signal(
-                        df, df_4h=df_4h, composite_state=_composite_state
-                    )
+                    tf_signal, tf_conf = self.s_trend_following.generate_signal(df, df_4h=df_4h)
                 except Exception as e:
                     logger.error(f"[COUNCIL] TF signal error: {e}")
 
             if self.s_ema:
                 try:
-                    # L10: same wiring as TF above.
-                    ema_signal, ema_conf = self.s_ema.generate_signal(
-                        df, df_4h=df_4h, composite_state=_composite_state
-                    )
+                    ema_signal, ema_conf = self.s_ema.generate_signal(df, df_4h=df_4h)
                 except Exception as e:
                     logger.error(f"[COUNCIL] EMA signal error: {e}")
             
@@ -1234,7 +1154,7 @@ class InstitutionalCouncilAggregator:
             is_breakout_mode = self._detect_breakout_state(df)
             
             # Run all judges for both directions
-            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull, w_trend, consensus_regime, governor_data=governor_data)
+            buy_scores['trend'], sell_scores['trend'], trend_exp = self._judge_trend_bidirectional(df, is_bull, w_trend, consensus_regime)
             buy_explanations.append(trend_exp['buy'])
             sell_explanations.append(trend_exp['sell'])
             
@@ -1423,33 +1343,7 @@ class InstitutionalCouncilAggregator:
             # Calculate total scores
             buy_total = sum(buy_scores.values())
             sell_total = sum(sell_scores.values())
-
-            # ── Item 19b: 4H Livermore / macro-regime disagreement gate ──────
-            # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
-            # default False — same on/off switch used in signal_aggregator.py
-            # and main.py for this item). When enabled and the live 4H
-            # Livermore state's lean disagrees with the EMA-derived `is_bull`
-            # macro lean, the decision block below is skipped entirely this
-            # cycle (HOLD) rather than trading on a regime label the structural
-            # state machine actively contradicts. Mirrors "Council fix #4"'s
-            # self.config.get('phase_config', {}) pattern just below.
-            _lsm_4h_for_regime_c = (
-                getattr(_composite_state, "livermore_state_4h", None)
-                if _composite_state is not None else None
-            )
-            _lsm_lean_c = (
-                "bullish" if _lsm_4h_for_regime_c in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-                else "bearish" if _lsm_4h_for_regime_c in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
-                else None
-            )
-            _regime_lean_c = "bullish" if is_bull else "bearish"
-            _lsm_gate_enabled_c = bool((self.config.get('phase_config', {}) or {}).get(
-                'lsm_regime_disagreement_gate_enabled', False
-            ))
-            _regime_lsm_disagree = bool(
-                _lsm_gate_enabled_c and _lsm_lean_c is not None and _lsm_lean_c != _regime_lean_c
-            )
-
+            
             # ================================================================
             # DECISION LOGIC: Choose strongest direction
             # ================================================================
@@ -1464,36 +1358,12 @@ class InstitutionalCouncilAggregator:
             preset_name = self.config.get('name', 'balanced').lower()
             trade_type = "REVERSION" if preset_name == "mr" else "TREND"
 
-            # Apply the same Livermore-state threshold-raise performance mode already
-            # gets (signal_aggregator.py STEP 5B, Layer 1 only — no Retest Engine
-            # layer here, that's performance-mode-specific), so council can't fire
-            # more easily than performance just because it was never wired to this
-            # safety adjustment.
-            _rsm_state_council = getattr(_composite_state, "livermore_state_4h", None) if _composite_state else None
-            if not hasattr(self, "_rsm_table_council"):
-                import json as _json_rsm_c
-                try:
-                    with open("config/aggregator_presets.json") as _rsm_f_c:
-                        _rsm_cfg_c = _json_rsm_c.load(_rsm_f_c)
-                    self._rsm_table_council = _rsm_cfg_c.get("REQUIRED_SCORE_MODIFIER", {}).get("state_modifiers", {})
-                    self._rsm_cap_council = _rsm_cfg_c.get("REQUIRED_SCORE_MODIFIER", {}).get("modifier_cap", 1.50)
-                except Exception as _rsm_cfg_err_c:
-                    logger.debug("[RSM][COUNCIL] config load error: %s", _rsm_cfg_err_c)
-                    self._rsm_table_council = {}
-                    self._rsm_cap_council = 1.50
-            _rsm_delta_council = self._rsm_table_council.get(_rsm_state_council, 0.0)
-            _effective_trend_threshold = min(
-                self.trend_aligned_threshold + self._rsm_cap_council,
-                self.trend_aligned_threshold + _rsm_delta_council,
-            )
-
             # SLIGHTLY regime: raise the counter-trend bar to match signal_aggregator's 0.50
             # confidence penalty, preventing low-conviction counter-trend trades in ambiguous regimes.
-            # Now also folds in the Livermore RSM delta above, same as trend threshold.
             _is_slightly = consensus_regime in ("SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH")
-            _effective_counter_threshold = min(
-                self.counter_trend_threshold + self._rsm_cap_council,
-                (self.counter_trend_threshold + 0.50 if _is_slightly else self.counter_trend_threshold) + _rsm_delta_council,
+            _effective_counter_threshold = (
+                min(self.counter_trend_threshold + 0.50, self.trend_aligned_threshold)
+                if _is_slightly else self.counter_trend_threshold
             )
             if _is_slightly and self.detailed_logging:
                 logger.debug(
@@ -1502,26 +1372,20 @@ class InstitutionalCouncilAggregator:
                 )
 
             # Determine preliminary signal
-            if _regime_lsm_disagree:
-                logger.info(
-                    f"[COUNCIL] {self.asset_type} 4H Livermore lean ({_lsm_lean_c}) disagrees "
-                    f"with macro regime lean ({_regime_lean_c}) — HOLD "
-                    f"(lsm_regime_disagreement_gate_enabled, buy={buy_total:.2f} sell={sell_total:.2f})"
-                )
-            elif is_bull and buy_total >= _effective_trend_threshold:
+            if is_bull and buy_total >= self.trend_aligned_threshold:
                 signal = 1
                 total_score = buy_total
-                required_score = _effective_trend_threshold
+                required_score = self.trend_aligned_threshold
                 chosen_scores = buy_scores
             elif not is_bull and buy_total >= _effective_counter_threshold:
                 signal = 1
                 total_score = buy_total
                 required_score = _effective_counter_threshold
                 chosen_scores = buy_scores
-            elif not is_bull and sell_total >= _effective_trend_threshold:
+            elif not is_bull and sell_total >= self.trend_aligned_threshold:
                 signal = -1
                 total_score = sell_total
-                required_score = _effective_trend_threshold
+                required_score = self.trend_aligned_threshold
                 chosen_scores = sell_scores
             elif is_bull and sell_total >= _effective_counter_threshold:
                 signal = -1
@@ -1564,7 +1428,7 @@ class InstitutionalCouncilAggregator:
                     sl_mult = risk_cfg.get('atr_multiplier', 1.5)
                     # 7.2 LIVE: mirror VTM's Livermore overlay so the gate judges the
                     # stop the trade will ACTUALLY get. Reads from _composite_state (in scope).
-                    if getattr(_composite_state, 'phase_config', {}).get('rr_gate_consistency_enabled', False):
+                    if self.config.get('phase_config', {}).get('rr_gate_consistency_enabled', False):
                         _lv4h = getattr(_composite_state, 'livermore_state_4h', None) if _composite_state else None
                         _adj  = risk_cfg.get('livermore_atr_adjustments', {})
                         if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
@@ -2147,7 +2011,6 @@ class InstitutionalCouncilAggregator:
                     signal=signal,
                     adx=adx,
                     current_required_score=required_score,
-                    governor_data=governor_data,
                 )
 
                 # Final execution check
@@ -2358,7 +2221,6 @@ class InstitutionalCouncilAggregator:
                     signal=signal,
                     signal_details=details,
                     df=df,
-                    composite_state=_composite_state,
                 )
                 
                 if validated_signal != signal:
@@ -2483,30 +2345,24 @@ class InstitutionalCouncilAggregator:
     # BIDIRECTIONAL JUDGES
     # ========================================================================
 
-    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float, consensus_regime: str = "NEUTRAL", governor_data: Optional[Dict] = None) -> Tuple[float, float, Dict]:
+    def _judge_trend_bidirectional(self, df: pd.DataFrame, is_bull: bool, weight: float, consensus_regime: str = "NEUTRAL") -> Tuple[float, float, Dict]:
         """
         JUDGE 1: TREND (Bidirectional)
-
-        L7: optionally confirms/contradicts the EMA-based trend read against the
-        Livermore 4H state carried on governor_data["composite_state"]. Gated by
-        phase_config.council_trend_judge_livermore_confirmation_enabled (default
-        False) — purely additive scoring nudge, never flips a 0 score to nonzero
-        and never lets a confirmed score exceed `weight`.
         """
         try:
             features = self.s_trend_following.generate_features(df.tail(250))
             if features.empty:
                 return 0.0, 0.0, {'buy': "TREND: No data", 'sell': "TREND: No data"}
-
+            
             latest = features.iloc[-1]
             price = latest['close']
             ema_20 = latest.get('ema_fast', 0)
             ema_50 = latest.get('ema_slow', 0)
             ema_200 = latest.get('ema_200', 0)
-
+            
             buy_score = 0.0
             sell_score = 0.0
-
+            
             # BUY scoring
             if price > ema_50:
                 if ema_20 > ema_50:
@@ -2520,7 +2376,7 @@ class InstitutionalCouncilAggregator:
                 buy_exp = f"TREND BUY: 🌊 Pullback ({buy_score:.1f}) - Slight Bullish regime, Price > EMA200"
             else:
                 buy_exp = "TREND BUY: ❌ No credit - Price < EMA50"
-
+            
             # SELL scoring
             if price < ema_50:
                 if ema_20 < ema_50:
@@ -2534,52 +2390,9 @@ class InstitutionalCouncilAggregator:
                 sell_exp = f"TREND SELL: 🌊 Pullback ({sell_score:.1f}) - Slight Bearish regime, Price < EMA200"
             else:
                 sell_exp = "TREND SELL: ❌ No credit - Price > EMA50"
-
-            # ── L7: Livermore 4H confirmation nudge ──────────────────────────
-            self._last_trend_judge_tag = "LSM_UNAVAILABLE"
-            try:
-                _phase_cfg = (governor_data or {}).get("phase_config")
-                if _phase_cfg is None:
-                    _cs_probe = (governor_data or {}).get("composite_state")
-                    _phase_cfg = getattr(_cs_probe, "phase_config", {}) or {}
-                if _phase_cfg.get("council_trend_judge_livermore_confirmation_enabled", False):
-                    cs = (governor_data or {}).get("composite_state")
-                    if cs is not None:
-                        _lsm_4h = cs.get("livermore_state_4h") if isinstance(cs, dict) else getattr(cs, "livermore_state_4h", None)
-                        if _lsm_4h:
-                            _bullish_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-                            _bearish_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
-                            _lsm_bull = _lsm_4h in _bullish_states
-                            _lsm_bear = _lsm_4h in _bearish_states
-
-                            if buy_score > 0:
-                                if _lsm_bull:
-                                    buy_score = min(buy_score + 0.15 * weight, weight)
-                                    buy_exp += f" +LSM_CONFIRMED({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONFIRMED"
-                                elif _lsm_bear:
-                                    buy_score = max(buy_score - 0.20 * weight, 0.0)
-                                    buy_exp += f" -LSM_CONTRARIAN({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONTRARIAN"
-                                else:
-                                    self._last_trend_judge_tag = "LSM_NEUTRAL"
-
-                            if sell_score > 0:
-                                if _lsm_bear:
-                                    sell_score = min(sell_score + 0.15 * weight, weight)
-                                    sell_exp += f" +LSM_CONFIRMED({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONFIRMED"
-                                elif _lsm_bull:
-                                    sell_score = max(sell_score - 0.20 * weight, 0.0)
-                                    sell_exp += f" -LSM_CONTRARIAN({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONTRARIAN"
-                                else:
-                                    self._last_trend_judge_tag = "LSM_NEUTRAL"
-            except Exception as _lsm_e:
-                logger.debug(f"[TREND] L7 Livermore confirmation skipped: {_lsm_e}")
-
+            
             return buy_score, sell_score, {'buy': buy_exp, 'sell': sell_exp}
-
+            
         except Exception as e:
             logger.error(f"[TREND] Error: {e}")
             return 0.0, 0.0, {'buy': f"TREND: Error", 'sell': f"TREND: Error"}
@@ -2970,11 +2783,7 @@ class InstitutionalCouncilAggregator:
             sell_score = 0.0
 
             # ── Phase 3B: institutional_pattern from performance aggregator ────
-            _gd_composite = (governor_data or {}).get("composite_state") if governor_data else None
-            if isinstance(_gd_composite, dict):
-                inst_pattern = _gd_composite.get("institutional_pattern")
-            else:
-                inst_pattern = getattr(_gd_composite, "institutional_pattern", None)
+            inst_pattern = (governor_data or {}).get("institutional_pattern") if governor_data else None
             if inst_pattern is not None:
                 if inst_pattern == "ACCUMULATION":
                     buy_score = weight
@@ -3051,7 +2860,7 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 5: VOLUME (Same for both directions)
         """
-        if self.asset_type in ['GOLD', 'EURUSD', 'EURJPY', 'USTEC', 'USOIL', 'GBPAUD']:
+        if self.asset_type in ['GOLD', 'EURUSD', 'EURJPY', 'USTEC']:
             return 0.5 * weight, 0.5 * weight, {'buy': 'VOL: Neutral (MT5 tick volume unreliable)', 'sell': 'VOL: Neutral (MT5 tick volume unreliable)'}
 
         try:
@@ -3343,70 +3152,4 @@ class InstitutionalCouncilAggregator:
                         if first_open > 0:
                             snippet_norm = snippet / first_open - 1
                             snippet_input = snippet_norm.reshape(1, 15, 4)
-                            predictions = self.ai_validator.sniper.model.predict(snippet_input, verbose=0)[0]
-
-                            top3_indices = predictions.argsort()[-3:][::-1]
-                            top3_confidences = predictions[top3_indices]
-
-                            top3_patterns = []
-                            for idx in top3_indices:
-                                pattern_name = self.ai_validator.reverse_pattern_map.get(idx, f"Pattern_{idx}")
-                                top3_patterns.append(pattern_name)
-
-                            viz_data["top3_patterns"] = top3_patterns
-                            viz_data["top3_confidences"] = top3_confidences.tolist()
-                    except Exception as e:
-                        logger.debug(f"[VIZ] Top3 patterns failed: {e}")
-            except Exception as e:
-                logger.error(f"[VIZ] Pattern detection failed: {e}")
-
-            # Validation Status
-            original_signal = details.get("original_signal", final_signal)
-
-            if final_signal == 0 and original_signal != 0:
-                viz_data["validation_passed"] = False
-                viz_data["action"] = "rejected"
-                
-                reasons = []
-                if not viz_data["sr_analysis"]["near_sr_level"]:
-                    reasons.append("No nearby S/R level")
-                if not viz_data["pattern_detected"]:
-                    reasons.append("No pattern detected")
-                if viz_data["pattern_confidence"] < self.ai_validator.current_pattern_threshold:
-                    reasons.append(f"Low confidence ({viz_data['pattern_confidence']:.1%})")
-                viz_data["rejection_reasons"] = reasons
-            elif final_signal != 0:
-                viz_data["validation_passed"] = True
-                viz_data["action"] = "approved"
-            else:
-                viz_data["action"] = "hold"
-
-            return viz_data
-
-        except Exception as e:
-            logger.error(f"[VIZ] AI formatting failed: {e}", exc_info=True)
-            return {
-                "pattern_detected": False,
-                "validation_passed": False,
-                "error": str(e),
-                "action": "error",
-            }
-
-    def get_statistics(self) -> Dict:
-        """Return aggregator statistics"""
-        total = max(self.stats['total_evaluations'], 1)
-
-        return {
-            **self.stats,
-            'buy_rate': (self.stats['buy_signals'] / total) * 100,
-            'sell_rate': (self.stats['sell_signals'] / total) * 100,
-            'hold_rate': (self.stats['hold_signals'] / total) * 100,
-            'avg_score_on_trade': (
-                np.mean(self.stats['avg_score_on_trade'])
-                if self.stats['avg_score_on_trade'] else 0.0
-            ),
-            'avg_score_on_hold': (
-                np.mean(self.stats['avg_score_on_hold'])
-                if self.stats['avg_score_on_hold'] else 0.0
-            ),
-        }
+   
