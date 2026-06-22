@@ -12,6 +12,7 @@ import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import pickle
+import copy
 from pathlib import Path
 from src.execution.veteran_trade_manager import VeteranTradeManager, ExitReason
 from src.utils.trade_logger import log_trade_event
