@@ -7,6 +7,7 @@ Phase 0B: sanitise() method added — NaN guard runs after all fields populated.
           order_book_imbalance and body_trend_ratio converted to Optional + _valid flag.
 Phase 1:  Livermore fields populated once livermore_state_machine.py is built.
 """
+
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
@@ -27,7 +28,6 @@ class CompositeState:
     slopes_aligned: bool = False
     slope_diverging: bool = False
     structural_decay: bool = False
-    transition_probability: float = 0.5
     is_friday_pm: bool = False
 
     # ══════════════════════════════════════
@@ -88,16 +88,11 @@ class CompositeState:
     # ══════════════════════════════════════
     # AI INTEGRATION (reserved — sniper disconnected Phase 0B)
     # ══════════════════════════════════════
-    ai_pattern_name: Optional[str] = None
-    ai_pattern_confidence: float = 0.0
-    ai_reversal_probability: float = 0.0
 
     # ══════════════════════════════════════
     # OUTPUT (set by Confluence Engine)
     # ══════════════════════════════════════
     institutional_pattern: Optional[str] = None
-    exhaustion_score: float = 0.0
-    confirmation_score: float = 0.0
     net_conviction: float = 0.0
     friday_tighten: bool = False
 
@@ -160,17 +155,24 @@ class CompositeState:
           - Ratio/proportion fields: NaN -> None + _valid = False
             (0.0 would mean the opposite of "no data" for ratio fields)
         """
+
         def _nan(v) -> bool:
             return isinstance(v, float) and math.isnan(v)
 
         # Count / additive — zero is a valid neutral value
         _count_fields = [
-            "regime_age_hours", "regime_age_ratio", "transition_probability",
-            "defense_strength", "distance_zscore", "squeeze_strength",
-            "effort_result_zscore", "divergence_strength", "rejection_strength",
-            "distance_to_vwap_atr", "exhaustion_score", "confirmation_score",
-            "net_conviction", "ai_pattern_confidence", "ai_reversal_probability",
-            "spread_ratio", "time_since_last_loss_hours",
+            "regime_age_hours",
+            "regime_age_ratio",
+            "defense_strength",
+            "distance_zscore",
+            "squeeze_strength",
+            "effort_result_zscore",
+            "divergence_strength",
+            "rejection_strength",
+            "distance_to_vwap_atr",
+            "net_conviction",
+            "spread_ratio",
+            "time_since_last_loss_hours",
         ]
         for fname in _count_fields:
             v = getattr(self, fname, None)
@@ -201,4 +203,4 @@ class CompositeState:
 
     def to_dict(self) -> Dict:
         """For shadow trader logging."""
-        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}

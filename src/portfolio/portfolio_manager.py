@@ -30,6 +30,112 @@ logger = logging.getLogger(__name__)
 USD_INVERSE_BUCKET = ["GOLD", "EURUSD", "BTC"]
 
 
+def _sanitize_for_pickle(obj, path="positions", _memo=None, _depth=0, _max_depth=14, _dropped=None):
+    """
+    Best-effort recursive copy of `obj` with any leaf that fails to pickle
+    on its own (e.g. a threading.RLock buried inside some nested dict/object)
+    replaced with None, so a single bad attribute can no longer abort the
+    entire save_portfolio_state() pickle.dump().
+
+    This mirrors the existing Position.__getstate__ pattern (which already
+    strips the known-bad `db_manager` attribute) but applies generically and
+    recursively, since `cannot pickle '_thread.RLock' object` has recurred
+    despite that earlier fix — meaning some OTHER reachable attribute (most
+    likely something nested deep inside trade_manager.signal_details, e.g.
+    mtf_regime/governor/full_regime_status) is now the carrier, and exhaustive
+    static tracing hasn't conclusively pinned down which one.
+
+    `_dropped` collects (path, type, repr) tuples for every leaf that had to
+    be swapped to None, purely so the caller can log exactly what was lost --
+    this turns the next occurrence into a precise root-cause confirmation
+    instead of another round of guessing.
+
+    `_memo` maps id(obj) -> already-sanitized result. This is real memoization,
+    not just a cycle guard: Position.signal_details and Position.trade_manager.
+    signal_details are typically the SAME shared dict object (both set from the
+    same `details` dict at position-open time), so without memoization the
+    second encounter would either redo wasted work or -- worse, with a naive
+    "seen" set -- skip sanitizing it and put the still-broken original back.
+    Memoizing means whichever path reaches a shared object first builds the
+    sanitized version once, and every other reference reuses that same result.
+
+    Never mutates the original object graph: dict/list/tuple are rebuilt as
+    new containers, and arbitrary objects are shallow-copied via copy.copy()
+    before any attribute is overwritten.
+    """
+    if _memo is None:
+        _memo = {}
+    if _dropped is None:
+        _dropped = []
+
+    obj_id = id(obj)
+    if obj_id in _memo:
+        return _memo[obj_id], _dropped
+
+    if _depth >= _max_depth:
+        try:
+            pickle.dumps(obj)
+            return obj, _dropped
+        except Exception:
+            _dropped.append((path, type(obj).__name__, repr(obj)[:200]))
+            return None, _dropped
+
+    if isinstance(obj, dict):
+        out = {}
+        _memo[obj_id] = out  # register before recursing -- safe even if a true cycle exists
+        for k, v in obj.items():
+            sv, _dropped = _sanitize_for_pickle(v, f"{path}[{k!r}]", _memo, _depth + 1, _max_depth, _dropped)
+            out[k] = sv
+        return out, _dropped
+    if isinstance(obj, list):
+        out = []
+        _memo[obj_id] = out
+        for i, v in enumerate(obj):
+            sv, _dropped = _sanitize_for_pickle(v, f"{path}[{i}]", _memo, _depth + 1, _max_depth, _dropped)
+            out.append(sv)
+        return out, _dropped
+    if isinstance(obj, tuple):
+        # Immutable -- can't pre-register a mutable placeholder, so build
+        # then memoize. Cycles through tuples don't occur in this codebase's
+        # data shapes, so this ordering is safe in practice.
+        out = []
+        for i, v in enumerate(obj):
+            sv, _dropped = _sanitize_for_pickle(v, f"{path}[{i}]", _memo, _depth + 1, _max_depth, _dropped)
+            out.append(sv)
+        result = tuple(out)
+        _memo[obj_id] = result
+        return result, _dropped
+
+    # Cheap fast path: most attributes (numbers, strings, numpy arrays,
+    # datetimes, pandas DataFrames) pickle fine on their own.
+    try:
+        pickle.dumps(obj)
+        _memo[obj_id] = obj
+        return obj, _dropped
+    except Exception:
+        pass
+
+    # Not directly picklable -- if it's a plain object with a __dict__,
+    # shallow-copy it and recursively sanitize its attributes in place on
+    # the COPY only, so e.g. one rogue attribute deep inside a dataclass
+    # doesn't force dropping the whole object.
+    if hasattr(obj, "__dict__") and not isinstance(obj, type):
+        try:
+            obj_copy = copy.copy(obj)
+            _memo[obj_id] = obj_copy  # register before recursing -- cycle-safe
+            for k, v in list(vars(obj_copy).items()):
+                sv, _dropped = _sanitize_for_pickle(v, f"{path}.{k}", _memo, _depth + 1, _max_depth, _dropped)
+                setattr(obj_copy, k, sv)
+            pickle.dumps(obj_copy)  # confirm the sanitized copy now actually pickles
+            return obj_copy, _dropped
+        except Exception:
+            pass
+
+    _dropped.append((path, type(obj).__name__, repr(obj)[:200]))
+    _memo[obj_id] = None
+    return None, _dropped
+
+
 class Position:
     """Represents a single trading position"""
 
@@ -637,9 +743,33 @@ class PortfolioManager:
         temp_file_path = self.state_file.with_suffix('.pkl.tmp')
         try:
             self.state_file.parent.mkdir(exist_ok=True)
-            with open(temp_file_path, "wb") as f:
-                pickle.dump(self.positions, f)
-            
+            try:
+                with open(temp_file_path, "wb") as f:
+                    pickle.dump(self.positions, f)
+            except (TypeError, pickle.PicklingError) as pe:
+                # Known recurring failure mode: some attribute deep inside a
+                # position (most likely trade_manager.signal_details ->
+                # mtf_regime/governor/full_regime_status) holds a live,
+                # unpicklable object (e.g. a threading.RLock). Rather than
+                # losing the entire save every cycle, fall back to a
+                # best-effort sanitized copy with only the offending
+                # leaf(ves) dropped -- core position fields (entry/SL/TP/
+                # quantity/trade_manager numeric state) survive intact.
+                logger.error(
+                    f"[STATE] Direct pickle failed ({pe}); retrying with sanitized "
+                    f"fallback copy (this should be reported -- it means a new "
+                    f"unpicklable object got attached to a position)."
+                )
+                sanitized, dropped = _sanitize_for_pickle(self.positions)
+                with open(temp_file_path, "wb") as f:
+                    pickle.dump(sanitized, f)
+                for d_path, d_type, d_repr in dropped:
+                    logger.warning(
+                        f"[STATE] Sanitized fallback dropped non-picklable attribute "
+                        f"at {d_path} (type={d_type}, value={d_repr}) -- this object "
+                        f"is NOT persisted across restarts; everything else was saved."
+                    )
+
             # Atomically replace the final file. MUST use replace(), not rename():
             # on Windows Path.rename()/os.rename refuses to overwrite an existing
             # target (WinError 183), whereas os.replace() overwrites atomically on
@@ -1197,6 +1327,29 @@ class PortfolioManager:
                 logger.warning(f"  ⚠️ Risk capped at maximum {max_risk:.3%}")
                 risk_pct = max_risk
             
+            # ── O4c: Recent loss context ──────────────────────────────────
+            # time_since_last_loss_hours was being computed every candle
+            # and immediately discarded. Modest tighten when a loss happened
+            # very recently (within 2 hours) — reduces sizing while reviewing
+            # what went wrong, not as a punitive measure.
+            try:
+                _cs_rb = None
+                _agg = self.aggregators.get(asset) if hasattr(self, "aggregators") else None
+                if isinstance(_agg, dict):
+                    _agg = _agg.get("performance") or _agg.get("livermore")
+                if _agg is not None:
+                    _cs_rb = getattr(_agg, "_cached_composite", None)
+                if _cs_rb is not None:
+                    _hrs_since_loss = float(getattr(_cs_rb, "time_since_last_loss_hours", 999.0))
+                    if _hrs_since_loss < 2.0:
+                        risk_pct = risk_pct * 0.85
+                        logger.info(
+                            f"  [O4c] Recent loss ({_hrs_since_loss:.1f}h ago) — "
+                            f"risk budget tightened 15%%"
+                        )
+            except Exception:
+                pass
+
             # ================================================================
             # STEP 7: Log Final Budget
             # ================================================================

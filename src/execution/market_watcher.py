@@ -463,11 +463,66 @@ class MarketWatcher:
 
         adverse_in_atr = adverse / atr
 
+        # ── Dynamic warn threshold ────────────────────────────────────────────
+        # Load composite state once here so both the threshold-adjustment block
+        # (O1a) and the existing L3 early-return checks below can share it
+        # without a second RPC call.
+        _warn_threshold = _ADVERSE_ATR_WARN
+        _cs = None
+        if self._structural_awareness_enabled():
+            _cs = self._get_live_composite_state(asset_name)
+
+            # ── O1a: Orphan signal awareness ──────────────────────────────────
+            # Three additional Confluence signals that were computed every candle
+            # but never used downstream. Applied on top of the base threshold.
+            # Only one fires per cycle — elif chain prevents double-stacking.
+            if _cs is not None:
+                _reversal_imminent = bool(_cs.get("reversal_imminent", False))
+                _conviction_dying  = bool(_cs.get("conviction_dying", False))
+                _structural_decay  = bool(_cs.get("structural_decay", False))
+                _in_silent_zone    = bool(_cs.get("is_silent_zone", False))
+
+                if _reversal_imminent and not _in_silent_zone:
+                    # is_parabolic + divergence_detected = high-specificity signal.
+                    # Treat same urgency as a confirmed structural flag.
+                    _warn_threshold = _ADVERSE_ATR_WARN * 0.70
+                    logger.info(
+                        f"[WATCHER] {asset_name}: reversal_imminent — "
+                        f"warn threshold → {_warn_threshold:.2f}× ATR"
+                    )
+                elif _conviction_dying and _warn_threshold >= _ADVERSE_ATR_WARN:
+                    # Candle body momentum fading. Moderate tighten,
+                    # only if not already in a stricter mode.
+                    _warn_threshold = _ADVERSE_ATR_WARN * 0.85
+                    logger.debug(
+                        f"[WATCHER] {asset_name}: conviction_dying — "
+                        f"warn threshold → {_warn_threshold:.2f}× ATR"
+                    )
+                elif _structural_decay and not _in_silent_zone and _warn_threshold >= _ADVERSE_ATR_WARN:
+                    # Regime aging + slopes fighting. Mild early warning.
+                    _warn_threshold = _ADVERSE_ATR_WARN * 0.90
+                    logger.debug(
+                        f"[WATCHER] {asset_name}: structural_decay — "
+                        f"warn threshold → {_warn_threshold:.2f}× ATR"
+                    )
+
+            # ── O4e: Session-aware threshold fine-tuning ──────────────────
+            # Asian session has lower volatility and tighter natural ranges.
+            # Applying the same ATR-based thresholds as NY produces over-
+            # sensitivity during Asian hours. Minor adjustment only.
+            _session = getattr(_cs, "session_name", "UNKNOWN") if _cs else "UNKNOWN"
+            if _session == "ASIAN" and _warn_threshold <= _ADVERSE_ATR_WARN:
+                _warn_threshold = _warn_threshold * 1.10
+                logger.debug(
+                    f"[WATCHER] {asset_name}: Asian session — "
+                    f"warn threshold nudged to {_warn_threshold:.2f}× ATR"
+                )
+
         # ── Determine alert level ────────────────────────────────────────────
         if adverse_in_atr >= _ADVERSE_ATR_CLOSE:
             # Extreme move: act unconditionally — price may have gapped past the SL.
             self._handle_extreme_adverse(position, current_price, adverse, atr, handler, asset_name)
-        elif adverse_in_atr >= _ADVERSE_ATR_WARN:
+        elif adverse_in_atr >= _warn_threshold:
             # Moderate adverse move. Only act if the existing SL does NOT already
             # cover this move — i.e. price has already blown PAST the stop.
             # If the SL is still ahead of current price, let VTM manage it normally.
@@ -488,21 +543,19 @@ class MarketWatcher:
             # that the regime context says deserves room. Soften (don't
             # disable) the warn-tier reaction here; the extreme tier above
             # still acts unconditionally regardless of this flag.
-            if self._structural_awareness_enabled():
-                _cs = self._get_live_composite_state(asset_name)
-                if _cs:
-                    if _cs.get("is_silent_zone"):
-                        logger.info(
-                            f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
-                            f"in a silent zone — holding off on SL tighten this tick."
-                        )
-                        return
-                    if _cs.get("choch_detected"):
-                        logger.info(
-                            f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
-                            f"right after a CHoCH — holding off on SL tighten this tick."
-                        )
-                        return
+            if _cs is not None:
+                if _cs.get("is_silent_zone"):
+                    logger.info(
+                        f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
+                        f"in a silent zone — holding off on SL tighten this tick."
+                    )
+                    return
+                if _cs.get("choch_detected"):
+                    logger.info(
+                        f"[WATCHER] {asset_name} adverse move {adverse/atr:.1f}×ATR "
+                        f"right after a CHoCH — holding off on SL tighten this tick."
+                    )
+                    return
 
             # No SL set, or price has blown through the existing SL → tighten.
             self._handle_warn_adverse(position, current_price, adverse, atr, asset_name)

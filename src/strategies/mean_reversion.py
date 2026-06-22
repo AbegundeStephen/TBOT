@@ -493,9 +493,34 @@ class MeanReversionStrategy(BaseStrategy):
             logger.info(f"[MR Mode1] {self.asset}: no spring detected → 0")
             return 0, 0.0
 
+        # ── O3a: Orphan Confluence signals for spring confirmation ─────────
+        # These four signals are computed every candle, directly relevant to
+        # Mode 1 spring setup quality, and were previously never read here.
+        _coiled_spring   = bool(getattr(composite_state, "coiled_spring", False)) if composite_state else False
+        _inside_bar      = bool(getattr(composite_state, "inside_bar", False)) if composite_state else False
+        _outside_bar     = bool(getattr(composite_state, "outside_bar", False)) if composite_state else False
+        _failed_breakout = bool(getattr(composite_state, "failed_breakout", False)) if composite_state else False
+
+        # coiled_spring during NATURAL_RETRACEMENT = Confluence confirms the
+        # structural precondition Mode 1 already checks via BB/KC squeeze.
+        # Log it for observability without adding a new hard gate.
+        if _coiled_spring:
+            logger.info(f"[MR Mode1] {self.asset}: coiled_spring=True — strong spring precondition")
+
+        # failed_breakout in a long setup = prior bull push rejected, now
+        # retracing. Classic spring precursor. Boost optional_min_count
+        # threshold to REDUCE required count by 1 when this fires — gives the
+        # setup more room to pass on fundamentally sound setups.
+
         # ── Optional conditions (2 of 4 required) ─────────────────────────
         opt_count = self._count_optional(features, direction=1)
         min_opt   = cfg["optional_min_count"]
+        if _failed_breakout:
+            min_opt = max(1, cfg["optional_min_count"] - 1)
+            logger.info(
+                f"[MR Mode1] {self.asset}: failed_breakout confirmed — "
+                f"optional requirement reduced to {min_opt}"
+            )
         if opt_count < min_opt:
             _vc = self._check_vol_contraction(features, 1)
             _hd = self._check_hidden_divergence(features, 1)
@@ -524,6 +549,16 @@ class MeanReversionStrategy(BaseStrategy):
         # spring_strength 0.30–1.0 → base 0.55–0.75
         base_conf = 0.55 + float(spring_strength) * 0.20
         extra_opt = max(0, opt_count - min_opt)
+        # ── O3a: Orphan confidence modifiers ─────────────────────────────
+        # outside_bar after a spring = candle breaking out of the coil's
+        # range. Positive confirmation of spring breakout. Boost confidence.
+        if _outside_bar:
+            conf_mod += 0.05
+            logger.debug(f"[MR Mode1] {self.asset}: outside_bar +0.05 confidence")
+        # inside_bar during compression = price tightening within range.
+        # Neutral to mildly positive for spring setup quality.
+        if _inside_bar and not _outside_bar:
+            conf_mod += 0.02
         confidence = float(min(1.0, base_conf + extra_opt * 0.05 + conf_mod))
 
         logger.info(
