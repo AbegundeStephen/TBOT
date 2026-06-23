@@ -158,14 +158,7 @@ class LivermoreStateMachine:
         if self._state != prev_state:
             self._state_age = 0
             self._last_transition = f"{prev_state}→{self._state}"
-            # Demoted INFO->DEBUG (2026-06-23): this fires once per bar transition
-            # during every full-history replay (generate_features() replays the
-            # whole df via update_from_series() each time it's called -- multiple
-            # times per asset per cycle, see mean_reversion.py Mode2/3's own
-            # `df.tail(260)` re-replay), producing dozens of lines per asset per
-            # cycle. Purely internal state bookkeeping -- no decision reads this
-            # log line. Set this logger to DEBUG if you need the play-by-play.
-            logger.debug(
+            logger.info(
                 "[Livermore] %s %s  %s→%s  close=%.5g  atr=%.5g",
                 self.asset, self.timeframe, prev_state, self._state, close, atr,
             )

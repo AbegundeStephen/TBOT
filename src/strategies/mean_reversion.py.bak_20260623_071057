@@ -1031,21 +1031,9 @@ class MeanReversionStrategy(BaseStrategy):
                 "MAIN_UP":               "Mode3(Fade/SHORT)",
                 "MAIN_DOWN":             "Mode3(Fade/LONG)",
             }
-            # Plain-English what's-actually-happening line, added 2026-06-23 so the
-            # GATE line is self-explanatory without needing to know the codebase.
-            # Cosmetic only — does not affect routing/decision logic below.
-            _mode_desc = {
-                "NATURAL_RETRACEMENT":   "buying the pullback in an uptrend (needs Wyckoff spring)",
-                "NATURAL_REBOUND":       "silent zone — no MR setup, longs blocked",
-                "SECONDARY_RETRACEMENT": "counter-trend LONG — fading a deep pullback, expecting a bounce",
-                "SECONDARY_REBOUND":     "counter-trend SHORT — fading a deep bounce, expecting reversion down",
-                "MAIN_UP":               "climax fade SHORT — fading an overextended up-leg",
-                "MAIN_DOWN":             "climax fade LONG — fading an overextended down-leg",
-            }
-            _label = _mode_label.get(lsm_state, "LEGACY(warmup)") if lsm_state else "LEGACY(warmup)"
-            _desc  = _mode_desc.get(lsm_state, "Livermore state unavailable — using legacy 6-pillar scorecard")
             logger.info(
-                f"[MR GATE] {self.asset}: LSM 1H={lsm_state} → {_label} — {_desc}"
+                f"[MR GATE] {self.asset}: lsm_1h={lsm_state} "
+                f"→ {_mode_label.get(lsm_state, 'LEGACY(warmup)') if lsm_state else 'LEGACY(warmup)'}"
             )
 
             if lsm_state == "NATURAL_RETRACEMENT":
@@ -1120,57 +1108,4 @@ class MeanReversionStrategy(BaseStrategy):
 
             sl = ss = 0
 
-            # PILLAR 1: Stretch
-            sl_full  = (float(ema50[i]) - cur > 1.5 * float(atr_arr[i])) or (cur < float(bb_lower[i]))
-            ss_full  = (cur - float(ema50[i]) > 1.5 * float(atr_arr[i])) or (cur > float(bb_upper[i]))
-            if sl_full: sl += 2
-            if ss_full: ss += 2
-            if not sl_full and float(ema50[i]) - cur > 0.8 * float(atr_arr[i]): sl += 1
-            if not ss_full and cur - float(ema50[i]) > 0.8 * float(atr_arr[i]): ss += 1
-
-            # PILLAR 1.5: RSI extreme
-            if float(bb_pos[i]) < 0.15 and float(rsi_arr[i]) < 35: sl += 1
-            if float(bb_pos[i]) > 0.85 and float(rsi_arr[i]) > 65: ss += 1
-
-            # PILLAR 2: Divergence
-            _slc = df.iloc[:i+1]
-            if self._check_divergence_legacy(_slc, signal=1):  sl += 1
-            if self._check_divergence_legacy(_slc, signal=-1): ss += 1
-
-            # PILLAR 3: Sweep
-            _lb_l = low_arr[max(0, i-30):i]
-            _lb_h = high_arr[max(0, i-30):i]
-            if len(_lb_l) > 0:
-                if cur < float(np.min(_lb_l)):  sl += 1
-                if cur > float(np.max(_lb_h)): ss += 1
-
-            # PILLAR 4: Exhaustion at extremes
-            if float(bb_pos[i]) < 0.15 or float(bb_pos[i]) > 0.85:
-                _o = df["open"].values[:i+1]
-                _h = df["high"].values[:i+1]
-                _l = df["low"].values[:i+1]
-                _c = df["close"].values[:i+1]
-                for _fn in (ta.CDLHAMMER, ta.CDLDOJI, ta.CDLENGULFING):
-                    _res = _fn(_o, _h, _l, _c)
-                    if int(_res[-1]) > 0: sl += 1
-                    if int(_res[-1]) < 0: ss += 1
-
-            # Future return validation
-            _atr_pct   = float(atr_arr[i]) / max(cur, 1e-10)
-            min_return = max(self.min_return_threshold, 0.30 * _atr_pct)
-            _fut       = close[i+1: i+1+5]
-            _fut_ret   = (float(np.mean(_fut)) - cur) / cur if len(_fut) > 0 else 0.0
-
-            if sl >= 3.0 and vel_drop <= atr_thr and _fut_ret > min_return:
-                labels.iloc[i] = 1;  signal_count["buy"] += 1
-            elif ss >= 3.0 and vel_rise <= atr_thr and _fut_ret < -min_return:
-                labels.iloc[i] = -1; signal_count["sell"] += 1
-
-        labels.iloc[-self.reversion_window:] = 0
-        signal_count["hold"] = len(labels) - signal_count["buy"] - signal_count["sell"]
-        total = len(labels)
-        logger.info(f"[{self.name}] Label distribution (legacy scorecard):")
-        logger.info(f"  SELL: {signal_count['sell']:>5} ({signal_count['sell']/total*100:>5.2f}%)")
-        logger.info(f"  HOLD: {signal_count['hold']:>5} ({signal_count['hold']/total*100:>5.2f}%)")
-        logger.info(f"  BUY:  {signal_count['buy']:>5}  ({signal_count['buy']/total*100:>5.2f}%)")
-        return labels
+            # PILLAR 1: Stretc
