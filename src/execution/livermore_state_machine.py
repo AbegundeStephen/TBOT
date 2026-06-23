@@ -172,7 +172,7 @@ class LivermoreStateMachine:
         else:
             self._state_age += 1
 
-        logger.info(
+        logger.debug(
             "[LSM] %s %s → %s  close=%.5g  atr=%.5g",
             self.asset, self.timeframe, self._state, close, atr,
         )
