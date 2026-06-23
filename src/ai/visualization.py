@@ -209,6 +209,7 @@ class AIVisualizationGenerator:
             self._plot_candlesticks(ax, df_plot)
 
             # Pattern overlay — PAT-4: removed
+            ai_details = details.get("ai_validation", {})
 
             # Show support/resistance levels
             if isinstance(ai_details, dict):
