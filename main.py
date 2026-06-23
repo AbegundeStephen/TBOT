@@ -590,6 +590,7 @@ class TradingBot:
                 binance_client=self.data_manager.futures_client,  # ✅ FIXED: Use Futures Client
                 db_manager=self.db_manager,
                 telegram_bot=self.telegram_bot,
+                aggregators=getattr(self, "aggregators", None),  # O4c: wire aggregators
             )
 
             # Hedging status — must be OFF. Confirmed on every startup.
@@ -1558,55 +1559,16 @@ class TradingBot:
                 threshold=self.ai_validator.current_sr_threshold,
             )
 
-            # Get pattern detection
-            pattern_result = self.ai_validator._check_pattern(
-                df=df,
-                signal=signal,
-                min_confidence=self.ai_validator.current_pattern_threshold,
-            )
-
-            # ✅ FIX: Get top 3 patterns (was missing!)
-            top3_patterns = []
-            top3_confidences = []
-
-            if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
-                try:
-                    # Get last 15 candles for pattern detection
-                    snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-                    first_open = snippet[0, 0]
-
-                    if first_open > 0:
-                        snippet_norm = snippet / first_open - 1
-                        snippet_input = snippet_norm.reshape(1, 15, 4)
-
-                        # Get predictions
-                        predictions = self.ai_validator.sniper.model.predict(
-                            snippet_input, verbose=0
-                        )[0]
-
-                        # Get top 3
-                        top3_indices = predictions.argsort()[-3:][::-1]
-                        top3_confidences = predictions[top3_indices].tolist()
-
-                        # Map to pattern names
-                        for idx in top3_indices:
-                            pattern_name = self.ai_validator.reverse_pattern_map.get(
-                                idx, f"Pattern_{idx}"
-                            )
-                            top3_patterns.append(pattern_name)
-
-                except Exception as e:
-                    logger.debug(f"[AI DIRECT] Top3 patterns failed: {e}")
-
+            # PAT-7: pattern detection removed — static stubs
             # Build result
             return {
-                "pattern_detected": pattern_result.get("pattern_confirmed", False),
+                "pattern_detected": False,
                 "validation_passed": signal != 0,  # If signal survived, it passed
-                "pattern_name": pattern_result.get("pattern_name", "None"),
-                "pattern_id": pattern_result.get("pattern_id"),
-                "pattern_confidence": pattern_result.get("confidence", 0.0),
-                "top3_patterns": top3_patterns,
-                "top3_confidences": top3_confidences,
+                "pattern_name": None,
+                "pattern_id": None,
+                "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
                 "sr_analysis": {
                     "near_sr_level": sr_result.get("near_level", False),
                     "level_type": sr_result.get("level_type", "none"),
@@ -3535,21 +3497,32 @@ class TradingBot:
         Runs every ~60 seconds from the VTM loop to detect positions
         closed directly on the exchange (without going through the bot).
 
-        Previously this only ran at startup; any position closed on the
-        broker mid-session would remain stale in the portfolio tracker
-        until the next bot restart, corrupting risk calculations.
+        NOTE: Intentionally reconciles disabled assets that still have
+        tracked positions. `enabled:false` gates new signal generation only.
+        A position opened before an asset was disabled must still be tracked
+        until it is fully closed and removed from the portfolio tracker.
+        Without this, manually closing a position on the broker while the
+        asset is disabled leaves a stale position in the portfolio forever.
         """
         try:
             for asset_name, asset_cfg in self.config.get("assets", {}).items():
-                if not asset_cfg.get("enabled", False):
-                    continue
                 exchange = asset_cfg.get("exchange", "mt5")
+                # Always reconcile if we have tracked positions for this asset,
+                # even if it is currently disabled.
+                positions = self.portfolio_manager.get_asset_positions(asset_name)
+                is_enabled = asset_cfg.get("enabled", False)
+                if not is_enabled and not positions:
+                    continue  # Disabled with no positions — nothing to do
                 symbol = self._resolve_symbol(asset_name)
                 if not symbol:
                     continue
-                positions = self.portfolio_manager.get_asset_positions(asset_name)
                 if not positions:
                     continue
+                if not is_enabled:
+                    logger.debug(
+                        f"[RECONCILE] {asset_name} is disabled but has "
+                        f"{len(positions)} tracked position(s) — reconciling"
+                    )
                 # S2.3: reconcile both MT5 and Binance assets
                 if exchange == "mt5":
                     if self.mt5_handler:

@@ -2294,33 +2294,12 @@ class PerformanceWeightedAggregator:
                 viz_data["error"] = f"S/R error: {str(e)}"
 
             # ================================================================
-            # STEP 2: Get Pattern Detection
+            # STEP 2: Pattern Detection — PAT-2: module removed, static stubs
             # ================================================================
-            try:
-                pattern_result = self.ai_validator._check_pattern(
-                    df=df,
-                    signal=final_signal,
-                    min_confidence=self.ai_validator.current_pattern_threshold,
-                )
-
-                # ✅ FIX: pattern_detected should be BOOL, not string
-                pattern_confirmed = pattern_result.get("pattern_confirmed", False)
-                pattern_name = pattern_result.get("pattern_name", "None")
-
-                # Convert to proper bool
-                if isinstance(pattern_confirmed, str):
-                    pattern_confirmed = pattern_confirmed not in ["None", "Noise", ""]
-
-                viz_data["pattern_detected"] = bool(pattern_confirmed)  # ← Force bool
-                viz_data["pattern_name"] = pattern_name  # ← Separate field for name
-                viz_data["pattern_id"] = pattern_result.get("pattern_id")
-                viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
-
-                # Top-3 sniper patterns removed (Phase 0B) — CNN-LSTM disconnected.
-
-            except Exception as e:
-                logger.error(f"[VIZ] Pattern detection failed: {e}")
-                viz_data["error"] = f"Pattern error: {str(e)}"
+            viz_data["pattern_detected"] = False
+            viz_data["pattern_name"] = None
+            viz_data["pattern_id"] = None
+            viz_data["pattern_confidence"] = 0.0
 
             # ================================================================
             # STEP 3: Determine Validation Status
@@ -2685,23 +2664,8 @@ class PerformanceWeightedAggregator:
             reasons = []
 
             # ================================================================
-            # 1. AI Pattern Confidence
+            # 1. AI Pattern Confidence — PAT-2: removed (pattern module disabled)
             # ================================================================
-            if self.ai_validator and hasattr(self.ai_validator, "sniper"):
-                pattern_result = self.ai_validator._check_pattern(
-                    df=df,
-                    signal=signal,
-                    min_confidence=0.60,  # was self.filter_thresholds['sniper_confidence']
-                )
-                if pattern_result.get("pattern_confirmed"):
-                    reasons.append(
-                        {
-                            "passed": True,
-                            "trigger_type": "AI_PATTERN",
-                            "pattern_name": pattern_result.get("pattern_name"),
-                            "confidence": pattern_result.get("confidence"),
-                        }
-                    )
 
             # ================================================================
             # 2. Momentum Candle

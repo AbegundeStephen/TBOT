@@ -42,15 +42,15 @@ class AIVisualizationGenerator:
     Shows exactly what the AI "sees" at decision time
     """
 
-    def __init__(self, analyst, sniper, ai_validator):
+    def __init__(self, analyst, sniper=None, ai_validator=None):
         """
         Args:
             analyst: DynamicAnalyst instance (4H S/R detection)
-            sniper: OHLCSniper instance (15min pattern detection)
+            sniper: unused — PAT-4: pattern module removed
             ai_validator: HybridSignalValidator instance
         """
         self.analyst = analyst
-        self.sniper = sniper
+        self.sniper = None  # PAT-4: pattern module removed
         self.ai_validator = ai_validator
 
         # Set matplotlib style for dark theme
@@ -105,9 +105,11 @@ class AIVisualizationGenerator:
             ax_sr = fig.add_subplot(gs[2, 0])
             self._plot_sr_levels(ax_sr, df_4h, current_price, details)
 
-            # Pattern detection heatmap
+            # Pattern detection — PAT-4: removed, slot repurposed as blank
             ax_pattern = fig.add_subplot(gs[2, 1])
-            self._plot_pattern_analysis(ax_pattern, df_15min, details)
+            ax_pattern.text(0.5, 0.5, "Pattern Module: DISABLED", ha="center", va="center", fontsize=11)
+            ax_pattern.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
+            ax_pattern.axis("off")
 
             # Signal aggregation breakdown
             ax_signals = fig.add_subplot(gs[3, 0])
@@ -206,22 +208,7 @@ class AIVisualizationGenerator:
             # Plot candlesticks manually (more reliable than mplfinance)
             self._plot_candlesticks(ax, df_plot)
 
-            # Overlay pattern detection zones
-            ai_details = details.get("ai_validation", {})
-            if isinstance(ai_details, dict) and ai_details.get("pattern_detected"):
-                pattern_name = ai_details.get("pattern_name", "Unknown")
-                confidence = ai_details.get("pattern_confidence", 0)
-
-                # Highlight the last 15 candles (pattern window)
-                pattern_start = len(df_plot) - 15
-                if pattern_start >= 0:
-                    ax.axvspan(
-                        pattern_start,
-                        len(df_plot),
-                        alpha=0.2,
-                        color="cyan",
-                        label=f"Pattern Window: {pattern_name} ({confidence:.0%})",
-                    )
+            # Pattern overlay — PAT-4: removed
 
             # Show support/resistance levels
             if isinstance(ai_details, dict):
@@ -627,157 +614,10 @@ class AIVisualizationGenerator:
             logger.error(f"[VIZ] S/R bar plot error: {e}")
 
     def _plot_pattern_analysis(self, ax, df: pd.DataFrame, details: Dict):
-        """
-        Plot pattern detection with FIXED logic
-        """
-        try:
-            # Defensive extraction
-            ai_details = details.get("ai_validation", {})
-
-            # Handle string format
-            if isinstance(ai_details, str):
-                ax.text(
-                    0.5,
-                    0.5,
-                    f"AI Status: {ai_details}",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
-                ax.axis("off")
-                return
-
-            # Check if dict is valid
-            if not ai_details or not isinstance(ai_details, dict):
-                ax.text(
-                    0.5,
-                    0.5,
-                    "Pattern Detection: Not Available",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
-                ax.axis("off")
-                return
-
-            # ================================================================
-            # Check pattern_confidence, not just pattern_detected
-            # ================================================================
-            pattern_name = ai_details.get("pattern_name", "Unknown")
-            confidence = ai_details.get("pattern_confidence", 0)
-
-            no_pattern_names = ["None", "Unknown", "Noise", "ERROR", None]
-            has_no_pattern = pattern_name in no_pattern_names and confidence < 0.05
-
-            if has_no_pattern:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "No Pattern Detected",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
-                ax.axis("off")
-                return
-
-            # ================================================================
-            # Show pattern even if pattern_detected is False
-            # (As long as we have valid pattern data with confidence > 5%)
-            # ================================================================
-
-            # Get top 3 patterns
-            top3_patterns = ai_details.get("top3_patterns", [])
-            top3_confidences = ai_details.get("top3_confidences", [])
-
-            # Create bar chart of top 3 patterns
-            if top3_patterns and len(top3_patterns) > 0:
-                y_pos = range(len(top3_patterns))
-                colors = [
-                    "lime" if i == 0 else "orange" if i == 1 else "yellow"
-                    for i in range(len(top3_patterns))
-                ]
-
-                ax.barh(
-                    y_pos, top3_confidences, color=colors, alpha=0.7, edgecolor="white"
-                )
-                ax.set_yticks(y_pos)
-                ax.set_yticklabels(top3_patterns)
-                ax.set_xlabel("Confidence", fontsize=10)
-                ax.set_xlim(0, 1)
-
-                # Add confidence values
-                for i, conf in enumerate(top3_confidences):
-                    ax.text(conf + 0.02, i, f"{conf:.1%}", va="center", fontsize=9)
-            else:
-                # Fallback: show single pattern as text
-                ax.text(
-                    0.5,
-                    0.5,
-                    f"{pattern_name}\nConfidence: {confidence:.1%}",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-
-            # Update title to show pattern name and confidence
-            ax.set_title(
-                f"Pattern: {pattern_name} ({confidence:.1%})",
-                fontsize=11,
-                fontweight="bold",
-            )
-            ax.grid(True, alpha=0.3, axis="x")
-
-            # Add validation status
-            validation_passed = ai_details.get("validation_passed", False)
-
-            # Check action field for better status
-            action = ai_details.get("action", "unknown")
-
-            if action == "rejected":
-                validation_status = "[X] REJECTED"
-                status_color = "red"
-            elif action in ["approved", "bypassed_strong_signal", "direct_validation"]:
-                validation_status = "[OK] VALIDATED"
-                status_color = "lime"
-            elif action == "hold":
-                validation_status = "[=] HOLD"
-                status_color = "yellow"
-            else:
-                # Fallback to old logic
-                validation_status = (
-                    "[OK] VALIDATED" if validation_passed else "[X] REJECTED"
-                )
-                status_color = "lime" if validation_passed else "red"
-
-            ax.text(
-                0.98,
-                0.02,
-                validation_status,
-                transform=ax.transAxes,
-                ha="right",
-                va="bottom",
-                fontsize=10,
-                fontweight="bold",
-                color=status_color,
-                bbox=dict(boxstyle="round", facecolor="black", alpha=0.7),
-            )
-
-        except Exception as e:
-            logger.error(f"[VIZ] Pattern plot error: {e}", exc_info=True)
-            ax.text(
-                0.5,
-                0.5,
-                "Error displaying pattern",
-                ha="center",
-                va="center",
-                fontsize=10,
-            )
-            ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
-            ax.axis("off")
+        """PAT-4: pattern module removed — no-op stub kept for call-site compatibility."""
+        ax.text(0.5, 0.5, "Pattern Module: DISABLED", ha="center", va="center", fontsize=11)
+        ax.set_title("AI Pattern Detection", fontsize=11, fontweight="bold")
+        ax.axis("off")
 
     def _plot_signal_breakdown(self, ax, details: Dict):
         """Plot signal aggregation breakdown — handles both performance and council modes"""
