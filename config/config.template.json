@@ -1728,7 +1728,6 @@
     "per_tick_livermore_enabled": false,
     "bb_kc_squeeze_gate_enabled": true,
     "nr7_gate_enabled": true,
-    "natural_cycle_second_pos_gate_enabled": false,
     "continuation_targets_enabled": false,
     "min_sl_pct_enabled": true,
     "min_rr_enabled": true,
