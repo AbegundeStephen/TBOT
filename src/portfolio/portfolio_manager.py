@@ -2499,8 +2499,19 @@ class PortfolioManager:
 
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
-                if signal_details is not None:
-                    signal_details["db_manager_ref"] = self.db_manager
+                # REMOVED (2026-06-23): used to also do
+                #   signal_details["db_manager_ref"] = self.db_manager
+                # but VeteranTradeManager.__init__ (veteran_trade_manager.py ~L481)
+                # reads that key BEFORE this DB-logging block ever runs, so it was
+                # always None there -- confirmed dead/inert, matching the VTM-side
+                # comment ("no call site does that yet"). Meanwhile the live,
+                # unpicklable supabase.Client it stored here (RLocks, SSL sockets,
+                # httpx connection pools) was exactly what tripped
+                # "cannot pickle '_thread.RLock' object" in save_portfolio_state()
+                # on every save cycle for any open position, every ~20-30s, caught
+                # only by the generic _sanitize_for_pickle() fallback. position.db_manager
+                # (line above) already covers the one legitimate use case and is
+                # already excluded from pickling via Position.__getstate__.
 
                 if is_new:
                     logger.debug(f"[DB] New trade created: {trade_id}")
