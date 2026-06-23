@@ -1031,9 +1031,21 @@ class MeanReversionStrategy(BaseStrategy):
                 "MAIN_UP":               "Mode3(Fade/SHORT)",
                 "MAIN_DOWN":             "Mode3(Fade/LONG)",
             }
+            # Plain-English what's-actually-happening line, added 2026-06-23 so the
+            # GATE line is self-explanatory without needing to know the codebase.
+            # Cosmetic only — does not affect routing/decision logic below.
+            _mode_desc = {
+                "NATURAL_RETRACEMENT":   "buying the pullback in an uptrend (needs Wyckoff spring)",
+                "NATURAL_REBOUND":       "silent zone — no MR setup, longs blocked",
+                "SECONDARY_RETRACEMENT": "counter-trend LONG — fading a deep pullback, expecting a bounce",
+                "SECONDARY_REBOUND":     "counter-trend SHORT — fading a deep bounce, expecting reversion down",
+                "MAIN_UP":               "climax fade SHORT — fading an overextended up-leg",
+                "MAIN_DOWN":             "climax fade LONG — fading an overextended down-leg",
+            }
+            _label = _mode_label.get(lsm_state, "LEGACY(warmup)") if lsm_state else "LEGACY(warmup)"
+            _desc  = _mode_desc.get(lsm_state, "Livermore state unavailable — using legacy 6-pillar scorecard")
             logger.info(
-                f"[MR GATE] {self.asset}: lsm_1h={lsm_state} "
-                f"→ {_mode_label.get(lsm_state, 'LEGACY(warmup)') if lsm_state else 'LEGACY(warmup)'}"
+                f"[MR GATE] {self.asset}: LSM 1H={lsm_state} → {_label} — {_desc}"
             )
 
             if lsm_state == "NATURAL_RETRACEMENT":
