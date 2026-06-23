@@ -259,9 +259,15 @@ class MultiTimeFrameRegimeDetector:
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
         else:  # mt5
+            # Convert '1h'→'H1', '4h'→'H4', '1d'→'D1'
+            # The original .upper().replace('H','H') was a no-op producing '4H'
+            # not 'H4', causing the MT5 API to fall back to H1 silently and
+            # write 1H bars into the 4H CSV file for ~19 hours.
+            _tf_map = {"1h": "H1", "4h": "H4", "1d": "D1"}
+            _mt5_tf = _tf_map.get(timeframe_str.lower(), timeframe_str.upper())
             df = self.data_manager.fetch_mt5_data(
                 symbol=symbol,
-                timeframe=timeframe_str.upper().replace('H', 'H'), # e.g., '1h' -> 'H1'
+                timeframe=_mt5_tf,
                 start_date=start_time.strftime("%Y-%m-%d"),
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
             )

@@ -594,27 +594,8 @@ class InstitutionalCouncilAggregator:
                 }
 
             # ================================================================
-            # 1. AI Pattern Confidence
+            # 1. AI Pattern Confidence — PAT-3: removed (pattern module disabled)
             # ================================================================
-            # Reason: The AI model has already encoded a multi-factor edge.
-            if self.ai_validator:
-                try:
-                    pattern_result = self.ai_validator._check_pattern(
-                        df=df,
-                        signal=signal,
-                        min_confidence=self.filter_thresholds["min_sniper_conf"],
-                    )
-                    if pattern_result.get("pattern_confirmed"):
-                        reasons.append(
-                            {
-                                "passed": True,
-                                "trigger_type": "AI_PATTERN",
-                                "pattern_name": pattern_result.get("pattern_name"),
-                                "confidence": pattern_result.get("confidence"),
-                            }
-                        )
-                except Exception as e:
-                    logger.debug(f"[SNIPER] AI Pattern check failed: {e}")
 
             # ================================================================
             # 2. Institutional Displacement Confirmation
@@ -4114,51 +4095,11 @@ class InstitutionalCouncilAggregator:
             except Exception as e:
                 logger.error(f"[VIZ] S/R analysis failed: {e}")
 
-            # Pattern Detection
-            try:
-                pattern_result = self.ai_validator._check_pattern(
-                    df=df,
-                    signal=final_signal,
-                    min_confidence=self.ai_validator.current_pattern_threshold,
-                )
-
-                viz_data["pattern_detected"] = pattern_result.get(
-                    "pattern_confirmed", False
-                )
-                viz_data["pattern_name"] = pattern_result.get("pattern_name", "None")
-                viz_data["pattern_id"] = pattern_result.get("pattern_id")
-                viz_data["pattern_confidence"] = pattern_result.get("confidence", 0.0)
-
-                if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
-                    try:
-                        snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-                        first_open = snippet[0, 0]
-
-                        if first_open > 0:
-                            snippet_norm = snippet / first_open - 1
-                            snippet_input = snippet_norm.reshape(1, 15, 4)
-                            predictions = self.ai_validator.sniper.model.predict(
-                                snippet_input, verbose=0
-                            )[0]
-
-                            top3_indices = predictions.argsort()[-3:][::-1]
-                            top3_confidences = predictions[top3_indices]
-
-                            top3_patterns = []
-                            for idx in top3_indices:
-                                pattern_name = (
-                                    self.ai_validator.reverse_pattern_map.get(
-                                        idx, f"Pattern_{idx}"
-                                    )
-                                )
-                                top3_patterns.append(pattern_name)
-
-                            viz_data["top3_patterns"] = top3_patterns
-                            viz_data["top3_confidences"] = top3_confidences.tolist()
-                    except Exception as e:
-                        logger.debug(f"[VIZ] Top3 patterns failed: {e}")
-            except Exception as e:
-                logger.error(f"[VIZ] Pattern detection failed: {e}")
+            # Pattern Detection — PAT-3: module removed, static stubs
+            viz_data["pattern_detected"] = False
+            viz_data["pattern_name"] = None
+            viz_data["pattern_id"] = None
+            viz_data["pattern_confidence"] = 0.0
 
             # Validation Status
             original_signal = details.get("original_signal", final_signal)

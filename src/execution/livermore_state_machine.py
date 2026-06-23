@@ -172,6 +172,10 @@ class LivermoreStateMachine:
         else:
             self._state_age += 1
 
+        logger.info(
+            "[LSM] %s %s → %s  close=%.5g  atr=%.5g",
+            self.asset, self.timeframe, self._state, close, atr,
+        )
         return self.snapshot()
 
     def update_from_series(self, df: pd.DataFrame) -> LivermoreSnapshot:

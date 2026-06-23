@@ -650,9 +650,11 @@ class PortfolioManager:
         db_manager=None,
         execution_handlers: Dict = None,
         telegram_bot=None,
+        aggregators: Dict = None,
     ):
         self.config = config
         self.telegram_bot = telegram_bot
+        self.aggregators = aggregators  # O4c: reference to aggregators dict
         self.portfolio_config = config["portfolio"]
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
@@ -2460,6 +2462,20 @@ class PortfolioManager:
                 # L1: surface Livermore state as top-level DB columns (was
                 # only ever reachable inside unindexed metadata JSON before).
                 _cs_for_db = (signal_details or {}).get("composite_state", {}) or {}
+                # Code Fix 1 (C1): extract confluence telemetry snapshot for entry metadata
+                _cs_obj = (signal_details or {}).get("_composite_state_obj")
+                _confluence_snapshot = None
+                if _cs_obj is not None:
+                    _confluence_snapshot = {
+                        "livermore_dual_confirmation": getattr(_cs_obj, "livermore_dual_confirmation", None),
+                        "is_silent_zone": getattr(_cs_obj, "is_silent_zone", None),
+                        "institutional_pattern": getattr(_cs_obj, "institutional_pattern", None),
+                        "divergence_detected": getattr(_cs_obj, "divergence_detected", None),
+                        "divergence_strength": getattr(_cs_obj, "divergence_strength", None),
+                        "absorption_detected": getattr(_cs_obj, "absorption_detected", None),
+                        "vpd_diverging": getattr(_cs_obj, "vpd_diverging", None),
+                        "order_book_imbalance": getattr(_cs_obj, "order_book_imbalance", None),
+                    }
                 trade_id, is_new = self.db_manager.insert_trade_entry(
                     asset=asset,
                     symbol=symbol,
@@ -2494,6 +2510,7 @@ class PortfolioManager:
                         ),
                         "entry_type": _cs_for_db.get("entry_type"),
                         "livermore_telemetry": (signal_details or {}).get("livermore_telemetry"),
+                        "confluence_telemetry": _confluence_snapshot,
                     },
                 )
 
@@ -3278,6 +3295,12 @@ class PortfolioManager:
                     # (MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY / etc.) instead
                     # of pooling every entry style into one asset-wide median.
                     _exit_meta["entry_type"] = getattr(_vtm, "vtm_entry_type", None)
+                    # Code Fix 2 (O1): VTM O1b telemetry — which safety layers fired
+                    _exit_meta["o1_vtm_telemetry"] = {
+                        "rejection_fired":  getattr(_vtm, "_rejection_fired", False),
+                        "parabolic_locked": getattr(_vtm, "_parabolic_locked", False),
+                        "absorption_fired": getattr(_vtm, "_absorption_fired", False),
+                    }
 
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,

@@ -1291,6 +1291,37 @@ class TradingTelegramBot:
             if "✅" in result:
                 position.stop_loss = new_sl
 
+                # Immediately push the new SL to the broker.
+                # Without this, the VTM loop only pushes when it naturally
+                # trails the SL in check_exit(), meaning manual overrides
+                # never reach the exchange unless the VTM happens to move
+                # the SL in the same cycle.
+                try:
+                    asset_cfg = self.trading_bot.config.get("assets", {}).get(
+                        position.asset, {}
+                    )
+                    trading_cfg = self.trading_bot.config.get("trading", {})
+                    mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+
+                    if (
+                        asset_cfg.get("exchange", "mt5") == "mt5"
+                        and mt5_handler
+                        and position.mt5_ticket
+                        and trading_cfg.get("place_vtm_sl_on_exchange", False)
+                    ):
+                        symbol = mt5_handler._resolve_symbol(position.asset)
+                        if symbol:
+                            push_ok = mt5_handler._push_sl_to_exchange(
+                                position.mt5_ticket, symbol, new_sl
+                            )
+                            if push_ok:
+                                result += "\n📡 Exchange SL updated ✅"
+                            else:
+                                result += "\n⚠️ Exchange SL push failed — check VTM-SL logs"
+                except Exception as _push_err:
+                    logger.error(f"[TG] /set_sl exchange push failed: {_push_err}")
+                    result += "\n⚠️ Exchange push error — see bot logs"
+
             await update.message.reply_text(
                 f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
             )
@@ -1358,6 +1389,33 @@ class TradingTelegramBot:
             # Sync portfolio_manager's cached take profit (tier-0 = primary TP)
             if "✅" in result and tier == 0:
                 position.take_profit = new_tp
+
+                # Immediately push the new TP to the broker.
+                try:
+                    asset_cfg = self.trading_bot.config.get("assets", {}).get(
+                        position.asset, {}
+                    )
+                    trading_cfg = self.trading_bot.config.get("trading", {})
+                    mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+
+                    if (
+                        asset_cfg.get("exchange", "mt5") == "mt5"
+                        and mt5_handler
+                        and position.mt5_ticket
+                        and trading_cfg.get("place_vtm_tp_on_exchange", False)
+                    ):
+                        symbol = mt5_handler._resolve_symbol(position.asset)
+                        if symbol:
+                            push_ok = mt5_handler._push_tp_to_exchange(
+                                position.mt5_ticket, symbol, new_tp
+                            )
+                            if push_ok:
+                                result += "\n📡 Exchange TP updated ✅"
+                            else:
+                                result += "\n⚠️ Exchange TP push failed — check VTM-TP logs"
+                except Exception as _push_err:
+                    logger.error(f"[TG] /set_tp exchange push failed: {_push_err}")
+                    result += "\n⚠️ Exchange push error — see bot logs"
 
             await update.message.reply_text(
                 f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
