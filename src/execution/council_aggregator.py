@@ -1747,6 +1747,36 @@ class InstitutionalCouncilAggregator:
             buy_total = sum(buy_scores.values())
             sell_total = sum(sell_scores.values())
 
+            # ── MR Direct Routing ─────────────────────────────────────────────
+            # MR signal is collected above but never reached the council total.
+            # In MR's primary states (NATURAL_RETRACEMENT = long spring,
+            # NATURAL_REBOUND = short spring) the signal is directionally
+            # authoritative — add it directly so the judges' trend-following
+            # bias cannot silence a correct MR call. Weight 0.75 is additive
+            # only — MR alone cannot clear the 2.75 trend threshold.
+            _lsm_1h_for_mr = (
+                getattr(_composite_state, "livermore_state_1h", None)
+                if _composite_state is not None
+                else None
+            )
+            _MR_LONG_STATES  = ("NATURAL_RETRACEMENT",)
+            _MR_SHORT_STATES = ("NATURAL_REBOUND",)
+            _MR_WEIGHT = 0.75
+            if mr_signal == 1 and _lsm_1h_for_mr in _MR_LONG_STATES:
+                buy_total += mr_conf * _MR_WEIGHT
+                logger.info(
+                    f"[COUNCIL MR ROUTE] {self.asset_type}: Mode1 long "
+                    f"(conf={mr_conf:.2f}) added {mr_conf * _MR_WEIGHT:.2f} to buy_total "
+                    f"→ buy_total now {buy_total:.2f}"
+                )
+            elif mr_signal == -1 and _lsm_1h_for_mr in _MR_SHORT_STATES:
+                sell_total += mr_conf * _MR_WEIGHT
+                logger.info(
+                    f"[COUNCIL MR ROUTE] {self.asset_type}: Mode1 short "
+                    f"(conf={mr_conf:.2f}) added {mr_conf * _MR_WEIGHT:.2f} to sell_total "
+                    f"→ sell_total now {sell_total:.2f}"
+                )
+
             # ── Item 19b: 4H Livermore / macro-regime disagreement gate ──────
             # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
             # default False — same on/off switch used in signal_aggregator.py
@@ -3129,16 +3159,20 @@ class InstitutionalCouncilAggregator:
                     else _cs_t.get("conviction_dying", False)
                 )
 
-                # slopes_aligned = 1H and 4H slopes agree. Confirms the EMA
-                # picture the judge already scored. Add a bonus for both
-                # directions since aligned slopes validate whichever trend fired.
+                # slopes_aligned = 1H and 4H EMA slopes agree in direction.
+                # The field is a boolean with no direction stored, so we infer
+                # direction from the trend judge's own EMA scores: if buy_score
+                # > sell_score the EMA picture is bullish, so aligned slopes
+                # confirm the bull — and vice versa. This prevents bearish
+                # slope alignment from boosting a buy signal.
                 if _slopes_aligned:
-                    if buy_score > 0:
+                    _slopes_bullish = buy_score > sell_score
+                    if _slopes_bullish and buy_score > 0:
                         buy_score = min(weight, buy_score * 1.10)
-                        buy_exp  += " +slopes_aligned"
-                    if sell_score > 0:
+                        buy_exp  += " +slopes_aligned_bull"
+                    elif not _slopes_bullish and sell_score > 0:
                         sell_score = min(weight, sell_score * 1.10)
-                        sell_exp  += " +slopes_aligned"
+                        sell_exp  += " +slopes_aligned_bear"
 
                 # conviction_dying = candle body momentum fading. Discount
                 # both directions — a fading trend is worth less than a fresh
@@ -3339,9 +3373,11 @@ class InstitutionalCouncilAggregator:
                         sell_exp = "STRUCT SELL: ❌ No resistance nearby"
 
             # ── O2c: VWAP as institutional reference level ────────────────
-            # VWAP and distance from VWAP were computed and available but
-            # never used by the structure judge. VWAP is one of the most
-            # widely-used institutional reference levels.
+            # VWAP direction matters: price above VWAP = VWAP is support
+            # (confirms buys). Price below VWAP = VWAP is resistance
+            # (confirms sells). The original code boosted both blindly,
+            # which could boost a buy when price is pressing into VWAP
+            # resistance from below. Fixed to check side.
             _vwap = float(
                 getattr(cs, "vwap_price", 0.0) if not isinstance(cs, dict)
                 else cs.get("vwap_price", 0.0)
@@ -3351,14 +3387,15 @@ class InstitutionalCouncilAggregator:
                 else cs.get("distance_to_vwap_atr", 999.0)
             ) if cs else 999.0
             if _vwap > 0 and _vwap_dist_atr < 0.5:
-                # Price within 0.5 ATR of VWAP — key institutional inflection.
-                # Modest bonus on whichever direction already scored positively.
-                if buy_score > 0:
+                _current_close = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+                _price_above_vwap = _current_close > _vwap
+                # Only boost the direction VWAP supports given price location.
+                if _price_above_vwap and buy_score > 0:
                     buy_score = min(buy_score + 0.15 * weight, weight)
-                    buy_exp  += f" +at_VWAP({_vwap_dist_atr:.2f}ATR)"
-                if sell_score > 0:
+                    buy_exp  += f" +above_VWAP_support({_vwap_dist_atr:.2f}ATR)"
+                elif not _price_above_vwap and sell_score > 0:
                     sell_score = min(sell_score + 0.15 * weight, weight)
-                    sell_exp  += f" +at_VWAP({_vwap_dist_atr:.2f}ATR)"
+                    sell_exp  += f" +below_VWAP_resistance({_vwap_dist_atr:.2f}ATR)"
 
             # Cap at 1.0 — the scorecard declares STRUCTURE max as 1.0/1.0.
             # When w_structure=1.5 (SLIGHTLY_BEARISH dynamic weight) the raw scores

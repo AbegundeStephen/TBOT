@@ -507,20 +507,29 @@ class MeanReversionStrategy(BaseStrategy):
         if _coiled_spring:
             logger.info(f"[MR Mode1] {self.asset}: coiled_spring=True — strong spring precondition")
 
-        # failed_breakout in a long setup = prior bull push rejected, now
-        # retracing. Classic spring precursor. Boost optional_min_count
-        # threshold to REDUCE required count by 1 when this fires — gives the
-        # setup more room to pass on fundamentally sound setups.
-
         # ── Optional conditions (2 of 4 required) ─────────────────────────
         opt_count = self._count_optional(features, direction=1)
         min_opt   = cfg["optional_min_count"]
+
+        # failed_breakout = price wicked above recent high, closed below it.
+        # This is always a bearish candle. During a genuine NATURAL_RETRACEMENT
+        # spring it's a valid precursor — but we must also confirm RSI is NOT
+        # in bearish territory (< 40), which would indicate a downtrend rally
+        # being rejected rather than a true spring forming.
         if _failed_breakout:
-            min_opt = max(1, cfg["optional_min_count"] - 1)
-            logger.info(
-                f"[MR Mode1] {self.asset}: failed_breakout confirmed — "
-                f"optional requirement reduced to {min_opt}"
-            )
+            _rsi_val = float(features.get("rsi", 50)) if isinstance(features, dict) else 50.0
+            _directionally_valid = _rsi_val >= 40  # above 40 = not in bearish flush
+            if _directionally_valid:
+                min_opt = max(1, cfg["optional_min_count"] - 1)
+                logger.info(
+                    f"[MR Mode1] {self.asset}: failed_breakout confirmed (RSI={_rsi_val:.1f}) — "
+                    f"optional requirement reduced to {min_opt}"
+                )
+            else:
+                logger.info(
+                    f"[MR Mode1] {self.asset}: failed_breakout present but RSI={_rsi_val:.1f} "
+                    f"< 40 — directionally invalid for long spring, gate not reduced"
+                )
         if opt_count < min_opt:
             _vc = self._check_vol_contraction(features, 1)
             _hd = self._check_hidden_divergence(features, 1)

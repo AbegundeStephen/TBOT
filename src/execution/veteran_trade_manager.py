@@ -1322,9 +1322,14 @@ class VeteranTradeManager:
                 _rejection_at  = bool(getattr(composite_state, "rejection_at_level", False))
                 if _rejection_at and _rejection_str >= 0.60 and not getattr(self, "_rejection_trail_fired", False):
                     _sweep_dir = getattr(composite_state, "sweep_direction", 0)
+                    # Use strict comparison: sweep_direction=0 means no sweep
+                    # occurred. <= 0 / >= 0 would fire on BOTH sides when
+                    # sweep_direction is neutral, tightening every open
+                    # position on ordinary rejections. Only tighten when a
+                    # directional sweep actually occurred against the position.
                     _rejection_against = (
-                        (self.side == "long" and _sweep_dir <= 0) or
-                        (self.side == "short" and _sweep_dir >= 0)
+                        (self.side == "long" and _sweep_dir < 0) or
+                        (self.side == "short" and _sweep_dir > 0)
                     )
                     if _rejection_against:
                         self._rejection_trail_fired = True
