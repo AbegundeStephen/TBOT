@@ -378,13 +378,6 @@
       "atr_period": 14,
       "_calibration": "GBPAUD 4H Feb-Jun2026: 1.20 t/w, main_frac=45%, avg_main_dur=78 bars"
     },
-    "GBPUSD": {
-      "major_mult": 3.5,
-      "minor_mult": 0.5,
-      "dual_confirm": 1,
-      "atr_period": 14,
-      "_calibration": "GBPUSD 4H Feb-Jun2026: 1.56 t/w, main_frac=33%, avg_main_dur=35 bars"
-    },
     "USOIL": {
       "major_mult": 3.5,
       "minor_mult": 1.0,
@@ -440,18 +433,12 @@
         "pickup_max": 3,
         "confirmation_max": 10
       },
-      "GBPUSD": {
-        "pickup_max": 3,
-        "confirmation_max": 10
-      },
+      
       "USOIL": {
         "pickup_max": 4,
         "confirmation_max": 12
       },
-      "USDJPY": {
-        "pickup_max": 3,
-        "confirmation_max": 10
-      },
+      
       "default": {
         "pickup_max": 4,
         "confirmation_max": 12
@@ -477,7 +464,7 @@
     "mode2": {
       "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT. optional_min_count lowered 4\u21923: requiring all 4 simultaneously is statistically near-impossible on hourly data.",
       "adx_max": 30,
-      "optional_min_count": 3,
+    "optional_min_count": 2,
       "bb_inside_required": true,
       "btc_long_zscore_threshold": -2.0,
       "btc_short_zscore_threshold": 3.5
@@ -584,20 +571,29 @@
     "_bucket_a_data_backed": "Values below have real justification — see inline notes. Do not change without re-running the same analysis.",
     "session_multipliers": {
       "_data": "T2.7 simulation: TF Asian 00-08 UTC 62%WR/+114%P&L -> lower bar. MR London 08-12 UTC 48%WR/-6.5%P&L -> raise bar. MR NY-close 17-21 UTC 67%WR/+19.7%P&L -> lower bar.",
-      "asian_hour_start": 0, "asian_hour_end": 8, "asian_mult": 0.85,
-      "london_hour_start": 8, "london_hour_end": 12, "london_mult": 1.20,
-      "ny_close_hour_start": 17, "ny_close_hour_end": 21, "ny_close_mult": 0.85
+      "asian_hour_start": 0,
+      "asian_hour_end": 8,
+      "asian_mult": 0.85,
+      "london_hour_start": 8,
+      "london_hour_end": 12,
+      "london_mult": 1.20,
+      "ny_close_hour_start": 17,
+      "ny_close_hour_end": 21,
+      "ny_close_mult": 0.85
     },
     "sr_ema_fallback_distance_atr_mult": 0.5,
     "sr_ema_fallback_distance_note": "Widened from 0.25x after observed chain rejections in practice.",
-    "pattern_penetration": {"_data": "TA-Lib standard candlestick recognition parameters.", "penetration_1": 0.3, "penetration_2": 0.3, "penetration_3": 0.5},
-
+    "pattern_penetration": {
+      "_data": "TA-Lib standard candlestick recognition parameters.",
+      "penetration_1": 0.3,
+      "penetration_2": 0.3,
+      "penetration_3": 0.5
+    },
     "_bucket_b_convention_backed": "Common technical-analysis convention, not yet tested against our own trade history.",
     "flash_crash_atr_mult": 4.0,
     "flash_crash_ema_span": 20,
     "atr_period": 14,
     "volume_confirmation_mult": 2.0,
-
     "_bucket_c_needs_real_calibration": "No stated rationale anywhere in the original code. Kept at current live values to avoid blind re-tuning. Logging added below so these get replaced with real numbers once enough trade outcomes accumulate.",
     "soft_pass_penalty_sr_only": 0.05,
     "soft_pass_penalty_pattern_only": 0.05,

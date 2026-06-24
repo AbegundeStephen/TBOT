@@ -1,6 +1,7 @@
 # Environment & Secrets
 .env
 config.json
+config.backup.json
 *.key
 *.pem
 
