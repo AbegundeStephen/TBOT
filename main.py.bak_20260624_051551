@@ -1619,15 +1619,7 @@ class TradingBot:
 
         required_fields = {
             "pattern_detected": bool,
-            # FIX (2026-06-24): was `str` only. Pattern detection was intentionally
-            # stubbed out across the codebase (PAT-1..PAT-7 — see main.py
-            # _format_ai_validation_direct, signal_aggregator.py STEP 2, and
-            # council_aggregator.py's PAT-3 block), all of which now set
-            # pattern_name=None to mean "no pattern". This validator was never
-            # updated to match, so it failed on every single trade — `pattern_id`
-            # right below already allows None for the same reason; pattern_name
-            # needs the same allowance.
-            "pattern_name": (str, type(None)),
+            "pattern_name": str,
             "pattern_confidence": (int, float),
             "pattern_id": (int, type(None)),
             "top3_patterns": list,

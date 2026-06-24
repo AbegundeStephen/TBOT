@@ -133,24 +133,8 @@ class PerformanceWeightedAggregator:
                 assert hasattr(
                     ai_validator, "pattern_id_map"
                 ), "Pattern mapping missing"
-                # FIX (2026-06-24): was `assert len(ai_validator.pattern_id_map) > 0`.
-                # hybrid_validator.py's __init__ now hardcodes
-                # `self.pattern_id_map = {}` (PAT-1: pattern detection module
-                # removed). That made this assertion fail unconditionally —
-                # self.ai_validator silently stayed None for EVERY
-                # PerformanceWeightedAggregator instance, on every asset, with
-                # only a startup-time logger.error/warning ("Pattern mapping
-                # empty" / "Continuing without AI validation") and no visible
-                # runtime symptom until STEP 8 below: with self.ai_validator
-                # falsy, neither the real-validator branch nor the cosmetic
-                # _format_ai_validation_for_viz branch ever ran, so
-                # ai_validation_details stayed `{}` and main.py's hybrid block
-                # reported all 8 required fields "missing" on every single
-                # PERFORMANCE-mode cycle (the "[HYBRID] ⚠️ AI validation
-                # missing fields" / "Regenerating..." loop). council_aggregator.py
-                # has no equivalent pattern_id_map assertion, which is why this
-                # was isolated to performance-mode assets. An empty pattern map
-                # is the correct, intentional state post-PAT-1..7, not an error.
+                assert len(ai_validator.pattern_id_map) > 0, "Pattern mapping empty"
+
                 self.ai_validator = ai_validator
                 self.ai_enabled = True
 
