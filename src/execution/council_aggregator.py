@@ -853,6 +853,12 @@ class InstitutionalCouncilAggregator:
         False); never changes the returned phase_label, only the score.
         """
         try:
+            # C2: extract composite_state so the RSI divergence block below can
+            # write back to it. Without this, composite_state is undefined and
+            # the divergence write throws a NameError caught silently by the
+            # outer except, meaning divergence_detected stays False forever.
+            composite_state = (governor_data or {}).get("composite_state")
+
             if len(df) < 60:
                 return current_required_score, "HEALTHY"
 
