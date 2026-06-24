@@ -433,12 +433,18 @@
         "pickup_max": 3,
         "confirmation_max": 10
       },
-      
+      "GBPUSD": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
       "USOIL": {
         "pickup_max": 4,
         "confirmation_max": 12
       },
-      
+      "USDJPY": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
       "default": {
         "pickup_max": 4,
         "confirmation_max": 12
@@ -464,7 +470,7 @@
     "mode2": {
       "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT. optional_min_count lowered 4\u21923: requiring all 4 simultaneously is statistically near-impossible on hourly data.",
       "adx_max": 30,
-    "optional_min_count": 2,
+      "optional_min_count": 2,
       "bb_inside_required": true,
       "btc_long_zscore_threshold": -2.0,
       "btc_short_zscore_threshold": 3.5

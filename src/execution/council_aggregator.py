@@ -1862,6 +1862,17 @@ class InstitutionalCouncilAggregator:
                 )
                 + _rsm_delta_council,
             )
+            # Counter-trend ceiling (phase_config.council_counter_trend_cap, default
+            # 4.0 = legacy). Funnel soak (6/20-6/24) showed the effective counter-trend
+            # bar climbing to 4.0 (base 3.5 + RSM +0.5), rejecting BTC counter-trend
+            # signals scoring 3.50. Capping it stops the RSM raise from pushing the
+            # counter-trend requirement past this value. Trend-aligned bar is untouched.
+            _ct_cap = float(
+                (self.config.get("phase_config", {}) or {}).get(
+                    "council_counter_trend_cap", 4.0
+                )
+            )
+            _effective_counter_threshold = min(_effective_counter_threshold, _ct_cap)
             if _is_slightly and self.detailed_logging:
                 logger.debug(
                     f"[COUNCIL] SLIGHTLY regime — counter_trend_threshold raised: "
@@ -2174,7 +2185,9 @@ class InstitutionalCouncilAggregator:
                             logger.debug(
                                 f"[COUNCIL] Transition evidence error in SLIGHTLY_COUNTER: {_te_err}"
                             )
-                        required_score = min(required_score + _te_raise, 4.0)
+                        # Honour the same counter-trend ceiling computed above so the
+                        # SLIGHTLY_COUNTER raise can't reintroduce the 4.0 bar.
+                        required_score = min(required_score + _te_raise, _ct_cap)
                         logger.info(
                             f"[GOV] ⚠️ SLIGHTLY_COUNTER: required score raised to {required_score:.2f}"
                         )
@@ -2737,7 +2750,24 @@ class InstitutionalCouncilAggregator:
             # The +1.5 bump for MAIN states (vs +0.5 for secondary) reflects that
             # MAIN_UP/DOWN represents a more extreme overextension — only truly
             # exceptional council scores (≥ base + 1.5) justify going with the trend.
-            if signal != 0 and mr_signal == 0 and mr_conf == 0.0:
+            # Mode-driven (phase_config.council_mr_lean_mode):
+            #   "off"    → gate skipped entirely. The council still consumes the
+            #              Livermore read directly elsewhere (livermore_state_1h is
+            #              used by the trend-judge confirmation, lifecycle guard, and
+            #              regime-disagreement gate), so removing THIS veto does not
+            #              blind the council to structure.
+            #   "strict" → legacy hard veto (bumps 1.5 MAIN / 0.5 secondary).
+            #   "soft"   → relaxed bumps from phase_config (default 0.25 / 0.0).
+            _pc_mrlean = self.config.get("phase_config", {}) or {}
+            _mr_lean_mode = (
+                str(_pc_mrlean.get("council_mr_lean_mode", "soft")).strip().lower()
+            )
+            if (
+                _mr_lean_mode != "off"
+                and signal != 0
+                and mr_signal == 0
+                and mr_conf == 0.0
+            ):
                 _lsm_lean = (
                     getattr(_composite_state, "livermore_state_1h", None)
                     if _composite_state
@@ -2769,7 +2799,22 @@ class InstitutionalCouncilAggregator:
                     # cleared the old 3.5 bar (3.0+0.5) and executed, but would have
                     # failed the documented 4.5 bar (3.0+1.5). Now matches the spec.
                     _is_main_state = _lsm_lean in ("MAIN_UP", "MAIN_DOWN")
-                    _bump = 1.50 if _is_main_state else 0.50
+                    if _mr_lean_mode == "strict":
+                        # Legacy hard-veto bumps (pre-2026-06-24 behaviour).
+                        _bump = 1.50 if _is_main_state else 0.50
+                    else:
+                        # "soft" (default): relaxed, tunable bumps. Funnel+shadow soak
+                        # (6/20-6/24) showed the +1.5 MAIN bump (bar = 2.75+1.5 = 4.25)
+                        # blocking GOLD/USOIL/BTC trend signals scoring 4.0-4.3 that the
+                        # shadow engine forward-tracked as winners. Default 0.25 MAIN
+                        # keeps a light structural caution without amputating them.
+                        _bump = (
+                            float(_pc_mrlean.get("council_mr_lean_bump_main", 0.25))
+                            if _is_main_state
+                            else float(
+                                _pc_mrlean.get("council_mr_lean_bump_secondary", 0.0)
+                            )
+                        )
                     _conflict_req = min(self.trend_aligned_threshold + _bump, 5.0)
                     if total_score < _conflict_req:
                         logger.warning(

@@ -1428,6 +1428,11 @@
     "council_trend_judge_livermore_confirmation_enabled": false,
     "council_lifecycle_livermore_guard_enabled": false,
     "strategy_livermore_awareness_enabled": false,
-    "pyramid_livermore_maturity_gate_enabled": true
+    "pyramid_livermore_maturity_gate_enabled": true,
+    "_council_gate_relax_note": "council_mr_lean_mode: 'soft'=relaxed bumps (default), 'off'=gate removed (council still reads livermore_state_1h directly), 'strict'=legacy 1.5/0.5 hard veto. council_counter_trend_cap caps the effective counter-trend bar (legacy ceiling was 4.0 via RSM raise).",
+    "council_mr_lean_mode": "soft",
+    "council_mr_lean_bump_main": 0.25,
+    "council_mr_lean_bump_secondary": 0.0,
+    "council_counter_trend_cap": 3.5
   }
 }
