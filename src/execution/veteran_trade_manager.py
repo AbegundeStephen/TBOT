@@ -1237,6 +1237,14 @@ class VeteranTradeManager:
         try:
             atr = self._calculate_atr()
 
+            # ── Structural prerequisite: store live composite_state on VTM ──────
+            # Enables check_exit to read live structural signals (BOS, CHoCH,
+            # Livermore state) without requiring a signature change to check_exit.
+            # If composite_state is None, all structural checks in check_exit
+            # gracefully skip and ATR behaviour is preserved.
+            self._live_cs = composite_state
+
+
             # ── PHASE 4: Live Livermore State Refresh ──────────────────────────
             # Refresh 4H Livermore state every cycle so VTM responds to structural
             # transitions that occur AFTER trade entry, not just at entry time.
@@ -1395,6 +1403,23 @@ class VeteranTradeManager:
                     if new_trail > self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
+
+                # ── STRUCTURAL SWING LOW TRAIL (Option 1 + Option B) ──────────
+                # Fires for BOTH REVERSION and TREND types when in profit.
+                # ATR runner trail (above) remains the floor for TREND type.
+                # Structural trail takes over when it produces a higher stop.
+                # Only active when structural_trailing_enabled = true in config.
+                _current_profit_long = self.close[-1] - self.entry_price
+                if _current_profit_long > 1.0 * atr:
+                    _struct_sl = self._compute_swing_low_trail(atr)
+                    if _struct_sl is not None and _struct_sl > self.current_stop_loss:
+                        logger.info(
+                            "[VTM] 🏗️ Structural trail: %s SL → %.5g "
+                            "(swing low − 0.3×ATR, was %.5g)",
+                            self.asset, _struct_sl, self.current_stop_loss,
+                        )
+                        self.current_stop_loss = _struct_sl
+                # ───────────────────────────────────────────────
             else:
                 # Guard: lowest_price_reached may be None if entry_price was None at construction
                 if self.lowest_price_reached is None:
@@ -1406,6 +1431,19 @@ class VeteranTradeManager:
                     if new_trail < self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
+
+                # ── STRUCTURAL SWING HIGH TRAIL (Option 1 + Option B, shorts) ─
+                _current_profit_short = self.entry_price - self.close[-1]
+                if _current_profit_short > 1.0 * atr:
+                    _struct_sl = self._compute_swing_low_trail(atr)
+                    if _struct_sl is not None and _struct_sl < self.current_stop_loss:
+                        logger.info(
+                            "[VTM] 🏗️ Structural trail: %s SL → %.5g "
+                            "(swing high + 0.3×ATR, was %.5g)",
+                            self.asset, _struct_sl, self.current_stop_loss,
+                        )
+                        self.current_stop_loss = _struct_sl
+                # ──────────────────────────────────────────────────────────────
 
             return self.check_exit(current_price, atr, df_4h=df_4h)
         except Exception as e:
@@ -1911,20 +1949,46 @@ class VeteranTradeManager:
                 bars_against = sum(
                     1 for k in range(-3, 0)
                     if (self.side == "long"  and self.close[k] < self.close[k - 1]) or
-                       (self.side == "short" and self.close[k] > self.close[k - 1])
+                    (self.side == "short" and self.close[k] > self.close[k - 1])
                 )
                 if bars_against >= 3 and adx_value < 20:
-                    self._trend_invalidated = True
-                    ti_size = self.remaining_position
-                    if ti_size > 0:
-                        self.remaining_position = 0.0
-                        logger.warning(
-                            f"[VTM] ❌ TREND INVALIDATION: {self.asset} {self.side.upper()} — "
-                            f"3 consecutive bars against + ADX={adx_value:.1f} < 20. "
-                            f"Full close ({ti_size:.0%})."
+                    # STRUCTURAL GATE: require the Livermore state to also confirm
+                    # structural weakness, not just statistical weakness.
+                    # For longs: SECONDARY_RETRACEMENT or MAIN_DOWN = structural
+                    #            warning against the position (more than normal pullback).
+                    # For shorts: SECONDARY_REBOUND or MAIN_UP = structural warning.
+                    # If Livermore state is NATURAL_RETRACEMENT / MAIN_UP (for longs),
+                    # the three lower closes are normal breathing and should not close.
+                    _lv4h = getattr(self, "livermore_state_4h", None)
+                    _struct_against = (
+                        (self.side == "long"  and _lv4h in ("SECONDARY_RETRACEMENT", "MAIN_DOWN")) or
+                        (self.side == "short" and _lv4h in ("SECONDARY_REBOUND",      "MAIN_UP"))
+                    )
+                    if not _struct_against:
+                        logger.debug(
+                            "[VTM] Trend invalidation: 3 bars against + ADX<20 "
+                            "but Livermore state %s does not confirm — holding. "
+                            "Structural stop is the protection.",
+                            _lv4h,
                         )
-                        self._log_mfe_mae("TREND_INVALIDATION")
-                        return {"reason": ExitReason.TREND_INVALIDATION, "price": current_price, "size": ti_size}
+                    else:
+                        self._trend_invalidated = True
+                        ti_size = self.remaining_position
+                        if ti_size > 0:
+                            self.remaining_position = 0.0
+                            logger.warning(
+                                "[VTM] ❌ TREND INVALIDATION: %s %s — "
+                                "3 bars against + ADX=%.1f < 20 + Livermore=%s. "
+                                "Full close (%.0f%%).",
+                                self.asset, self.side.upper(),
+                                adx_value, _lv4h, ti_size * 100,
+                            )
+                            self._log_mfe_mae("TREND_INVALIDATION")
+                            return {
+                                "reason": ExitReason.TREND_INVALIDATION,
+                                "price":  current_price,
+                                "size":   ti_size,
+                            }
             except Exception as _e:
                 logger.debug(f"[VTM] Trend-invalidation check skipped: {_e}")
 
@@ -1977,13 +2041,30 @@ class VeteranTradeManager:
                         _macd_counter  = _h1 < _h2 < 0      # histogram falling into negative = bearish
 
                     if _rsi_counter and _macd_counter:
-                        if not (self.partials_enabled and self._can_partial(0.60)):
-                            logger.debug(f"[VTM] Counter-momentum cut suppressed — letting trade run.")
+                        # STRUCTURAL GATE: same Livermore state check as Trend Invalidation.
+                        # Statistical momentum signals alone should not override the
+                        # structural stop on a position entered at a proven structural
+                        # level. Both statistical AND structural must confirm before cutting.
+                        _lv4h_cm = getattr(self, "livermore_state_4h", None)
+                        _struct_against_cm = (
+                            (self.side == "long"  and _lv4h_cm in ("SECONDARY_RETRACEMENT", "MAIN_DOWN")) or
+                            (self.side == "short" and _lv4h_cm in ("SECONDARY_REBOUND",      "MAIN_UP"))
+                        )
+                        if not _struct_against_cm:
+                            logger.debug(
+                                "[VTM] Counter-momentum signals present but Livermore=%s "
+                                "does not structurally confirm — letting structural stop "
+                                "manage this trade.",
+                                _lv4h_cm,
+                            )
                         else:
-                            self._counter_momentum_cut = True
-                            cut_size = min(0.60, self.remaining_position)
-                            if cut_size > 0:
-                                self.remaining_position = max(0.0, self.remaining_position - cut_size)
+                            if not (self.partials_enabled and self._can_partial(0.60)):
+                                logger.debug(f"[VTM] Counter-momentum partial suppressed — letting trade run.")
+                            else:
+                                self._counter_momentum_cut = True
+                                cut_size = min(0.60, self.remaining_position)
+                                if cut_size > 0:
+                                    self.remaining_position = max(0.0, self.remaining_position - cut_size)
                             # Tighten remaining SL to entry ± 0.5×ATR so runner risk is minimal
                             if self.side == "short":
                                 _tight_sl = self.entry_price + 0.5 * atr_value
@@ -2052,22 +2133,41 @@ class VeteranTradeManager:
                     )
 
                     if _macd_flipped and _rsi_confirms:
+                        # STRUCTURAL ACTION: tighten the structural trail aggressively
+                        # rather than closing the full position on a statistical signal.
+                        # MACD zero-cross + RSI < 50 is a warning, not a structural
+                        # confirmation that the thesis has broken. The trade continues
+                        # with a tighter stop. If structure subsequently breaks (swing
+                        # low is hit), the structural trail will exit it correctly.
                         self._profit_reversal_exited = True
-                        _pg_size = self.remaining_position
-                        if _pg_size > 0:
-                            self.remaining_position = 0.0
+                        _pg_struct = self._compute_swing_low_trail(atr_value)
+                        if _pg_struct is not None:
+                            if self.side == "long" and _pg_struct > self.current_stop_loss:
+                                self.current_stop_loss = _pg_struct
+                                logger.warning(
+                                    "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                    "Statistical warning: tightening SL to structural "
+                                    "swing low %.5g (not closing — structure not yet broken).",
+                                    self.asset, self.side.upper(), _rsi_now, _pg_struct,
+                                )
+                            elif self.side == "short" and _pg_struct < self.current_stop_loss:
+                                self.current_stop_loss = _pg_struct
+                                logger.warning(
+                                    "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                    "Statistical warning: tightening SL to structural "
+                                    "swing high %.5g (not closing — structure not yet broken).",
+                                    self.asset, self.side.upper(), _rsi_now, _pg_struct,
+                                )
+                        else:
+                            # No structural swing to trail behind — keep current stop,
+                            # log the warning, let structural stop or trail handle exit.
                             logger.warning(
-                                f"[VTM] 💰 PROFIT GUARD: {self.asset} {self.side.upper()} — "
-                                f"profit=${_profit_guard:.2f} ({_profit_guard/atr_value:.1f}×ATR), "
-                                f"MACD flipped ({_h2_pg:+.4f}→{_h1_pg:+.4f}), "
-                                f"RSI={_rsi_now:.1f}. Full close at ${current_price:,.5f}."
+                                "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                "No structural swing trail available — holding current SL %.5g. "
+                                "Structural stop is the protection.",
+                                self.asset, self.side.upper(), _rsi_now,
+                                self.current_stop_loss,
                             )
-                            self._log_mfe_mae("PROFIT_GUARD")
-                            return {
-                                "reason": ExitReason.TREND_INVALIDATION,
-                                "price": current_price,
-                                "size": _pg_size,
-                            }
             except Exception as _e:
                 logger.debug(f"[VTM] Profit-guard check skipped: {_e}")
 
@@ -2172,12 +2272,28 @@ class VeteranTradeManager:
 
         # --- STEP 5: Trade State Mutation ---
         # Objective: Allow profitable Mean Reversion trades to convert into trend trades.
+        # Original trigger: ADX > 30 (statistical momentum confirmation).
+        # Additional trigger: BOS detected on live composite_state (structural proof).
+        # In NATURAL_RETRACEMENT — where Mode 1 spring entries happen — ADX is
+        # typically below 30 because the pullback itself is not strong momentum.
+        # Mutation was silently failing for most Mode 1 trades.
+        # BOS = the market just made a higher high, breaking the local retracement
+        # structure. That is Livermore's proof the pullback is over and the trend
+        # is resuming. Either ADX OR BOS can now trigger mutation.
         if self.trade_type == "REVERSION":
-            if adx_value > 30 and current_profit > 0:
-                is_actually_profitable = (self.side == "long" and current_price > self.entry_price) or \
-                                         (self.side == "short" and current_price < self.entry_price)
+            _bos_live = getattr(getattr(self, "_live_cs", None), "bos_detected", False)
+            if (adx_value > 30 or _bos_live) and current_profit > 0:
+                is_actually_profitable = (
+                    (self.side == "long"  and current_price > self.entry_price) or
+                    (self.side == "short" and current_price < self.entry_price)
+                )
                 if is_actually_profitable:
-                    logger.info("[VTM] 🧬 Trade mutated from REVERSION to TREND. Ride the move.")
+                    _trigger = "BOS structural break" if _bos_live else f"ADX={adx_value:.1f}"
+                    logger.info(
+                        "[VTM] 🧬 %s: Trade mutated REVERSION → TREND (%s). "
+                        "Runner + structural trail now both active.",
+                        self.asset, _trigger,
+                    )
                     self.cancel_take_profit()
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
@@ -2226,11 +2342,33 @@ class VeteranTradeManager:
                             exhaust_size = min(0.50, self.remaining_position)
                             if exhaust_size > 0:
                                 self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
-                            # Lock SL to break-even so runner can only win or scratch
-                            if self.side == "long" and self.current_stop_loss < self.entry_price:
-                                self.current_stop_loss = self.entry_price
-                            elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                                self.current_stop_loss = self.entry_price
+                            # Structural trail on remainder instead of ATR breakeven lock.
+                            # If a swing low/high has formed above/below the current stop,
+                            # place the stop there — it is structurally more meaningful
+                            # than locking to entry price regardless of market context.
+                            # Fall back to entry price lock only if no structural level found.
+                            _exhaust_struct = self._compute_swing_low_trail(atr)
+                            if _exhaust_struct is not None:
+                                if self.side == "long" and _exhaust_struct > self.current_stop_loss:
+                                    self.current_stop_loss = _exhaust_struct
+                                    logger.info(
+                                        "[VTM] 📉 Momentum exhaustion remainder: "
+                                        "SL → structural swing low %.5g",
+                                        _exhaust_struct,
+                                    )
+                                elif self.side == "short" and _exhaust_struct < self.current_stop_loss:
+                                    self.current_stop_loss = _exhaust_struct
+                                    logger.info(
+                                        "[VTM] 📉 Momentum exhaustion remainder: "
+                                        "SL → structural swing high %.5g",
+                                        _exhaust_struct,
+                                    )
+                            else:
+                                # No structural swing formed yet — safety net
+                                if self.side == "long" and self.current_stop_loss < self.entry_price:
+                                    self.current_stop_loss = self.entry_price
+                                elif self.side == "short" and self.current_stop_loss > self.entry_price:
+                                    self.current_stop_loss = self.entry_price
                             logger.warning(
                                 f"[VTM] 📉 MOMENTUM EXHAUSTION: {self.asset} {self.side.upper()} — "
                                 f"RSI={rsi_val:.1f}, MACD hist declining, ADX={adx_arr[-1]:.1f}↓. "
@@ -2679,6 +2817,104 @@ class VeteranTradeManager:
             return None
 
         return None
+    
+    def _compute_swing_low_trail(self, atr: float) -> Optional[float]:
+        """
+        Structural swing low trail — Option 1 (Pure Livermore).
+
+        Scans accumulated OHLC bars for the most recent confirmed structural
+        swing low (long) or swing high (short) that sits above the current
+        stop loss. Returns a candidate stop just below that level.
+
+        Pivot quality: 4 bars committed on the left (proves the level was
+        real), 2 bars rejection on the right (catches the turn early).
+        ATR depth filter: the swing must travel at least 0.3×ATR from prior
+        closes — same standard as the entry pivot quality fix.
+
+        Fires for both REVERSION and TREND trade types when profit > 1.0×ATR
+        (Option B decision). The ATR runner trail stays as the floor —
+        this trail takes over when it produces a higher stop level.
+
+        Gates:
+        - structural_trailing_enabled must be true in phase_config
+        - Trade must be in profit (no trailing on losers)
+        - Minimum 10 bars in trade (enough data for meaningful pivots)
+        - Candidate must be ABOVE current_stop_loss (one-way ratchet)
+        - Candidate must be BELOW current price (stop behind price)
+        """
+        _phase_cfg = self.risk_config.get("phase_config", {})
+        if not _phase_cfg.get("structural_trailing_enabled", False):
+            return None
+
+        if atr <= 0 or self.bars_in_trade < 10:
+            return None
+
+        _in_profit = (
+            (self.side == "long"  and self.close[-1] > self.entry_price) or
+            (self.side == "short" and self.close[-1] < self.entry_price)
+        )
+        if not _in_profit:
+            return None
+
+        try:
+            highs_arr  = self.high
+            lows_arr   = self.low
+            closes_arr = self.close
+            _min_depth = 0.3 * atr
+
+            if self.side == "long":
+                # Find the highest confirmed swing LOW above current stop
+                best_candidate = None
+                for i in range(len(lows_arr) - 3, 6, -1):
+                    if (
+                        lows_arr[i] < lows_arr[i - 1]
+                        and lows_arr[i] < lows_arr[i - 2]
+                        and lows_arr[i] < lows_arr[i - 3]
+                        and lows_arr[i] < lows_arr[i - 4]
+                        and lows_arr[i] < lows_arr[i + 1]
+                        and lows_arr[i] < lows_arr[i + 2]
+                        and (min(closes_arr[i - 4:i]) - lows_arr[i] >= _min_depth)
+                    ):
+                        # Stop goes just below this swing low
+                        _candidate = lows_arr[i] - (0.3 * atr)
+                        # Valid only if it advances the stop (never pulls back)
+                        # and stays behind current price
+                        if (
+                            _candidate > self.current_stop_loss
+                            and _candidate < self.close[-1]
+                        ):
+                            if best_candidate is None or _candidate > best_candidate:
+                                best_candidate = _candidate
+                return best_candidate
+
+            else:  # short
+                # Find the lowest confirmed swing HIGH below current stop
+                best_candidate = None
+                for i in range(len(highs_arr) - 3, 6, -1):
+                    if (
+                        highs_arr[i] > highs_arr[i - 1]
+                        and highs_arr[i] > highs_arr[i - 2]
+                        and highs_arr[i] > highs_arr[i - 3]
+                        and highs_arr[i] > highs_arr[i - 4]
+                        and highs_arr[i] > highs_arr[i + 1]
+                        and highs_arr[i] > highs_arr[i + 2]
+                        and (highs_arr[i] - max(closes_arr[i - 4:i]) >= _min_depth)
+                    ):
+                        _candidate = highs_arr[i] + (0.3 * atr)
+                        if (
+                            _candidate < self.current_stop_loss
+                            and _candidate > self.close[-1]
+                        ):
+                            if best_candidate is None or _candidate < best_candidate:
+                                best_candidate = _candidate
+                return best_candidate
+
+        except Exception as _e:
+            logger.debug(
+                "[VTM STRUCT TRAIL] Swing pivot scan failed (non-blocking): %s", _e
+            )
+            return None
+
 
     def __repr__(self):
         levels = self.get_current_levels()

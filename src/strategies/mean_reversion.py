@@ -487,6 +487,35 @@ class MeanReversionStrategy(BaseStrategy):
                 )
                 return 0, 0.0
 
+         # ── STRUCTURAL GATE: Break and Retest required before spring ────────
+        # The BRV checks whether price has swept the Livermore anchor_natural_low
+        # and closed back above it. This is the exact spring-at-structure
+        # sequence that Livermore waited for before committing.
+        #
+        # Uses Livermore anchors when available (independent of pivot calibration).
+        # Falls back to legacy 50-bar logic when anchor not yet confirmed.
+        # Neither path blocks Mode 1 permanently — both require structural proof.
+        # ───────────────────────────────────────────────────────────────────
+        if not hasattr(self, "_brv_validator"):
+            from src.analysis.break_retest import BreakRetestValidator
+            self._brv_validator = BreakRetestValidator()
+
+        _brv_result = self._brv_validator.validate(df, composite_state=composite_state)
+
+        if not _brv_result.is_valid:
+            logger.info(
+                "[MR Mode1] %s: no structural proof — BRV returned %s "
+                "(anchor retest or legacy B&R required before spring entry)",
+                self.asset, _brv_result.type,
+            )
+            return 0, 0.0
+
+        logger.info(
+            "[MR Mode1] %s: structural proof confirmed via %s @ %.5g — "
+            "proceeding to spring check",
+            self.asset, _brv_result.type, _brv_result.level,
+        )
+
         # ── Spring (mandatory) ─────────────────────────────────────────────
         spring_ok, spring_strength = self._detect_spring(features)
         if not spring_ok:
@@ -585,20 +614,35 @@ class MeanReversionStrategy(BaseStrategy):
     ) -> tuple:
         """
         Mode 2 — Counter-Trend (SECONDARY states only).
-
-        SECONDARY_RETRACEMENT → LONG  (counter the deep pullback)
-        SECONDARY_REBOUND     → SHORT (counter the deep bounce)
-
-        [VETO]      range_classification == TRENDING (strong trend, counter-trend fatal)
-        [MANDATORY] ADX < 25
-        [MANDATORY] 4 of 4 optional conditions
-        [MANDATORY] BB has closed back inside bands (was recently outside)
-        [BTC only]  LONG: BB z-score < −2.0; SHORT: z-score > +3.5
+        ...
         """
         cfg      = self._mr3_cfg["mode2"]
         features = self.generate_features(df.tail(260))
         if len(features) < 50:
             return 0, 0.0
+
+        # ── STRUCTURAL GATE: CHoCH required in SECONDARY states ─────────────
+        # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most
+        # dangerous correction environments. Catching a knife here without
+        # structural proof of exhaustion is the fastest way to take a maximum
+        # loss. CHoCH — a higher low or lower high forming in the secondary
+        # move — is the minimum evidence that pressure is beginning to reverse.
+        # ───────────────────────────────────────────────────────────────────
+        if composite_state is not None:
+            _choch = getattr(composite_state, "choch_detected", False)
+            if not _choch:
+                logger.info(
+                    "[MR Mode2] %s: no CHoCH detected in SECONDARY state — "
+                    "counter-trend entry blocked (market has not shown "
+                    "exhaustion signal yet)",
+                    self.asset,
+                )
+                return 0, 0.0
+            logger.info(
+                "[MR Mode2] %s: CHoCH confirmed in SECONDARY state — "
+                "exhaustion signal present, proceeding",
+                self.asset,
+            )
 
         # ── TRENDING veto: counter-trend in a strong trend is fatal ──────────
         if composite_state is not None:

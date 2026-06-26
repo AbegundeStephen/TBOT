@@ -1891,6 +1891,122 @@ class InstitutionalCouncilAggregator:
                 total_score = buy_total
                 required_score = _effective_trend_threshold
                 chosen_scores = buy_scores
+                # ══════════════════════════════════════════════════════════════════
+            # GATE A: STRUCTURAL LOCATION (RetestEngine)
+            # ══════════════════════════════════════════════════════════════════
+            # Runs before the final decision so statistics can only confirm a
+            # structurally sound entry — they cannot override structural reality.
+            #
+            # CHASE_HARD: absolute veto. Price is too far from any structural
+            #             reference. No council score can override this.
+            # All other tiers adjust the threshold up or down based on the
+            # quality of the structural location.
+            # ══════════════════════════════════════════════════════════════════
+            try:
+                if not hasattr(self, "_council_retest_engine"):
+                    import json as _j_re
+                    try:
+                        with open("config/aggregator_presets.json") as _f_re:
+                            _re_cfg = _j_re.load(_f_re)
+                        from src.analysis.retest_engine import RetestEngine as _RE
+                        self._council_retest_engine = _RE(
+                            _re_cfg.get("RETEST_ENGINE", {})
+                        )
+                        logger.info(
+                            "[COUNCIL GATE] RetestEngine loaded for council mode"
+                        )
+                    except Exception as _re_load_err:
+                        logger.warning(
+                            "[COUNCIL GATE] RetestEngine failed to load: %s",
+                            _re_load_err,
+                        )
+                        self._council_retest_engine = None
+
+                _cre = getattr(self, "_council_retest_engine", None)
+                if _cre is not None and _composite_state is not None:
+                    _likely_dir = 1 if buy_total >= sell_total else -1
+                    _rt_buy  = _cre.classify(df, _composite_state, self.asset_type, direction=+1)
+                    _rt_sell = _cre.classify(df, _composite_state, self.asset_type, direction=-1)
+
+                    _buy_type  = _rt_buy.retest_type  if _rt_buy  is not None else "UNKNOWN"
+                    _sell_type = _rt_sell.retest_type if _rt_sell is not None else "UNKNOWN"
+
+                    logger.info(
+                        "[COUNCIL GATE] %s structural classification → "
+                        "BUY=%s SELL=%s",
+                        self.asset_type, _buy_type, _sell_type,
+                    )
+
+                    # ── ABSOLUTE VETO ───────────────────────────────────────
+                    if _buy_type == "CHASE_HARD" and _sell_type == "CHASE_HARD":
+                        logger.info(
+                            "[COUNCIL GATE] %s CHASE_HARD both directions — "
+                            "structural veto: price extended from all levels",
+                            self.asset_type,
+                        )
+                        signal        = 0
+                        decision_type = "HOLD (structural_chase_hard)"
+                    elif _buy_type == "CHASE_HARD" and _likely_dir == 1:
+                        logger.info(
+                            "[COUNCIL GATE] %s BUY direction CHASE_HARD — "
+                            "structural veto on long",
+                            self.asset_type,
+                        )
+                        buy_total = 0.0
+                    elif _sell_type == "CHASE_HARD" and _likely_dir == -1:
+                        logger.info(
+                            "[COUNCIL GATE] %s SELL direction CHASE_HARD — "
+                            "structural veto on short",
+                            self.asset_type,
+                        )
+                        sell_total = 0.0
+
+                    # ── THRESHOLD MODIFIERS ─────────────────────────────────
+                    # CLEAN (-0.20): at a defended level — easier to enter
+                    # WICK  ( 0.00): spring/upthrust recovery — standard
+                    # BREAKOUT (+0.10 to +0.40): fresh state, slight caution
+                    # CHASE_SOFT (+0.75): extended, needs strong conviction
+                    if _buy_type != "CHASE_HARD" and _rt_buy is not None:
+                        _effective_trend_threshold   += _rt_buy.modifier
+                        _effective_counter_threshold += _rt_buy.modifier
+                        if _rt_buy.modifier != 0.0:
+                            logger.debug(
+                                "[COUNCIL GATE] %s threshold adjusted by %.2f "
+                                "(structural=%s)",
+                                self.asset_type, _rt_buy.modifier, _buy_type,
+                            )
+
+            except Exception as _gate_err:
+                logger.debug(
+                    "[COUNCIL GATE] Gate error (non-blocking): %s", _gate_err
+                )
+            # ══════════════════════════════════════════════════════════════════
+
+            # ══════════════════════════════════════════════════════════════════
+            # GATE B: DUAL TIMEFRAME CONFIRMATION
+            # ══════════════════════════════════════════════════════════════════
+            # When the 4H and 1H Livermore states agree on direction, the brain
+            # has full structural conviction across both timeframes.
+            # Ease the threshold slightly — the market is proving itself at two
+            # zoom levels simultaneously. Conservative when timeframes disagree,
+            # flexible when both are aligned. Floor at 2.0 ensures dual
+            # confirmation alone can never open a trade.
+            # ══════════════════════════════════════════════════════════════════
+            if (
+                _composite_state is not None
+                and getattr(_composite_state, "livermore_dual_confirmation", False)
+            ):
+                _ease = 0.15
+                _effective_trend_threshold   = max(2.0, _effective_trend_threshold   - _ease)
+                _effective_counter_threshold = max(2.0, _effective_counter_threshold - _ease)
+                logger.debug(
+                    "[COUNCIL GATE] %s dual_confirmation — thresholds eased "
+                    "by %.2f → trend=%.2f counter=%.2f",
+                    self.asset_type, _ease,
+                    _effective_trend_threshold,
+                    _effective_counter_threshold,
+                )
+            # ══════════════════════════════════════════════════════════════════
             elif not is_bull and buy_total >= _effective_counter_threshold:
                 signal = 1
                 total_score = buy_total
