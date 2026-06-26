@@ -1422,48 +1422,75 @@ class PerformanceWeightedAggregator:
     # ── E.1: ChoCh / BOS Detection ───────────────────────────────────────
 
     def _update_structure(self, state, df):
-        """Detect Break of Structure and Change of Character using 5-bar swing pivots."""
+        """
+        Detect Break of Structure and Change of Character.
+
+        Pivot requirements:
+          - 4 bars committed on the LEFT (proves the level was real, not a flicker)
+          - 2 bars rejection on the RIGHT (catches the turn early enough to be useful)
+          - Minimum 0.3 x ATR depth measured against prior CLOSES (not wicks, which
+            include sweep noise that inflates the apparent size of micro-moves)
+
+        Using numpy arrays throughout: faster and avoids pandas index alignment
+        surprises when slicing with integers inside a loop.
+        """
         try:
-            if len(df) < 15:
+            if len(df) < 20:
                 return
-            highs = df["high"].values
-            lows = df["low"].values
+
+            highs_arr  = df["high"].values
+            lows_arr   = df["low"].values
+            closes_arr = df["close"].values
+
+            _atr_raw   = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+            _min_depth = 0.3 * _atr_raw if _atr_raw > 0 else 0.0
 
             swing_highs = []
-            swing_lows = []
-            for i in range(len(highs) - 3, 4, -1):
+            swing_lows  = []
+
+            # ── Swing HIGH: 4 left, 2 right, depth vs prior closes ──────────
+            for i in range(len(highs_arr) - 3, 6, -1):
                 if (
-                    highs[i] > highs[i - 1]
-                    and highs[i] > highs[i - 2]
-                    and highs[i] > highs[i + 1]
-                    and highs[i] > highs[i + 2]
+                    highs_arr[i] > highs_arr[i - 1]
+                    and highs_arr[i] > highs_arr[i - 2]
+                    and highs_arr[i] > highs_arr[i - 3]
+                    and highs_arr[i] > highs_arr[i - 4]
+                    and highs_arr[i] > highs_arr[i + 1]
+                    and highs_arr[i] > highs_arr[i + 2]
+                    and (highs_arr[i] - max(closes_arr[i - 4:i]) >= _min_depth)
                 ):
-                    swing_highs.append(highs[i])
+                    swing_highs.append(highs_arr[i])
                     if len(swing_highs) >= 2:
                         break
 
-            for i in range(len(lows) - 3, 4, -1):
+            # ── Swing LOW: symmetric, depth vs prior closes ─────────────────
+            for i in range(len(lows_arr) - 3, 6, -1):
                 if (
-                    lows[i] < lows[i - 1]
-                    and lows[i] < lows[i - 2]
-                    and lows[i] < lows[i + 1]
-                    and lows[i] < lows[i + 2]
+                    lows_arr[i] < lows_arr[i - 1]
+                    and lows_arr[i] < lows_arr[i - 2]
+                    and lows_arr[i] < lows_arr[i - 3]
+                    and lows_arr[i] < lows_arr[i - 4]
+                    and lows_arr[i] < lows_arr[i + 1]
+                    and lows_arr[i] < lows_arr[i + 2]
+                    and (min(closes_arr[i - 4:i]) - lows_arr[i] >= _min_depth)
                 ):
-                    swing_lows.append(lows[i])
+                    swing_lows.append(lows_arr[i])
                     if len(swing_lows) >= 2:
                         break
 
+            # ── CHoCH / BOS classification ───────────────────────────────────
             if len(swing_highs) >= 2:
                 if swing_highs[0] > swing_highs[1]:
-                    state.bos_detected = True  # Higher high = trend continuing
+                    state.bos_detected = True    # Higher high — trend continuing
                 elif swing_highs[0] < swing_highs[1]:
-                    state.choch_detected = True  # Lower high = trend may be ending
+                    state.choch_detected = True  # Lower high — reversal warning
 
             if len(swing_lows) >= 2:
                 if swing_lows[0] < swing_lows[1] and not state.bos_detected:
-                    state.bos_detected = True  # Lower low in downtrend = continuation
+                    state.bos_detected = True    # Lower low — downtrend continuing
                 elif swing_lows[0] > swing_lows[1] and not state.choch_detected:
-                    state.choch_detected = True  # Higher low in downtrend = reversal
+                    state.choch_detected = True  # Higher low — reversal warning
+
         except Exception:
             pass
 
@@ -1486,11 +1513,14 @@ class PerformanceWeightedAggregator:
             if np.isnan(_atr) or _atr <= 0:
                 return
 
-            # Garbage collection: remove broken and stale levels
+            # 3.0 ATR threshold (was 0.5) — prevents premature deletion of the
+            # entry level as a trade develops and price moves away from it.
+            # 0.5 ATR caused structural stops to fall back to ATR within hours
+            # of a trade opening as price moved in favour.
             self._structure_levels[asset] = [
                 lvl
                 for lvl in self._structure_levels[asset]
-                if abs(current_price - lvl["price"]) / _atr <= 0.5
+                if abs(current_price - lvl["price"]) / _atr <= 3.0
                 and lvl.get("age_hours", 0) < 336
             ]
 
@@ -1523,20 +1553,34 @@ class PerformanceWeightedAggregator:
                             )
                         break
 
-            # Find nearest level to current price
-            nearest = None
-            nearest_dist = float("inf")
-            for lvl in self._structure_levels[asset]:
-                dist = abs(current_price - lvl["price"]) / _atr
-                if dist < nearest_dist and dist < 2.0:
-                    nearest = lvl
-                    nearest_dist = dist
+            # Collect all candidate levels within 3.0 ATR.
+            # Sort by quality: most-tested first, then nearest.
+            # A level tested 3 times at a price is more significant
+            # than a fresh level 0.1 ATR closer.
+            candidates = [
+                lvl for lvl in self._structure_levels[asset]
+                if abs(current_price - lvl["price"]) / _atr <= 3.0
+            ]
+            candidates.sort(
+                key=lambda l: (
+                    -l.get("tests", 0),
+                    abs(current_price - l["price"]) / _atr,
+                )
+            )
+            top3 = candidates[:3]
 
-            if nearest:
-                state.nearby_4h_level = nearest["price"]
-                state.level_test_count = nearest.get("tests", 0)
-                if nearest_dist < 0.3:
-                    nearest["tests"] = nearest.get("tests", 0) + 1
+            if top3:
+                best = top3[0]
+                best_dist = abs(current_price - best["price"]) / _atr
+                state.nearby_4h_level   = best["price"]
+                state.level_test_count  = best.get("tests", 0)
+                if best_dist < 0.3:
+                    best["tests"] = best.get("tests", 0) + 1
+
+                # Second and third levels — fallback references for structural
+                # stops and RetestEngine when the primary level is broken.
+                state.nearby_4h_level_2 = top3[1]["price"] if len(top3) > 1 else None
+                state.nearby_4h_level_3 = top3[2]["price"] if len(top3) > 2 else None
         except Exception:
             pass
 
