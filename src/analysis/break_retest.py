@@ -111,7 +111,7 @@ class BreakRetestValidator:
                 return self._validate_legacy(df)
 
             # Step 1: Did price wick below the anchor in the last 8 bars?
-            recent_lows = df["low"].values[-8:]
+            recent_lows = df["low"].values[-24:]
             swept_below = any(l < anchor for l in recent_lows)
 
             # Step 2: Did price close back above it?
@@ -144,7 +144,7 @@ class BreakRetestValidator:
                 return self._validate_legacy(df)
 
             # Step 1: Did price wick above the anchor in the last 8 bars?
-            recent_highs = df["high"].values[-8:]
+            recent_highs = df["high"].values[-24:]
             swept_above = any(h > anchor for h in recent_highs)
 
             # Step 2: Did price close back below it?
@@ -169,7 +169,7 @@ class BreakRetestValidator:
         elif lsm_state == "MAIN_UP":
             anchor = getattr(state, "livermore_anchor_main_up_max", None)
             if anchor and close_now < anchor:
-                recent_highs = df["high"].values[-8:]
+                recent_highs = df["high"].values[-24:]
                 if any(h > anchor for h in recent_highs):
                     return BreakRetestResult(
                         True, 0.8, "BEARISH_RETEST", anchor,
@@ -179,7 +179,7 @@ class BreakRetestValidator:
         elif lsm_state == "MAIN_DOWN":
             anchor = getattr(state, "livermore_anchor_main_down_min", None)
             if anchor and close_now > anchor:
-                recent_lows = df["low"].values[-8:]
+                recent_lows = df["low"].values[-24:]
                 if any(l < anchor for l in recent_lows):
                     return BreakRetestResult(
                         True, 0.8, "BULLISH_RETEST", anchor,

@@ -1976,6 +1976,30 @@ class InstitutionalCouncilAggregator:
                                 self.asset_type, _rt_buy.modifier, _buy_type,
                             )
 
+
+
+                    # ── WRITE ENTRY_TYPE TO COMPOSITE_STATE ────────────────
+                    # Performance mode writes this in signal_aggregator:4280.
+                    # Council mode must write it here so VTM can route to the
+                    # correct structural stop via _compute_structural_stop.
+                    # Without this, vtm_entry_type is None for every council
+                    # trade and structural stops silently fall back to ATR.
+                    if not _buy_hard and _likely_dir == 1 and _rt_buy is not None:
+                        try:
+                            _composite_state.entry_type = _rt_buy.entry_type
+                        except Exception:
+                            pass
+                    elif not _sell_hard and _likely_dir == -1 and _rt_sell is not None:
+
+                        try:
+                            _composite_state.entry_type = _rt_sell.entry_type
+                        except Exception:
+                            pass
+
+                    # ───────────────────────────────────────────────────────
+
+
+
             except Exception as _gate_err:
                 logger.debug(
                     "[COUNCIL GATE] Gate error (non-blocking): %s", _gate_err
