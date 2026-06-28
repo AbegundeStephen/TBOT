@@ -2003,13 +2003,12 @@ class InstitutionalCouncilAggregator:
                     # correct structural stop via _compute_structural_stop.
                     # Without this, vtm_entry_type is None for every council
                     # trade and structural stops silently fall back to ATR.
-                    if not _buy_hard and _likely_dir == 1 and _rt_buy is not None:
+                    if _buy_type != "CHASE_HARD" and _likely_dir == 1 and _rt_buy is not None:
                         try:
                             _composite_state.entry_type = _rt_buy.entry_type
                         except Exception:
                             pass
-                    elif not _sell_hard and _likely_dir == -1 and _rt_sell is not None:
-
+                    elif _sell_type != "CHASE_HARD" and _likely_dir == -1 and _rt_sell is not None:
                         try:
                             _composite_state.entry_type = _rt_sell.entry_type
                         except Exception:

@@ -4316,6 +4316,49 @@ class PerformanceWeightedAggregator:
                 )
                 original_signal = final_signal
 
+                # ── STEP 6B: Confluence-adjusted re-score ─────────────────────
+                # Run the Confluence Engine NOW (with the known signal direction)
+                # so pattern/regime adjustments to tf_conf/mr_conf feed back into
+                # the scoring and can change the decision. Previously this ran
+                # post-decision and only affected the response dict (dead code).
+                if final_signal != 0 and state is not None:
+                    try:
+                        _tf_adj, _mr_adj, state = self._score_confluence(
+                            state, tf_conf, mr_conf, signal=final_signal
+                        )
+                        if abs(_tf_adj - tf_conf) > 1e-4 or abs(_mr_adj - mr_conf) > 1e-4:
+                            _b_adj, _, _ = self._calculate_score(
+                                df, 1, mr_signal, _mr_adj, tf_signal, _tf_adj,
+                                ema_signal, ema_conf, is_bull,
+                            )
+                            _s_adj, _, _ = self._calculate_score(
+                                df, -1, mr_signal, _mr_adj, tf_signal, _tf_adj,
+                                ema_signal, ema_conf, is_bull,
+                            )
+                            if _b_adj >= adj_buy_thresh and _b_adj > _s_adj:
+                                final_signal = 1
+                            elif _s_adj >= adj_sell_thresh and _s_adj > _b_adj:
+                                final_signal = -1
+                            else:
+                                final_signal = 0
+                            buy_score, sell_score = _b_adj, _s_adj
+                            if final_signal != original_signal:
+                                reasoning = (
+                                    f"BUY (score:{buy_score:.2f}, thresh:{adj_buy_thresh:.2f})"
+                                    if final_signal == 1
+                                    else (
+                                        f"SELL (score:{sell_score:.2f}, thresh:{adj_sell_thresh:.2f})"
+                                        if final_signal == -1
+                                        else (
+                                            f"hold — confluence overrode {original_signal:+d} "
+                                            f"(buy:{buy_score:.2f} vs sell:{sell_score:.2f})"
+                                        )
+                                    )
+                                )
+                        tf_conf, mr_conf = _tf_adj, _mr_adj
+                    except Exception as _ce:
+                        logger.debug(f"[CONFLUENCE] Re-score failed (non-blocking): {_ce}")
+
                 # Write entry_type to CompositeState for VTM routing (Phase 3B).
                 # Directional: uses the retest result that matched final_signal direction.
                 if state is not None:
@@ -4386,16 +4429,28 @@ class PerformanceWeightedAggregator:
                                 _avg_body = float(abs(_cmr_closes - _cmr_opens).mean())
                                 _min_body = _cmr_atr * 0.08
 
+                                # Net displacement (first open → last close) in ATRs.
+                                # Requires a genuine sustained move, not just a majority
+                                # of tiny candles pointing the wrong way.
+                                _cmr_net = float(_cmr_closes[-1] - _cmr_opens[0])
+                                _cmr_adv_mult = float(_cmr_cfg.get("adverse_atr_mult", 0.30))
+
                                 if _avg_body >= _min_body:
-                                    if final_signal == -1 and _cmr_bull >= _cmr_agree:
+                                    _cmr_atr_pos = _cmr_atr if _cmr_atr > 0 else 1e-8
+                                    if (
+                                        final_signal == -1
+                                        and _cmr_bull >= _cmr_agree
+                                        and _cmr_net >= _cmr_adv_mult * _cmr_atr_pos
+                                    ):
                                         _cmr_reason = (
                                             f"{_cmr_bull}/{_cmr_candles} recent candles bullish "
+                                            f"AND net +{_cmr_net / _cmr_atr_pos:.2f} ATR "
                                             f"— momentum opposing SELL"
                                         )
                                         logger.info(
                                             f"[CMR] ⛔ {self.asset_type} SELL blocked — "
                                             f"{_cmr_bull}/{_cmr_candles} candles bullish, "
-                                            f"market bouncing against short entry."
+                                            f"net {_cmr_net / _cmr_atr_pos:+.2f} ATR against short entry."
                                         )
                                         return 0, {
                                             "timestamp": timestamp,
@@ -4412,15 +4467,20 @@ class PerformanceWeightedAggregator:
                                             "ema_confidence": ema_conf,
                                             "cmr_reason": _cmr_reason,
                                         }
-                                    elif final_signal == 1 and _cmr_bear >= _cmr_agree:
+                                    elif (
+                                        final_signal == 1
+                                        and _cmr_bear >= _cmr_agree
+                                        and -_cmr_net >= _cmr_adv_mult * _cmr_atr_pos
+                                    ):
                                         _cmr_reason = (
                                             f"{_cmr_bear}/{_cmr_candles} recent candles bearish "
+                                            f"AND net {_cmr_net / _cmr_atr_pos:.2f} ATR "
                                             f"— momentum opposing BUY"
                                         )
                                         logger.info(
                                             f"[CMR] ⛔ {self.asset_type} BUY blocked — "
                                             f"{_cmr_bear}/{_cmr_candles} candles bearish, "
-                                            f"market falling against long entry."
+                                            f"net {_cmr_net / _cmr_atr_pos:+.2f} ATR against long entry."
                                         )
                                         return 0, {
                                             "timestamp": timestamp,
@@ -4738,14 +4798,6 @@ class PerformanceWeightedAggregator:
                         state.reversal_imminent = True
                 except Exception:
                     pass
-
-                # Section I: Confluence Engine — adjust tf_conf and mr_conf
-                try:
-                    tf_conf, mr_conf, state = self._score_confluence(
-                        state, tf_conf, mr_conf, signal=final_signal
-                    )
-                except Exception as _ce:
-                    logger.debug(f"[CONFLUENCE] Scoring failed: {_ce}")
 
             # ─────────────────────────────────────────────────────────────
 
