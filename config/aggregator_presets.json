@@ -24,10 +24,14 @@
         "trend_following_weight": 0.85,
         "ema_weight": 0.3,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Veteran rewrite 2026-06-24: blocks a trend-aligned entry ONLY when min_agreement/candles recent CLOSED candles oppose the trade AND net displacement >= adverse_atr_mult x ATR (a real counter-move, not candle-colour noise). mode 'soft' = require council score >= required + soft_penalty instead of a hard veto; a strong_adx trend halves the penalty (pullback = entry). mode: 'soft'|'off'|'veto'. Set adverse_atr_mult=0 + mode='veto' to restore the legacy candle-colour hard block.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "balanced": {
@@ -53,10 +57,14 @@
         "trend_following_weight": 0.75,
         "ema_weight": 0.4,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block \u2014 gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "aggressive": {
@@ -82,10 +90,14 @@
         "trend_following_weight": 0.7,
         "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Slightly looser: requires all 3 candles against trade to block (aggressive preset tolerates 1 opposing candle).",
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "scalper": {
@@ -144,9 +156,14 @@
         "trend_following_weight": 0.8,
         "ema_weight": 0.3,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "balanced": {
@@ -172,9 +189,14 @@
         "trend_following_weight": 0.7,
         "ema_weight": 0.4,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "aggressive": {
@@ -200,9 +222,14 @@
         "trend_following_weight": 0.65,
         "ema_weight": 0.5,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "scalper": {
