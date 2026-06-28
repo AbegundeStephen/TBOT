@@ -4139,12 +4139,18 @@ class TradingBot:
             return True
 
         # Adaptive cooldown: genuine Livermore state transition → shorter window.
+        # Exception: SECONDARY states indicate deep counter-trend pressure —
+        # the last stop was likely caused by that same pressure. Reducing the
+        # cooldown into a SECONDARY phase would invite a repeat loss.
+        _SECONDARY = {"SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"}
         prev_state = self._last_livermore_states.get(asset_name)
-        if (
+        _genuine_transition = (
             current_lsm_state is not None
             and prev_state is not None
             and current_lsm_state != prev_state
-        ):
+            and current_lsm_state not in _SECONDARY
+        )
+        if _genuine_transition:
             min_minutes = min(base_minutes, 180)
             logger.info(
                 f"[COOLDOWN] {asset_name}: Livermore transition {prev_state}→{current_lsm_state} "
@@ -4152,6 +4158,11 @@ class TradingBot:
             )
         else:
             min_minutes = base_minutes
+            if current_lsm_state in _SECONDARY and prev_state != current_lsm_state:
+                logger.info(
+                    f"[COOLDOWN] {asset_name}: Livermore→{current_lsm_state} "
+                    f"(SECONDARY phase) — full {min_minutes:.0f}min cooldown maintained"
+                )
 
         elapsed = datetime.now() - self.last_trade_times[asset_name]
         if elapsed.total_seconds() < min_minutes * 60:
@@ -5433,6 +5444,9 @@ class TradingBot:
                                 )
 
                                 vtm_is_active = new_pos.trade_manager is not None
+                                _vtm = new_pos.trade_manager
+                                vtm_entry_type = getattr(_vtm, "vtm_entry_type", None)
+                                vtm_stop_type = getattr(_vtm, "stop_type", "atr")
 
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
@@ -5446,6 +5460,8 @@ class TradingBot:
                                         margin_type=margin_type,
                                         is_futures=is_futures,
                                         vtm_is_active=vtm_is_active,
+                                        entry_type=vtm_entry_type,
+                                        stop_type=vtm_stop_type,
                                     )
                                 )
 
