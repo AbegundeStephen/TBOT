@@ -731,32 +731,40 @@ class InstitutionalCouncilAggregator:
         atr_fast: float,
         n_candles: int = 3,
         min_agreement: int = 2,
-    ) -> Tuple[bool, str]:
+        adverse_atr_mult: float = 1.0,
+    ) -> Tuple[bool, str, float]:
         """
-        Candle Momentum Alignment Gate.
+        Candle Momentum Alignment detector (veteran rewrite 2026-06-24).
 
-        Blocks a trend-aligned signal when the most recent closed 1H candles
-        show clear momentum in the *opposite* direction — i.e. price is actively
-        bouncing against the proposed trade.
+        Flags a trend-aligned entry as ADVERSE only when BOTH conditions hold over
+        the last `n_candles` CLOSED bars (the forming candle is excluded):
+          1. a directional majority (>= `min_agreement` candles) closes AGAINST the
+             proposed trade, AND
+          2. NET close-to-close displacement (first open → last close) moves against
+             the trade by at least `adverse_atr_mult` × fast-ATR.
 
-        Examples of what this catches:
-          • SELL proposed in a BEARISH regime but the last 3 candles are all
-            bullish (price rallying) — don't add short exposure into a bounce.
-          • BUY proposed in a BULLISH regime but the last 3 candles are all
-            bearish (price pulling back hard) — don't add long exposure into a
-            sharp sell-off.
+        Why both — the old majority-only test fired on noise. Three candles of
+        {two tiny green, one big red} net DOWN, yet voted 2:1 "bullish" and blocked
+        a SELL that was correctly aligned with the move. Requiring real net
+        displacement means a counter-move only counts when price has actually
+        TRAVELLED against the entry — a genuine bounce — not merely printed a couple
+        of small opposite-colour bodies. The displacement floor also subsumes the
+        old doji filter (tiny candles can't clear it), so that is removed.
 
         Returns:
-            (passed: bool, reason: str)
-            passed=True  → gate cleared, signal may proceed
-            passed=False → gate failed, signal should be blocked
+            (is_adverse: bool, reason: str, adverse_atr_ratio: float)
+            is_adverse=False → momentum is not against the trade; proceed.
+            is_adverse=True  → genuine counter-move; caller decides veto vs penalty.
+            adverse_atr_ratio = net adverse displacement in ATRs (0.0 when not
+            adverse), used by the caller to scale the response.
+
+        Set `adverse_atr_mult=0.0` to fall back to majority-only (legacy) behaviour.
         """
         try:
-            if len(df) < n_candles + 2:
-                return True, "insufficient data"
+            if atr_fast is None or atr_fast <= 0 or len(df) < n_candles + 2:
+                return False, "insufficient data", 0.0
 
-            # Use rows [-n_candles-1 : -1] to get n_candles confirmed-closed
-            # bars (exclude the most-recent potentially-forming candle).
+            # n confirmed-closed bars, excluding the most-recent forming candle.
             _recent = df.iloc[-(n_candles + 1) : -1]
             _opens = _recent["open"].values
             _closes = _recent["close"].values
@@ -764,40 +772,45 @@ class InstitutionalCouncilAggregator:
             _bullish = int((_closes > _opens).sum())
             _bearish = int((_closes < _opens).sum())
 
-            # Require that candle bodies are meaningful (not tiny dojis).
-            _avg_body = float(abs(_closes - _opens).mean())
-            _min_body = atr_fast * 0.08  # 8% of ATR — filters out doji noise
+            # Net displacement across the window (first open → last close), in ATRs.
+            # Positive = price rose over the window, negative = price fell.
+            _net_atr = float(_closes[-1] - _opens[0]) / atr_fast
 
-            if _avg_body < _min_body:
-                return True, "candle bodies too small to determine momentum"
+            if signal == -1:  # SELL: adverse = price RISING
+                _majority = _bullish >= min_agreement
+                _adverse_disp = _net_atr  # positive is adverse
+                _dir, _side = "bullish", "SELL"
+            elif signal == 1:  # BUY: adverse = price FALLING
+                _majority = _bearish >= min_agreement
+                _adverse_disp = -_net_atr  # positive is adverse
+                _dir, _side = "bearish", "BUY"
+            else:
+                return False, "no signal", 0.0
 
-            if signal == -1 and _bullish >= min_agreement:
+            if _majority and _adverse_disp >= adverse_atr_mult:
                 reason = (
-                    f"{_bullish}/{n_candles} recent candles are bullish "
-                    f"(avg body {_avg_body:.4f}) — momentum opposing SELL"
+                    f"{max(_bullish, _bearish)}/{n_candles} candles {_dir} AND net "
+                    f"{_adverse_disp:+.2f} ATR against {_side} "
+                    f"(>= {adverse_atr_mult:.2f}) — genuine counter-move"
                 )
                 logger.info(
-                    f"[CMR] ⛔ SELL blocked — recent {_bullish}/{n_candles} "
-                    f"candles bullish, market bouncing against short entry."
+                    f"[CMR] ⛔ {_side} adverse momentum — {max(_bullish, _bearish)}/"
+                    f"{n_candles} {_dir}, net {_adverse_disp:+.2f} ATR against entry."
                 )
-                return False, reason
+                return True, reason, float(_adverse_disp)
 
-            if signal == 1 and _bearish >= min_agreement:
-                reason = (
-                    f"{_bearish}/{n_candles} recent candles are bearish "
-                    f"(avg body {_avg_body:.4f}) — momentum opposing BUY"
-                )
-                logger.info(
-                    f"[CMR] ⛔ BUY blocked — recent {_bearish}/{n_candles} "
-                    f"candles bearish, market falling against long entry."
-                )
-                return False, reason
-
-            return True, "momentum aligned"
+            return (
+                False,
+                (
+                    f"not adverse (majority={_majority}, net "
+                    f"{_adverse_disp:+.2f} ATR vs floor {adverse_atr_mult:.2f})"
+                ),
+                0.0,
+            )
 
         except Exception as e:
             logger.warning(f"[CMR] Check failed, allowing signal: {e}")
-            return True, f"check error: {e}"
+            return False, f"check error: {e}", 0.0
 
     def _check_macro_regime(self, asset: str) -> str:
         """
@@ -1867,8 +1880,14 @@ class InstitutionalCouncilAggregator:
             # bar climbing to 4.0 (base 3.5 + RSM +0.5), rejecting BTC counter-trend
             # signals scoring 3.50. Capping it stops the RSM raise from pushing the
             # counter-trend requirement past this value. Trend-aligned bar is untouched.
+            # NOTE: read phase_config from _composite_state, NOT self.config — the
+            # council's self.config is the aggregator PRESET and never carries
+            # phase_config, so self.config.get("phase_config") is always {}. The live
+            # phase_config is propagated onto _composite_state (same source the
+            # rr_gate_consistency / lifecycle gates read). Reading self.config here was
+            # a silent no-op that pinned the cap at the 4.0 legacy default.
             _ct_cap = float(
-                (self.config.get("phase_config", {}) or {}).get(
+                (getattr(_composite_state, "phase_config", {}) or {}).get(
                     "council_counter_trend_cap", 4.0
                 )
             )
@@ -2543,48 +2562,88 @@ class InstitutionalCouncilAggregator:
                     signal == 1 and is_bull
                 )  # BUY  in BULLISH regime
                 if _cmr_trend_aligned:
-                    _cmr_cfg = self.config.get("momentum_alignment", {})
-                    _cmr_candles = _cmr_cfg.get("candles", 3)
-                    _cmr_min_agree = _cmr_cfg.get("min_agreement", 2)
-                    _cmr_enabled = _cmr_cfg.get("enabled", True)
-
-                    if _cmr_enabled:
-                        _cmr_passed, _cmr_reason = (
+                    _cmr_cfg = self.config.get("momentum_alignment", {}) or {}
+                    # mode: "soft" (default) | "off" | "veto"
+                    _cmr_mode = str(_cmr_cfg.get("mode", "soft")).strip().lower()
+                    if _cmr_mode != "off" and _cmr_cfg.get("enabled", True):
+                        _cmr_candles = int(_cmr_cfg.get("candles", 3))
+                        _cmr_min_agree = int(_cmr_cfg.get("min_agreement", 2))
+                        _cmr_adv_mult = float(_cmr_cfg.get("adverse_atr_mult", 1.0))
+                        _cmr_strong_adx = float(_cmr_cfg.get("strong_adx", 28.0))
+                        _cmr_penalty = float(_cmr_cfg.get("soft_penalty", 0.75))
+                        _is_adverse, _cmr_reason, _adv_ratio = (
                             self._check_recent_momentum_alignment(
                                 df,
                                 signal,
                                 atr_fast,
                                 n_candles=_cmr_candles,
                                 min_agreement=_cmr_min_agree,
+                                adverse_atr_mult=_cmr_adv_mult,
                             )
                         )
-                        if not _cmr_passed:
-                            logger.info(
-                                f"[VETO] ❌ BLOCKED - Candle Momentum Reversal: {_cmr_reason}"
+                        if _is_adverse:
+                            # Pullback-in-strong-trend exemption: when ADX confirms a
+                            # strong trend, a counter-move IS the pullback-continuation
+                            # entry a trend system wants — soften the response.
+                            _strong_trend = bool(
+                                adx is not None
+                                and np.isfinite(adx)
+                                and adx >= _cmr_strong_adx
                             )
-                            return 0, {
-                                "timestamp": timestamp,
-                                "signal": 0,
-                                "asset": self.asset_type,
-                                "decision_type": "BLOCKED (Candle Momentum Reversal)",
-                                "action": "rejected",
-                                "original_signal": signal,
-                                "reasoning": "blocked_by_candle_momentum_reversal",
-                                "final_signal": 0,
-                                "signal_quality": 0.0,
-                                "total_score": total_score,
-                                "scores": chosen_scores,
-                                "buy_total": buy_total,
-                                "sell_total": sell_total,
-                                "regime": regime_name,
-                                "mr_signal": mr_signal,
-                                "mr_confidence": mr_conf,
-                                "tf_signal": tf_signal,
-                                "tf_confidence": tf_conf,
-                                "ema_signal": ema_signal,
-                                "ema_confidence": ema_conf,
-                                "cmr_reason": _cmr_reason,
-                            }
+                            # Block vs allow:
+                            #   "veto" → hard block (unless strong-trend pullback).
+                            #   "soft" → require an elevated score (required_score +
+                            #            penalty). A high-conviction council survives a
+                            #            bad-timing bounce; a marginal one stands down.
+                            #            Strong trend halves the penalty.
+                            _cmr_block = False
+                            _cmr_detail = _cmr_reason
+                            if _cmr_mode == "veto" and not _strong_trend:
+                                _cmr_block = True
+                            else:
+                                _eff_pen = _cmr_penalty * (0.5 if _strong_trend else 1.0)
+                                _cmr_bar = required_score + _eff_pen
+                                if total_score < _cmr_bar:
+                                    _cmr_block = True
+                                    _cmr_detail = (
+                                        f"{_cmr_reason}; score {total_score:.2f} < "
+                                        f"elevated bar {_cmr_bar:.2f} "
+                                        f"(pen={_eff_pen:+.2f}, strong_trend={_strong_trend})"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"[CMR] ⚠️ Adverse momentum noted ({_cmr_reason}) "
+                                        f"but council score {total_score:.2f} >= elevated "
+                                        f"bar {_cmr_bar:.2f} (pen={_eff_pen:+.2f}, "
+                                        f"strong_trend={_strong_trend}) — entry allowed."
+                                    )
+                            if _cmr_block:
+                                logger.info(
+                                    f"[VETO] ❌ BLOCKED - Candle Momentum Reversal: {_cmr_detail}"
+                                )
+                                return 0, {
+                                    "timestamp": timestamp,
+                                    "signal": 0,
+                                    "asset": self.asset_type,
+                                    "decision_type": "BLOCKED (Candle Momentum Reversal)",
+                                    "action": "rejected",
+                                    "original_signal": signal,
+                                    "reasoning": "blocked_by_candle_momentum_reversal",
+                                    "final_signal": 0,
+                                    "signal_quality": 0.0,
+                                    "total_score": total_score,
+                                    "scores": chosen_scores,
+                                    "buy_total": buy_total,
+                                    "sell_total": sell_total,
+                                    "regime": regime_name,
+                                    "mr_signal": mr_signal,
+                                    "mr_confidence": mr_conf,
+                                    "tf_signal": tf_signal,
+                                    "tf_confidence": tf_conf,
+                                    "ema_signal": ema_signal,
+                                    "ema_confidence": ema_conf,
+                                    "cmr_reason": _cmr_detail,
+                                }
 
             # ====================================================================
             # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)
@@ -2898,7 +2957,11 @@ class InstitutionalCouncilAggregator:
             #              blind the council to structure.
             #   "strict" → legacy hard veto (bumps 1.5 MAIN / 0.5 secondary).
             #   "soft"   → relaxed bumps from phase_config (default 0.25 / 0.0).
-            _pc_mrlean = self.config.get("phase_config", {}) or {}
+            # Read from _composite_state (live phase_config), NOT self.config (preset,
+            # never carries phase_config → always {}). Until now "soft" worked only
+            # because its code defaults happened to match config; the tunable bumps
+            # were ignored. This makes config-driven tuning actually take effect.
+            _pc_mrlean = getattr(_composite_state, "phase_config", {}) or {}
             _mr_lean_mode = (
                 str(_pc_mrlean.get("council_mr_lean_mode", "soft")).strip().lower()
             )

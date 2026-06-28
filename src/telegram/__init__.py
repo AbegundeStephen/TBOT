@@ -2918,6 +2918,20 @@ class TradingTelegramBot:
                                     hybrid_selector=self.trading_bot.hybrid_selector,
                                 )
                             )
+                        elif isinstance(agg, dict) and agg.get("mode") == "council":
+                            # Council mode: dict wraps council + livermore companion
+                            mtf_regime = {}
+                            if (
+                                hasattr(self.trading_bot, "_current_regime_data")
+                                and asset_name in self.trading_bot._current_regime_data
+                            ):
+                                mtf_regime = self.trading_bot._current_regime_data[asset_name]
+                            sig, det = agg["council"].get_aggregated_signal(
+                                df_15.copy(),
+                                current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                                is_bull_market=mtf_regime.get("is_bull", False),
+                                governor_data=mtf_regime,
+                            )
                         else:
                             # Single-mode aggregator (council or performance object)
                             mtf_regime = {}

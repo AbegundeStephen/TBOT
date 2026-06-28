@@ -1387,7 +1387,10 @@
       "trade_closed": true,
       "errors": true,
       "daily_summary": true,
-      "market_status_changes": false
+      "market_status_changes": false,
+    "nr7_gate_enabled": true,
+    "continuation_targets_enabled": false,
+    "min_sl_pct_enabled": true
     }
   },
   "scalp_alerts": {
@@ -1406,9 +1409,6 @@
     "autotrainer_enabled": false,
     "per_tick_livermore_enabled": false,
     "bb_kc_squeeze_gate_enabled": true,
-    "nr7_gate_enabled": true,
-    "continuation_targets_enabled": false,
-    "min_sl_pct_enabled": true,
     "min_rr_enabled": true,
     "single_tp_blend_enabled": true,
     "rr_gate_consistency_enabled": true,
