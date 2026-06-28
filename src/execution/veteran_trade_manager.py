@@ -900,6 +900,17 @@ class VeteranTradeManager:
                             (self.side == "long"  and _struct_sl < self.entry_price) or
                             (self.side == "short" and _struct_sl > self.entry_price)
                         )
+                        # MR_PULLBACK special rule: only override ATR if the structural
+                        # stop is MORE conservative (wider) than the ATR baseline.
+                        # The intent is to ensure the stop clears the nearby level —
+                        # if ATR already clears it, no override is needed and tightening
+                        # the stop would put it inside the active zone.
+                        if _valid and self.vtm_entry_type == "MR_PULLBACK":
+                            _more_conservative = (
+                                (self.side == "long"  and _struct_sl < final_sl) or
+                                (self.side == "short" and _struct_sl > final_sl)
+                            )
+                            _valid = _more_conservative
                         if _valid:
                             final_sl = _struct_sl
                             # Re-apply clamps to the structural stop
@@ -913,11 +924,23 @@ class VeteranTradeManager:
                                     self.entry_price + max_stop_dist,
                                     max(self.entry_price + min_stop_dist, final_sl),
                                 )
-                            logger.info(
-                                f"[VTM] 🎯 Structural stop "
-                                f"({self.vtm_entry_type}): {final_sl:.5f} "
-                                f"(clamped from raw {_struct_sl:.5f})"
-                            )
+                            # Detect whether the clamp discarded the structural
+                            # reference. If it did, the stop is the ATR cap in
+                            # disguise — log it honestly so it can't be mistaken
+                            # for a level-anchored stop in the trade record.
+                            _anchor_discarded = abs(final_sl - _struct_sl) > (atr * 0.05)
+                            if _anchor_discarded:
+                                logger.info(
+                                    f"[VTM] ⚠️ Structural anchor too far "
+                                    f"({self.vtm_entry_type} raw={_struct_sl:.5f}): "
+                                    f"ATR cap applied → {final_sl:.5f}"
+                                )
+                            else:
+                                logger.info(
+                                    f"[VTM] 🎯 Structural stop "
+                                    f"({self.vtm_entry_type}): {final_sl:.5f} "
+                                    f"(raw anchor={_struct_sl:.5f})"
+                                )
                         else:
                             logger.debug(
                                 f"[VTM] Structural stop {_struct_sl:.5f} invalid "
@@ -2778,7 +2801,10 @@ class VeteranTradeManager:
 
         if entry_type == "TREND_FOLLOWING":
             # Stop behind the Livermore anchor that price just broke through.
-            lv_state = getattr(self, "livermore_state_4h", None)
+            # Reject the anchor if it is more than max_stop_atr_mult ATRs from
+            # entry — at that distance the clamp would discard it anyway and the
+            # stop would be the ATR cap wearing a structural label.
+            _max_atr = float(self.risk_config.get("max_stop_atr_mult", 5.0))
             if side == "long":
                 anchor = getattr(self, "livermore_anchor_main_up", None)
                 if anchor is None:
@@ -2788,6 +2814,14 @@ class VeteranTradeManager:
                 if anchor is None:
                     anchor = getattr(self, "livermore_anchor_nat_high", None)
             if anchor is not None and atr > 0:
+                dist_atr = abs(entry - anchor) / atr
+                if dist_atr > _max_atr:
+                    logger.debug(
+                        f"[VTM] TREND_FOLLOWING anchor {anchor:.5f} is "
+                        f"{dist_atr:.1f}× ATR from entry — too far, "
+                        f"falling back to ATR baseline"
+                    )
+                    return None
                 buf = 0.5 * atr
                 return (anchor - buf) if side == "long" else (anchor + buf)
             return None
@@ -2798,12 +2832,7 @@ class VeteranTradeManager:
             level = getattr(self, "nearby_4h_level", None)
             if level is not None and atr > 0:
                 buf = 0.5 * atr
-                candidate = (level - buf) if side == "long" else (level + buf)
-                # Only override if the structural stop is FURTHER from entry than
-                # the pure ATR stop (i.e. looser, not tighter — we want the level
-                # cleared so the trade has breathing room).
-                # If ATR stop already clears the level, no change needed.
-                return candidate
+                return (level - buf) if side == "long" else (level + buf)
             return None
 
         if entry_type == "CONTINUATION":
