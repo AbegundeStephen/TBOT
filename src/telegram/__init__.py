@@ -3207,6 +3207,8 @@ class TradingTelegramBot:
         margin_type: str = "SPOT",
         is_futures: bool = False,
         vtm_is_active: bool = False,
+        entry_type: str = None,
+        stop_type: str = None,
     ):
         """
         ✅ FIXED: Notify when a trade is opened with correct futures/spot detection
@@ -3270,10 +3272,20 @@ class TradingTelegramBot:
             if sl and sl > 0:
                 msg += (
                     f"🛑 Stop Loss: ${sl:,.2f}\n"
-                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n\n"
+                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n"
                 )
             else:
-                msg += "🛑 Stop Loss: VTM Dynamic\n\n"
+                msg += "🛑 Stop Loss: VTM Dynamic\n"
+
+            # Stop type + entry classification
+            _stop_icons = {
+                "structural": "🏗️ Structural",
+                "atr_capped": "📐 ATR cap (anchor too far)",
+                "atr":        "📐 ATR baseline",
+            }
+            _stop_label = _stop_icons.get(stop_type or "atr", "📐 ATR baseline")
+            _entry_label = f" · {entry_type}" if entry_type else ""
+            msg += f"   └─ Type: {_stop_label}{_entry_label}\n\n"
 
             # Add TP info if available
             if tp and tp > 0:

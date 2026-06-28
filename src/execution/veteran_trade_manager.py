@@ -566,6 +566,7 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
+        self.stop_type = "atr"
         self.has_pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
 
@@ -930,12 +931,14 @@ class VeteranTradeManager:
                             # for a level-anchored stop in the trade record.
                             _anchor_discarded = abs(final_sl - _struct_sl) > (atr * 0.05)
                             if _anchor_discarded:
+                                self.stop_type = "atr_capped"
                                 logger.info(
                                     f"[VTM] ⚠️ Structural anchor too far "
                                     f"({self.vtm_entry_type} raw={_struct_sl:.5f}): "
                                     f"ATR cap applied → {final_sl:.5f}"
                                 )
                             else:
+                                self.stop_type = "structural"
                                 logger.info(
                                     f"[VTM] 🎯 Structural stop "
                                     f"({self.vtm_entry_type}): {final_sl:.5f} "
