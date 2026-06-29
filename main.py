@@ -1916,7 +1916,15 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Binance btcusdt CVD/depth is only a valid evidence source when
+                # BTC is actually executed on Binance. This deployment runs BTC
+                # on exchange="mt5" (BTCUSDm) — a different instrument with a
+                # different tape — so injecting Binance CVD here would blend
+                # two unrelated markets into one asset's governor data.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
@@ -2000,7 +2008,15 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Binance btcusdt CVD/depth is only a valid evidence source when
+                # BTC is actually executed on Binance. This deployment runs BTC
+                # on exchange="mt5" (BTCUSDm) — a different instrument with a
+                # different tape — so injecting Binance CVD here would blend
+                # two unrelated markets into one asset's governor data.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
@@ -5831,7 +5847,12 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: Inject BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Same MT5/Binance instrument-mismatch guard as the other two
+                # injection sites — see comment there for rationale.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()

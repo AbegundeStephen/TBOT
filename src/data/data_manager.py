@@ -472,7 +472,7 @@ class DataManager:
             # Update the price cache with the latest close
             if not df.empty:
                 last_close = df['close'].iloc[-1]
-                price_cache.set(symbol, last_close)
+                price_cache.set(symbol, last_close, timeframe=interval)
                 logger.info(f"[CACHE] Price cache updated with last kline close: {last_close}")
 
             return self.clean_data(df)
@@ -617,7 +617,7 @@ class DataManager:
             # Update the price cache with the latest close
             if not df.empty:
                 last_close = df['close'].iloc[-1]
-                price_cache.set(symbol, last_close)
+                price_cache.set(symbol, last_close, timeframe=timeframe)
                 logger.info(f"[CACHE] Price cache updated with last kline close from MT5: {last_close}")
 
             return self.clean_data(df)

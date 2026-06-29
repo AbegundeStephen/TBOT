@@ -82,7 +82,15 @@ class TransitionDetector:
 
     # Assets with a real, wired order-flow source (Binance CVD/L2 via
     # main.py's cvd_consumer). Keep in sync with the gating condition there.
-    FLOW_CAPABLE_ASSETS = ("BTC", "BTCUSDT")
+    #
+    # "BTC" is intentionally excluded even though the CVD consumer always
+    # subscribes to Binance btcusdt: every BTC asset config in this deployment
+    # has exchange="mt5" (BTCUSDm) — a different instrument with a different
+    # tape. Feeding MT5-priced BTC with Binance order-flow evidence blends two
+    # unrelated markets. Only "BTCUSDT" (literal Binance-routed asset name)
+    # gets FLOW credit. If BTC is ever moved back to Binance execution, the
+    # asset_name used throughout the pipeline must become "BTCUSDT" to match.
+    FLOW_CAPABLE_ASSETS = ("BTCUSDT",)
 
     MIN_CONDITIONS = 2
 
