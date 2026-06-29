@@ -194,8 +194,8 @@ class InstitutionalCouncilAggregator:
         # ── Crypto ────────────────────────────────────────────────────────────
         if "BTC" in a:
             return {
-                "rsi_bullish_zone": (40, 65),
-                "rsi_bearish_zone": (35, 60),
+                "rsi_bullish_zone": (53, 65),
+                "rsi_bearish_zone": (35, 47),
                 "rsi_oversold_bonus": 30,
                 "rsi_overbought_bonus": 70,
                 "volume_ma_period": 20,
@@ -207,8 +207,8 @@ class InstitutionalCouncilAggregator:
         # ── Gold / Precious Metals ─────────────────────────────────────────────
         if "GOLD" in a or "XAU" in a:
             return {
-                "rsi_bullish_zone": (35, 60),
-                "rsi_bearish_zone": (40, 65),
+                "rsi_bullish_zone": (35, 47),
+                "rsi_bearish_zone": (53, 65),
                 "rsi_oversold_bonus": 25,
                 "rsi_overbought_bonus": 75,
                 "volume_ma_period": 20,
@@ -222,8 +222,8 @@ class InstitutionalCouncilAggregator:
         # and a higher overbought threshold so bull runs aren't prematurely blocked.
         if any(x in a for x in ("USTEC", "US100", "NAS", "US30", "SPX")):
             return {
-                "rsi_bullish_zone": (45, 70),
-                "rsi_bearish_zone": (30, 55),
+                "rsi_bullish_zone": (53, 70),
+                "rsi_bearish_zone": (30, 47),
                 "rsi_oversold_bonus": 30,
                 "rsi_overbought_bonus": 75,
                 "volume_ma_period": 20,
@@ -236,8 +236,8 @@ class InstitutionalCouncilAggregator:
         # USOIL swings wide; symmetric RSI zones, slightly relaxed extremes.
         if "OIL" in a or "WTI" in a or "BRENT" in a:
             return {
-                "rsi_bullish_zone": (35, 65),
-                "rsi_bearish_zone": (35, 65),
+                "rsi_bullish_zone": (53, 65),
+                "rsi_bearish_zone": (35, 47),
                 "rsi_oversold_bonus": 28,
                 "rsi_overbought_bonus": 72,
                 "volume_ma_period": 20,
@@ -251,8 +251,8 @@ class InstitutionalCouncilAggregator:
         # Lower pattern_confidence_min because AI patterns are noisier on crosses.
         if any(x in a for x in ("GBPAUD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY")):
             return {
-                "rsi_bullish_zone": (35, 65),
-                "rsi_bearish_zone": (35, 65),
+                "rsi_bullish_zone": (53, 65),
+                "rsi_bearish_zone": (35, 47),
                 "rsi_oversold_bonus": 25,
                 "rsi_overbought_bonus": 75,
                 "volume_ma_period": 20,
@@ -265,8 +265,8 @@ class InstitutionalCouncilAggregator:
         # Major pairs are more mean-reverting with tighter RSI ranges.
         # Higher trend_safety_threshold — TF must be more confident to veto.
         return {
-            "rsi_bullish_zone": (40, 62),
-            "rsi_bearish_zone": (38, 60),
+            "rsi_bullish_zone": (53, 62),
+            "rsi_bearish_zone": (38, 47),
             "rsi_oversold_bonus": 30,
             "rsi_overbought_bonus": 70,
             "volume_ma_period": 20,
@@ -288,9 +288,18 @@ class InstitutionalCouncilAggregator:
         logger.info(f"   4. PATTERN    ({self.w_pattern:.1f} pt)  - AI candlesticks")
         logger.info(f"   5. VOLUME     ({self.w_volume:.1f} pt)  - Volume confirmation")
         logger.info("")
+        _configured_ceiling = (
+            self.w_trend + self.w_structure + self.w_momentum
+            + self.w_pattern + self.w_volume
+        )
         logger.info("   DECISION RULES (Bidirectional):")
-        logger.info(f"   • Trend-aligned:  ≥ {self.trend_aligned_threshold:.1f} / 5.0")
-        logger.info(f"   • Counter-trend:  ≥ {self.counter_trend_threshold:.1f} / 5.0")
+        logger.info(
+            f"   • Trend-aligned:  ≥ {self.trend_aligned_threshold:.1f} / {_configured_ceiling:.1f} "
+            f"(sum of judge weights above, not a fixed 5.0)"
+        )
+        logger.info(
+            f"   • Counter-trend:  ≥ {self.counter_trend_threshold:.1f} / {_configured_ceiling:.1f}"
+        )
         logger.info("")
         logger.info(
             f"   AI Validation: {'ENABLED' if self.ai_validator else 'DISABLED'}"
@@ -1701,9 +1710,7 @@ class InstitutionalCouncilAggregator:
             _TRAJ_GAIN = 0.15  # 15% of a judge's own cycle-over-cycle delta
             _judge_weight_cap = {
                 "trend": w_trend,
-                "structure": min(
-                    w_structure, 1.0
-                ),  # STRUCTURE judge hard-caps its own return at 1.0
+                "structure": w_structure,  # judge now caps at its own weight (see Fix 7)
                 "momentum": w_momentum,
                 "pattern": w_pattern,
                 "volume": w_volume,
@@ -3612,14 +3619,20 @@ class InstitutionalCouncilAggregator:
             # (confirms sells). The original code boosted both blindly,
             # which could boost a buy when price is pressing into VWAP
             # resistance from below. Fixed to check side.
-            _vwap = float(
-                getattr(cs, "vwap_price", 0.0) if not isinstance(cs, dict)
-                else cs.get("vwap_price", 0.0)
-            ) if cs else 0.0
-            _vwap_dist_atr = float(
-                getattr(cs, "distance_to_vwap_atr", 999.0) if not isinstance(cs, dict)
-                else cs.get("distance_to_vwap_atr", 999.0)
-            ) if cs else 999.0
+            # vwap_price defaults to None (not 0.0) until VWAP is computed —
+            # getattr/get only fall back when the attribute is absent, never
+            # when it's explicitly None, so float(None) was raised here on
+            # every cycle before VWAP data became available.
+            _vwap_raw = (
+                getattr(cs, "vwap_price", None) if not isinstance(cs, dict)
+                else cs.get("vwap_price", None)
+            ) if cs else None
+            _vwap = float(_vwap_raw) if _vwap_raw is not None else 0.0
+            _vwap_dist_raw = (
+                getattr(cs, "distance_to_vwap_atr", None) if not isinstance(cs, dict)
+                else cs.get("distance_to_vwap_atr", None)
+            ) if cs else None
+            _vwap_dist_atr = float(_vwap_dist_raw) if _vwap_dist_raw is not None else 999.0
             if _vwap > 0 and _vwap_dist_atr < 0.5:
                 _current_close = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
                 _price_above_vwap = _current_close > _vwap
@@ -3631,12 +3644,13 @@ class InstitutionalCouncilAggregator:
                     sell_score = min(sell_score + 0.15 * weight, weight)
                     sell_exp  += f" +below_VWAP_resistance({_vwap_dist_atr:.2f}ATR)"
 
-            # Cap at 1.0 — the scorecard declares STRUCTURE max as 1.0/1.0.
-            # When w_structure=1.5 (SLIGHTLY_BEARISH dynamic weight) the raw scores
-            # overflow to 1.5 which inflates the total past what the UI shows and
-            # allows trades to clear thresholds they shouldn't. Hard cap here.
-            buy_score = min(buy_score, 1.0)
-            sell_score = min(sell_score, 1.0)
+            # Cap at the judge's actual weight, not a hardcoded 1.0. The scorecard
+            # display (_log_decision_bidirectional) already renders against the
+            # dynamic self.w_structure (e.g. 1.5/1.5 in SLIGHTLY_BEARISH regimes) —
+            # hard-capping the judge's own return at 1.0 made the extra 0.5 weight
+            # permanently unreachable whenever w_structure was raised above 1.0.
+            buy_score = min(buy_score, weight)
+            sell_score = min(sell_score, weight)
             return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
         except Exception as e:
@@ -3661,16 +3675,42 @@ class InstitutionalCouncilAggregator:
 
             # ✅ TASK 19: Super-Cycle Recalibration (Phase 3)
             # Reason: Real BTC super-trends start at ADX 30-32. 35 is too late.
-            if adx > 32:
+            #
+            # 4H ADX wiring: `adx` here is computed from the 1H df only. A strong
+            # 4H trend with a temporarily ranging 1H (e.g. mid-trend consolidation)
+            # never triggers this gate even though the 4H tape is clearly trending —
+            # the council falls through to the RSI-zone path and can produce a
+            # contradictory result. governor_data["df_4h"] is already plumbed
+            # through to this judge (used elsewhere for MR/TF context) — use the
+            # higher of 1H/4H ADX so a genuine 4H super-trend isn't missed just
+            # because the 1H bar is consolidating.
+            _adx_for_gate = adx
+            try:
+                _df4 = (governor_data or {}).get("df_4h")
+                if _df4 is not None and len(_df4) >= 14:
+                    _adx_4h = float(
+                        ta.ADX(
+                            _df4["high"].values,
+                            _df4["low"].values,
+                            _df4["close"].values,
+                            timeperiod=14,
+                        )[-1]
+                    )
+                    if not np.isnan(_adx_4h):
+                        _adx_for_gate = max(adx, _adx_4h)
+            except Exception as _adx4_err:
+                logger.debug(f"[MOMENTUM] 4H ADX lookup failed (non-blocking): {_adx4_err}")
+
+            if _adx_for_gate > 32:
                 buy_score = weight if is_bull else 0.0
                 sell_score = weight if not is_bull else 0.0
                 buy_exp = (
-                    f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {adx:.1f} > 32"
+                    f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {_adx_for_gate:.1f} > 32"
                     if is_bull
                     else "MOM BUY: ❌ Dead in Bear Super-Cycle"
                 )
                 sell_exp = (
-                    f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {adx:.1f} > 32"
+                    f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {_adx_for_gate:.1f} > 32"
                     if not is_bull
                     else "MOM SELL: ❌ Dead in Bull Super-Cycle"
                 )
@@ -4270,17 +4310,27 @@ class InstitutionalCouncilAggregator:
         logger.info(f"Timestamp: {details['timestamp']}")
         logger.info(f"")
 
-        # Show both BUY and SELL scores
-        logger.info(f"BUY SCORECARD (Total: {details['buy_total']:.2f}/5.0):")
-        for judge, score in details["buy_scores"].items():
+        _ceiling = (
+            self.w_trend + self.w_structure + self.w_momentum
+            + self.w_pattern + self.w_volume
+        )
+
+        # Show both BUY and SELL scores. Total is the sum of the *displayed*
+        # (2dp-rounded) per-judge values, not the raw unrounded scores — a
+        # raw-sum Total could differ from what a reader adds up from the
+        # bars above by a few hundredths, which looked like a bug on audit.
+        _buy_rounded = {j: round(s, 2) for j, s in details["buy_scores"].items()}
+        logger.info(f"BUY SCORECARD (Total: {sum(_buy_rounded.values()):.2f}/{_ceiling:.1f}):")
+        for judge, score in _buy_rounded.items():
             max_score = getattr(self, f"w_{judge}")
             pct = (score / max_score * 100) if max_score > 0 else 0
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
             logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
 
         logger.info(f"")
-        logger.info(f"SELL SCORECARD (Total: {details['sell_total']:.2f}/5.0):")
-        for judge, score in details["sell_scores"].items():
+        _sell_rounded = {j: round(s, 2) for j, s in details["sell_scores"].items()}
+        logger.info(f"SELL SCORECARD (Total: {sum(_sell_rounded.values()):.2f}/{_ceiling:.1f}):")
+        for judge, score in _sell_rounded.items():
             max_score = getattr(self, f"w_{judge}")
             pct = (score / max_score * 100) if max_score > 0 else 0
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))

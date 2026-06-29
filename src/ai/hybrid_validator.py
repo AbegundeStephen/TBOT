@@ -120,6 +120,8 @@ class HybridSignalValidator:
             "approved": 0,
             "rejected": 0,
             "rejected_no_sr": 0,
+            "rejected_no_pattern": 0,
+            "rejected_low_confidence": 0,
             "rejected_direction_mismatch": 0,
             "bypassed_strong_signal": 0,
             "bypassed_circuit_breaker": 0,
