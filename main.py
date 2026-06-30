@@ -4783,6 +4783,50 @@ class TradingBot:
                             "livermore_retracement_sl_sweep_block", asset_cfg,
                         )
 
+            # ── SECONDARY STATE DIRECTIONAL BLOCK ─────────────────────────────
+            # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most
+            # dangerous counter-moves. Two distinct risks:
+            #
+            # 1. Chasing the secondary direction (SELL in SECONDARY_RETRACEMENT,
+            #    LONG in SECONDARY_REBOUND) — TF/EMA blindly sees momentum and
+            #    piles in. Livermore is explicit: do NOT chase secondary moves.
+            #
+            # 2. Fading the secondary (LONG in SECONDARY_RETRACEMENT, SHORT in
+            #    SECONDARY_REBOUND) — MR Mode 2 exhaustion play. This IS a
+            #    legitimate Livermore trade at the secondary extreme. Allow it.
+            #
+            # Solution: block signals in the SAME direction as the secondary
+            # move; allow signals opposing it. Direction-based, not provenance-
+            # based — avoids the untrackable "which strategy fired this" problem.
+            if signal != 0 and _lsm_post in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                _chasing_secondary = (
+                    (_lsm_post == "SECONDARY_RETRACEMENT" and signal < 0) or
+                    (_lsm_post == "SECONDARY_REBOUND"     and signal > 0)
+                )
+                if _chasing_secondary:
+                    _chase_dir = "SELL" if signal < 0 else "BUY"
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: {_chase_dir} zeroed — "
+                        f"{_lsm_post} (4H={_lsm_4h_post}): chasing the secondary "
+                        f"move is the highest-risk entry. Wait for exhaustion."
+                    )
+                    _original_signal = signal
+                    signal = 0
+                    details["reasoning"] = "livermore_secondary_chase_block"
+                    self._shadow_open_blocked(
+                        asset_name, _original_signal, details, df, current_price,
+                        "livermore_secondary_chase_block", asset_cfg,
+                    )
+                else:
+                    # Opposing the secondary = exhaustion fade. Allowed — but log
+                    # the elevated risk so the trade record is honest.
+                    _fade_dir = "LONG" if signal > 0 else "SHORT"
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: {_fade_dir} allowed — "
+                        f"{_lsm_post}: fading secondary exhaustion (4H={_lsm_4h_post}). "
+                        f"Elevated risk — secondary can extend further."
+                    )
+
             # ── MINIMUM REGIME CONFIDENCE GATE ────────────────────────────────
             # Block any signal when MTF regime confidence is below 60%.
             # NEUTRAL (0%), SLIGHTLY_BEARISH at 33-50% — all historically losing.
