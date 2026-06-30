@@ -1992,14 +1992,26 @@ class InstitutionalCouncilAggregator:
                     # WICK  ( 0.00): spring/upthrust recovery — standard
                     # BREAKOUT (+0.10 to +0.40): fresh state, slight caution
                     # CHASE_SOFT (+0.75): extended, needs strong conviction
-                    if _buy_type != "CHASE_HARD" and _rt_buy is not None:
-                        _effective_trend_threshold   += _rt_buy.modifier
-                        _effective_counter_threshold += _rt_buy.modifier
-                        if _rt_buy.modifier != 0.0:
+                    # Apply the modifier from whichever side the preliminary signal
+                    # is leaning. Applying _rt_buy.modifier regardless of direction
+                    # meant a SELL signal could be penalised by the buy-side CHASE_SOFT
+                    # or rewarded by the buy-side CLEAN even when the sell side read
+                    # the opposite — the wrong structural context was adjusting the bar.
+                    _likely_modifier = (
+                        _rt_buy.modifier  if (_likely_dir >= 0 and _rt_buy  is not None) else
+                        _rt_sell.modifier if (_likely_dir <  0 and _rt_sell is not None) else
+                        0.0
+                    )
+                    _likely_type = _buy_type if _likely_dir >= 0 else _sell_type
+                    if _likely_type != "CHASE_HARD":
+                        _effective_trend_threshold   += _likely_modifier
+                        _effective_counter_threshold += _likely_modifier
+                        if _likely_modifier != 0.0:
                             logger.debug(
                                 "[COUNCIL GATE] %s threshold adjusted by %.2f "
-                                "(structural=%s)",
-                                self.asset_type, _rt_buy.modifier, _buy_type,
+                                "(structural=%s, dir=%s)",
+                                self.asset_type, _likely_modifier, _likely_type,
+                                "BUY" if _likely_dir >= 0 else "SELL",
                             )
 
 
@@ -2591,11 +2603,27 @@ class InstitutionalCouncilAggregator:
                             # Pullback-in-strong-trend exemption: when ADX confirms a
                             # strong trend, a counter-move IS the pullback-continuation
                             # entry a trend system wants — soften the response.
-                            _strong_trend = bool(
-                                adx is not None
-                                and np.isfinite(adx)
-                                and adx >= _cmr_strong_adx
-                            )
+                            # Use the higher of 1H and 4H ADX so a strong 4H trend
+                            # correctly exempts its own pullback candles on 1H, matching
+                            # the same pattern as Fix 9 (momentum super-cycle gate).
+                            _adx_4h_cmr = 0.0
+                            try:
+                                _df4_cmr = (governor_data or {}).get("df_4h")
+                                if _df4_cmr is not None and len(_df4_cmr) >= 14:
+                                    _adx_4h_cmr = float(
+                                        ta.ADX(
+                                            _df4_cmr["high"].values,
+                                            _df4_cmr["low"].values,
+                                            _df4_cmr["close"].values,
+                                            timeperiod=14,
+                                        )[-1]
+                                    )
+                                    if not np.isfinite(_adx_4h_cmr):
+                                        _adx_4h_cmr = 0.0
+                            except Exception:
+                                _adx_4h_cmr = 0.0
+                            _adx_for_cmr = max(adx if (adx is not None and np.isfinite(adx)) else 0.0, _adx_4h_cmr)
+                            _strong_trend = bool(_adx_for_cmr >= _cmr_strong_adx)
                             # Block vs allow:
                             #   "veto" → hard block (unless strong-trend pullback).
                             #   "soft" → require an elevated score (required_score +
@@ -3097,6 +3125,17 @@ class InstitutionalCouncilAggregator:
                 "atr_fast": atr_fast,
                 "atr_slow": atr_slow,
                 "lifecycle_phase": lifecycle_phase,
+                # Dynamic per-judge weights for the current call — may differ from
+                # self.w_* in SLIGHTLY regimes where w_structure is locally raised
+                # to 1.5. The scorecard renderer uses these so bars always show the
+                # correct denominator rather than the static __init__ defaults.
+                "judge_weights": {
+                    "trend":     w_trend,
+                    "structure": w_structure,
+                    "momentum":  w_momentum,
+                    "pattern":   w_pattern,
+                    "volume":    w_volume,
+                },
                 "governor_data": governor_data,
                 "livermore_state_1h": (
                     getattr(
@@ -4319,7 +4358,12 @@ class InstitutionalCouncilAggregator:
         logger.info(f"Timestamp: {details['timestamp']}")
         logger.info(f"")
 
-        _ceiling = (
+        # Use the dynamic weights captured at decision time — in SLIGHTLY regimes
+        # w_structure is locally raised to 1.5, but self.w_structure is always 1.0.
+        # getattr(self, "w_structure") was therefore always showing the wrong
+        # denominator. judge_weights carries the actual values used this cycle.
+        _jw = details.get("judge_weights", {})
+        _ceiling = sum(_jw.values()) if _jw else (
             self.w_trend + self.w_structure + self.w_momentum
             + self.w_pattern + self.w_volume
         )
@@ -4331,7 +4375,7 @@ class InstitutionalCouncilAggregator:
         _buy_rounded = {j: round(s, 2) for j, s in details["buy_scores"].items()}
         logger.info(f"BUY SCORECARD (Total: {sum(_buy_rounded.values()):.2f}/{_ceiling:.1f}):")
         for judge, score in _buy_rounded.items():
-            max_score = getattr(self, f"w_{judge}")
+            max_score = _jw.get(judge, getattr(self, f"w_{judge}", 1.0))
             pct = (score / max_score * 100) if max_score > 0 else 0
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
             logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
@@ -4340,7 +4384,7 @@ class InstitutionalCouncilAggregator:
         _sell_rounded = {j: round(s, 2) for j, s in details["sell_scores"].items()}
         logger.info(f"SELL SCORECARD (Total: {sum(_sell_rounded.values()):.2f}/{_ceiling:.1f}):")
         for judge, score in _sell_rounded.items():
-            max_score = getattr(self, f"w_{judge}")
+            max_score = _jw.get(judge, getattr(self, f"w_{judge}", 1.0))
             pct = (score / max_score * 100) if max_score > 0 else 0
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
             logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
