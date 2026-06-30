@@ -196,7 +196,14 @@ class MultiTimeFrameRegimeDetector:
                 # boundary, forcing unnecessary API fallback. 2.25h gives a 15-min
                 # buffer on top of the legitimate 119-min max age — confirmed via
                 # live logs, not a clock/timezone issue (that claim didn't hold up).
-                stale_threshold = {"1h": 2.25, "4h": 4.0, "1d": 24.0}.get(timeframe_str, 4.0)
+                # 1h: 2.25h gives a 15-min buffer above the legitimate 2h max age
+                #      (drop-in-progress-candle + processing delay), confirmed via live logs.
+                # 4h: raised from 4.0h to 6.0h — live logs showed 5.3h actual staleness
+                #      on multiple consecutive cycles. The 4H bar closes at fixed UTC hours
+                #      (00,04,08…) and the updater + fetch latency adds real-world delay
+                #      that pushes beyond the theoretical 4h maximum. 6.0h covers the
+                #      worst-case observed while still catching genuinely stale data.
+                stale_threshold = {"1h": 2.25, "4h": 6.0, "1d": 24.0}.get(timeframe_str, 4.0)
                 if hours_old > stale_threshold or pd.isna(hours_old):
                     logger.warning(f"[CSV] Data is {hours_old:.1f}h old (limit={stale_threshold}h) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)
