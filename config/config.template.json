@@ -1418,7 +1418,6 @@
     "pyramiding_enabled": false,
     "ai_third_path_structural_anchor_enabled": false,
     "ai_validator_gates_performance_mode": false,
-    "lsm_regime_disagreement_gate_enabled": false,
     "mr_mode2_counter_trend_enabled": true,
     "mr_mode3_climax_fade_enabled": true,
     "structural_stops_enabled": true,
@@ -1434,6 +1433,8 @@
     "council_mr_lean_mode": "soft",
     "council_mr_lean_bump_main": 0.25,
     "council_mr_lean_bump_secondary": 0.0,
-    "council_counter_trend_cap": 3.5
+    "council_counter_trend_cap": 3.5,
+    "council_min_score_margin": 0.20,
+    "lsm_regime_disagreement_gate_enabled": true
   }
 }
