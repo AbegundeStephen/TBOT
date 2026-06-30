@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python3 *)",
-      "Bash(awk -F: '$1 < 3643')"
+      "Bash(awk -F: '$1 < 3643')",
+      "Bash(python -m py_compile main.py src/execution/council_aggregator.py)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }
