@@ -4665,14 +4665,42 @@ class TradingBot:
                         _lsm_post = getattr(_cs_post, "livermore_state_1h", None)
                         if hasattr(_lsm_post, "value"):
                             _lsm_post = _lsm_post.value
+
+                # 4H awareness (2026-06-30): livermore_state_4h was already being
+                # injected into `details` by signal_aggregator.py but never read
+                # here — this gate was 1H-only despite the 4H signal being one
+                # function call away. Same primary/fallback pattern as the 1H read.
+                _lsm_4h_post = details.get("livermore_state_4h")
+                if _lsm_4h_post is None:
+                    _cs_post = mtf_regime.get("composite_state")
+                    if _cs_post is not None:
+                        _lsm_4h_post = getattr(_cs_post, "livermore_state_4h", None)
+                        if hasattr(_lsm_4h_post, "value"):
+                            _lsm_4h_post = _lsm_4h_post.value
+
                 logger.debug(
-                    "[LIVERMORE BLOCK] %s: 1H state=%s signal=%d",
-                    asset_name, _lsm_post, signal
+                    "[LIVERMORE BLOCK] %s: 1H state=%s 4H state=%s signal=%d",
+                    asset_name, _lsm_post, _lsm_4h_post, signal
                 )
+
+                # 4H confirmation: only an unambiguous MAIN_UP/MAIN_DOWN counts.
+                # NATURAL_*/SECONDARY_* 4H states are themselves not a clean trend
+                # read, so they don't get to override the 1H timing gate below.
+                # A missing 4H state (None — warmup, staleness) is NEVER treated
+                # as confirmation; always fail safe to the existing block.
+                _4h_confirms_long = _lsm_4h_post == "MAIN_UP"
+                _4h_confirms_short = _lsm_4h_post == "MAIN_DOWN"
+
                 if _lsm_post == "NATURAL_RETRACEMENT" and signal < 0:
+                    # Pure counter-trend short — 1H itself implies an uptrend
+                    # context. No 4H state makes this correct: 4H=MAIN_UP means
+                    # shorting against both timeframes; 4H=MAIN_DOWN means the
+                    # 1H "uptrend" read is fighting the 4H trend, which is a
+                    # no-trade case, not a short setup either. Always blocked.
                     logger.info(
                         f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
-                        f"NATURAL_RETRACEMENT is a pullback in uptrend, not a SHORT setup"
+                        f"1H NATURAL_RETRACEMENT (pullback in uptrend) vs "
+                        f"4H={_lsm_4h_post} — not a SHORT setup at any 4H state"
                     )
                     # Record in shadow trader BEFORE zeroing — the shadow records
                     # what would have happened if this signal had been allowed through.
@@ -4685,9 +4713,11 @@ class TradingBot:
                         "livermore_counter_trend_block", asset_cfg,
                     )
                 elif _lsm_post == "NATURAL_REBOUND" and signal > 0:
+                    # Mirror of above — pure counter-trend long, always blocked.
                     logger.info(
                         f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
-                        f"NATURAL_REBOUND is a bounce in downtrend, not a LONG setup"
+                        f"1H NATURAL_REBOUND (bounce in downtrend) vs "
+                        f"4H={_lsm_4h_post} — not a LONG setup at any 4H state"
                     )
                     _original_signal = signal
                     signal = 0
@@ -4697,36 +4727,61 @@ class TradingBot:
                         "livermore_counter_trend_block", asset_cfg,
                     )
                 elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
-                    # Shorting INTO a rebound sweeps the SL before price resumes down.
-                    # Gold June 4 2026: shorted at $4,463 during NATURAL_REBOUND,
-                    # price ran to $4,499 hitting SL before reversing.
-                    # Wait for rebound to exhaust (Mode 3 MR spring or state change).
-                    logger.info(
-                        f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
-                        f"NATURAL_REBOUND is an active bounce; shorting INTO it risks SL sweep. "
-                        f"Wait for exhaustion."
-                    )
-                    _original_signal = signal
-                    signal = 0
-                    details["reasoning"] = "livermore_rebound_sl_sweep_block"
-                    self._shadow_open_blocked(
-                        asset_name, _original_signal, details, df, current_price,
-                        "livermore_rebound_sl_sweep_block", asset_cfg,
-                    )
+                    if _4h_confirms_short:
+                        # 4H=MAIN_DOWN backs this short: bounce-exhaustion entry
+                        # within a confirmed downtrend is the Livermore "ideal"
+                        # setup, not a timing risk — the higher timeframe is the
+                        # stronger signal here. Let it through.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
+                            f"4H=MAIN_DOWN confirms; 1H NATURAL_REBOUND is bounce "
+                            f"exhaustion within the dominant downtrend"
+                        )
+                    else:
+                        # Shorting INTO a rebound sweeps the SL before price resumes
+                        # down. Gold June 4 2026: shorted at $4,463 during
+                        # NATURAL_REBOUND, price ran to $4,499 hitting SL before
+                        # reversing. Wait for exhaustion — no 4H backstop here.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
+                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_REBOUND "
+                            f"is an active bounce, shorting INTO it risks SL sweep. "
+                            f"Wait for exhaustion."
+                        )
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_rebound_sl_sweep_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "livermore_rebound_sl_sweep_block", asset_cfg,
+                        )
                 elif _lsm_post == "NATURAL_RETRACEMENT" and signal > 0:
-                    # Longing INTO a retracement risks SL sweep before trend resumes up.
-                    logger.info(
-                        f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
-                        f"NATURAL_RETRACEMENT is an active pullback; longing INTO it risks SL sweep. "
-                        f"Wait for spring/exhaustion."
-                    )
-                    _original_signal = signal
-                    signal = 0
-                    details["reasoning"] = "livermore_retracement_sl_sweep_block"
-                    self._shadow_open_blocked(
-                        asset_name, _original_signal, details, df, current_price,
-                        "livermore_retracement_sl_sweep_block", asset_cfg,
-                    )
+                    if _4h_confirms_long:
+                        # 4H=MAIN_UP backs this long: buying the pullback within a
+                        # confirmed uptrend is the Livermore "ideal" entry. The
+                        # higher timeframe is the stronger timing signal — let it
+                        # through without requiring a separate spring confirmation.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
+                            f"4H=MAIN_UP confirms; 1H NATURAL_RETRACEMENT is the "
+                            f"ideal pullback entry within the dominant uptrend"
+                        )
+                    else:
+                        # Longing INTO a retracement risks SL sweep before trend
+                        # resumes up. No 4H backstop here — wait for spring/exhaustion.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
+                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_RETRACEMENT "
+                            f"is an active pullback, longing INTO it risks SL sweep. "
+                            f"Wait for spring/exhaustion."
+                        )
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_retracement_sl_sweep_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "livermore_retracement_sl_sweep_block", asset_cfg,
+                        )
 
             # ── MINIMUM REGIME CONFIDENCE GATE ────────────────────────────────
             # Block any signal when MTF regime confidence is below 60%.

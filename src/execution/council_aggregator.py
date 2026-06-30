@@ -3035,6 +3035,15 @@ class InstitutionalCouncilAggregator:
                         signal = 0
                         signal_quality = 0.0
                         decision_type = f"HOLD (MR lean conflict — {_lsm_lean})"
+                    elif _bump == 0.0:
+                        # No threshold elevation actually occurred (bump=0) — saying
+                        # "cleared elevated bar" here is misleading since there was
+                        # nothing to clear. Log the conflict as noted, not resolved.
+                        logger.info(
+                            f"[COUNCIL] LSM={_lsm_lean} noted — MR leans {_lean_dir} "
+                            f"vs council {_council_dir}, no threshold bump configured "
+                            f"for this state — deferred to downstream Livermore gate."
+                        )
                     else:
                         logger.info(
                             f"[COUNCIL] ⚠️ MR lean conflict: LSM={_lsm_lean} → MR leans "
