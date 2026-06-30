@@ -3586,6 +3586,44 @@ class InstitutionalCouncilAggregator:
                     sell_score = min(sell_score + 0.3 * weight, weight)
                     sell_exp += " +CHoCH"
 
+                # ── Livermore Anchor Proximity ────────────────────────────────
+                # The SMC-derived fields above detect structure from recent price
+                # action, but can miss Livermore's specific pivotal points — the
+                # confirmed natural low (nl_confirmed) and natural high (nh_confirmed)
+                # from the state machine. These are the exact support/resistance
+                # levels Livermore watched. If price is within 0.5×ATR of one and
+                # the SMC signals haven't already scored this side, give partial
+                # credit — not as an override, as an additive enrichment.
+                try:
+                    if len(df) >= 14:
+                        _atr_struct = float(
+                            ta.ATR(
+                                df["high"].values, df["low"].values, df["close"].values,
+                                timeperiod=14,
+                            )[-1]
+                        )
+                        _close_now = float(df["close"].iloc[-1])
+                        _anchor_prox = 0.5  # within 0.5×ATR = at the level
+
+                        _nat_low  = _cs("livermore_anchor_natural_low",  None)
+                        _nat_high = _cs("livermore_anchor_natural_high", None)
+
+                        if _nat_low is not None and _atr_struct > 0:
+                            _dist_low = abs(_close_now - float(_nat_low)) / _atr_struct
+                            if _dist_low <= _anchor_prox and buy_score < weight * 0.7:
+                                _boost_buy = weight * 0.5
+                                buy_score = min(buy_score + _boost_buy, weight)
+                                buy_exp += f" +LV_nat_low({_dist_low:.2f}ATR)"
+
+                        if _nat_high is not None and _atr_struct > 0:
+                            _dist_high = abs(_close_now - float(_nat_high)) / _atr_struct
+                            if _dist_high <= _anchor_prox and sell_score < weight * 0.7:
+                                _boost_sell = weight * 0.5
+                                sell_score = min(sell_score + _boost_sell, weight)
+                                sell_exp += f" +LV_nat_high({_dist_high:.2f}ATR)"
+                except Exception:
+                    pass  # non-blocking — standard SMC scoring already ran above
+
             else:
                 # ── Fallback: legacy BreakRetestValidator + raw OHLCV ─────────
                 br_res = self.break_retest_validator.validate(df, self.asset_type)
