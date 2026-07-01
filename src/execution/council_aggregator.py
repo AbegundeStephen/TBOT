@@ -381,9 +381,12 @@ class InstitutionalCouncilAggregator:
 
             # 2. MRS §6 Phase 0 — TRANSITION path permanently removed.
             # NEUTRAL regime passes through at normal scoring. Structural gating
-            # is handled by the Livermore Hard Veto (is_silent_zone) which blocks
-            # entries in NATURAL_RETRACEMENT / NATURAL_REBOUND states — the only
-            # states where NEUTRAL regime entries were genuinely dangerous.
+            # is handled by main.py's POST-SIGNAL LIVERMORE COUNTER-TREND BLOCK
+            # which blocks entries in NATURAL_RETRACEMENT / NATURAL_REBOUND states
+            # — the only states where NEUTRAL regime entries were genuinely
+            # dangerous. (Previously referenced the retired signal_aggregator.py
+            # Hard Veto Blocks A-D; those were consolidated into main.py 2026-07-01
+            # so the gate covers all aggregator paths, not just Performance mode.)
             # Raising required_score +0.75 for MTF NEUTRAL was the single largest
             # source of rejected valid setups in the pre-v3 system.
             if regime_name == "NEUTRAL" and preset_trade_type == "TREND":
@@ -1905,18 +1908,6 @@ class InstitutionalCouncilAggregator:
                     f"{self.counter_trend_threshold:.2f} → {_effective_counter_threshold:.2f}"
                 )
 
-            # Determine preliminary signal
-            if _regime_lsm_disagree:
-                logger.info(
-                    f"[COUNCIL] {self.asset_type} 4H Livermore lean ({_lsm_lean_c}) disagrees "
-                    f"with macro regime lean ({_regime_lean_c}) — HOLD "
-                    f"(lsm_regime_disagreement_gate_enabled, buy={buy_total:.2f} sell={sell_total:.2f})"
-                )
-            elif is_bull and buy_total >= _effective_trend_threshold:
-                signal = 1
-                total_score = buy_total
-                required_score = _effective_trend_threshold
-                chosen_scores = buy_scores
                 # ══════════════════════════════════════════════════════════════════
             # GATE A: STRUCTURAL LOCATION (RetestEngine)
             # ══════════════════════════════════════════════════════════════════
@@ -2044,15 +2035,22 @@ class InstitutionalCouncilAggregator:
             # ══════════════════════════════════════════════════════════════════
 
             # ══════════════════════════════════════════════════════════════════
-            # GATE B: DUAL TIMEFRAME CONFIRMATION
+            # UNIFIED DECISION RESOLUTION
             # ══════════════════════════════════════════════════════════════════
-            # When the 4H and 1H Livermore states agree on direction, the brain
-            # has full structural conviction across both timeframes.
-            # Ease the threshold slightly — the market is proving itself at two
-            # zoom levels simultaneously. Conservative when timeframes disagree,
-            # flexible when both are aligned. Floor at 2.0 ensures dual
-            # confirmation alone can never open a trade.
+            # Replaces old "GATE B" if/elif and old regime-disagreement if/elif.
+            # Both were written as branches competing with score-vs-threshold
+            # checks — when either gate fired, Python took that branch and the
+            # check never ran, even when the score clearly cleared its bar
+            # (confirmed live: BTC 2026-06-30 22:10:16, SELL 3.00 vs required
+            # 2.90, printed untagged HOLD). Gates now apply as modifiers/filters
+            # BEFORE a single unavoidable comparison, and when both sides clear
+            # their bars in the same cycle the one further past its own bar wins,
+            # not whichever branch used to be checked first.
             # ══════════════════════════════════════════════════════════════════
+
+            # 1. Dual-timeframe confirmation eases the bar — unconditionally
+            #    as a modifier, not as a branch that blocks comparison.
+            #    Floor at 2.0: dual confirmation alone can never open a trade.
             if (
                 _composite_state is not None
                 and getattr(_composite_state, "livermore_dual_confirmation", False)
@@ -2067,22 +2065,50 @@ class InstitutionalCouncilAggregator:
                     _effective_trend_threshold,
                     _effective_counter_threshold,
                 )
-            # ══════════════════════════════════════════════════════════════════
-            elif not is_bull and buy_total >= _effective_counter_threshold:
-                signal = 1
-                total_score = buy_total
-                required_score = _effective_counter_threshold
-                chosen_scores = buy_scores
-            elif not is_bull and sell_total >= _effective_trend_threshold:
-                signal = -1
-                total_score = sell_total
-                required_score = _effective_trend_threshold
-                chosen_scores = sell_scores
-            elif is_bull and sell_total >= _effective_counter_threshold:
-                signal = -1
-                total_score = sell_total
-                required_score = _effective_counter_threshold
-                chosen_scores = sell_scores
+
+            # 2. Resolve which threshold applies to which side for this regime.
+            _buy_threshold  = _effective_trend_threshold   if is_bull else _effective_counter_threshold
+            _sell_threshold = _effective_counter_threshold if is_bull else _effective_trend_threshold
+            _buy_clears  = buy_total  >= _buy_threshold
+            _sell_clears = sell_total >= _sell_threshold
+
+            # 3. Regime/Livermore disagreement is a full-cycle HOLD — previously
+            #    only sat in front of the is_bull+buy branch, silently letting the
+            #    other three branches (GATE B) fire anyway.
+            if _regime_lsm_disagree:
+                logger.info(
+                    f"[COUNCIL] {self.asset_type} 4H Livermore lean ({_lsm_lean_c}) disagrees "
+                    f"with macro regime lean ({_regime_lean_c}) — HOLD "
+                    f"(lsm_regime_disagreement_gate_enabled, buy={buy_total:.2f} sell={sell_total:.2f})"
+                )
+            # 4. Both sides cleared — take whichever is further past its bar.
+            elif _buy_clears and _sell_clears:
+                _buy_margin  = buy_total  - _buy_threshold
+                _sell_margin = sell_total - _sell_threshold
+                if _buy_margin >= _sell_margin:
+                    signal, total_score, required_score, chosen_scores = (
+                        1, buy_total, _buy_threshold, buy_scores
+                    )
+                    logger.debug(
+                        "[COUNCIL GATE] %s both sides cleared — BUY wins "
+                        "(margin %.2f vs SELL %.2f)", self.asset_type, _buy_margin, _sell_margin,
+                    )
+                else:
+                    signal, total_score, required_score, chosen_scores = (
+                        -1, sell_total, _sell_threshold, sell_scores
+                    )
+                    logger.debug(
+                        "[COUNCIL GATE] %s both sides cleared — SELL wins "
+                        "(margin %.2f vs BUY %.2f)", self.asset_type, _sell_margin, _buy_margin,
+                    )
+            elif _buy_clears:
+                signal, total_score, required_score, chosen_scores = (
+                    1, buy_total, _buy_threshold, buy_scores
+                )
+            elif _sell_clears:
+                signal, total_score, required_score, chosen_scores = (
+                    -1, sell_total, _sell_threshold, sell_scores
+                )
 
             # Capture initial consensus before penalties and vetos
             original_signal = signal
@@ -4137,15 +4163,34 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 5: VOLUME (Same for both directions)
         """
-        if self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD"]:
-            return (
-                0.5 * weight,
-                0.5 * weight,
-                {
-                    "buy": "VOL: Neutral (MT5 tick volume unreliable)",
-                    "sell": "VOL: Neutral (MT5 tick volume unreliable)",
-                },
-            )
+        if self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY"]:
+            # Tick volume is confirmed unreliable for MT5 CFD assets
+            # (data_manager.py:611 renames tick_volume → volume at fetch time).
+            # Replaced unconditional 0.5×weight-both-sides with real broker
+            # bid-ask spread_ratio from composite_state — already computed by
+            # signal_aggregator.py:1015 but never reaching this judge until now.
+            #
+            # Polarity: widening spread = liquidity withdrawing = penalize.
+            # This is the OPPOSITE of volume rising = more conviction = reward.
+            # Mirrors how spread_velocity_spike is treated everywhere else it
+            # appears (signal_aggregator.py:1891 exhaustion, :4540 quality cut).
+            # Normal spread just restores the old neutral baseline — spread never
+            # beats volume because tight spread means "nothing wrong," not "good."
+            _cs_v = (governor_data or {}).get("composite_state") if governor_data else None
+            _spread_ratio = (
+                getattr(_cs_v, "spread_ratio", 1.0) if not isinstance(_cs_v, dict)
+                else (_cs_v.get("spread_ratio", 1.0) if _cs_v else 1.0)
+            ) or 1.0
+            if _spread_ratio >= 2.5:
+                score = 0.0
+                exp = f"VOL: ❌ spread spike ({_spread_ratio:.1f}x avg) — liquidity withdrawing"
+            elif _spread_ratio >= 1.5:
+                score = weight * 0.35
+                exp = f"VOL: ⚠️ spread elevated ({_spread_ratio:.1f}x avg)"
+            else:
+                score = weight * 0.5
+                exp = f"VOL: Neutral (spread normal, {_spread_ratio:.1f}x avg)"
+            return score, score, {"buy": exp, "sell": exp}
 
         try:
             if "volume" not in df.columns:

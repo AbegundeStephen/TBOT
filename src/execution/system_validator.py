@@ -407,7 +407,20 @@ class SystemValidator:
             _veto_name = "HARD_VETO_LAYER"
             if _veto_name not in self._liveness_buffers:
                 self._liveness_buffers[_veto_name] = deque(maxlen=100)
-            _veto_fired = "HARD_VETO" in str(signal_details.get("reasoning", ""))
+            # Blocks A-D in signal_aggregator.py logged "HARD_VETO" and are
+            # now retired. main.py's consolidated Livermore block uses different
+            # reasoning tags. Recognise both so this metric doesn't show "dead."
+            _reasoning_str = str(signal_details.get("reasoning", ""))
+            _veto_fired = any(
+                tag in _reasoning_str
+                for tag in (
+                    "HARD_VETO",
+                    "livermore_counter_trend_block",
+                    "livermore_rebound_sl_sweep_block",
+                    "livermore_retracement_sl_sweep_block",
+                    "livermore_secondary_chase_block",
+                )
+            )
             self._liveness_buffers[_veto_name].append(1 if _veto_fired else 0)
             buf = self._liveness_buffers[_veto_name]
             if len(buf) >= 20:
