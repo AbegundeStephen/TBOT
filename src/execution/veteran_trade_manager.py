@@ -820,17 +820,40 @@ class VeteranTradeManager:
                 wick_buffer = 0.5 * atr
 
                 if self.side == "long":
-                    # Long reversion: price bouncing up from below — exit just *below* the
-                    # EMA so we don't overshoot into the resistance zone above it.
+                    # Long reversion: price bouncing up from below — SL below entry,
+                    # TP near EMA above.
                     self.initial_stop_loss = self.low[-1] - wick_buffer
                     tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
+                    # Guard: if bar data is stale/misaligned, SL might be above the
+                    # actual fill price — MT5 would reject it (retcode 10016).
+                    if self.initial_stop_loss >= self.entry_price:
+                        self.initial_stop_loss = self.entry_price - (1.5 * atr)
+                        logger.warning(
+                            f"[VTM] REVERSION LONG: bar-derived SL ({self.initial_stop_loss:.5f}) "
+                            f"was >= entry — clamped to entry - 1.5×ATR"
+                        )
+                    if tp_target <= self.entry_price:
+                        tp_target = self.entry_price + (2.0 * atr)
+                        logger.warning("[VTM] REVERSION LONG: TP was <= entry — clamped to entry + 2×ATR")
 
                 else:
-                    # Short reversion: price falling from above — exit just *above* the
-                    # EMA (mean-convergence point). The original code used ema_4h_50 + 0.2*atr
-                    # which placed TP *above* the EMA — wrong direction for a short.
+                    # Short reversion: price falling from above — SL above entry,
+                    # TP below (toward the EMA mean-convergence point).
                     self.initial_stop_loss = self.high[-1] + wick_buffer
                     tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
+                    # Guard: if bar data is stale (e.g. 1H bars are at a different
+                    # price level than the actual MT5 fill), high[-1] + buffer can
+                    # land BELOW the fill price — MT5 rejects the SL as invalid
+                    # (retcode 10016). Same guard for TP above entry for a SHORT.
+                    if self.initial_stop_loss <= self.entry_price:
+                        self.initial_stop_loss = self.entry_price + (1.5 * atr)
+                        logger.warning(
+                            f"[VTM] REVERSION SHORT: bar-derived SL ({self.initial_stop_loss:.5f}) "
+                            f"was <= entry — clamped to entry + 1.5×ATR"
+                        )
+                    if tp_target >= self.entry_price:
+                        tp_target = self.entry_price - (2.0 * atr)
+                        logger.warning("[VTM] REVERSION SHORT: TP was >= entry — clamped to entry - 2×ATR")
 
                 self.current_stop_loss = self.initial_stop_loss
                 self.take_profit_levels = [tp_target]
