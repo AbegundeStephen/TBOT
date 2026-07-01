@@ -3284,7 +3284,11 @@ class TradingTelegramBot:
                 "atr":        "📐 ATR baseline",
             }
             _stop_label = _stop_icons.get(stop_type or "atr", "📐 ATR baseline")
-            _entry_label = f" · {entry_type}" if entry_type else ""
+            # Replace underscores in entry_type names (e.g. TREND_FOLLOWING,
+            # MR_PULLBACK) — Telegram Markdown treats _ as italic delimiter
+            # and throws "can't find end of entity" when it sees an odd count.
+            _entry_display = entry_type.replace("_", " ") if entry_type else None
+            _entry_label = f" · {_entry_display}" if _entry_display else ""
             msg += f"   └─ Type: {_stop_label}{_entry_label}\n\n"
 
             # Add TP info if available
