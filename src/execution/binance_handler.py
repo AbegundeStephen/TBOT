@@ -549,7 +549,7 @@ class BinanceExecutionHandler:
             live_price = self._fetch_live_futures_price(symbol)
             if live_price is not None:
                 # Update cache and return the fresh price.
-                price_cache.set(symbol, live_price)
+                price_cache.set(symbol, live_price, timeframe="tick")  # Live tick = highest priority
                 return live_price
             else:
                 if self.is_paper_mode:

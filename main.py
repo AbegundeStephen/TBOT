@@ -5492,6 +5492,16 @@ class TradingBot:
                         ),
                         signal_details=details,
                     )
+                    # Snapshot positions BEFORE check_and_update runs — the VTM
+                    # runs on a background thread and can emergency-close a position
+                    # within milliseconds of it opening (e.g. SL placement failure).
+                    # If we only read positions AFTER check_and_update, the position
+                    # may already be gone and new_position_ids comes back empty,
+                    # silently skipping the trade-opened notification. This snapshot
+                    # captures what was actually opened before any VTM action.
+                    _positions_just_opened = self.portfolio_manager.get_asset_positions(asset_name)
+                    _ids_just_opened = {p.position_id for p in _positions_just_opened}
+
                     self.mt5_handler.check_and_update_positions(asset_name)
             except Exception as e:
                 logger.error(f"[ERROR] Failed to execute signal for {asset_name}: {e}")
@@ -5510,7 +5520,11 @@ class TradingBot:
 
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
                 position_ids_after = {p.position_id for p in positions_after}
-                new_position_ids = position_ids_after - position_ids_before
+                # Use the pre-VTM-close snapshot for new_position_ids so the
+                # trade-opened notification fires even when VTM emergency-closes
+                # the position in under one second (e.g. SL placement failure).
+                _ids_just_opened = _ids_just_opened if '_ids_just_opened' in dir() else position_ids_after
+                new_position_ids = _ids_just_opened - position_ids_before
                 closed_position_ids = position_ids_before - position_ids_after
 
                 # Update internal counters
@@ -5528,12 +5542,13 @@ class TradingBot:
                 # Send Telegram Notifications (New Positions)
                 if new_position_ids:
                     for position_id in new_position_ids:
+                        # Search current positions first; fall back to the
+                        # pre-VTM snapshot when VTM already emergency-closed.
                         new_pos = next(
-                            (
-                                p
-                                for p in positions_after
-                                if p.position_id == position_id
-                            ),
+                            (p for p in positions_after if p.position_id == position_id),
+                            None,
+                        ) or next(
+                            (p for p in _positions_just_opened if p.position_id == position_id),
                             None,
                         )
                         if (

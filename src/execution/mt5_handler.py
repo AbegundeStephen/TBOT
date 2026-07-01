@@ -313,7 +313,7 @@ class MT5ExecutionHandler:
             tick = mt5.symbol_info_tick(symbol)
             if tick:
                 live_price = (tick.ask + tick.bid) / 2
-                price_cache.set(symbol, live_price)  # Update cache
+                price_cache.set(symbol, live_price, timeframe="tick")  # Tick = highest priority (0)
                 # F.7: Capture spread for spread velocity (stored per symbol)
                 _spread = tick.ask - tick.bid
                 if _spread > 0:
