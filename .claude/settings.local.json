@@ -4,7 +4,8 @@
       "Bash(python3 *)",
       "Bash(awk -F: '$1 < 3643')",
       "Bash(python -m py_compile main.py src/execution/council_aggregator.py)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(python -m py_compile src/execution/council_aggregator.py src/execution/signal_aggregator.py src/execution/system_validator.py src/execution/transition_detector.py src/execution/mtf_regime_detector.py src/execution/veteran_trade_manager.py src/market/price_cache.py src/data/data_manager.py src/ai/hybrid_validator.py src/utils/market_hours.py src/telegram/__init__.py main.py)"
     ]
   }
 }

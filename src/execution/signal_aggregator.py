@@ -3438,109 +3438,21 @@ class PerformanceWeightedAggregator:
             tf_original = tf_signal
 
             # ═══════════════════════════════════════════════════════════════
-            # PHASE 2: LIVERMORE HARD VETO LAYER
-            # Three unconditional structural blocks. No signal strength or
-            # confidence overrides these. Runs before any gatekeeper, scoring,
-            # or adjustments. Logs specific reason for every block event.
-            #
-            # Block A — 1H NATURAL_REBOUND + any LONG: trend is down, pullback
-            #   is healthy breathing. New longs fight the macro structure.
-            # Block B — 1H SECONDARY_REBOUND + LONG without dual confirmation:
-            #   counter-trend rally exceeded natural threshold but hasn't confirmed
-            #   a new downtrend reversal. Too risky to enter long.
-            # Block C — MR counter-trend during any 1H NATURAL state:
-            #   MR specifically fires SHORT during NATURAL_RETRACEMENT (trend-up
-            #   pullback) — the exact losing pattern identified in the MRS.
-            # ═══════════════════════════════════════════════════════════════
-            if state is not None:
-                _hv_1h = state.livermore_state_1h
-                _hv_dual = state.livermore_dual_confirmation
-
-                # Block A: 1H NATURAL_REBOUND + any LONG
-                if _hv_1h == "NATURAL_REBOUND":
-                    _blocked = []
-                    if mr_signal > 0:
-                        mr_signal = 0
-                        mr_conf = 0.0
-                        _blocked.append("MR")
-                    if tf_signal > 0:
-                        tf_signal = 0
-                        tf_conf = 0.0
-                        _blocked.append("TF")
-                    if ema_signal > 0:
-                        ema_signal = 0
-                        ema_conf = 0.0
-                        _blocked.append("EMA")
-                    if _blocked:
-                        logger.info(
-                            "[HARD_VETO] %s Block A: NATURAL_REBOUND+LONG → zeroed %s",
-                            self.asset_type,
-                            "+".join(_blocked),
-                        )
-
-                # Block B: 1H SECONDARY_REBOUND + LONG without dual confirmation
-                elif _hv_1h == "SECONDARY_REBOUND" and not _hv_dual:
-                    _blocked = []
-                    if mr_signal > 0:
-                        mr_signal = 0
-                        mr_conf = 0.0
-                        _blocked.append("MR")
-                    if tf_signal > 0:
-                        tf_signal = 0
-                        tf_conf = 0.0
-                        _blocked.append("TF")
-                    if ema_signal > 0:
-                        ema_signal = 0
-                        ema_conf = 0.0
-                        _blocked.append("EMA")
-                    if _blocked:
-                        logger.info(
-                            "[HARD_VETO] %s Block B: SECONDARY_REBOUND+LONG+no_dual → zeroed %s",
-                            self.asset_type,
-                            "+".join(_blocked),
-                        )
-
-                # Block C: MR counter-trend during any NATURAL state
-                # NATURAL_RETRACEMENT (up-trend): SHORT is counter-trend → block MR SHORT
-                # NATURAL_REBOUND (down-trend): LONG is counter-trend → block MR LONG
-                # (MR LONG in NATURAL_REBOUND is also caught by Block A, but Belt-and-suspenders)
-                if _hv_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
-                    _c_blocked = None
-                    if _hv_1h == "NATURAL_RETRACEMENT" and mr_signal < 0:
-                        mr_signal = 0
-                        mr_conf = 0.0
-                        _c_blocked = "MR_SHORT in NATURAL_RETRACEMENT"
-                    elif _hv_1h == "NATURAL_REBOUND" and mr_signal > 0:
-                        mr_signal = 0
-                        mr_conf = 0.0
-                        _c_blocked = "MR_LONG in NATURAL_REBOUND"
-                    if _c_blocked:
-                        logger.info(
-                            "[HARD_VETO] %s Block C: %s → MR zeroed",
-                            self.asset_type,
-                            _c_blocked,
-                        )
-
-                # Block D: TF and EMA shorts during NATURAL_RETRACEMENT
-                # NATURAL_RETRACEMENT = pullback inside an uptrend.
-                # Shorting INTO a retracement risks SL sweep before trend resumes.
-                # MR shorts are caught by Block C; Block D closes the gap for TF+EMA.
-                if _hv_1h == "NATURAL_RETRACEMENT":
-                    _d_blocked = []
-                    if tf_signal < 0:
-                        tf_signal = 0
-                        tf_conf = 0.0
-                        _d_blocked.append("TF_SHORT")
-                    if ema_signal < 0:
-                        ema_signal = 0
-                        ema_conf = 0.0
-                        _d_blocked.append("EMA_SHORT")
-                    if _d_blocked:
-                        logger.info(
-                            "[HARD_VETO] %s Block D: NATURAL_RETRACEMENT+SHORT → zeroed %s",
-                            self.asset_type,
-                            "+".join(_d_blocked),
-                        )
+            # PHASE 2: LIVERMORE HARD VETO LAYER — RETIRED (2026-07-01)
+            # Blocks A-D previously ran here, duplicating what main.py's
+            # POST-SIGNAL LIVERMORE COUNTER-TREND BLOCK (4H-aware, all aggregator
+            # types) now handles fully and correctly. The old blocks were:
+            #   A — NATURAL_REBOUND + any LONG
+            #   B — SECONDARY_REBOUND + LONG without dual confirmation
+            #   C — MR counter-trend during NATURAL states
+            #   D — TF/EMA shorts during NATURAL_RETRACEMENT
+            # All of these are now covered by main.py, which runs after all
+            # aggregators have resolved their final signal, is 4H-aware (uses
+            # both livermore_state_1h and livermore_state_4h), and covers council
+            # mode too (Blocks A-D only ran in the Performance path). The
+            # reasoning tags produced by main.py's replacement are registered in
+            # system_validator.py's HARD_VETO_LAYER liveness check so the health
+            # metric continues to fire correctly.
             # ─────────────────────────────────────────────────────────────
 
             # ═══════════════════════════════════════════════════════════════
