@@ -2392,14 +2392,6 @@ class TradingBot:
         # Update signal in details
         merged_details["signal"] = signal
 
-        # Phase 2.1/2.2: record this evaluation into the signal funnel (which
-        # stage it reached, and any AI rejection). Observational only.
-        if getattr(self, "funnel_logger", None) is not None:
-            try:
-                self.funnel_logger.record(asset_name, signal, merged_details)
-            except Exception as _fe:
-                logger.debug(f"[FUNNEL] record hook failed: {_fe}")
-
         # Phase 2.2+: AI-filter A/B via shadow engine. The AI veto zeroes the
         # signal INSIDE the aggregator, so the normal downstream
         # _shadow_open_blocked calls never see it (they no-op on signal==0).
@@ -5238,6 +5230,20 @@ class TradingBot:
                 logger.debug(
                     "[MTF FILTER] No MTF data available, skipping regime filters"
                 )
+
+            # ── FUNNEL LOGGING ────────────────────────────────────────────────
+            # Record the FINAL signal state — after every post-aggregator gate
+            # (Livermore blocks, regime confidence, position suppression, MTF
+            # filter). Previously this was called inside
+            # get_aggregated_signal_hybrid_dynamic(), which only covered hybrid
+            # mode AND ran before the post-processing gates, making the
+            # "passed_to_execution" count meaningless. Now logged here once,
+            # covering council, performance, and hybrid modes uniformly.
+            if getattr(self, "funnel_logger", None) is not None:
+                try:
+                    self.funnel_logger.record(asset_name, signal, details)
+                except Exception as _fe:
+                    logger.debug(f"[FUNNEL] record hook failed: {_fe}")
 
             # ============================================================
             # 3. Check HOLD Signal
