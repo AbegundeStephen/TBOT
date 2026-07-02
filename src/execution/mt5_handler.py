@@ -315,23 +315,67 @@ class MT5ExecutionHandler:
                 )
                 return mock_price
 
+            _tick_was_stale = False
+            _tick_age_s = 0.0
+            max_tick_age = float(self.trading_config.get("mt5_tick_max_age_seconds", 30))
+
             tick = mt5.symbol_info_tick(symbol)
             if tick:
-                live_price = (tick.ask + tick.bid) / 2
-                price_cache.set(symbol, live_price, timeframe="tick")  # Tick = highest priority (0)
-                # F.7: Capture spread for spread velocity (stored per symbol)
-                _spread = tick.ask - tick.bid
+                try:
+                    _tick_age_s = (datetime.now() - datetime.fromtimestamp(tick.time)).total_seconds()
+                    if _tick_age_s < 0:
+                        _tick_age_s = 0.0
+                except Exception:
+                    _tick_age_s = 0.0
+
+                if _tick_age_s <= max_tick_age:
+                    live_price = (tick.ask + tick.bid) / 2
+                    price_cache.set(symbol, live_price, timeframe="tick")  # Tick = highest priority (0)
+                    # F.7: Capture spread for spread velocity (stored per symbol)
+                    _spread = tick.ask - tick.bid
+                    if _spread > 0:
+                        if not hasattr(self, '_last_spread'):
+                            self._last_spread = {}
+                        self._last_spread[symbol] = _spread
+                    return live_price
+
+                _tick_was_stale = True
+                logger.debug(
+                    f"[MT5] {symbol}: symbol_info_tick is {_tick_age_s:.0f}s old — "
+                    f"re-subscribing and pulling tick history"
+                )
+            else:
+                logger.debug(f"[MT5] {symbol}: symbol_info_tick returned None — re-subscribing")
+
+            # Re-subscribe the data feed so fresh ticks resume on the next cycle
+            mt5.symbol_select(symbol, True)
+
+            # Pull last 10 seconds of tick history directly from the broker's server.
+            # copy_ticks_range bypasses the terminal's internal cache and reads from
+            # the broker's stored tick history, giving exchange-accurate prices even
+            # when the terminal feed has a gap.
+            from_dt = datetime.now() - timedelta(seconds=10)
+            recent = mt5.copy_ticks_range(symbol, from_dt, datetime.now(), mt5.COPY_TICKS_ALL)
+            if recent is not None and len(recent) > 0:
+                t = recent[-1]
+                live_price = (float(t['ask']) + float(t['bid'])) / 2
+                price_cache.set(symbol, live_price, timeframe="tick")
+                _spread = float(t['ask']) - float(t['bid'])
                 if _spread > 0:
                     if not hasattr(self, '_last_spread'):
                         self._last_spread = {}
                     self._last_spread[symbol] = _spread
+                if _tick_was_stale:
+                    logger.info(
+                        f"[MT5] {symbol}: Recovered live price {live_price:.5g} via tick history "
+                        f"(symbol_info_tick was {_tick_age_s:.0f}s stale)"
+                    )
                 return live_price
-            else:
-                # Fallback to last known price if tick fails
-                logger.warning(
-                    f"Failed to get live tick for {symbol}, using last known price."
-                )
-                return price_cache.get_last_known(symbol)
+
+            logger.warning(
+                f"[MT5] {symbol}: No fresh tick data from terminal or history — returning last known"
+            )
+            return price_cache.get_last_known(symbol)
         except Exception as e:
             logger.error(f"Error fetching MT5 price for {symbol}: {e}")
             # Fallback to last known price on error
