@@ -32,6 +32,7 @@ class CVDConsumer:
         """Start the WebSocket consumer in a background task."""
         try:
             from binance import AsyncClient, BinanceSocketManager
+            from binance.exceptions import BinanceWebsocketQueueOverflow
             client = await AsyncClient.create()
             bm = BinanceSocketManager(client)
             self._running = True
@@ -43,6 +44,11 @@ class CVDConsumer:
                 while self._running:
                     try:
                         msg = await stream.recv()
+                    except BinanceWebsocketQueueOverflow:
+                        # Queue backed up: yield briefly to drain it, then continue.
+                        # Do NOT break — that kills the session and forces a 60s backoff.
+                        await asyncio.sleep(0.05)
+                        continue
                     except Exception:
                         break
                     if msg is None:
@@ -56,6 +62,8 @@ class CVDConsumer:
                     else:
                         self._cvd -= qty
                     self._last_update = datetime.now()
+                    # Yield to the event loop so book/depth tasks stay current
+                    await asyncio.sleep(0)
         except Exception as e:
             logger.error(f"[CVD] WebSocket error: {e}")
             self._running = False
@@ -63,10 +71,14 @@ class CVDConsumer:
     async def _book_listener(self, bm):
         """L2 best bid/ask imbalance."""
         try:
+            from binance.exceptions import BinanceWebsocketQueueOverflow
             async with bm.symbol_book_ticker_socket("btcusdt") as stream:
                 while self._running:
                     try:
                         msg = await stream.recv()
+                    except BinanceWebsocketQueueOverflow:
+                        await asyncio.sleep(0.05)
+                        continue
                     except Exception:
                         break
                     if msg is None:
@@ -74,23 +86,29 @@ class CVDConsumer:
                     self._best_bid_qty = float(msg.get('B', 0))
                     self._best_ask_qty = float(msg.get('A', 0))
                     self._book_last_update = datetime.now()
+                    await asyncio.sleep(0)
         except Exception as e:
             logger.debug(f"[L2] Book ticker error: {e}")
 
     async def _depth_listener(self, bm):
-        """L2 depth stream -- top 20 levels."""
+        """L2 depth stream -- top 5 levels (20 caused queue overflow on active BTC sessions)."""
         try:
-            async with bm.depth_socket("btcusdt", depth=20) as stream:
+            from binance.exceptions import BinanceWebsocketQueueOverflow
+            async with bm.depth_socket("btcusdt", depth=5) as stream:
                 while self._running:
                     try:
                         msg = await stream.recv()
+                    except BinanceWebsocketQueueOverflow:
+                        await asyncio.sleep(0.05)
+                        continue
                     except Exception:
                         break
                     if msg is None:
                         break
-                    self._bids = msg.get('bids', [])  # [[price, qty], ...]
+                    self._bids = msg.get('bids', [])
                     self._asks = msg.get('asks', [])
                     self._depth_last_update = datetime.now()
+                    await asyncio.sleep(0)
         except Exception as e:
             logger.debug(f"[L2] Depth error: {e}")
 
