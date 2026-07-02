@@ -17,6 +17,9 @@ def review_mr_modes(db: DatabaseManager, min_samples: int = 10):
         .execute()
     )
     rows = result.data or []
+    print(f"[DEBUG] Total closed trades fetched: {len(rows)}")
+    mr_rows = [r for r in rows if r.get("strategy") == "REVERSION"]
+    print(f"[DEBUG] REVERSION strategy rows: {len(mr_rows)}")
     buckets = {
         "mode1_pullback": [],
         "mode2_counter": [],
@@ -34,7 +37,7 @@ def review_mr_modes(db: DatabaseManager, min_samples: int = 10):
         ct = meta.get("confluence_telemetry") or {}
         lsm = ct.get("livermore_state_1h", "")
         entry_type = meta.get("entry_type", "")
-        if "MR" not in row.get("strategy", ""):
+        if row.get("strategy") != "REVERSION":
             continue
         if "NATURAL_RETRACEMENT" in lsm or "mode1" in entry_type.lower():
             buckets["mode1_pullback"].append(pnl)
