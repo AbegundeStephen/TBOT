@@ -945,8 +945,23 @@ class MT5ExecutionHandler:
 
                     if _push_sl:
                         _sl_placed = False
+                        _pos_already_gone = False
                         if _initial_sl:
                             for _att in range(3):
+                                # Bug 4 fix: confirm position still exists at broker before
+                                # each attempt. The VTM runs on a background thread and can
+                                # close the position (e.g. structural SL already hit) in the
+                                # milliseconds between fill and SL placement. Without this
+                                # check the retry loop fires an emergency close on a position
+                                # that's already gone, which on a hedging account opens a
+                                # phantom position instead of closing anything.
+                                if not mt5.positions_get(ticket=mt5_ticket):
+                                    logger.warning(
+                                        f"[VTM-SL] #{mt5_ticket}: position no longer exists "
+                                        f"at broker (VTM/market closed it). SL push skipped."
+                                    )
+                                    _pos_already_gone = True
+                                    break
                                 try:
                                     if self._push_sl_to_exchange(mt5_ticket, symbol, _initial_sl):
                                         _sl_placed = True
@@ -954,20 +969,77 @@ class MT5ExecutionHandler:
                                 except Exception as _e:
                                     logger.warning(f"[VTM-SL] push attempt {_att+1} raised: {_e}")
                                 time.sleep(0.5)
+                        else:
+                            logger.warning(
+                                f"[VTM-SL] #{mt5_ticket}: no initial SL available — "
+                                f"check VTM initialization."
+                            )
 
-                        if not _sl_placed:
+                        if _pos_already_gone:
+                            # Position was already closed by VTM or market — deregister
+                            # from portfolio (VTM loop may have handled this already).
+                            try:
+                                if _pos_any is not None:
+                                    self.portfolio_manager.close_position(
+                                        position_id=_pos_any.position_id,
+                                        reason="vtm_preemptive_close",
+                                        already_closed_on_exchange=True,
+                                    )
+                            except Exception:
+                                pass
+                            # Bug 6 fix (partial): notify user that trade opened and was
+                            # immediately closed by the risk manager.
+                            try:
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    _sfn(_tg.send_message(
+                                        text=(
+                                            f"⚠️ <b>FAST EXIT</b> — {asset} #{mt5_ticket}\n"
+                                            f"{'SHORT' if side == 'short' else 'LONG'} opened "
+                                            f"but risk manager closed it before SL could be "
+                                            f"pushed. No phantom position created."
+                                        ),
+                                        parse_mode="HTML",
+                                    ))
+                            except Exception:
+                                pass
+                            return False
+
+                        elif not _sl_placed:
+                            # Final existence check before firing emergency close — position
+                            # may have been closed between last retry and this line.
+                            if not mt5.positions_get(ticket=mt5_ticket):
+                                logger.warning(
+                                    f"[VTM-SL] #{mt5_ticket}: position gone just before "
+                                    f"emergency close — skipping."
+                                )
+                                try:
+                                    if _pos_any is not None:
+                                        self.portfolio_manager.close_position(
+                                            position_id=_pos_any.position_id,
+                                            reason="vtm_preemptive_close",
+                                            already_closed_on_exchange=True,
+                                        )
+                                except Exception:
+                                    pass
+                                return False
+
                             logger.critical(
                                 f"[VTM-SL] ❌ Could not place protective stop for {asset} "
                                 f"#{mt5_ticket} (sl={_initial_sl}). Position is NAKED — "
                                 f"emergency-closing to avoid unbounded risk."
                             )
+                            # Bug 5 fix: pass ticket so hedging accounts close the
+                            # specific position rather than opening a phantom long/short.
                             self._emergency_close_mt5_position(
                                 symbol,
                                 volume_lots,
                                 mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL,
+                                ticket=mt5_ticket,
                             )
-                            # Deregister the now-closed position so the bot does
-                            # not believe it holds a protected position.
+                            # Deregister the now-closed position.
                             try:
                                 if _pos_any is not None:
                                     self.portfolio_manager.close_position(
@@ -980,6 +1052,25 @@ class MT5ExecutionHandler:
                                     f"[VTM-SL] Failed to deregister emergency-closed "
                                     f"position #{mt5_ticket}: {_ce}"
                                 )
+                            # Bug 6 fix: notify so the user knows a real position opened
+                            # and was immediately emergency-closed.
+                            try:
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    _sfn(_tg.send_message(
+                                        text=(
+                                            f"🚨 <b>EMERGENCY CLOSE</b> — {asset} #{mt5_ticket}\n"
+                                            f"Opened {'SHORT' if side == 'short' else 'LONG'} "
+                                            f"but SL placement failed after 3 retries "
+                                            f"(sl={_initial_sl}).\n"
+                                            f"Position emergency-closed to protect account."
+                                        ),
+                                        parse_mode="HTML",
+                                    ))
+                            except Exception:
+                                pass
                             return False
 
                     # TP placement stays best-effort — a missing profit target is
@@ -2151,9 +2242,14 @@ class MT5ExecutionHandler:
             return False
 
     def _emergency_close_mt5_position(
-        self, symbol: str, volume: float, original_order_type: int
+        self, symbol: str, volume: float, original_order_type: int, ticket: int = None
     ):
-        """Emergency close of an unwanted MT5 position"""
+        """Emergency close of an unwanted MT5 position.
+
+        ticket: MT5 position ticket. When supplied, the request includes
+        position=ticket so hedging-account brokers close *that* position
+        rather than opening a new counter-position.
+        """
         try:
             close_order_type = (
                 mt5.ORDER_TYPE_SELL
@@ -2178,6 +2274,12 @@ class MT5ExecutionHandler:
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
+
+            # Bug 5 fix: on hedging accounts a plain market order opens a new
+            # position instead of closing the existing one. Specifying
+            # position=ticket targets the exact position regardless of account type.
+            if ticket:
+                request["position"] = ticket
 
             result = mt5.order_send(request)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
