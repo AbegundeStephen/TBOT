@@ -5968,6 +5968,10 @@ class TradingBot:
         ✅ FIXED: Now handles hybrid mode correctly
         """
         try:
+            logger.info(f"\n{'=' * 70}")
+            logger.info(f"[PROCESSING ASSET] {asset_name}")
+            logger.info(f"{'=' * 70}")
+
             asset_cfg = self.config["assets"][asset_name]
             exchange = asset_cfg.get("exchange", "binance")
             symbol = self._resolve_symbol(asset_name)
