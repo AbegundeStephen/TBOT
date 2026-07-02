@@ -2951,6 +2951,17 @@ class InstitutionalCouncilAggregator:
                 chosen_explanations = buy_explanations + sell_explanations
                 if total_score == 0:
                     total_score = max(buy_total, sell_total)
+                    # Show the *effective* threshold (after RSM delta + structural
+                    # modifier) so "SCORE: X / Y" reflects the real bar that was
+                    # compared. Previously Y showed the unadjusted base threshold,
+                    # making it look like a cleared score that actually wasn't.
+                    try:
+                        if sell_total >= buy_total:
+                            required_score = _sell_threshold
+                        else:
+                            required_score = _buy_threshold
+                    except NameError:
+                        pass  # thresholds not computed (early exception path)
 
             # Update statistics based on FINAL signal
             if signal == 1:

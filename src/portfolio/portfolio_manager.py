@@ -566,10 +566,14 @@ class Position:
 
     def get_position_value(self, current_price: float) -> float:
         """Get current position value in USD"""
+        if current_price is None:
+            return 0.0
         return self.quantity * current_price
 
     def get_pnl(self, current_price: float) -> float:
         """Get current profit/loss"""
+        if current_price is None:
+            return 0.0
         if self.side == "long":
             return (current_price - self.entry_price) * self.quantity
         else:

@@ -377,6 +377,13 @@ class TradingBot:
         self.last_trade_date = None
         self.last_trade_times = {}
         self.last_market_status_log = {}  # Per-asset logging dictionary
+        # Startup warmup: block all new trade executions until the first complete
+        # trading cycle has finished. This prevents the startup race condition where
+        # rapid successive cycles fire before the cooldown clock is seeded from DB,
+        # Livermore LSM states are computed, and all components have settled.
+        # Signals are still EVALUATED on the first cycle (so the bot reads the
+        # market correctly); only actual order placement is held back.
+        self._startup_warmup_complete = False
         # Livermore state at time of last trade — used for cooldown transition detection.
         # Format: {asset_name: str}  e.g. {"GOLD": "MAIN_UP", "BTC": "SECONDARY_REBOUND"}
         self._last_livermore_states: dict = {}
@@ -3430,6 +3437,16 @@ class TradingBot:
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
 
+                # Mark the first full cycle as complete — trade execution is now
+                # permitted. Set here so ALL assets have been evaluated at least
+                # once before any order can be placed.
+                if not self._startup_warmup_complete:
+                    self._startup_warmup_complete = True
+                    logger.info(
+                        "[STARTUP] ✅ First cycle complete — trade execution now enabled. "
+                        "Signals were evaluated but no orders were placed this cycle."
+                    )
+
         except Exception as e:
             logger.error(f"[ERROR] Cycle failed: {e}", exc_info=True)
             self._consecutive_errors += 1
@@ -4385,6 +4402,20 @@ class TradingBot:
         """
         asset_cfg = self.config["assets"][asset_name]
         if not asset_cfg.get("enabled", False):
+            return
+
+        # ── STARTUP WARMUP GUARD ──────────────────────────────────────────────
+        # Block all new trade executions until the first complete cycle has
+        # finished. Signals are still evaluated so the market state is known
+        # and logged, but no orders are placed. This prevents the startup race
+        # condition where rapid consecutive cycles fire before the cooldown
+        # clock is seeded, Livermore LSM states are computed, and DB sync is
+        # complete — which caused multiple simultaneous positions on restart.
+        if not self._startup_warmup_complete:
+            logger.info(
+                f"[STARTUP] ⏳ {asset_name}: startup warmup active — "
+                f"signals evaluated but trade execution blocked (first cycle)"
+            )
             return
 
         # Check market hours BEFORE trading
