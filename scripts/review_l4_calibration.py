@@ -5,7 +5,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
-from src.database.database_manager import DatabaseManager
+from src.database.database_manager import TradingDatabaseManager as DatabaseManager
 
 
 def review_l4_calibration(db: DatabaseManager, min_samples: int = 20):
@@ -58,5 +58,10 @@ def review_l4_calibration(db: DatabaseManager, min_samples: int = 20):
 
 
 if __name__ == "__main__":
-    db = DatabaseManager()
+    from dotenv import load_dotenv
+    load_dotenv()
+    db = DatabaseManager(
+        supabase_url=os.environ["SUPABASE_URL"],
+        supabase_key=os.environ["SUPABASE_KEY"],
+    )
     review_l4_calibration(db)
