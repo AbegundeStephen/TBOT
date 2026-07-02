@@ -653,7 +653,18 @@ class ShadowTradingEngine:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(state, f, default=str)
-            os.replace(tmp, path)          # atomic write
+            try:
+                os.replace(tmp, path)
+            except OSError:
+                # Windows: os.replace raises WinError 5 (Access Denied) when the
+                # destination is briefly locked by a reader (dashboard, antivirus).
+                # Fall back to remove-then-rename — not atomic but good enough for
+                # a read-only dashboard snapshot.
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                os.rename(tmp, path)
         except Exception as exc:
             logger.warning(f"[SHADOW] dump_state failed: {exc}")
 
