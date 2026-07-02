@@ -6024,7 +6024,7 @@ class TradingBot:
                 return
 
             try:
-                current_price = handler.get_current_price(symbol)
+                current_price = handler.get_current_price(symbol, force_live=True)
             except:
                 current_price = df["close"].iloc[-1]
 

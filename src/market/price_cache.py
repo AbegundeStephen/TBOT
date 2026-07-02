@@ -33,9 +33,11 @@ class PriceCache:
         self._ttl = ttl
         logger.info(f"[PRICE_CACHE] Initialized with TTL: {self._ttl}s.")
 
-    def set(self, symbol: str, price: float, timeframe: Optional[str] = None):
+    def set(self, symbol: str, price: float, timeframe: Optional[str] = None) -> bool:
         """
         Update the cache with a new price for a specific symbol.
+        Returns True if the write was accepted, False if rejected by priority.
+
         Args:
             symbol (str): The asset symbol (e.g., 'BTCUSDT', 'XAUUSDm').
             price (float): The new price to cache.
@@ -54,11 +56,12 @@ class PriceCache:
                 f"coarser timeframe '{timeframe}' (priority {new_priority} > "
                 f"cached priority {current_priority})"
             )
-            return
+            return False
         self._prices[symbol] = price
         self._timestamps[symbol] = time.monotonic()
         self._priorities[symbol] = new_priority
         logger.debug(f"[PRICE_CACHE] Price for {symbol} set to {price} at {self._timestamps[symbol]} (tf={timeframe})")
+        return True
 
     def get(self, symbol: str) -> Optional[float]:
         """
