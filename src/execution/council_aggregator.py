@@ -1955,28 +1955,29 @@ class InstitutionalCouncilAggregator:
                     )
 
                     # ── ABSOLUTE VETO ───────────────────────────────────────
-                    if _buy_type == "CHASE_HARD" and _sell_type == "CHASE_HARD":
-                        logger.info(
-                            "[COUNCIL GATE] %s CHASE_HARD both directions — "
-                            "structural veto: price extended from all levels",
-                            self.asset_type,
-                        )
-                        signal        = 0
-                        decision_type = "HOLD (structural_chase_hard)"
-                    elif _buy_type == "CHASE_HARD" and _likely_dir == 1:
+                    # Zero out the chasing side(s) so the UNIFIED DECISION block
+                    # cannot override via _buy_clears / _sell_clears. Previously
+                    # the both-CHASE_HARD branch only set signal=0 (leaving totals
+                    # untouched) and the one-sided branches were gated on _likely_dir
+                    # (the preliminary lean), so a direction that was CHASE_HARD but
+                    # happened to be the minority lean still passed the threshold
+                    # comparison and could win by margin in the UNIFIED block.
+                    if _buy_type == "CHASE_HARD":
                         logger.info(
                             "[COUNCIL GATE] %s BUY direction CHASE_HARD — "
                             "structural veto on long",
                             self.asset_type,
                         )
                         buy_total = 0.0
-                    elif _sell_type == "CHASE_HARD" and _likely_dir == -1:
+                    if _sell_type == "CHASE_HARD":
                         logger.info(
                             "[COUNCIL GATE] %s SELL direction CHASE_HARD — "
                             "structural veto on short",
                             self.asset_type,
                         )
                         sell_total = 0.0
+                    if _buy_type == "CHASE_HARD" and _sell_type == "CHASE_HARD":
+                        decision_type = "HOLD (structural_chase_hard)"
 
                     # ── THRESHOLD MODIFIERS ─────────────────────────────────
                     # CLEAN (-0.20): at a defended level — easier to enter
