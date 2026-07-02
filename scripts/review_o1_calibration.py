@@ -22,8 +22,8 @@ def review_o1_calibration(db: DatabaseManager, min_samples: int = 20):
     buckets = {
         "rejection_fired":      [],
         "rejection_not_fired":  [],
-        "parabolic_locked":     [],
-        "parabolic_not_locked": [],
+        "parabolic_fired":      [],
+        "parabolic_not_fired":  [],
         "absorption_fired":     [],
         "absorption_not_fired": [],
     }
