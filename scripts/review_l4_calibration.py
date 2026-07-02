@@ -1,6 +1,9 @@
 """
 Wave L4 calibration review — run after 30+ days.
 """
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 from src.database.database_manager import DatabaseManager
 

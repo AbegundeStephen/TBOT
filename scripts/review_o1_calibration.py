@@ -3,6 +3,9 @@ O-Track calibration review — run manually against Supabase once 30+ trades
 have accumulated under each O1 signal. Breaks down P&L by which orphan
 signal fired, so the starting multipliers can be replaced with real numbers.
 """
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 from src.database.database_manager import DatabaseManager
 
