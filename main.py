@@ -142,6 +142,10 @@ class TradingBot:
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
 
+        # ── Startup quarantine: session-start timestamp (Change 1.1) ─────────
+        self._session_start_time = datetime.now()
+        self._quarantine_cleared_logged: Dict[str, bool] = {}
+
         # ── Phase 0.1: Risk-cap sanity guard ───────────────────────────────
         # max_total_open_risk is a FRACTION of equity (e.g. 0.25 = 25%). A
         # value > 1.0 means a fat-fingered decimal (e.g. 45 instead of 0.45)
@@ -4324,6 +4328,58 @@ class TradingBot:
 
         return True
 
+    def _startup_quarantine_active(self, asset_name: str) -> bool:
+        """
+        Suppress new entries for the first N minutes after bot start (Change 1.2).
+
+        During the quarantine window:
+          1. Time floor: block until startup_quarantine_minutes have elapsed.
+          2. Price sanity: block if mt5_handler hasn't yet confirmed a clean live
+             price for this asset (requires FILE 2 / Change 2.1 attributes).
+
+        Unlike _update_session_open_state, this applies to ALL assets including
+        BTC — the 2026-07-01 incident showed BTC's 24/7 status was exactly why
+        a stale cache slipped through on first-cycle execution.
+
+        Returns True  → still in quarantine, caller should return early.
+        Returns False → quarantine cleared, normal trading allowed.
+
+        Cross-file constraint: reads self.mt5_handler._price_sanity_status, which
+        is initialised in MT5ExecutionHandler.__init__ (Change 2.1). Do not deploy
+        this method without that change in place.
+        """
+        quarantine_minutes = float(
+            self.config.get("trading", {}).get("startup_quarantine_minutes", 10)
+        )
+        elapsed = (datetime.now() - self._session_start_time).total_seconds() / 60.0
+
+        if elapsed < quarantine_minutes:
+            logger.debug(
+                f"[QUARANTINE] {asset_name}: {elapsed:.1f} min elapsed, "
+                f"need {quarantine_minutes:.0f} min — holding."
+            )
+            return True
+
+        # Time floor met. Also require a passed price-sanity check for MT5 assets.
+        if self.mt5_handler is not None:
+            sanity = getattr(self.mt5_handler, "_price_sanity_status", {})
+            asset_status = sanity.get(asset_name, {})
+            if not asset_status.get("passed", False):
+                logger.debug(
+                    f"[QUARANTINE] {asset_name}: time floor met but price sanity "
+                    f"not yet confirmed — holding."
+                )
+                return True
+
+        # Both conditions met — log once per asset then clear
+        if not self._quarantine_cleared_logged.get(asset_name, False):
+            self._quarantine_cleared_logged[asset_name] = True
+            logger.info(
+                f"[QUARANTINE] ✅ {asset_name}: startup quarantine lifted "
+                f"({elapsed:.1f} min elapsed, price sane)."
+            )
+        return False
+
     def _update_session_open_state(self, asset_name: str, is_open: bool) -> bool:
         """
         Track closed→open market transitions and return True if entries should
@@ -4430,6 +4486,12 @@ class TradingBot:
         # Existing positions are not affected — only new entries are gated here.
         if self._update_session_open_state(asset_name, True):
             return  # logged inside the method
+
+        # Change 1.3: startup quarantine — holds ALL assets (including BTC,
+        # which _update_session_open_state deliberately exempts) for the first
+        # N minutes after bot start while prices stabilise and sanity checks run.
+        if self._startup_quarantine_active(asset_name):
+            return
 
         exchange = asset_cfg.get("exchange", "binance")
         symbol = self._resolve_symbol(asset_name)   # picks mt5_symbol when exchange=mt5
@@ -5537,6 +5599,23 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to execute signal for {asset_name}: {e}")
                 return
+
+            # Change 1.4: drain any deferred alerts queued by mt5_handler during
+            # this cycle (e.g. price sanity failures, SL-push streak escalations).
+            if self.mt5_handler is not None:
+                for _alert in list(getattr(self.mt5_handler, "_pending_alerts", [])):
+                    try:
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_error(
+                                f"⚠️ {_alert['asset']}: {_alert['message']}"
+                            )
+                        )
+                    except Exception:
+                        pass
+                try:
+                    self.mt5_handler._pending_alerts.clear()
+                except Exception:
+                    pass
 
             # ============================================================
             # 7. Handle Success & DB Logging

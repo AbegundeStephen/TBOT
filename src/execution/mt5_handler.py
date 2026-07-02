@@ -213,6 +213,11 @@ class MT5ExecutionHandler:
         self._last_pushed_sl: Dict[int, float] = {}
         self._last_pushed_tp: Dict[int, float] = {}
 
+        # Price sanity + deferred alert infrastructure (Changes 2.1–2.3)
+        self._price_sanity_status: Dict[str, Dict] = {}
+        self._pending_alerts: list = []
+        self._alert_occurrence_counts: Dict[str, int] = {}
+
         logger.info("MT5ExecutionHandler with Multi-Asset support initialized")
 
         # Auto-sync enabled assets on startup
@@ -575,11 +580,16 @@ class MT5ExecutionHandler:
                 logger.info(f"[SIZING] Calculating position size for {asset}")
                 logger.info(f"{'='*80}")
 
-                # ── VENUE-SCOPED BALANCE ─────────────────────────────────────────
-                # MT5 trades must be sized against the MT5/Exness account balance,
-                # NOT the combined portfolio capital. Otherwise a $50 Exness account
-                # can be told to open $11k notional because Binance has $14.9k —
-                # which blows the free-margin budget on the first adverse tick.
+                # ── BALANCE SOURCE FOR SIZING ────────────────────────────────────
+                # Default: use MT5 venue balance so position size never exceeds
+                # what Exness margin can actually fund.
+                # When `use_portfolio_balance_for_sizing: true` in trading config,
+                # use the combined portfolio capital instead — appropriate when a
+                # single funded MT5 account does NOT hold all capital (e.g. funds
+                # split across Binance + Exness). The MT5 margin check at line ~809
+                # (via _validate_margin → mt5.order_check) still enforces that the
+                # resulting notional fits within actual Exness free margin, so this
+                # is safe even when portfolio_balance >> mt5_balance.
                 portfolio_balance = self.portfolio_manager.current_capital
                 mt5_balance = portfolio_balance  # safe fallback
                 try:
@@ -592,14 +602,23 @@ class MT5ExecutionHandler:
                 except Exception as _e:
                     logger.debug(f"[SIZING] MT5 account_info fetch failed: {_e}")
 
-                # Always size MT5 orders against MT5 equity. Cross-venue capital
-                # cannot back an Exness margin call.
-                account_balance = mt5_balance
-                if abs(mt5_balance - portfolio_balance) > 1.0:
-                    logger.info(
-                        f"[SIZING] Using MT5 venue balance ${mt5_balance:,.2f} "
-                        f"(portfolio combined: ${portfolio_balance:,.2f})"
-                    )
+                _use_portfolio_bal = self.trading_config.get(
+                    "use_portfolio_balance_for_sizing", False
+                )
+                if _use_portfolio_bal:
+                    account_balance = portfolio_balance
+                    if abs(mt5_balance - portfolio_balance) > 1.0:
+                        logger.info(
+                            f"[SIZING] Using portfolio balance ${portfolio_balance:,.2f} "
+                            f"for sizing (MT5 venue: ${mt5_balance:,.2f})"
+                        )
+                else:
+                    account_balance = mt5_balance
+                    if abs(mt5_balance - portfolio_balance) > 1.0:
+                        logger.info(
+                            f"[SIZING] Using MT5 venue balance ${mt5_balance:,.2f} "
+                            f"(portfolio combined: ${portfolio_balance:,.2f})"
+                        )
 
                 # ── SMALL-ACCOUNT GUARD (sub-$200 MT5 balance) ───────────────────
                 # On a tiny Exness account, force min lot regardless of what the
@@ -723,34 +742,31 @@ class MT5ExecutionHandler:
                     symbol_info.volume_min * current_price * contract_size
                 )
                 if not force_small_account and position_size_usd < min_lot_notional_value:
-                    # ── Small-account fallback: use min lot instead of aborting ──
-                    # Risk-based sizing produced a notional too small for the broker's
-                    # minimum lot.  Rather than blocking the trade entirely, fall back
-                    # to volume_min (the smallest tradeable unit) and let the margin
-                    # check below decide whether the account can actually afford it.
-                    logger.warning(
-                        f"[SIZING] {asset}: Risk-based size (${position_size_usd:,.2f}) "
-                        f"below min lot notional (${min_lot_notional_value:,.2f}). "
-                        f"Falling back to min lot ({symbol_info.volume_min}) — "
-                        f"Small Account Protocol activated."
+                    # Risk calc produced notional below broker minimum lot.
+                    # Check whether the actual dollar risk at min lot is still
+                    # within the risk budget before proceeding.
+                    min_lot_risk_usd = (
+                        symbol_info.volume_min * contract_size * current_price * stop_distance_pct
+                    )
+                    max_acceptable_risk = risk_amount_usd * 2.0
+                    if risk_amount_usd > 0 and min_lot_risk_usd > max_acceptable_risk:
+                        logger.error(
+                            f"[SIZING] {asset}: Risk-calc notional (${position_size_usd:,.2f}) "
+                            f"< broker min lot (${min_lot_notional_value:,.2f}). "
+                            f"Risk at min lot (${min_lot_risk_usd:.2f}) would exceed "
+                            f"2× budget (${max_acceptable_risk:.2f}). Trade blocked."
+                        )
+                        return False
+                    logger.info(
+                        f"[SIZING] {asset}: Risk-calc notional (${position_size_usd:,.2f}) "
+                        f"< broker min lot (${min_lot_notional_value:,.2f}). "
+                        f"Using min lot — actual risk ${min_lot_risk_usd:.2f} "
+                        f"vs budget ${risk_amount_usd:.2f}."
                     )
                     volume_lots = symbol_info.volume_min
-                    if signal_details is None:
-                        signal_details = {}
-                    signal_details["small_account_protocol_active"] = True
                 else:
                     if volume_lots < symbol_info.volume_min:
                         volume_lots = symbol_info.volume_min
-
-                    # Activate small-account protocol whenever we land at min lot
-                    if volume_lots <= symbol_info.volume_min:
-                        if signal_details is None:
-                            signal_details = {}
-                        signal_details["small_account_protocol_active"] = True
-                        logger.info(
-                            f"[MARGIN] 🛡️ Small Account Protocol: {asset} sized to min lot "
-                            f"({symbol_info.volume_min}), enabling margin bypass."
-                        )
 
                 # Config-level per-asset max lot ceiling (harder than broker's volume_max)
                 config_max_lots = asset_cfg.get("max_lots")
@@ -1072,6 +1088,9 @@ class MT5ExecutionHandler:
                             except Exception:
                                 pass
                             return False
+                    else:
+                        # SL placed successfully — clear any partial escalation streak
+                        self._clear_alert_streak(asset, "protective stop failed to place")
 
                     # TP placement stays best-effort — a missing profit target is
                     # not a risk event and must never trigger an emergency close.
@@ -1087,10 +1106,15 @@ class MT5ExecutionHandler:
             else:
                 if self.mode.lower() != "paper" and mt5_ticket:
                     logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
+                    # Bug 2.7 fix: pass original_order_type (what opened the position)
+                    # not the already-flipped close direction. _emergency_close_mt5_position
+                    # flips internally; the previous call passed the flipped value so
+                    # a LONG position ended up sending a BUY (added to it instead of closing).
                     self._emergency_close_mt5_position(
                         symbol,
                         volume_lots,
-                        mt5.ORDER_TYPE_SELL if side == "long" else mt5.ORDER_TYPE_BUY,
+                        mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL,
+                        ticket=mt5_ticket,
                     )
                 return False
         except Exception as e:
@@ -1496,9 +1520,28 @@ class MT5ExecutionHandler:
                 logger.error(f"[MT5 HANDLER] ❌ Could not find symbol for asset: {asset_name}")
                 return False
 
-            current_price = self.get_current_price(symbol)
-            if current_price == 0 or current_price is None:
+            # Change 2.4: verified live price — catches stale-cache entries like
+            # the 2026-07-01 BTC crash where a 4H bar-close was used as fill price.
+            current_price, _price_sane, _dev_pct = self._get_verified_current_price(
+                symbol, asset_name
+            )
+            if current_price is None or current_price <= 0:
+                self._flag_alert(
+                    asset_name, f"Price unavailable for {symbol}", escalate_after=1
+                )
                 logger.error(f"{asset_name} ({symbol}): Failed to get current price")
+                return False
+            if not _price_sane:
+                self._flag_alert(
+                    asset_name,
+                    f"Price check failed: live deviates {_dev_pct:.2%} from cache",
+                    escalate_after=3,
+                )
+                logger.warning(
+                    f"[SANITY] {asset_name}: Live price {current_price:.5g} deviates "
+                    f"{_dev_pct:.2%} from cached bar-close — holding cycle "
+                    f"(Telegram fires after 3 consecutive)"
+                )
                 return False
 
             # ============================================================
@@ -2290,6 +2333,74 @@ class MT5ExecutionHandler:
         except Exception as e:
             logger.error(f"[MT5] Emergency close error: {e}", exc_info=True)
 
+    # ── Alert infrastructure (Changes 2.2–2.3) ──────────────────────────────
+
+    def _flag_alert(self, asset_name: str, message: str, escalate_after: int = 1):
+        """Queue a deferred alert. escalate_after=1 notifies immediately;
+        >1 only pages once the same condition has recurred that many times
+        consecutively, so transient one-off blips don't fire Telegram."""
+        key = f"{asset_name}:{message[:40]}"
+        self._alert_occurrence_counts[key] = (
+            self._alert_occurrence_counts.get(key, 0) + 1
+        )
+        if self._alert_occurrence_counts[key] >= escalate_after:
+            self._pending_alerts.append({"asset": asset_name, "message": message})
+            self._alert_occurrence_counts[key] = 0
+
+    def _clear_alert_streak(self, asset_name: str, message_prefix: str):
+        """Reset escalation streak once the underlying condition has resolved,
+        so a later unrelated occurrence starts fresh instead of inheriting a
+        stale partial count."""
+        key_prefix = f"{asset_name}:{message_prefix[:40]}"
+        for k in list(self._alert_occurrence_counts.keys()):
+            if k.startswith(key_prefix):
+                self._alert_occurrence_counts[k] = 0
+
+    def _get_verified_current_price(
+        self, symbol: str, asset_name: str
+    ) -> tuple:
+        """Fetch a live tick price and sanity-check it against the bar-close cache.
+
+        Returns (price, is_sane, deviation_pct).
+        If the live tick deviates more than price_sanity_max_deviation_pct (default 0.5%)
+        from the last cached bar-close, marks the asset as failed and returns
+        (live_price, False, deviation_pct) so the caller can hold the cycle.
+        A failed check does NOT consume the signal — it defers it to the next cycle,
+        at which point if the deviation persists for escalate_after=3 cycles Telegram fires.
+        """
+        threshold = float(
+            self.trading_config.get("price_sanity_max_deviation_pct", 0.005)
+        )
+
+        live_price = self.get_current_price(symbol, force_live=True)
+        if live_price is None or live_price <= 0:
+            self._price_sanity_status[asset_name] = {
+                "passed": False, "checked_at": datetime.now()
+            }
+            return (None, False, 0.0)
+
+        cached_price = price_cache.get(symbol)
+        if cached_price is None or cached_price <= 0:
+            # No cached reference — accept live price, cannot sanity-check
+            self._price_sanity_status[asset_name] = {
+                "passed": True, "checked_at": datetime.now()
+            }
+            return (live_price, True, 0.0)
+
+        deviation_pct = abs(live_price - cached_price) / cached_price
+
+        if deviation_pct > threshold:
+            self._price_sanity_status[asset_name] = {
+                "passed": False, "checked_at": datetime.now()
+            }
+            return (live_price, False, deviation_pct)
+
+        self._price_sanity_status[asset_name] = {
+            "passed": True, "checked_at": datetime.now()
+        }
+        self._clear_alert_streak(asset_name, "Price check failed")
+        return (live_price, True, deviation_pct)
+
     @handle_errors(
         component="mt5_handler",
         severity=ErrorSeverity.WARNING,
@@ -2515,9 +2626,11 @@ class MT5ExecutionHandler:
             )
 
         if exit_price is None or exit_price <= 0:
-            # Deal history unavailable; use current market price as fallback
+            # Deal history unavailable; use current market price as fallback.
+            # force_live=True: reconciliation paths must not use a stale bar-close
+            # (same root cause as the 2026-07-01 BTC price-source bug).
             if current_price is None:
-                current_price = self.get_current_price(symbol)
+                current_price = self.get_current_price(symbol, force_live=True)
             exit_price = current_price
             logger.debug(
                 f"[SYNC] Falling back to market price ${exit_price} "
@@ -2539,7 +2652,9 @@ class MT5ExecutionHandler:
         Fetches authoritative fill price, sends Telegram alert, and calls close_position.
         """
         try:
-            current_price = self.get_current_price(symbol)
+            # force_live=True: reconciliation must use a live tick, not a stale
+            # bar-close from the price cache (same root cause as 2026-07-01 BTC bug).
+            current_price = self.get_current_price(symbol, force_live=True)
             exit_price, broker_data, _raw_profit = \
                 self._record_mt5_external_close(pos, asset, current_price, symbol)
 
