@@ -1320,7 +1320,9 @@
     "exchange_reconcile_interval_seconds": 60,
     "session_filter_enabled": true,
     "natural_cycle_min_bars": 8,
-    "allow_hedging": false
+    "allow_hedging": false,
+    "startup_quarantine_minutes": 10,
+    "price_sanity_max_deviation_pct": 0.005
   },
   "risk_management": {
     "max_daily_trades": 30,
@@ -1435,6 +1437,8 @@
     "council_mr_lean_bump_secondary": 0.0,
     "council_counter_trend_cap": 3.5,
     "council_min_score_margin": 0.20,
-    "lsm_regime_disagreement_gate_enabled": true
+    "lsm_regime_disagreement_gate_enabled": true,
+    "graduated_squeeze_enabled": false,
+    "conviction_dying_directional_enabled": false
   }
 }

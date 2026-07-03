@@ -1165,9 +1165,20 @@ class InstitutionalCouncilAggregator:
             )
             if not _price_moved:
                 if _minutes_since_move > self._stale_threshold_minutes:
-                    logger.warning(
+                    # Downgrade to DEBUG after 60 min: at that point the market is
+                    # almost certainly closed (holiday, CME early-close, weekend
+                    # rollover). The first ~2 WARNINGs are enough to flag the event;
+                    # repeating every 5 min for 3+ hours is pure noise.
+                    _log_stale = (
+                        logger.debug if _minutes_since_move > 60 else logger.warning
+                    )
+                    _stale_ctx = (
+                        " (market likely closed)" if _minutes_since_move > 60 else ""
+                    )
+                    _log_stale(
                         f"[COUNCIL] ⏸️ Stale price: {self.asset_type} frozen at "
                         f"{_current_price} for {_minutes_since_move:.0f}min — blocking"
+                        f"{_stale_ctx}"
                     )
                     return 0, {
                         "timestamp": timestamp,
@@ -2004,6 +2015,24 @@ class InstitutionalCouncilAggregator:
                                 "BUY" if _likely_dir >= 0 else "SELL",
                             )
 
+                        # Narrow evidence-gated exception: counter-trend CHASE_SOFT during
+                        # a SLIGHTLY regime is structurally unreachable (needs 4.75 against
+                        # a 4.5 ceiling). A confirmed failed_breakout means the old trend
+                        # just failed to continue — not the same as bos_detected (continuation).
+                        # Relax by exactly the measured gap. Same elevated-bar, evidence-logged
+                        # pattern as the CMR override elsewhere in this function.
+                        if (
+                            _likely_type == "CHASE_SOFT"
+                            and _is_slightly
+                            and getattr(_composite_state, "failed_breakout", False)
+                        ):
+                            _effective_counter_threshold -= 0.25
+                            logger.info(
+                                "[COUNCIL GATE] %s counter-trend CHASE_SOFT relaxed by 0.25 — "
+                                "failed_breakout confirmed (SLIGHTLY regime)",
+                                self.asset_type,
+                            )
+
 
 
                     # ── WRITE ENTRY_TYPE TO COMPOSITE_STATE ────────────────
@@ -2066,8 +2095,13 @@ class InstitutionalCouncilAggregator:
                 )
 
             # 2. Resolve which threshold applies to which side for this regime.
-            _buy_threshold  = _effective_trend_threshold   if is_bull else _effective_counter_threshold
-            _sell_threshold = _effective_counter_threshold if is_bull else _effective_trend_threshold
+            # NEUTRAL is symmetric — both sides get the trend threshold so a
+            # strong BUY and a strong SELL face the same bar in a directionless
+            # market. Previously is_bull=False in NEUTRAL caused BUY to use the
+            # higher counter-trend threshold while SELL used the lower trend one.
+            _is_neutral_regime = (consensus_regime == "NEUTRAL")
+            _buy_threshold  = _effective_trend_threshold   if (is_bull or _is_neutral_regime) else _effective_counter_threshold
+            _sell_threshold = _effective_trend_threshold   if (not is_bull or _is_neutral_regime) else _effective_counter_threshold
             _buy_clears  = buy_total  >= _buy_threshold
             _sell_clears = sell_total >= _sell_threshold
 
@@ -2186,11 +2220,13 @@ class InstitutionalCouncilAggregator:
                         safety_threshold = base_threshold
 
                     # High-conviction Council override: when Council ≥ 4.0/5.0
-                    # in a non-strongly-trending regime, a borderline TF signal
-                    # should not be able to veto it.
+                    # and the macro is NOT in a full confirmed trend, a borderline
+                    # TF signal should not veto it. "STRONGLY_BULLISH/BEARISH"
+                    # never existed in the 5-tier model — the correct guard is
+                    # "BULLISH"/"BEARISH" (the full-trend labels that ARE produced).
                     if total_score >= 4.0 and consensus_regime not in (
-                        "STRONGLY_BULLISH",
-                        "STRONGLY_BEARISH",
+                        "BULLISH",
+                        "BEARISH",
                     ):
                         safety_threshold = max(safety_threshold, 0.80)
 
@@ -3503,12 +3539,23 @@ class InstitutionalCouncilAggregator:
                 # both directions — a fading trend is worth less than a fresh
                 # one regardless of which way it's going.
                 if _conviction_dying:
-                    buy_score  = buy_score  * 0.75
-                    sell_score = sell_score * 0.75
-                    if buy_score > 0:
-                        buy_exp  += " -conviction_dying"
-                    if sell_score > 0:
-                        sell_exp += " -conviction_dying"
+                    _cd_directional = self.config.get("phase_config", {}).get(
+                        "conviction_dying_directional_enabled", False
+                    )
+                    _lsm_state_1h = getattr(_cs_t, "livermore_state_1h", None)
+                    if _cd_directional and _lsm_state_1h == "NATURAL_REBOUND":
+                        # Dying bounce inside a downtrend is bearish evidence, not
+                        # neutral. Penalise BUY only — SELL keeps its score.
+                        buy_score = buy_score * 0.75
+                        if buy_score > 0:
+                            buy_exp += " -conviction_dying(NATURAL_REBOUND, BUY-only)"
+                    else:
+                        buy_score  = buy_score  * 0.75
+                        sell_score = sell_score * 0.75
+                        if buy_score > 0:
+                            buy_exp  += " -conviction_dying"
+                        if sell_score > 0:
+                            sell_exp += " -conviction_dying"
 
             return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
@@ -3922,11 +3969,21 @@ class InstitutionalCouncilAggregator:
 
                 if conviction_dying:
                     # Shrinking candle bodies = conviction dying; penalise both
+                    # directions — unless directional mode is enabled (flag gated).
                     penalty = 0.20 * weight
-                    buy_score = max(0.0, buy_score - penalty)
-                    sell_score = max(0.0, sell_score - penalty)
-                    buy_exp += " -conviction_dying"
-                    sell_exp += " -conviction_dying"
+                    _cd_dir = self.config.get("phase_config", {}).get(
+                        "conviction_dying_directional_enabled", False
+                    )
+                    _lsm_1h = getattr(cs, "livermore_state_1h", None)
+                    if _cd_dir and _lsm_1h == "NATURAL_REBOUND":
+                        # Dying bounce in a downtrend: penalise BUY only.
+                        buy_score = max(0.0, buy_score - penalty)
+                        buy_exp += " -conviction_dying(NATURAL_REBOUND, BUY-only)"
+                    else:
+                        buy_score = max(0.0, buy_score - penalty)
+                        sell_score = max(0.0, sell_score - penalty)
+                        buy_exp += " -conviction_dying"
+                        sell_exp += " -conviction_dying"
 
                 if vpd_diverging:
                     # Price moves but volume disagrees — penalise trend direction

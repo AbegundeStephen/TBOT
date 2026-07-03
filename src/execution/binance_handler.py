@@ -1643,7 +1643,7 @@ class BinanceExecutionHandler:
                 "timeInForce": "GTC",
                 "reduceOnly":  True,
             }
-            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", True)
+            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", False)
             if hedge_mode:
                 order_params["positionSide"] = position_side
                 # reduceOnly is incompatible with positionSide in hedge mode
