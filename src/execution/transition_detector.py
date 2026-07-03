@@ -90,7 +90,7 @@ class TransitionDetector:
     # unrelated markets. Only "BTCUSDT" (literal Binance-routed asset name)
     # gets FLOW credit. If BTC is ever moved back to Binance execution, the
     # asset_name used throughout the pipeline must become "BTCUSDT" to match.
-    FLOW_CAPABLE_ASSETS = ("BTCUSDT",)
+    FLOW_CAPABLE_ASSETS = ("BTC", "BTCUSDT",)
 
     MIN_CONDITIONS = 2
 

@@ -1814,9 +1814,7 @@ class InstitutionalCouncilAggregator:
             )
             _regime_lean_c = "bullish" if is_bull else "bearish"
             _lsm_gate_enabled_c = bool(
-                (self.config.get("phase_config", {}) or {}).get(
-                    "lsm_regime_disagreement_gate_enabled", False
-                )
+                (getattr(_composite_state, "phase_config", {}) or {}).get("lsm_regime_disagreement_gate_enabled", False)
             )
             _regime_lsm_disagree = bool(
                 _lsm_gate_enabled_c
