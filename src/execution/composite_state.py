@@ -21,6 +21,9 @@ class CompositeState:
     # LAYER 1: MACRO STATE
     # ══════════════════════════════════════
     lifecycle_phase: str = "ESTABLISHED"
+    # Intentionally unconsumed — formatted debug string ("prev→new"), not judge-ready
+    # data. RSM state_modifiers keys on current state alone, not a transition pair.
+    # Build a fresh consumer if transition-specific logic is ever needed.
     transition_type: Optional[str] = None
     regime_age_hours: float = 0.0
     regime_age_ratio: float = 0.0

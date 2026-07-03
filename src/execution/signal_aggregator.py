@@ -829,6 +829,7 @@ class PerformanceWeightedAggregator:
                 _recent_high = df["high"].iloc[-4:-1].max()
                 if _curr_h > _recent_high and _curr_c < _recent_high:
                     state.failed_breakout = True
+                    logger.info(f"[SIGNAL] {self.asset_type}: failed_breakout=True")
         except Exception:
             pass
 
@@ -858,7 +859,17 @@ class PerformanceWeightedAggregator:
                 _recent = _bodies[-3:].mean()
                 _older = _bodies[:5].mean()
                 state.body_trend_ratio = _recent / max(_older, 0.0001)
-                state.conviction_dying = state.body_trend_ratio < 0.5
+                # Only trust the ratio when older-window bodies aren't near-zero —
+                # dead chop makes the ratio pure noise.
+                state.body_trend_ratio_valid = _older > 0.0001
+                state.conviction_dying = (
+                    state.body_trend_ratio_valid and state.body_trend_ratio < 0.5
+                )
+                if state.conviction_dying:
+                    logger.info(
+                        f"[SIGNAL] {self.asset_type}: conviction_dying=True "
+                        f"(body_trend_ratio={state.body_trend_ratio:.2f})"
+                    )
         except Exception:
             pass
 

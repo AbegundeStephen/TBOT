@@ -15,6 +15,7 @@ from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.utils.trade_logger import log_trade_event
 from src.market.price_cache import price_cache
+from src.utils.market_hours import MarketHours
 
 logger = logging.getLogger(__name__)
 
@@ -372,8 +373,23 @@ class MT5ExecutionHandler:
                     )
                 return live_price
 
-            logger.warning(
-                f"[MT5] {symbol}: No fresh tick data from terminal or history — returning last known"
+            # Downgrade to DEBUG when the market is expected to be closed —
+            # stale ticks outside trading hours are normal, not actionable.
+            # USTEC uses equity hours; crypto is 24/7 (always warn); everything
+            # else (FX, Gold, Oil) uses forex session hours.
+            _sym_key = symbol.lower().rstrip("m")
+            if "btc" in _sym_key or "eth" in _sym_key:
+                _mkt_open = True          # crypto never sleeps; stale tick is always unexpected
+            elif _sym_key in ("ustec", "us100", "nas100", "spx"):
+                _mkt_open = MarketHours.is_us_stock_market_open()
+            else:
+                _mkt_open = MarketHours.is_forex_market_open()
+
+            _log_tick = logger.warning if _mkt_open else logger.debug
+            _tick_ctx = "" if _mkt_open else " (market closed — expected)"
+            _log_tick(
+                f"[MT5] {symbol}: No fresh tick data from terminal or history"
+                f" — returning last known{_tick_ctx}"
             )
             return price_cache.get_last_known(symbol)
         except Exception as e:
@@ -1075,6 +1091,22 @@ class MT5ExecutionHandler:
                                     f"[VTM-SL] #{mt5_ticket}: position gone just before "
                                     f"emergency close — skipping."
                                 )
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    try:
+                                        _sfn(_tg.send_message(
+                                            text=(
+                                                f"⚠️ {asset} #{mt5_ticket}: protective stop failed "
+                                                f"to place, but the position closed on its own just "
+                                                f"before emergency action was needed. "
+                                                f"No action taken — worth a quick check."
+                                            ),
+                                            parse_mode="HTML",
+                                        ))
+                                    except Exception as _te:
+                                        logger.error(f"[VTM-SL] Failed to send self-resolved alert: {_te}")
                                 try:
                                     if _pos_any is not None:
                                         self.portfolio_manager.close_position(

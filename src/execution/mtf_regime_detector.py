@@ -186,24 +186,21 @@ class MultiTimeFrameRegimeDetector:
                 now = pd.Timestamp.now(tz='UTC')
                 hours_old = (now - latest_date).total_seconds() / 3600
 
-                # ✅ FIX: 1H threshold raised from 1.0h → 2.0h, then to 2.25h.
+                # ✅ FIX: 1H threshold raised from 1.0h → 2.0h → 2.25h → 3.5h.
                 # The MTF detector drops the in-progress candle, so the last closed
                 # 1H bar is legitimately 60-119 min old near each hour boundary.
-                # A 1.0h limit triggered an API refetch on every 5-min bot cycle
-                # (CSV "Data is 1.2h old") — wasteful and added latency each loop.
-                # 2.0h left zero margin for fetch/compute latency: live logs showed
-                # repeated "[CSV] Data is 2.0h old (limit=2.0h)" trips right at the
-                # boundary, forcing unnecessary API fallback. 2.25h gives a 15-min
-                # buffer on top of the legitimate 119-min max age — confirmed via
-                # live logs, not a clock/timezone issue (that claim didn't hold up).
-                # 1h: 2.25h gives a 15-min buffer above the legitimate 2h max age
-                #      (drop-in-progress-candle + processing delay), confirmed via live logs.
-                # 4h: raised from 4.0h to 6.0h — live logs showed 5.3h actual staleness
-                #      on multiple consecutive cycles. The 4H bar closes at fixed UTC hours
-                #      (00,04,08…) and the updater + fetch latency adds real-world delay
-                #      that pushes beyond the theoretical 4h maximum. 6.0h covers the
-                #      worst-case observed while still catching genuinely stale data.
-                stale_threshold = {"1h": 2.25, "4h": 6.0, "1d": 24.0}.get(timeframe_str, 4.0)
+                # Additionally, the historical updater saves only completed bars, so
+                # the CSV's last-bar timestamp is the open of the last closed bar —
+                # not the write time. Live logs showed: updater ran at 10:19, saved
+                # the 09:00 bar as newest; at 11:18 the bar was 2h18m old (2.3h),
+                # crossing the 2.25h limit by 5 min and triggering unnecessary API
+                # fallback every ~65 min. The pattern repeats once per updater cycle.
+                # 3.5h catches real staleness (updater missed 1+ full cycle =
+                # worst-case legitimate age ~2.2h + 65-min cycle = ~3.3h) without
+                # false-positives during normal operation.
+                # 4h: kept at 6.0h — live logs showed 5.3h actual staleness on
+                #      multiple cycles due to fixed UTC bar boundaries + fetch latency.
+                stale_threshold = {"1h": 3.5, "4h": 6.0, "1d": 24.0}.get(timeframe_str, 4.0)
                 if hours_old > stale_threshold or pd.isna(hours_old):
                     logger.warning(f"[CSV] Data is {hours_old:.1f}h old (limit={stale_threshold}h) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)
@@ -353,6 +350,18 @@ class MultiTimeFrameRegimeDetector:
                 )
 
             df_daily = self._calculate_indicators(df_daily)
+            # _calculate_indicators returns an empty DataFrame when bars < 400
+            # (EMA-200 burn-in not complete). This happens in the 100-399 range
+            # that the logging block above announces as "Producing a real read" —
+            # the log was correct in intent but the empty-df crash made it a lie.
+            if df_daily.empty:
+                return GovernorStatus(
+                    is_bullish=False, is_bearish=False,
+                    reasoning=f"EMA-200 burn-in incomplete ({_daily_bars}/400 bars)",
+                    ema_200=None,
+                    daily_bars_available=_daily_bars,
+                    regime_maturity=_maturity,
+                )
             latest = df_daily.iloc[-1]
             current_price = latest["close"]
             ema_200 = latest[f"ema_{BASELINE_EMA}"]
@@ -442,15 +451,13 @@ class MultiTimeFrameRegimeDetector:
         latest_1h = df_1h_with_ema.iloc[-1]
         latest_4h = df_4h_with_ema.iloc[-1]
 
-        # [ADX-DEBUG] Temporary instrumentation — confirms/refutes whether
-        # talib's Wilder-smoothed ADX/RSI for the "same" closed bar drifts
-        # between cycles because the CSV gets rewritten by
-        # historical_updater.py mid-read. Compare bars/last_bar/adx/rsi
-        # across consecutive cycles for the same asset: if last_bar is
-        # unchanged but adx/rsi or bar count differs, that's the race.
-        # Remove once confirmed/fixed.
+        # [ADX-DEBUG] Downgraded INFO → DEBUG: the CSV race condition this was
+        # investigating (does talib ADX/RSI drift between cycles when the updater
+        # rewrites mid-read?) is now resolved by the updater writing atomically.
+        # Keep at DEBUG so it's still accessible when needed without polluting
+        # the production log with one line per asset per 5-min cycle.
         try:
-            logger.info(
+            logger.debug(
                 f"[ADX-DEBUG] {asset_type} "
                 f"1H: bars={len(df_1h_with_ema)} last_bar={df_1h_with_ema.index[-1]} "
                 f"adx={latest_1h['adx']:.2f} rsi={latest_1h['rsi']:.2f} | "
@@ -645,24 +652,36 @@ class MultiTimeFrameRegimeDetector:
             h1_higher_lows = False
 
         # ✨ NEW: Populate granular timeframe data for database/dashboard
+        # Derive per-timeframe regime labels from each timeframe's own ADX
+        # trend direction (plus_di vs minus_di). Previously these used a
+        # bool-equality test (above_Xh_50 == is_bullish) which produced "NEUTRAL"
+        # whenever the EMA and macro bias disagreed — masking the real 1H/4H
+        # directional state in the DB and dashboard. "NEUTRAL" now means the
+        # timeframe's own DMI is flat, not "contradicts macro".
+        _h1_td = latest_1h.get("trend_dir") if hasattr(latest_1h, "get") else (
+            latest_1h["trend_dir"] if "trend_dir" in latest_1h else None
+        )
+        _h4_td = latest_4h.get("trend_dir") if hasattr(latest_4h, "get") else (
+            latest_4h["trend_dir"] if "trend_dir" in latest_4h else None
+        )
         timeframe_data = {
             "1h": {
-                "regime": consensus_regime if above_1h_50 == is_bullish else "NEUTRAL",
+                "regime": "BULLISH" if _h1_td == "UP" else "BEARISH" if _h1_td == "DOWN" else "NEUTRAL",
                 "confidence": abs(score),
                 "adx": float(latest_1h["adx"]) if "adx" in latest_1h else None,
                 "rsi": float(latest_1h["rsi"]) if "rsi" in latest_1h else None,
-                "trend_direction": latest_1h["trend_dir"] if "trend_dir" in latest_1h else "N/A",
+                "trend_direction": _h1_td if _h1_td else "N/A",
                 "momentum_dir": h1_momentum_dir,
                 "momentum_pct": round(h1_momentum_pct * 100, 3),
                 "lower_highs": h1_lower_highs,
                 "higher_lows": h1_higher_lows,
             },
             "4h": {
-                "regime": consensus_regime if above_4h_200 == is_bullish else "NEUTRAL",
+                "regime": "BULLISH" if _h4_td == "UP" else "BEARISH" if _h4_td == "DOWN" else "NEUTRAL",
                 "confidence": abs(score),
                 "adx": float(latest_4h["adx"]) if "adx" in latest_4h else None,
                 "rsi": float(latest_4h["rsi"]) if "rsi" in latest_4h else None,
-                "trend_direction": latest_4h["trend_dir"] if "trend_dir" in latest_4h else "N/A"
+                "trend_direction": _h4_td if _h4_td else "N/A"
             },
             "1d": {
                 "regime": "BULLISH" if macro_bullish else "BEARISH" if macro_bearish else "NEUTRAL",

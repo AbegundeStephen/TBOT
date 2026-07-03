@@ -503,8 +503,15 @@ class TrendFollowingStrategy(BaseStrategy):
             upper_70 = np.percentile(recent_widths, 70)
             
             if latest["bb_width_norm"] <= lower_20:
-                bullish_score += 1.0; bearish_score += 1.0
-                if not silent: logger.info(f"[{self.name}] 🌀 Volatility Squeeze detected (+1.0 bonus)")
+                _phase_cfg = getattr(composite_state, "phase_config", {}) if composite_state else {}
+                if _phase_cfg.get("graduated_squeeze_enabled", False):
+                    _sq_str = getattr(composite_state, "squeeze_strength", 0.5) or 0.5
+                    _sq_dur = getattr(composite_state, "bb_kc_squeeze_duration", 0) or 0
+                    _sq_bonus = 0.5 + min(1.0, _sq_str) * 1.0 + min(0.3, _sq_dur * 0.02)
+                else:
+                    _sq_bonus = 1.0
+                bullish_score += _sq_bonus; bearish_score += _sq_bonus
+                if not silent: logger.info(f"[{self.name}] 🌀 Volatility Squeeze detected (+{_sq_bonus:.2f} bonus)")
             elif latest["bb_width_norm"] >= upper_70:
                 bullish_score -= 0.5; bearish_score -= 0.5
                 if not silent: logger.info(f"[{self.name}] 🌋 High Volatility Expansion (-0.5 penalty)")

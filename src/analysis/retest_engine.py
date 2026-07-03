@@ -81,6 +81,10 @@ class RetestResult:
     # None when the feature is off or no box was computed.
     range_high: Optional[float] = None
     range_low: Optional[float] = None
+    # Second and third nearest 4H structural levels — visible context only.
+    # Currently logged but do not alter CLEAN/BREAKOUT/CHASE classification.
+    level_2: Optional[float] = None
+    level_3: Optional[float] = None
 
 
 class RetestEngine:
@@ -169,6 +173,8 @@ class RetestEngine:
 
         close     = float(df["close"].iloc[-1])
         level     = getattr(state, "nearby_4h_level", None)
+        level_2   = getattr(state, "nearby_4h_level_2", None)
+        level_3   = getattr(state, "nearby_4h_level_3", None)
         asset_cfg = self._assets.get(symbol, self._assets.get("DEFAULT", {}))
 
         # ── 1. CLEAN ───────────────────────────────────────────────
@@ -188,6 +194,8 @@ class RetestEngine:
                     level=level,
                     range_high=_rh,
                     range_low=_rl,
+                    level_2=level_2,
+                    level_3=level_3,
                 )
 
         # ── 2. BREAKOUT ──────────────────────────────────────────────
@@ -215,6 +223,8 @@ class RetestEngine:
                         entry_type=ET_TREND_FOLLOWING,
                         direction=direction,
                         level=bo_level,
+                        level_2=level_2,
+                        level_3=level_3,
                     )
 
         # ── 2B. CONTINUATION (Scenario B) ────────────────────────
@@ -267,6 +277,8 @@ class RetestEngine:
                     entry_type=ET_REJECT,
                     direction=direction,
                     level=level,
+                    level_2=level_2,
+                    level_3=level_3,
                 )
             if dist_atr >= chase_soft:
                 logger.debug(
@@ -278,6 +290,8 @@ class RetestEngine:
                     entry_type=ET_MR_PULLBACK,
                     direction=direction,
                     level=level,
+                    level_2=level_2,
+                    level_3=level_3,
                 )
 
         # ── 6. NO_LEVEL_NEARBY (fallback) ────────────────────────

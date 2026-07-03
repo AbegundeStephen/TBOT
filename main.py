@@ -1948,7 +1948,13 @@ class TradingBot:
             # df_4h injection: CompositeState, TransitionDetector momentum, MR/TF strategies,
             # and 4H slope alignment all read governor_data.get('df_4h'). Without this the
             # cached 4H data was fetched but never reached the aggregator.
-            mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+            # Guard: _df_4h_cache is populated inside trade_asset() which runs AFTER
+            # this point — on the first cycle get() returns None and would overwrite
+            # the df_4h that get_regime_for_trading() already set, breaking Livermore
+            # 4H update, slope alignment, and composite_state on the first cycle.
+            _cached_4h = self._df_4h_cache.get(asset_name)
+            if _cached_4h is not None:
+                mtf_regime["df_4h"] = _cached_4h
 
             # ── Livermore composite_state injection ───────────────────────────
             # The council aggregator has no Livermore state machine of its own.
@@ -2040,7 +2046,10 @@ class TradingBot:
             # df_4h injection: CompositeState, TransitionDetector momentum, MR/TF strategies,
             # and 4H slope alignment all read governor_data.get('df_4h'). Without this the
             # cached 4H data was fetched but never reached the aggregator.
-            mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+            # Guard: same first-cycle None risk as the council path above.
+            _cached_4h = self._df_4h_cache.get(asset_name)
+            if _cached_4h is not None:
+                mtf_regime["df_4h"] = _cached_4h
 
             signal, details = aggregator.get_aggregated_signal(
                 df,
@@ -4283,12 +4292,20 @@ class TradingBot:
         if asset_cfg.get("asset_type", "") == "crypto" or "BTC" in asset_name_upper:
             return True
 
-        # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex)
+        # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex, Indices)
         is_open = MarketHours.should_trade(asset_name)
         if not is_open:
-            status, message = MarketHours.get_market_status("forex")
+            # Use the correct market type so the log message matches the asset.
+            # USTEC is a US equity index; passing "forex" produced the misleading
+            # "[MARKET] USTEC: Forex/Gold market is OPEN" message even when the
+            # US market was closed and should_trade correctly returned False.
+            _mkt_log_type = (
+                "stocks" if asset_name_upper in ("USTEC", "US100", "NAS100", "SPX")
+                else "forex"
+            )
+            status, message = MarketHours.get_market_status(_mkt_log_type)
             current_hour = datetime.now().hour
-            
+
             # Use per-asset logging
             if self.last_market_status_log.get(asset_name) != current_hour:
                 logger.info(f"[MARKET] {asset_name}: {message}")
@@ -6454,7 +6471,7 @@ class TradingBot:
         try:
             current_prices = {}
             for asset_name, asset_cfg in self.config["assets"].items():
-                if not asset_cfg.get("enabled", False) and not self.portfolio_manager.get_asset_positions(asset_name):
+                if not asset_cfg.get("enabled", False):
                     continue
 
                 exchange = asset_cfg.get("exchange", "binance")
@@ -6861,45 +6878,62 @@ class TradingBot:
                 logger.warning(f"[SHADOW] load_state at startup failed: {_se}")
                 logger.info("[SHADOW] Shadow trading engine started (fresh)")
 
-            # F.4: Start CVD WebSocket for BTC real-time order flow
-            # THREADING FIX: main.py's start() is synchronous and enters a blocking while-loop.
-            # asyncio.get_event_loop().create_task() creates a coroutine but the event loop is
-            # never driven, so the WebSocket task starves and the CVD feed stays permanently stale.
-            # Running asyncio.run() inside a daemon thread gives the coroutine its own event loop.
-            try:
-                self.cvd_consumer = CVDConsumer()
-
-                def _cvd_supervisor():
-                    # RECONNECT FIX: CVDConsumer.start() returns (rather than raising)
-                    # whenever the websocket drops — without a supervisor the daemon
-                    # thread exits silently and FLOW/cvd_trend stay stale at 0 for the
-                    # rest of the process lifetime. Loop forever with capped exponential
-                    # backoff so a transient network blip doesn't permanently kill the
-                    # order-flow feed.
-                    backoff = 5
-                    max_backoff = 60
-                    while True:
-                        try:
-                            asyncio.run(self.cvd_consumer.start())
-                        except Exception as _loop_err:
-                            logger.warning(f"[CVD] Supervisor caught exception: {_loop_err}")
-                        logger.warning(
-                            f"[CVD] WebSocket disconnected — reconnecting in {backoff}s"
-                        )
-                        time.sleep(backoff)
-                        backoff = min(backoff * 2, max_backoff)
-
-                self.cvd_thread = threading.Thread(
-                    target=_cvd_supervisor,
-                    daemon=True,
-                    name="cvd-websocket",
-                )
-                self.cvd_thread.start()
-                logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread (auto-reconnect enabled)")
-            except Exception as _cvd_err:
-                logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
+            # F.4: Start CVD WebSocket for BTC real-time order flow — only when
+            # BTC is actually on Binance. When BTC uses MT5, the _btc_is_binance
+            # gate in the aggregator already prevents CVD data from being injected,
+            # but the WebSocket was still connecting to Binance, streaming tick data
+            # into a queue nobody reads, and generating BinanceWebsocketQueueOverflow
+            # ERRORs from the library's own reconnecting_websocket logger every time
+            # the queue hit 100 messages. Starting the socket conditionally eliminates
+            # the connection, the errors, and the wasted bandwidth in one step.
+            _btc_on_binance = (
+                self.config.get("assets", {}).get("BTC", {}).get("exchange", "binance")
+                == "binance"
+            )
+            if not _btc_on_binance:
+                logger.info("[CVD] BTC exchange is MT5 — Binance WebSocket skipped.")
                 self.cvd_consumer = None
                 self.cvd_thread = None
+            else:
+                # THREADING FIX: main.py's start() is synchronous and enters a blocking
+                # while-loop. asyncio.get_event_loop().create_task() creates a coroutine
+                # but the event loop is never driven, so the WebSocket task starves and
+                # the CVD feed stays permanently stale. Running asyncio.run() inside a
+                # daemon thread gives the coroutine its own event loop.
+                try:
+                    self.cvd_consumer = CVDConsumer()
+
+                    def _cvd_supervisor():
+                        # RECONNECT FIX: CVDConsumer.start() returns (rather than raising)
+                        # whenever the websocket drops — without a supervisor the daemon
+                        # thread exits silently and FLOW/cvd_trend stay stale at 0 for
+                        # the rest of the process lifetime. Loop forever with capped
+                        # exponential backoff so a transient network blip doesn't
+                        # permanently kill the order-flow feed.
+                        backoff = 5
+                        max_backoff = 60
+                        while True:
+                            try:
+                                asyncio.run(self.cvd_consumer.start())
+                            except Exception as _loop_err:
+                                logger.warning(f"[CVD] Supervisor caught exception: {_loop_err}")
+                            logger.warning(
+                                f"[CVD] WebSocket disconnected — reconnecting in {backoff}s"
+                            )
+                            time.sleep(backoff)
+                            backoff = min(backoff * 2, max_backoff)
+
+                    self.cvd_thread = threading.Thread(
+                        target=_cvd_supervisor,
+                        daemon=True,
+                        name="cvd-websocket",
+                    )
+                    self.cvd_thread.start()
+                    logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread (auto-reconnect enabled)")
+                except Exception as _cvd_err:
+                    logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
+                    self.cvd_consumer = None
+                    self.cvd_thread = None
 
             # ✅ FIXED: Initialize selectors AFTER exchanges are connected
             self.dynamic_selector = DynamicPresetSelector(
