@@ -6454,7 +6454,7 @@ class TradingBot:
         try:
             current_prices = {}
             for asset_name, asset_cfg in self.config["assets"].items():
-                if not asset_cfg.get("enabled", False):
+                if not asset_cfg.get("enabled", False) and not self.portfolio_manager.get_asset_positions(asset_name):
                     continue
 
                 exchange = asset_cfg.get("exchange", "binance")
