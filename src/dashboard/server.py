@@ -1141,6 +1141,92 @@ def health_check():
 
 
 # ============================================================================
+# LOG DOWNLOADS
+# ============================================================================
+
+@app.route("/api/download")
+def download_logs():
+    """
+    Download log files as file attachments.
+
+    ?type=bot_log             — full trading_bot.log
+    ?type=funnel&days=N       — funnel + ai_rejects JSONL for last N days (0 = all)
+    ?type=shadow&days=N       — shadow closed JSONL for last N days (0 = all)
+    """
+    import io
+    import glob as _glob
+    from flask import send_file
+
+    log_type = request.args.get("type", "bot_log")
+    days_str = request.args.get("days", "0")
+
+    try:
+        n_days = int(days_str)
+    except ValueError:
+        n_days = 0
+
+    if log_type == "bot_log":
+        log_path = os.path.join(project_root, "logs", "trading_bot.log")
+        if not os.path.exists(log_path):
+            return jsonify({"error": "trading_bot.log not found"}), 404
+        return send_file(
+            log_path,
+            as_attachment=True,
+            download_name="trading_bot.log",
+            mimetype="text/plain",
+        )
+
+    elif log_type in ("funnel", "shadow"):
+        if log_type == "funnel":
+            log_dir = os.path.join(project_root, "logs", "funnel")
+            prefixes = ("funnel_", "ai_rejects_")
+            out_name = f"funnel_data_last{n_days}d.jsonl" if n_days > 0 else "funnel_data_all.jsonl"
+        else:
+            log_dir = os.path.join(project_root, "logs", "shadow")
+            prefixes = ("closed_",)
+            out_name = f"shadow_data_last{n_days}d.jsonl" if n_days > 0 else "shadow_data_all.jsonl"
+
+        if not os.path.isdir(log_dir):
+            return jsonify({"error": f"Log directory not found"}), 404
+
+        cutoff = (datetime.now() - timedelta(days=n_days)).date() if n_days > 0 else None
+
+        segments = []
+        for prefix in prefixes:
+            for filepath in sorted(_glob.glob(os.path.join(log_dir, f"{prefix}*.jsonl"))):
+                if cutoff:
+                    fname = os.path.basename(filepath)
+                    date_part = fname[len(prefix):].replace(".jsonl", "")
+                    try:
+                        if datetime.strptime(date_part, "%Y-%m-%d").date() < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                        data = f.read().strip()
+                    if data:
+                        segments.append(data)
+                except Exception:
+                    continue
+
+        if not segments:
+            return jsonify({"error": "No log files found for the selected range"}), 404
+
+        buf = io.BytesIO("\n".join(segments).encode("utf-8"))
+        buf.seek(0)
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=out_name,
+            mimetype="application/x-ndjson",
+        )
+
+    else:
+        return jsonify({"error": f"Unknown type: {log_type}"}), 400
+
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 

@@ -422,6 +422,15 @@
             border: none; font-size: 11px; font-weight: 600;
             cursor: pointer; transition: background 0.15s;
         }
+
+        .dl-range-btn {
+            padding: 5px 13px; border-radius: 20px;
+            border: 1px solid var(--border2);
+            background: transparent; color: var(--muted2);
+            font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+        }
+        .dl-range-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+        .dl-range-btn:hover:not(.active) { background: var(--surface); color: var(--text); }
         .export-csv  { background: var(--green);  color: white; }
         .export-csv:hover  { background: #059669; }
         .export-copy { background: var(--accent); color: white; }
@@ -1001,6 +1010,7 @@
                 <button class="tab-btn" data-tab="shadow">🟣 Shadow Intel</button>
                 <button class="tab-btn" data-tab="control">🎛 Control</button>
                 <button class="tab-btn" data-tab="config">⚙️ Config</button>
+                <button class="tab-btn" data-tab="downloads">📥 Downloads</button>
             </div>
 
             <!-- Open Positions -->
@@ -1091,6 +1101,39 @@
             <div class="tab-panel" id="tab-config">
                 <div id="config-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <!-- Downloads -->
+            <div class="tab-panel" id="tab-downloads">
+                <div style="padding:24px 20px;max-width:520px;">
+                    <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:18px;letter-spacing:0.04em;">📥 Log Downloads</div>
+
+                    <!-- Source selector -->
+                    <div style="margin-bottom:16px;">
+                        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Log source</label>
+                        <select id="dl-type" onchange="dlUpdateUI()" style="width:100%;padding:8px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;outline:none;cursor:pointer;">
+                            <option value="bot_log">Trading Bot Log  (trading_bot.log)</option>
+                            <option value="funnel">Funnel Data  (signal funnel + AI rejects)</option>
+                            <option value="shadow">Shadow Data  (shadow closed trades)</option>
+                        </select>
+                    </div>
+
+                    <!-- Date range (hidden for bot_log) -->
+                    <div id="dl-range-wrap" style="display:none;margin-bottom:16px;">
+                        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Date range</label>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <button class="dl-range-btn active" data-days="3"  onclick="dlSelectRange(this)">Last 3 days</button>
+                            <button class="dl-range-btn"        data-days="7"  onclick="dlSelectRange(this)">Last 7 days</button>
+                            <button class="dl-range-btn"        data-days="14" onclick="dlSelectRange(this)">Last 14 days</button>
+                            <button class="dl-range-btn"        data-days="30" onclick="dlSelectRange(this)">Last 30 days</button>
+                            <button class="dl-range-btn"        data-days="0"  onclick="dlSelectRange(this)">All time</button>
+                        </div>
+                    </div>
+
+                    <!-- Download button + hint -->
+                    <button onclick="dlExecute()" style="padding:9px 22px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0.02em;">⬇ Download</button>
+                    <p id="dl-hint" style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.6;">Full log file will download as plain text.</p>
                 </div>
             </div>
         </div>
@@ -2805,6 +2848,45 @@ document.addEventListener('DOMContentLoaded', () => {
         if (panel && panel.classList.contains('active')) updateCCBotStatus();
     }, 30000);
 });
+
+// ── Downloads tab ────────────────────────────────────────────────────────────
+function dlUpdateUI() {
+    const type = document.getElementById('dl-type').value;
+    const rangeWrap = document.getElementById('dl-range-wrap');
+    const hint = document.getElementById('dl-hint');
+    if (type === 'bot_log') {
+        rangeWrap.style.display = 'none';
+        hint.textContent = 'Full log file will download as plain text.';
+    } else if (type === 'funnel') {
+        rangeWrap.style.display = 'block';
+        hint.textContent = 'Downloads signal funnel + AI rejects as a single JSONL file.';
+    } else {
+        rangeWrap.style.display = 'block';
+        hint.textContent = 'Downloads shadow closed trade records as a single JSONL file.';
+    }
+}
+
+function dlSelectRange(btn) {
+    document.querySelectorAll('.dl-range-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+}
+
+function dlExecute() {
+    const type = document.getElementById('dl-type').value;
+    let days = 3;
+    const activeRange = document.querySelector('.dl-range-btn.active');
+    if (activeRange) days = parseInt(activeRange.getAttribute('data-days'), 10);
+
+    let url = `/api/download?type=${encodeURIComponent(type)}`;
+    if (type !== 'bot_log') url += `&days=${days}`;
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
 </script>
 </body>
 </html>
