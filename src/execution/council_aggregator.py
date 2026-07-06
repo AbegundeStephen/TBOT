@@ -3074,8 +3074,9 @@ class InstitutionalCouncilAggregator:
             if (
                 _mr_lean_mode != "off"
                 and signal != 0
-                and mr_signal == 0
-                and mr_conf == 0.0
+                and not (
+                    (mr_signal == 1 and signal == 1) or (mr_signal == -1 and signal == -1)
+                )
             ):
                 _lsm_lean = (
                     getattr(_composite_state, "livermore_state_1h", None)
@@ -3165,6 +3166,11 @@ class InstitutionalCouncilAggregator:
                 main_reasoning += " | " + " | ".join(bonus_tags[:2])
 
             # Build details dict
+            _judge_scores_src = (
+                buy_scores if signal == 1
+                else sell_scores if signal == -1
+                else (buy_scores if buy_total >= sell_total else sell_scores)
+            )
             details = {
                 "timestamp": timestamp,
                 "signal": signal,
@@ -3175,6 +3181,13 @@ class InstitutionalCouncilAggregator:
                 "total_score": total_score,
                 "required_score": required_score,
                 "scores": chosen_scores,
+                "judge_scores": {
+                    "trend": _judge_scores_src.get("trend", 0.0),
+                    "structure": _judge_scores_src.get("structure", 0.0),
+                    "momentum": _judge_scores_src.get("momentum", 0.0),
+                    "pattern": _judge_scores_src.get("pattern", 0.0),
+                    "volume": _judge_scores_src.get("volume", 0.0),
+                },
                 "buy_scores": buy_scores,
                 "sell_scores": sell_scores,
                 "buy_total": buy_total,
