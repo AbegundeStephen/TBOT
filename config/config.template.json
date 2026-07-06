@@ -1439,6 +1439,7 @@
     "council_min_score_margin": 0.20,
     "lsm_regime_disagreement_gate_enabled": true,
     "graduated_squeeze_enabled": false,
-    "conviction_dying_directional_enabled": false
+    "conviction_dying_directional_enabled": false,
+    "emergency_close_unanchored_weak_signal_enabled": false
   }
 }
