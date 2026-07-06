@@ -1564,6 +1564,22 @@ class PerformanceWeightedAggregator:
                             )
                         break
 
+                for i in range(len(_4h_lows) - 3, 4, -1):
+                    if _4h_lows[i] < _4h_lows[i - 1] and _4h_lows[i] < _4h_lows[i + 1]:
+                        _exists = any(
+                            abs(lvl["price"] - _4h_lows[i]) / _atr < 0.3
+                            for lvl in self._structure_levels[asset]
+                        )
+                        if not _exists:
+                            self._structure_levels[asset].append({
+                                "price": _4h_lows[i],
+                                "tf": "4H",
+                                "type": "swing_low",
+                                "tests": 0,
+                                "age_hours": 0,
+                            })
+                        break
+
             # Collect all candidate levels within 3.0 ATR.
             # Sort by quality: most-tested first, then nearest.
             # A level tested 3 times at a price is more significant

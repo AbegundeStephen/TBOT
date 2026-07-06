@@ -387,6 +387,8 @@ class MT5ExecutionHandler:
 
             _log_tick = logger.warning if _mkt_open else logger.debug
             _tick_ctx = "" if _mkt_open else " (market closed — expected)"
+            if mt5.last_error()[0] != 0:
+                logger.warning(f"[MT5] {symbol}: last_error={mt5.last_error()}")
             _log_tick(
                 f"[MT5] {symbol}: No fresh tick data from terminal or history"
                 f" — returning last known{_tick_ctx}"

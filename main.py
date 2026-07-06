@@ -4343,12 +4343,11 @@ class TradingBot:
 
         During the quarantine window:
           1. Time floor: block until startup_quarantine_minutes have elapsed.
-          2. Price sanity: block if mt5_handler hasn't yet confirmed a clean live
-             price for this asset (requires FILE 2 / Change 2.1 attributes).
-
-        Unlike _update_session_open_state, this applies to ALL assets including
-        BTC — the 2026-07-01 incident showed BTC's 24/7 status was exactly why
-        a stale cache slipped through on first-cycle execution.
+          2. Price sanity (MT5 assets only): block until mt5_handler actively
+             confirms a clean live price for this asset via
+             _get_verified_current_price. Binance/BTC has no equivalent sanity
+             mechanism yet, so BTC is governed by the time floor alone — a gap
+             to close if a BTC-side stale-cache incident recurs.
 
         Returns True  → still in quarantine, caller should return early.
         Returns False → quarantine cleared, normal trading allowed.
@@ -4370,15 +4369,23 @@ class TradingBot:
             return True
 
         # Time floor met. Also require a passed price-sanity check for MT5 assets.
-        if self.mt5_handler is not None:
+        asset_cfg = self.config.get("assets", {}).get(asset_name, {})
+        if self.mt5_handler is not None and asset_cfg.get("exchange") == "mt5":
+            symbol = asset_cfg.get("symbol", asset_name)
             sanity = getattr(self.mt5_handler, "_price_sanity_status", {})
             asset_status = sanity.get(asset_name, {})
             if not asset_status.get("passed", False):
-                logger.debug(
-                    f"[QUARANTINE] {asset_name}: time floor met but price sanity "
-                    f"not yet confirmed — holding."
-                )
-                return True
+                try:
+                    _, is_sane, _ = self.mt5_handler._get_verified_current_price(symbol, asset_name)
+                except Exception as _qc_err:
+                    logger.debug(f"[QUARANTINE] {asset_name}: sanity check errored ({_qc_err}) — holding.")
+                    return True
+                if not is_sane:
+                    logger.debug(
+                        f"[QUARANTINE] {asset_name}: time floor met but price sanity "
+                        f"not yet confirmed — holding."
+                    )
+                    return True
 
         # Both conditions met — log once per asset then clear
         if not self._quarantine_cleared_logged.get(asset_name, False):
@@ -5115,17 +5122,17 @@ class TradingBot:
                     # regime check further below).
                     _mtf_is_bullish = mtf_regime.get("is_bullish")
                     _mtf_is_bearish = mtf_regime.get("is_bearish")
-                    _lsm_gate_enabled_m = bool(self.config.get("phase_config", {}).get(
-                        "lsm_regime_disagreement_gate_enabled", False
-                    ))
+                    _agg_m = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
+                    _cs_m = {}
+                    if _agg_m and getattr(_agg_m, "_cached_composite", None) is not None:
+                        try:
+                            _cs_m = _agg_m._cached_composite.to_dict()
+                        except Exception:
+                            _cs_m = {}
+                    _lsm_gate_enabled_m = bool(
+                        (_cs_m.get("phase_config", {}) or {}).get("lsm_regime_disagreement_gate_enabled", False)
+                    )
                     if _lsm_gate_enabled_m:
-                        _agg_m = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
-                        _cs_m = {}
-                        if _agg_m and getattr(_agg_m, "_cached_composite", None) is not None:
-                            try:
-                                _cs_m = _agg_m._cached_composite.to_dict()
-                            except Exception:
-                                _cs_m = {}
                         _lsm_4h_m = _cs_m.get("livermore_state_4h")
                         _lsm_lean_m = (
                             "bullish" if _lsm_4h_m in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
@@ -5273,6 +5280,11 @@ class TradingBot:
                     logger.debug(
                         f"[SUPPRESS] {asset_name}: counter-direction signal silently dropped."
                     )
+                    if getattr(self, "funnel_logger", None) is not None:
+                        try:
+                            self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_same_direction"})
+                        except Exception:
+                            pass
                     return
 
                 # Distinguish aggregator/AI rejection from a natural HOLD
@@ -5417,6 +5429,11 @@ class TradingBot:
                     asset_name, signal, details, df, current_price,
                     "trading_limits", asset_cfg,
                 )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_trading_limits"})
+                    except Exception:
+                        pass
                 return
 
             if not self.check_min_time_between_trades(asset_name, current_lsm_state=_current_lsm):
@@ -5459,6 +5476,11 @@ class TradingBot:
                     asset_name, signal, details, df, current_price,
                     "cooldown_block", asset_cfg,
                 )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_cooldown"})
+                    except Exception:
+                        pass
                 return
 
             # ── Natural cycle elapsed gate ────────────────────────────────────
@@ -5489,6 +5511,11 @@ class TradingBot:
                     asset_name, signal, details, df, current_price,
                     "natural_cycle_gate", asset_cfg,
                 )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_natural_cycle"})
+                    except Exception:
+                        pass
                 return
 
             # Store BEFORE state
@@ -6638,13 +6665,8 @@ class TradingBot:
                             logger.warning("[WATCHDOG] MT5 reconnect failed: %s", _rc_err)
 
                         _down_seconds = (datetime.now() - self._mt5_down_since).total_seconds()
-                        _has_mt5_positions = any(
-                            getattr(p, "symbol", "") and not str(getattr(p, "symbol", "")).upper().startswith("BTC")
-                            for p in (self.portfolio_manager.positions.values() if self.portfolio_manager else [])
-                        )
                         _should_alert = (
                             _down_seconds >= 180
-                            and _has_mt5_positions
                             and (
                                 self._mt5_last_alert_time is None
                                 or (datetime.now() - self._mt5_last_alert_time).total_seconds() >= 600
@@ -6654,7 +6676,7 @@ class TradingBot:
                             self._mt5_last_alert_time = datetime.now()
                             _alert_msg = (
                                 f"🔴 *CRITICAL: MT5 DISCONNECTED*\n\n"
-                                f"Down for {int(_down_seconds // 60)} minutes with open MT5 positions.\n"
+                                f"Down for {int(_down_seconds // 60)} minutes.\n"
                                 f"Reconnect attempts are failing. Manual check required."
                             )
                             try:
@@ -6763,6 +6785,20 @@ class TradingBot:
             return combined
         except Exception:
             return api_df  # fall back to API data if merge fails
+
+    def _warm_start_price_sanity_all_assets(self) -> None:
+        """Populate price-sanity status for every MT5-routed asset before the
+        trading loop starts."""
+        if self.mt5_handler is None:
+            return
+        for asset_name, asset_cfg in self.config.get("assets", {}).items():
+            if not asset_cfg.get("enabled", False) or asset_cfg.get("exchange") != "mt5":
+                continue
+            symbol = asset_cfg.get("symbol", asset_name)
+            try:
+                self.mt5_handler._get_verified_current_price(symbol, asset_name)
+            except Exception as e:
+                logger.warning(f"[STARTUP] Price-sanity warm-start failed for {asset_name}: {e}")
 
     def _warm_start_livermore_all_assets(self) -> None:
         """
@@ -7052,6 +7088,7 @@ class TradingBot:
             logger.info(f"Press Ctrl+C to stop\n")
 
             # Phase 1: Warm-start Livermore state machines before first cycle
+            self._warm_start_price_sanity_all_assets()
             self._warm_start_livermore_all_assets()
 
             # Run initial cycle
@@ -7418,9 +7455,32 @@ def main():
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
 
-    # Write PID so the dashboard Control Center can check bot liveness
+    # Single-instance lock: refuse to start if another instance's PID file
+    # points at a still-running process. Two live instances trading the same
+    # account was the suspected root cause of a prior phantom-position incident.
     import os as _os
     _pid_path = Path("logs") / "bot.pid"
+    if _pid_path.exists():
+        try:
+            _old_pid = int(_pid_path.read_text().strip())
+        except (ValueError, OSError):
+            _old_pid = None
+        if _old_pid is not None:
+            try:
+                import psutil
+                _still_running = psutil.pid_exists(_old_pid)
+            except ImportError:
+                _still_running = None
+            if _still_running:
+                print(f"[STARTUP] Another instance (PID {_old_pid}) is already running. Exiting.")
+                sys.exit(1)
+            elif _still_running is None:
+                logger.warning(
+                    f"[STARTUP] Could not verify whether PID {_old_pid} from {_pid_path} is "
+                    "still running (psutil not installed) — proceeding anyway."
+                )
+
+    # Write PID so the dashboard Control Center can check bot liveness
     _pid_path.write_text(str(_os.getpid()))
     logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
 
