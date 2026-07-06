@@ -1845,9 +1845,12 @@ class InstitutionalCouncilAggregator:
                 "HEALTHY"  # Updated by _check_lifecycle_phase when signal != 0
             )
 
-            # Determine preliminary trade type from preset
-            preset_name = self.config.get("name", "balanced").lower()
-            trade_type = "REVERSION" if preset_name == "mr" else "TREND"
+            # Item 2.11: trade_type was permanently stuck on "TREND" — it read
+            # self.config["name"], a preset key that is never actually set to
+            # "mr" anywhere in the live config, so the REVERSION-specific rules
+            # built elsewhere have likely never once applied. Tie it to what's
+            # actually happening this cycle instead.
+            trade_type = "REVERSION" if not is_trending_regime else "TREND"
 
             # Apply the same Livermore-state threshold-raise performance mode already
             # gets (signal_aggregator.py STEP 5B, Layer 1 only — no Retest Engine
@@ -2102,8 +2105,24 @@ class InstitutionalCouncilAggregator:
             _is_neutral_regime = (consensus_regime == "NEUTRAL")
             _buy_threshold  = _effective_trend_threshold   if (is_bull or _is_neutral_regime) else _effective_counter_threshold
             _sell_threshold = _effective_trend_threshold   if (not is_bull or _is_neutral_regime) else _effective_counter_threshold
-            _buy_clears  = buy_total  >= _buy_threshold
-            _sell_clears = sell_total >= _sell_threshold
+
+            # Achievable-max normalization (Item 2.5): judge weights sum to 5.0
+            # today, including through the SLIGHTLY regime reweight above — but
+            # that's a hand-checked coincidence, not an enforced invariant. The
+            # momentum/reversion judge slot always shares w_momentum's ceiling
+            # (see the is_trending_regime branch above — both judges are called
+            # with w_momentum, there is no separate w_reversion), so the real
+            # per-cycle ceiling is just the five weights actually in play this
+            # cycle. Comparing raw totals against thresholds implicitly assumed
+            # against a fixed 5.0 would silently drift the moment a future
+            # weight change stops summing to 5.0 — compare percentages instead.
+            _achievable_max = w_trend + w_structure + w_momentum + w_pattern + w_volume
+            _buy_score_pct  = (buy_total  / _achievable_max) if _achievable_max > 0 else 0.0
+            _sell_score_pct = (sell_total / _achievable_max) if _achievable_max > 0 else 0.0
+            _buy_required_pct  = _buy_threshold  / 5.0
+            _sell_required_pct = _sell_threshold / 5.0
+            _buy_clears  = _buy_score_pct  >= _buy_required_pct
+            _sell_clears = _sell_score_pct >= _sell_required_pct
 
             # 3. Regime/Livermore disagreement is a full-cycle HOLD — previously
             #    only sat in front of the is_bull+buy branch, silently letting the
@@ -3088,7 +3107,7 @@ class InstitutionalCouncilAggregator:
                     "NATURAL_RETRACEMENT",
                     "MAIN_DOWN",
                 }
-                _MR_LEAN_SHORT = {"SECONDARY_REBOUND", "MAIN_UP"}
+                _MR_LEAN_SHORT = {"SECONDARY_REBOUND", "NATURAL_REBOUND", "MAIN_UP"}
                 _lean_conflict = (signal == -1 and _lsm_lean in _MR_LEAN_LONG) or (
                     signal == +1 and _lsm_lean in _MR_LEAN_SHORT
                 )
@@ -3125,6 +3144,17 @@ class InstitutionalCouncilAggregator:
                                 _pc_mrlean.get("council_mr_lean_bump_secondary", 0.0)
                             )
                         )
+                    # Item 2.12: soften when Structure judge already drove the
+                    # signal — Structure independently re-confirms a defended
+                    # level/BOS, so this conflict gate is largely re-asking the
+                    # same question Structure already answered. When Trend or
+                    # Momentum drove it instead, keep the bump at full strength —
+                    # that IS a genuine second opinion against MR's lean.
+                    _driven_by_structure = chosen_scores.get("structure", 0) > (
+                        0.6 * total_score if total_score else 0
+                    )
+                    if _driven_by_structure:
+                        _bump = _bump * 0.3
                     _conflict_req = min(self.trend_aligned_threshold + _bump, 5.0)
                     if total_score < _conflict_req:
                         logger.warning(
@@ -3406,118 +3436,49 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 1: TREND (Bidirectional)
 
-        L7: optionally confirms/contradicts the EMA-based trend read against the
-        Livermore 4H state carried on governor_data["composite_state"]. Gated by
-        phase_config.council_trend_judge_livermore_confirmation_enabled (default
-        False) — purely additive scoring nudge, never flips a 0 score to nonzero
-        and never lets a confirmed score exceed `weight`.
+        Item 2.8: redefined from "is price above the EMA" to "do the 1H and 4H
+        Livermore reads actually agree" — Livermore's own state machine already
+        answers the EMA-above/below question more reliably than a raw crossover,
+        so deriving it twice (once via EMA, once via the old L7 confirmation
+        nudge bolted on afterward) was redundant. Full weight to whichever side
+        both timeframes agree on; a flat 0.3x baseline to both sides when they
+        don't (no clear structural read, not a confident bet either way).
         """
         try:
-            features = self.s_trend_following.generate_features(df.tail(250))
-            if features.empty:
-                return 0.0, 0.0, {"buy": "TREND: No data", "sell": "TREND: No data"}
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
+            lsm_1h = (
+                (cs.get("livermore_state_1h") if isinstance(cs, dict)
+                 else getattr(cs, "livermore_state_1h", None))
+                if cs is not None else None
+            )
+            lsm_4h = (
+                (cs.get("livermore_state_4h") if isinstance(cs, dict)
+                 else getattr(cs, "livermore_state_4h", None))
+                if cs is not None else None
+            )
 
-            latest = features.iloc[-1]
-            price = latest["close"]
-            ema_20 = latest.get("ema_fast", 0)
-            ema_50 = latest.get("ema_slow", 0)
-            ema_200 = latest.get("ema_200", 0)
+            _bull_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _bear_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            _agree_bull = lsm_1h in _bull_states and lsm_4h in _bull_states
+            _agree_bear = lsm_1h in _bear_states and lsm_4h in _bear_states
 
-            buy_score = 0.0
-            sell_score = 0.0
-
-            # BUY scoring
-            if price > ema_50:
-                if ema_20 > ema_50:
-                    buy_score = weight
-                    buy_exp = f"TREND BUY: ✅ Full ({weight:.1f}) - Price > EMA50, EMA20 > EMA50"
-                else:
-                    buy_score = weight * 0.5
-                    buy_exp = f"TREND BUY: ⚠️ Partial ({buy_score:.1f}) - Price > EMA50 but EMA20 < EMA50"
-            elif (
-                consensus_regime == "SLIGHTLY_BULLISH"
-                and price < ema_50
-                and price > ema_200
-            ):
-                buy_score = weight * 0.5
-                buy_exp = f"TREND BUY: 🌊 Pullback ({buy_score:.1f}) - Slight Bullish regime, Price > EMA200"
+            if _agree_bull:
+                buy_score, sell_score = weight, 0.0
+                buy_exp = f"TREND BUY: ✅ 1H/4H agree bullish ({lsm_1h}/{lsm_4h}, {weight:.1f})"
+                sell_exp = f"TREND SELL: ❌ 1H/4H agree bullish ({lsm_1h}/{lsm_4h})"
+                self._last_trend_judge_tag = "LSM_CONFIRMED"
+            elif _agree_bear:
+                buy_score, sell_score = 0.0, weight
+                buy_exp = f"TREND BUY: ❌ 1H/4H agree bearish ({lsm_1h}/{lsm_4h})"
+                sell_exp = f"TREND SELL: ✅ 1H/4H agree bearish ({lsm_1h}/{lsm_4h}, {weight:.1f})"
+                self._last_trend_judge_tag = "LSM_CONFIRMED"
             else:
-                buy_exp = "TREND BUY: ❌ No credit - Price < EMA50"
-
-            # SELL scoring
-            if price < ema_50:
-                if ema_20 < ema_50:
-                    sell_score = weight
-                    sell_exp = f"TREND SELL: ✅ Full ({weight:.1f}) - Price < EMA50, EMA20 < EMA50"
-                else:
-                    sell_score = weight * 0.5
-                    sell_exp = f"TREND SELL: ⚠️ Partial ({sell_score:.1f}) - Price < EMA50 but EMA20 > EMA50"
-            elif (
-                consensus_regime == "SLIGHTLY_BEARISH"
-                and price > ema_50
-                and price < ema_200
-            ):
-                sell_score = weight * 0.5
-                sell_exp = f"TREND SELL: 🌊 Pullback ({sell_score:.1f}) - Slight Bearish regime, Price < EMA200"
-            else:
-                sell_exp = "TREND SELL: ❌ No credit - Price > EMA50"
-
-            # ── L7: Livermore 4H confirmation nudge ──────────────────────────
-            self._last_trend_judge_tag = "LSM_UNAVAILABLE"
-            try:
-                _phase_cfg = (governor_data or {}).get("phase_config")
-                if _phase_cfg is None:
-                    _cs_probe = (governor_data or {}).get("composite_state")
-                    _phase_cfg = getattr(_cs_probe, "phase_config", {}) or {}
-                if _phase_cfg.get(
-                    "council_trend_judge_livermore_confirmation_enabled", False
-                ):
-                    cs = (governor_data or {}).get("composite_state")
-                    if cs is not None:
-                        _lsm_4h = (
-                            cs.get("livermore_state_4h")
-                            if isinstance(cs, dict)
-                            else getattr(cs, "livermore_state_4h", None)
-                        )
-                        if _lsm_4h:
-                            _bullish_states = (
-                                "MAIN_UP",
-                                "NATURAL_RETRACEMENT",
-                                "SECONDARY_RETRACEMENT",
-                            )
-                            _bearish_states = (
-                                "MAIN_DOWN",
-                                "NATURAL_REBOUND",
-                                "SECONDARY_REBOUND",
-                            )
-                            _lsm_bull = _lsm_4h in _bullish_states
-                            _lsm_bear = _lsm_4h in _bearish_states
-
-                            if buy_score > 0:
-                                if _lsm_bull:
-                                    buy_score = min(buy_score + 0.15 * weight, weight)
-                                    buy_exp += f" +LSM_CONFIRMED({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONFIRMED"
-                                elif _lsm_bear:
-                                    buy_score = max(buy_score - 0.20 * weight, 0.0)
-                                    buy_exp += f" -LSM_CONTRARIAN({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONTRARIAN"
-                                else:
-                                    self._last_trend_judge_tag = "LSM_NEUTRAL"
-
-                            if sell_score > 0:
-                                if _lsm_bear:
-                                    sell_score = min(sell_score + 0.15 * weight, weight)
-                                    sell_exp += f" +LSM_CONFIRMED({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONFIRMED"
-                                elif _lsm_bull:
-                                    sell_score = max(sell_score - 0.20 * weight, 0.0)
-                                    sell_exp += f" -LSM_CONTRARIAN({_lsm_4h})"
-                                    self._last_trend_judge_tag = "LSM_CONTRARIAN"
-                                else:
-                                    self._last_trend_judge_tag = "LSM_NEUTRAL"
-            except Exception as _lsm_e:
-                logger.debug(f"[TREND] L7 Livermore confirmation skipped: {_lsm_e}")
+                buy_score = sell_score = weight * 0.3
+                buy_exp = f"TREND BUY: ⚠️ 1H/4H disagree ({lsm_1h}/{lsm_4h}, {buy_score:.1f})"
+                sell_exp = f"TREND SELL: ⚠️ 1H/4H disagree ({lsm_1h}/{lsm_4h}, {sell_score:.1f})"
+                self._last_trend_judge_tag = (
+                    "LSM_NEUTRAL" if (lsm_1h or lsm_4h) else "LSM_UNAVAILABLE"
+                )
 
             # ── O2a: Orphan signal wiring — slopes_aligned, conviction_dying ──
             # Pre-computed Confluence signals that the trend judge was ignoring
@@ -3642,11 +3603,24 @@ class InstitutionalCouncilAggregator:
                         buy_score = weight * 0.5   # weak defense → reduced credit
                         buy_exp   = f"STRUCT BUY: ⚠️ Weak defense (str={_def_strength:.2f}, {buy_score:.1f})"
                 elif is_breakout_mode and not failed_breakout and len(df) >= 21:
-                    # Donchian breakout detected but no SMC BOS yet — partial credit
+                    # Donchian breakout detected but no SMC BOS yet — partial credit.
+                    # Continuous ramp on how far price pushed past the 20-bar high,
+                    # instead of a flat 0.8x for any close above it by any amount
+                    # (Item 2.6) — a $0.01 close above the high used to score
+                    # identically to a strong 1-ATR push through it.
                     _h20 = df["high"].iloc[-21:-1].max()
-                    if float(df["close"].iloc[-1]) > _h20:
-                        buy_score = weight * 0.8
-                        buy_exp = f"STRUCT BUY: ⚡ Donchian breakout, no SMC BOS ({buy_score:.1f})"
+                    _close_now = float(df["close"].iloc[-1])
+                    if _close_now > _h20:
+                        try:
+                            _atr_don = float(ta.ATR(
+                                df["high"].values, df["low"].values, df["close"].values, timeperiod=14
+                            )[-1])
+                        except Exception:
+                            _atr_don = 0.0
+                        _push_atr = (_close_now - _h20) / _atr_don if _atr_don > 0 else 0.0
+                        buy_score = weight * 0.8 * min(_push_atr / 0.5, 1.0)
+                        _tag = "STRONG_BREAKOUT" if _push_atr >= 0.5 else "MARGINAL_BREAKOUT"
+                        buy_exp = f"STRUCT BUY: ⚡ {_tag} ({buy_score:.1f}, push={_push_atr:.2f}ATR)"
                     else:
                         buy_exp = "STRUCT BUY: ❌ No structural signal"
                 else:
@@ -3664,11 +3638,22 @@ class InstitutionalCouncilAggregator:
                     sell_score = weight * 0.7
                     sell_exp = f"STRUCT SELL: ⚠️ Rejected at level ({sell_score:.1f})"
                 elif is_breakout_mode and len(df) >= 21:
-                    # Donchian breakdown detected but no SMC failed_breakout yet — partial credit
+                    # Donchian breakdown detected but no SMC failed_breakout yet —
+                    # partial credit, continuous ramp on push distance (Item 2.6),
+                    # mirroring the BUY-side breakout treatment above.
                     _l20 = df["low"].iloc[-21:-1].min()
-                    if float(df["close"].iloc[-1]) < _l20:
-                        sell_score = weight * 0.8
-                        sell_exp = f"STRUCT SELL: ⚡ Donchian breakdown, no SMC BOS ({sell_score:.1f})"
+                    _close_now = float(df["close"].iloc[-1])
+                    if _close_now < _l20:
+                        try:
+                            _atr_don = float(ta.ATR(
+                                df["high"].values, df["low"].values, df["close"].values, timeperiod=14
+                            )[-1])
+                        except Exception:
+                            _atr_don = 0.0
+                        _push_atr = (_l20 - _close_now) / _atr_don if _atr_don > 0 else 0.0
+                        sell_score = weight * 0.8 * min(_push_atr / 0.5, 1.0)
+                        _tag = "STRONG_BREAKDOWN" if _push_atr >= 0.5 else "MARGINAL_BREAKDOWN"
+                        sell_exp = f"STRUCT SELL: ⚡ {_tag} ({sell_score:.1f}, push={_push_atr:.2f}ATR)"
                     else:
                         sell_exp = "STRUCT SELL: ❌ No structural signal"
                 else:
@@ -3904,12 +3889,6 @@ class InstitutionalCouncilAggregator:
 
             rsi = features_mr.iloc[-1].get("rsi", 50)
 
-            # Config values
-            bullish_min, bullish_max = self.config["rsi_bullish_zone"]
-            bearish_min, bearish_max = self.config["rsi_bearish_zone"]
-            oversold = self.config["rsi_oversold_bonus"]
-            overbought = self.config["rsi_overbought_bonus"]
-
             buy_score = 0.0
             sell_score = 0.0
             buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
@@ -3931,25 +3910,34 @@ class InstitutionalCouncilAggregator:
                     sell_score = min(sell_score + 0.2 * weight, weight)
                     sell_exp += f" | 🚀 {div_res.explanation}"
 
-            if is_breakout_mode:
-                # --- BREAKOUT LOGIC (Momentum Continuation) ---
-                if rsi < oversold:
-                    sell_score = weight
-                    sell_exp = f"MOM SELL: ✅ Breakout ({weight:.1f}) - RSI {rsi:.1f} shows downside momentum"
-                if rsi > overbought:
-                    buy_score = weight
-                    buy_exp = f"MOM BUY: ✅ Breakout ({weight:.1f}) - RSI {rsi:.1f} shows upside momentum"
-
-            else:
-                # --- NORMAL LOGIC (Trend Alignment) ---
-                # Award points for price being in the 'value' zone relative to RSI
-                if bullish_min <= rsi <= bullish_max:
-                    buy_score = weight
-                    buy_exp = f"MOM BUY: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bullish zone"
-
-                if bearish_min <= rsi <= bearish_max:
-                    sell_score = weight
-                    sell_exp = f"MOM SELL: ✅ Full ({weight:.1f}) - RSI {rsi:.1f} in bearish zone"
+            # Item 2.9: redefined — how FRESH the current 1H Livermore state is
+            # matters more than a raw RSI zone read. A fresh state-flip (age <=3
+            # bars) is genuine momentum; RSI only confirms/disconfirms direction
+            # (+15%/-15%) rather than gating the score to zero the way the old
+            # bullish/bearish RSI-zone threshold did. min(..., weight) caps the
+            # confirmed case at the judge's own ceiling — an earlier version of
+            # this could exceed it.
+            _cs_mom = (governor_data or {}).get("composite_state") if governor_data else None
+            lsm_age = (
+                (_cs_mom.get("livermore_state_age_1h") if isinstance(_cs_mom, dict)
+                 else getattr(_cs_mom, "livermore_state_age_1h", None))
+                if _cs_mom is not None else None
+            )
+            _fresh_transition = lsm_age is not None and lsm_age <= 3
+            base = weight if _fresh_transition else weight * 0.5
+            _buy_rsi_confirms = rsi > 50
+            _sell_rsi_confirms = rsi < 50
+            buy_score = min(base * (1.15 if _buy_rsi_confirms else 0.85), weight)
+            sell_score = min(base * (1.15 if _sell_rsi_confirms else 0.85), weight)
+            _fresh_tag = "FRESH" if _fresh_transition else "AGED"
+            buy_exp = (
+                f"MOM BUY: {'✅' if _buy_rsi_confirms else '⚠️'} {_fresh_tag} "
+                f"({buy_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+            )
+            sell_exp = (
+                f"MOM SELL: {'✅' if _sell_rsi_confirms else '⚠️'} {_fresh_tag} "
+                f"({sell_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+            )
 
             # MACD confirmation
             if self.config["macd_confirmation"]:
@@ -4261,15 +4249,16 @@ class InstitutionalCouncilAggregator:
                 getattr(_cs_v, "spread_ratio", 1.0) if not isinstance(_cs_v, dict)
                 else (_cs_v.get("spread_ratio", 1.0) if _cs_v else 1.0)
             ) or 1.0
+            # Continuous ramp instead of flat 1.5x/2.5x cliffs (Item 2.6) — a
+            # spread of 1.51x and 1.49x used to score 0.35 vs 0.50 weight
+            # apart; now the penalty scales smoothly with how elevated it is.
             if _spread_ratio >= 2.5:
-                score = 0.0
-                exp = f"VOL: ❌ spread spike ({_spread_ratio:.1f}x avg) — liquidity withdrawing"
+                tag, score = "SPIKE", 0.0
             elif _spread_ratio >= 1.5:
-                score = weight * 0.35
-                exp = f"VOL: ⚠️ spread elevated ({_spread_ratio:.1f}x avg)"
+                tag, score = "ELEVATED", weight * 0.5 * (2.5 - _spread_ratio) / 1.0
             else:
-                score = weight * 0.5
-                exp = f"VOL: Neutral (spread normal, {_spread_ratio:.1f}x avg)"
+                tag, score = "NORMAL", weight * 0.5
+            exp = f"VOL: {tag} (spread {_spread_ratio:.1f}x avg, score={score:.2f})"
             return score, score, {"buy": exp, "sell": exp}
 
         try:
@@ -4282,16 +4271,17 @@ class InstitutionalCouncilAggregator:
 
             vol_ratio = current_volume / volume_ma if volume_ma > 0 else 1.0
 
-            # Same scoring for both directions
-            if vol_ratio > 1.5:
-                score = weight
-                exp = f"VOLUME: ✅ Strong ({weight:.1f}) - {vol_ratio:.1f}x avg"
+            # Continuous ramp across the 1.0x-1.5x band instead of a flat 0.7x
+            # plateau (Item 2.6) — 1.51x and 1.49x used to score weight vs
+            # 0.7*weight apart; 1.01x and 0.99x used to score 0.7*weight vs 0.
+            # Same tiers, smooth transition between them.
+            if vol_ratio >= 1.5:
+                tag, score = "STRONG", weight
             elif vol_ratio > 1.0:
-                score = weight * 0.7
-                exp = f"VOLUME: ⚠️ Partial ({score:.1f}) - {vol_ratio:.1f}x avg"
+                tag, score = "PARTIAL", weight * (vol_ratio - 1.0) / 0.5
             else:
-                score = 0.0
-                exp = f"VOLUME: ❌ Below avg ({vol_ratio:.1f}x)"
+                tag, score = "BELOW_AVG", 0.0
+            exp = f"VOLUME: {tag} ({score:.2f}) - {vol_ratio:.1f}x avg"
 
             # ── O2b: Orphan signal wiring — absorption_detected, vpd_diverging ──
             _cs_v = (governor_data or {}).get("composite_state") if governor_data else None

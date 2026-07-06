@@ -352,11 +352,31 @@ class HybridSignalValidator:
                         if _anchor_dist_atr <= 6.0:
                             _anchor = _raw_anchor
 
-                if _anchor is not None:
+                # Item 2.10: an anchor alone isn't a second opinion — the
+                # Structure judge may have already used this exact Livermore
+                # anchor to produce the signal being validated here. Require
+                # genuinely separate evidence (order-book imbalance, or a
+                # simple recent-price-direction check when imbalance isn't
+                # available) before treating the anchor as confirmation.
+                _independent_confirm = False
+                if composite_state is not None:
+                    if getattr(composite_state, "order_book_imbalance", None) is not None:
+                        _independent_confirm = (
+                            (signal > 0 and composite_state.order_book_imbalance > 0.15) or
+                            (signal < 0 and composite_state.order_book_imbalance < -0.15)
+                        )
+                    elif len(df) >= 3:
+                        _independent_confirm = (
+                            (signal > 0 and df["close"].iloc[-1] > df["close"].iloc[-3]) or
+                            (signal < 0 and df["close"].iloc[-1] < df["close"].iloc[-3])
+                        )
+
+                if _anchor is not None and _independent_confirm:
                     logger.info(
                         f"[AI] Structural-momentum pass: anchor={_anchor:.2f} "
                         f"({_anchor_dist_atr:.2f}x ATR) | quality={signal_quality:.2f} | "
-                        f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
+                        f"1H dir={h1_dir} | regime-aligned + independent confirmation → "
+                        f"approve with quality penalty"
                     )
                     signal_details = {
                         **signal_details,
@@ -365,6 +385,16 @@ class HybridSignalValidator:
                         "anchor_distance_atr": round(_anchor_dist_atr, 2),
                         "third_path_pass": True,
                     }
+                elif _anchor is not None:
+                    logger.info(
+                        f"[AI] Structural-momentum reject: anchor={_anchor:.2f} present but "
+                        f"no independent confirmation (order-book/price-direction) — the anchor "
+                        f"alone may just be re-confirming what Structure already used."
+                    )
+                    return self._reject_signal(
+                        signal_details, sr_result, pattern_result,
+                        reason="anchor_without_independent_confirmation", strategy=strategy,
+                    )
                 else:
                     logger.info(
                         f"[AI] Structural-momentum reject: regime+1H momentum agreed "

@@ -1084,6 +1084,15 @@ class PerformanceWeightedAggregator:
                 )
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── Item 2.7: institutional pattern from a live data source ──────────
+        # Runs every cycle so the Pattern judge has a real classification to
+        # read most of the time, instead of relying solely on _score_confluence's
+        # much stricter 5-way classifier (which only runs when a candidate
+        # signal already exists, and otherwise leaves institutional_pattern
+        # unset/None — silently falling back to the old candlestick-pattern
+        # AI validator path in the judge).
+        self._compute_institutional_pattern(df, state)
+
         # ── PHASE 2: vol_down_ratio ──────────────────────────────────────────
         # Volume on down-close bars vs up-close bars over the last 20 1H bars.
         # Used as MR Mode 1 veto (Phase 3A) and Scenario B continuation veto.
@@ -1539,6 +1548,15 @@ class PerformanceWeightedAggregator:
             for lvl in self._structure_levels[asset]:
                 lvl["age_hours"] = lvl.get("age_hours", 0) + 1
 
+            # Role reversal: a broken ceiling that price holds above becomes a
+            # new floor, and vice versa. 0.3% buffer avoids flip-flopping on
+            # noise right at the level.
+            for lvl in self._structure_levels[asset]:
+                if lvl["type"] == "swing_high" and current_price > lvl["price"] * 1.003:
+                    lvl["type"] = "swing_low"
+                elif lvl["type"] == "swing_low" and current_price < lvl["price"] * 0.997:
+                    lvl["type"] = "swing_high"
+
             # Add new 4H swing points if available
             if df_4h is not None and len(df_4h) >= 10:
                 _4h_highs = df_4h["high"].values
@@ -1599,10 +1617,13 @@ class PerformanceWeightedAggregator:
             if top3:
                 best = top3[0]
                 best_dist = abs(current_price - best["price"]) / _atr
-                state.nearby_4h_level   = best["price"]
+                state.nearby_4h_level      = best["price"]
+                state.nearby_4h_level_type = best.get("type")
                 state.level_test_count  = best.get("tests", 0)
-                if best_dist < 0.3:
+                _was_away = best.get("_last_dist_atr", 99) >= 0.5
+                if best_dist < 0.3 and _was_away:
                     best["tests"] = best.get("tests", 0) + 1
+                best["_last_dist_atr"] = best_dist
 
                 # Second and third levels — fallback references for structural
                 # stops and RetestEngine when the primary level is broken.
@@ -1749,6 +1770,38 @@ class PerformanceWeightedAggregator:
         except Exception:
             pass
 
+    def _compute_institutional_pattern(self, df, state) -> None:
+        """Item 2.7: live institutional-pattern classification from Livermore
+        state + volume ratio + range tightness, feeding the Pattern judge's
+        primary (ACCUMULATION/DISTRIBUTION/COMPRESSION) recognized labels
+        instead of leaving it to fall back to the legacy candlestick check.
+
+        Note: the 0.8 volume-ratio and 2.5x-ATR range thresholds are
+        reasonable starting shapes, not yet validated against real outcomes —
+        flag for review once Item 1.8's judge-level logging has real data.
+        """
+        try:
+            lsm = getattr(state, "livermore_state_1h", None)
+            vol_ratio = df["volume"].iloc[-10:].mean() / max(df["volume"].iloc[-30:-10].mean(), 1e-9)
+            range_pct = (df["high"].iloc[-10:].max() - df["low"].iloc[-10:].min()) / df["close"].iloc[-1]
+            atr = getattr(state, "atr_fast", None) or df["close"].diff().abs().rolling(14).mean().iloc[-1]
+            is_tight_range = range_pct < (2.5 * atr / df["close"].iloc[-1])
+
+            _basing_bull_states = ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _basing_bear_states = ("NATURAL_REBOUND", "SECONDARY_REBOUND")
+
+            if lsm in _basing_bull_states and is_tight_range and vol_ratio < 0.8:
+                state.institutional_pattern = "ACCUMULATION"
+            elif lsm in _basing_bear_states and is_tight_range and vol_ratio < 0.8:
+                state.institutional_pattern = "DISTRIBUTION"
+            elif is_tight_range:
+                state.institutional_pattern = "COMPRESSION"
+            else:
+                state.institutional_pattern = None
+        except Exception as e:
+            logger.debug(f"[PATTERN] compute error: {e}")
+            state.institutional_pattern = None
+
     # ── Section I: Confluence Engine ─────────────────────────────────────
 
     def _score_confluence(self, state, tf_conf: float, mr_conf: float, signal: int = 0):
@@ -1877,7 +1930,14 @@ class PerformanceWeightedAggregator:
 
         # ─── STEP 2: ADDITIVE CONFLUENCE (fallback if no pattern matched) ─
         else:
-            state.institutional_pattern = None
+            # Item 2.7: don't blank institutional_pattern here. None of these
+            # five stricter patterns matched, but _compute_institutional_pattern
+            # already set a live ACCUMULATION/DISTRIBUTION/COMPRESSION/None
+            # classification earlier in _build_composite_state — resetting to
+            # None here would silently erase it on every cycle this stricter
+            # classifier doesn't fire (the common case), sending the Pattern
+            # judge back to its legacy candlestick fallback for no reason.
+            pass
 
             _exhaust = 0.0
             if state.choch_detected:

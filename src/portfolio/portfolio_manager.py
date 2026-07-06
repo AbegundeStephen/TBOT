@@ -2455,6 +2455,21 @@ class PortfolioManager:
         # ============================================================================
         self.positions[position.position_id] = position
 
+        # Item 2.14: VTM flags a just-opened position for emergency close when
+        # it has no structural stop reference AND wasn't strong enough to
+        # justify a plain distance-based stop. VTM can't prevent the entry
+        # itself (the order already filled) — this is the earliest point after
+        # registration where an actual close can be issued.
+        if position.trade_manager and getattr(position.trade_manager, "emergency_close_requested", False):
+            logger.warning(
+                f"[VTM] {asset}: emergency-close flagged at open (no structural "
+                f"anchor, weak score) — closing immediately."
+            )
+            self.close_position(
+                position_id=position.position_id,
+                reason="no_structural_anchor_weak_signal",
+            )
+
         # 6. Database Logging
         if self.db_manager:
             try:

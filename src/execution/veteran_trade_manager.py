@@ -569,6 +569,13 @@ class VeteranTradeManager:
         self.stop_type = "atr"
         self.has_pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
+        # Item 2.14: set by _compute_structural_stop when the trade has no
+        # structural stop reference AND wasn't strong enough to justify a
+        # plain distance-based stop. The caller (PortfolioManager, right
+        # after registering this position) checks this flag and immediately
+        # closes the position — VTM manages already-open positions, it can't
+        # prevent the entry itself at this point.
+        self.emergency_close_requested = False
 
         # Calculate initial SL/TP levels (must be last step of __init__)
         try:
@@ -1543,12 +1550,30 @@ class VeteranTradeManager:
                 (is_long  and new_state == "NATURAL_RETRACEMENT") or
                 (not is_long and new_state == "NATURAL_REBOUND")
             )
+            # Item 2.16: a counter-trend/REVERSION position (possible now that
+            # trade_type actually reflects live regime — Item 2.11) held AGAINST
+            # the prevailing MAIN leg has its own thesis confirmed by the
+            # opposite transition: a LONG bet against MAIN_DOWN is confirmed by
+            # NATURAL_REBOUND; a SHORT bet against MAIN_UP is confirmed by
+            # NATURAL_RETRACEMENT. VTM previously had no branch for this at
+            # all — it silently did nothing while a working reversion thesis
+            # played out.
+            _thesis_confirming = (
+                (is_long and new_state == "NATURAL_REBOUND") or
+                (not is_long and new_state == "NATURAL_RETRACEMENT")
+            )
             if _same_dir:
                 # Normal pullback against position — tighten trail
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail
                 logger.info(
                     "[VTM LIVE LSM] %s: MAIN→NATURAL — tightening trail to %.2f× ATR",
                     self.asset, self.runner_trail_atr_multiplier,
+                )
+            elif _thesis_confirming:
+                self.runner_trail_atr_multiplier = _config_trail * 1.1
+                logger.info(
+                    "[VTM LIVE LSM] %s: counter-trend thesis confirming — trail eased",
+                    self.asset,
                 )
 
         # ── MAIN → SECONDARY: deep counter-move, structural warning ──────
@@ -2871,8 +2896,26 @@ class VeteranTradeManager:
                 return (level - buf) if side == "long" else (level + buf)
             return None
 
+        # Item 2.14: no entry_type matched any structural reference above —
+        # this trade has no real level to place a stop behind. A plain
+        # distance-based (ATR) stop only protects a trade that was strong
+        # enough to justify it; a weak, unanchored trade gets flagged for
+        # immediate close instead of quietly falling back to a weak stop.
+        # A stop must still be returned (None → caller keeps the ATR
+        # baseline) since the position needs SOME protection while the
+        # emergency close executes.
+        _total_score = self.signal_details.get("total_score")
+        _required_score = self.signal_details.get("required_score")
+        if _total_score is not None and _required_score is not None:
+            if _total_score < (_required_score + 1.0):
+                self.emergency_close_requested = True
+                logger.warning(
+                    f"[VTM] {self.asset}: no structural stop reference and score "
+                    f"{_total_score:.2f} < {_required_score + 1.0:.2f} — flagging "
+                    f"for emergency close instead of a weak distance-based stop."
+                )
         return None
-    
+
     def _compute_swing_low_trail(self, atr: float) -> Optional[float]:
         """
         Structural swing low trail — Option 1 (Pure Livermore).
