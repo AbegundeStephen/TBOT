@@ -2904,16 +2904,21 @@ class VeteranTradeManager:
         # A stop must still be returned (None → caller keeps the ATR
         # baseline) since the position needs SOME protection while the
         # emergency close executes.
-        _total_score = self.signal_details.get("total_score")
-        _required_score = self.signal_details.get("required_score")
-        if _total_score is not None and _required_score is not None:
-            if _total_score < (_required_score + 1.0):
-                self.emergency_close_requested = True
-                logger.warning(
-                    f"[VTM] {self.asset}: no structural stop reference and score "
-                    f"{_total_score:.2f} < {_required_score + 1.0:.2f} — flagging "
-                    f"for emergency close instead of a weak distance-based stop."
-                )
+        # Independently flag-gated (default False) rather than piggybacking on
+        # structural_stops_enabled (already True live) — auto-closing a
+        # just-filled position is new, unvalidated, real-money behavior and
+        # deserves its own soak period like every other Phase 4 feature here.
+        if _phase_cfg.get("emergency_close_unanchored_weak_signal_enabled", False):
+            _total_score = self.signal_details.get("total_score")
+            _required_score = self.signal_details.get("required_score")
+            if _total_score is not None and _required_score is not None:
+                if _total_score < (_required_score + 1.0):
+                    self.emergency_close_requested = True
+                    logger.warning(
+                        f"[VTM] {self.asset}: no structural stop reference and score "
+                        f"{_total_score:.2f} < {_required_score + 1.0:.2f} — flagging "
+                        f"for emergency close instead of a weak distance-based stop."
+                    )
         return None
 
     def _compute_swing_low_trail(self, atr: float) -> Optional[float]:
