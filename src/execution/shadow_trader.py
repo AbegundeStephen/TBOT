@@ -75,12 +75,20 @@ class ShadowPosition:
     # Identity
     asset: str
     side: str               # "long" | "short"
-    strategy_source: str    # "TF" | "MR" | "EMA" | "consensus"
+    strategy_source: str    # "TF" | "MR" | "EMA" | "consensus" | "COUNCIL"
     gate_blocked_by: str    # e.g. "blocked_by_governor", "no_sniper_confirmation"
 
     # Entry
     entry_price: float
     entry_time: datetime
+
+    # Item 2.17: categories matching the council judge system (previously only
+    # the old single-strategy system's labels existed here).
+    judge_driver: str = "unknown"    # which judge contributed most to the score
+    score_pct_of_max: float = 0.0    # total_score / achievable_max (Item 2.5)
+    qualify_tag: str = ""            # plain-English score-margin label (Item 2.6)
+    livermore_state_1h: str = ""
+
     regime_score: float = 0.0
     regime_name: str = "UNKNOWN"
 
@@ -406,11 +414,39 @@ class ShadowTradingEngine:
             else:
                 _tp1_price = entry_price - _tp1_dist
 
+        # Item 2.17: derive the new judge-system fields from signal_details —
+        # judge_scores (Item 1.8), judge_weights, total_score/required_score
+        # are all already present on council-sourced signals; default safely
+        # for non-council (single-strategy) signals where they're absent.
+        _judge_scores = signal_details.get("judge_scores") or {}
+        _judge_driver = max(_judge_scores, key=_judge_scores.get) if _judge_scores else "unknown"
+
+        _judge_weights = signal_details.get("judge_weights") or {}
+        _achievable_max = sum(_judge_weights.values()) if _judge_weights else 0.0
+        _total_score = signal_details.get("total_score", 0.0) or 0.0
+        _score_pct_of_max = (_total_score / _achievable_max) if _achievable_max > 0 else 0.0
+
+        _required_score = signal_details.get("required_score", 0.0) or 0.0
+        if _required_score > 0:
+            _margin = _total_score - _required_score
+            _qualify_tag = "CLEARED" if _margin >= 0.5 else "MARGINAL" if _margin >= 0 else "BLOCKED"
+        else:
+            _qualify_tag = ""
+
+        _lsm_1h = signal_details.get("livermore_state_1h")
+        if hasattr(_lsm_1h, "value"):
+            _lsm_1h = _lsm_1h.value
+        _lsm_1h = _lsm_1h or ""
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
             strategy_source=strategy_source,
             gate_blocked_by=gate_blocked_by,
+            judge_driver=_judge_driver,
+            score_pct_of_max=_score_pct_of_max,
+            qualify_tag=_qualify_tag,
+            livermore_state_1h=_lsm_1h,
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),

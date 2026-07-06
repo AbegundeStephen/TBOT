@@ -4846,6 +4846,20 @@ class TradingBot:
                             f"4H=MAIN_DOWN confirms; 1H NATURAL_REBOUND is bounce "
                             f"exhaustion within the dominant downtrend"
                         )
+                    elif details.get("judge_scores", {}).get("structure", 0) > (
+                        0.6 * details.get("total_score", 1)
+                    ):
+                        # Item 2.12: Structure judge already independently drove
+                        # this signal — a defended level/BOS is itself exhaustion
+                        # evidence, not just riding 1H/4H Livermore timing. Treat
+                        # it as equivalent to 4H confirmation rather than
+                        # re-blocking on a question Structure already answered.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
+                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
+                            f"independently confirmed a defended level/BOS — treating "
+                            f"as exhaustion evidence."
+                        )
                     else:
                         # Shorting INTO a rebound sweeps the SL before price resumes
                         # down. Gold June 4 2026: shorted at $4,463 during
@@ -4874,6 +4888,16 @@ class TradingBot:
                             f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
                             f"4H=MAIN_UP confirms; 1H NATURAL_RETRACEMENT is the "
                             f"ideal pullback entry within the dominant uptrend"
+                        )
+                    elif details.get("judge_scores", {}).get("structure", 0) > (
+                        0.6 * details.get("total_score", 1)
+                    ):
+                        # Item 2.12: mirror of the NATURAL_REBOUND+SHORT case above.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
+                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
+                            f"independently confirmed a defended level/BOS — treating "
+                            f"as exhaustion evidence."
                         )
                     else:
                         # Longing INTO a retracement risks SL sweep before trend
@@ -5158,7 +5182,18 @@ class TradingBot:
                     is_counter_trend = (signal == 1 and not _mtf_is_bullish) or \
                                      (signal == -1 and _mtf_is_bullish)
 
-                    if is_counter_trend:
+                    # Item 2.15: council's macro governor already granted an
+                    # explicit V-Shape exception (explosive momentum overruling
+                    # its own 1D counter-trend veto) — this MTF-regime-based
+                    # gate is a separate, later check that doesn't know about
+                    # that exception and would silently re-block the same
+                    # signal it was just deliberately allowed through.
+                    if details.get("trade_type") == "V_SHAPE":
+                        logger.info(
+                            f"[MTF FILTER] {asset_name}: counter-trend check skipped — "
+                            f"V_SHAPE exception already granted by macro governor."
+                        )
+                    elif is_counter_trend:
                         logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
                         logger.info(
                             f"  Signal Direction: {'LONG' if signal == 1 else 'SHORT'}"
@@ -6261,8 +6296,17 @@ class TradingBot:
                     _intended = _raw_tf or _raw_ema or _raw_mr
                     if _intended != 0 and _reasoning and "hold (no strategy" not in _reasoning:
                         _side = "long" if _intended > 0 else "short"
-                        _src = ("TF" if _raw_tf != 0 else
-                                "EMA" if _raw_ema != 0 else "MR")
+                        # Item 2.17: check aggregator_mode first — a council-driven
+                        # decision isn't really "TF"/"EMA"/"MR" even if one of those
+                        # raw sub-signals happened to be nonzero; it was the judge
+                        # system that made the call. Matches the other shadow-open
+                        # call site (details.get("aggregator_mode", "PERF").upper()).
+                        _agg_mode = (details.get("aggregator_mode") or "").lower()
+                        if _agg_mode == "council":
+                            _src = "COUNCIL"
+                        else:
+                            _src = ("TF" if _raw_tf != 0 else
+                                    "EMA" if _raw_ema != 0 else "MR")
                         # Compute VTM-style regime-adaptive ATR from df.
                         # Mirrors VTM._calculate_atr(): ATR7/14/28 ratio decides which to use.
                         _atr = None

@@ -41,6 +41,7 @@ class CompositeState:
     nearby_4h_level:   Optional[float] = None
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
+    nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
     level_test_count: int = 0
     level_defended: bool = False
     defense_strength: float = 0.0

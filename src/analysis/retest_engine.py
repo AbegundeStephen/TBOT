@@ -186,9 +186,14 @@ class RetestEngine:
             if dist_atr <= self._clean_atr_mult and level_defended:
                 logger.debug("retest_engine: CLEAN @ %.5f (dist=%.2f ATR)", level, dist_atr)
                 _rh, _rl = self._maybe_swing_range(state, df)
+                # A level tested multiple times is more proven than a fresh one —
+                # deepen the CLEAN discount (more negative = easier) rather than
+                # scoring a 4x-tested level identically to a first touch.
+                _tests = getattr(state, "level_test_count", 0)
+                _proven_bonus = min(_tests * 0.05, 0.20)
                 return RetestResult(
                     retest_type=RT_CLEAN,
-                    modifier=self._mod_clean,
+                    modifier=self._mod_clean - _proven_bonus,
                     entry_type=ET_RANGE_BOUNDARY,
                     direction=direction,
                     level=level,
@@ -243,16 +248,40 @@ class RetestEngine:
         sweep_detected = getattr(state, "sweep_detected", False)
         if sweep_detected and self._wick_recovered(df, state, direction):
             sweep_level = getattr(state, "sweep_level", None)
-            logger.debug("retest_engine: WICK @ sweep_level=%s", sweep_level)
-            _rh, _rl = self._maybe_swing_range(state, df)
-            return RetestResult(
-                retest_type=RT_WICK,
-                modifier=self._mod_wick,
-                entry_type=ET_SPRING_ENTRY,
-                direction=direction,
-                level=sweep_level,
-                range_high=_rh,
-                range_low=_rl,
+            # If the swept level coincides with a tracked 4H structure level,
+            # validate its CURRENT role — support/resistance can flip (see the
+            # role-reversal logic in signal_aggregator.py's
+            # _update_structure_memory) so this reads the live label fresh
+            # each cycle rather than trusting the type from whenever the level
+            # was first recorded. A spring only makes sense off a level
+            # presently acting as support (LONG) or resistance (SHORT); if the
+            # live label disagrees, this isn't really a spring off structure —
+            # fall through to the next tier instead of returning WICK here.
+            _role_conflict = False
+            if (
+                level is not None and sweep_level is not None
+                and abs(sweep_level - level) / atr < self._clean_atr_mult
+            ):
+                _level_type = getattr(state, "nearby_4h_level_type", None)
+                _expected_type = "swing_low" if direction == 1 else "swing_high"
+                _role_conflict = _level_type is not None and _level_type != _expected_type
+
+            if not _role_conflict:
+                logger.debug("retest_engine: WICK @ sweep_level=%s", sweep_level)
+                _rh, _rl = self._maybe_swing_range(state, df)
+                return RetestResult(
+                    retest_type=RT_WICK,
+                    modifier=self._mod_wick,
+                    entry_type=ET_SPRING_ENTRY,
+                    direction=direction,
+                    level=sweep_level,
+                    range_high=_rh,
+                    range_low=_rl,
+                )
+            logger.debug(
+                "retest_engine: WICK candidate rejected — level %.5f now labeled %s, "
+                "expected %s for direction=%d",
+                level, _level_type, _expected_type, direction,
             )
 
         # ── 4 & 5. CHASE (requires a nearby level to measure distance from) ──
