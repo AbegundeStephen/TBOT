@@ -389,6 +389,10 @@ class MT5ExecutionHandler:
             _tick_ctx = "" if _mkt_open else " (market closed — expected)"
             if mt5.last_error()[0] != 0:
                 logger.warning(f"[MT5] {symbol}: last_error={mt5.last_error()}")
+            _sym_info = mt5.symbol_info(symbol)
+            if _sym_info is not None and not _sym_info.visible:
+                logger.warning(f"[MT5] {symbol}: not visible in Market Watch — re-selecting")
+                mt5.symbol_select(symbol, True)
             _log_tick(
                 f"[MT5] {symbol}: No fresh tick data from terminal or history"
                 f" — returning last known{_tick_ctx}"

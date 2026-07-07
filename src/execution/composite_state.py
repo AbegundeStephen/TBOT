@@ -43,6 +43,20 @@ class CompositeState:
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
     nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
     level_test_count: int = 0
+    # Item 3.1/3.4: direction-split levels — nearest support (below price) and
+    # nearest resistance (above price), each with its own distinct-visit test
+    # count. Alongside nearby_4h_level (direction-agnostic nearest of either
+    # type), not a replacement for it.
+    nearby_support_level: Optional[float] = None
+    nearby_support_level_tests: int = 0
+    nearby_resistance_level: Optional[float] = None
+    nearby_resistance_level_tests: int = 0
+    # Item 3.4: volume/OBV divergence (Section 6) and Wyckoff pattern
+    # confidence (Section 5) — computed once in _build_composite_state,
+    # consumed by the Volume and Pattern judges respectively.
+    bullish_divergence: bool = False
+    bearish_divergence: bool = False
+    institutional_pattern_confidence: float = 0.0
     level_defended: bool = False
     defense_strength: float = 0.0
     is_parabolic: bool = False

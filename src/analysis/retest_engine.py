@@ -172,7 +172,19 @@ class RetestEngine:
             return self._no_level(symbol, direction)
 
         close     = float(df["close"].iloc[-1])
-        level     = getattr(state, "nearby_4h_level", None)
+        # Item 3.6: direction-correct level — the nearest support for a LONG
+        # setup, nearest resistance for a SHORT setup, instead of whichever of
+        # either type happened to be globally nearest (which could be the
+        # wrong side of price for this direction). None (not a fallback to
+        # the old direction-agnostic level) when no level exists on the
+        # correct side — falling back would reintroduce the wrong-direction
+        # level this item exists to fix.
+        if direction == 1:
+            level = getattr(state, "nearby_support_level", None)
+            _level_tests = getattr(state, "nearby_support_level_tests", 0)
+        else:
+            level = getattr(state, "nearby_resistance_level", None)
+            _level_tests = getattr(state, "nearby_resistance_level_tests", 0)
         level_2   = getattr(state, "nearby_4h_level_2", None)
         level_3   = getattr(state, "nearby_4h_level_3", None)
         asset_cfg = self._assets.get(symbol, self._assets.get("DEFAULT", {}))
@@ -189,8 +201,9 @@ class RetestEngine:
                 # A level tested multiple times is more proven than a fresh one —
                 # deepen the CLEAN discount (more negative = easier) rather than
                 # scoring a 4x-tested level identically to a first touch.
-                _tests = getattr(state, "level_test_count", 0)
-                _proven_bonus = min(_tests * 0.05, 0.20)
+                # Item 3.6: use the direction-specific test count (_level_tests)
+                # instead of the old shared level_test_count.
+                _proven_bonus = min(_level_tests * 0.05, 0.20)
                 return RetestResult(
                     retest_type=RT_CLEAN,
                     modifier=self._mod_clean - _proven_bonus,

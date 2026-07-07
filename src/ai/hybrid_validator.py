@@ -235,9 +235,18 @@ class HybridSignalValidator:
         )
 
         # Layer 4: Pattern Confirmation
-        pattern_result = self._check_pattern(
-            df, signal, min_confidence=self.current_pattern_threshold, strategy=strategy
-        )
+        # Item 5.4: candlestick fallback (_check_pattern) removed — reads
+        # composite_state.institutional_pattern directly (Item 5.2's rebuilt,
+        # tiered classifier) instead of the old, weak candlestick heuristic.
+        _inst_pattern = getattr(composite_state, "institutional_pattern", None) if composite_state is not None else None
+        _inst_conf = getattr(composite_state, "institutional_pattern_confidence", 0.0) if composite_state is not None else 0.0
+        pattern_result = {
+            "pattern_confirmed": _inst_pattern is not None and (
+                (signal > 0 and _inst_pattern == "ACCUMULATION") or
+                (signal < 0 and _inst_pattern == "DISTRIBUTION")
+            ),
+            "model_uncertain": _inst_conf < 0.5,
+        }
 
         sr_passed = sr_result["near_level"]
         pattern_passed = pattern_result["pattern_confirmed"]
