@@ -86,6 +86,16 @@ class FunnelLogger:
             "blocked_cooldown": "blocked_cooldown",
             "blocked_natural_cycle": "blocked_natural_cycle",
             "blocked_same_direction": "blocked_same_direction",
+            # Item 2.1: check_trading_limits() now records its specific
+            # self._last_limit_reason text instead of the generic
+            # "blocked_trading_limits" label — map each real reason to its
+            # own family so analyze_observability.py can still tell daily
+            # trade cap apart from daily loss apart from circuit breaker.
+            "daily trade cap": "blocked_daily_trade_cap",
+            "daily loss limit": "blocked_daily_loss_limit",
+            "circuit breaker": "blocked_circuit_breaker",
+            "blocked_total_risk_cap": "blocked_total_risk_cap",
+            "risk_capped_shared_budget": "risk_capped_shared_budget",
             "quality": "blocked_low_quality",
             "score": "blocked_low_score",
             "rejected": "blocked_low_score",
@@ -175,6 +185,7 @@ class FunnelLogger:
             blocks = " ".join(
                 f"{k}={v}" for k, v in sorted(c.items())
                 if k.startswith("blocked") or k == "no_raw_signal"
+                or k == "risk_capped_shared_budget"
             )
             logger.info(
                 f"[FUNNEL] {a} {d}: eval={c.get('evaluations', 0)} "

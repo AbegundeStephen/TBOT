@@ -603,6 +603,9 @@ class TradingBot:
                 telegram_bot=self.telegram_bot,
                 aggregators=getattr(self, "aggregators", None),  # O4c: wire aggregators
             )
+            # Item 2.2: let the shared-risk-budget cap record funnel visibility
+            # when it caps or blocks a trade.
+            self.portfolio_manager.funnel_logger = self.funnel_logger
 
             # Hedging status — must be OFF. Confirmed on every startup.
             hedging_enabled = self.config.get("trading", {}).get(
@@ -3383,6 +3386,17 @@ class TradingBot:
                 self.data_manager_telegram.update_snapshot(self)
                 self.data_manager_telegram.process_queued_commands(self)
 
+            # Item 2.3: strongest-score-first ordering — with the shared
+            # risk-budget cap (Item 2.2) able to trim or block a trade once
+            # the aggregate is spent, whichever asset gets evaluated first
+            # gets first claim on that budget. Order by last cycle's score
+            # (this cycle's own score isn't known until trade_asset() runs)
+            # so the highest-conviction asset claims the budget first instead
+            # of whichever happens to iterate first.
+            def _get_cached_score(asset_name):
+                return getattr(self, "_last_cycle_scores", {}).get(asset_name, 0)
+            enabled = sorted(enabled, key=_get_cached_score, reverse=True)
+
             # Trade each asset
             for asset_name in enabled:
                 try:
@@ -4082,71 +4096,37 @@ class TradingBot:
                 f"Circuit breaker tripped: drawdown {loss_pct:.2%} ≥ {circuit_breaker:.2%}"
             )
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
-            if self.telegram_bot and self._telegram_ready.is_set():
-                try:
-                    self._send_telegram_notification(
-                        self.telegram_bot.notify_error(
-                            f"🚨 CIRCUIT BREAKER!\nLoss: {loss_pct:.2%}"
+            # Item 1.2: throttle to once per 5 min — with six assets live,
+            # every asset's cycle hits this same check, which could otherwise
+            # fire the same alert six times in the same couple of minutes.
+            _now = time.time()
+            _last_alert = getattr(self, "_last_breaker_alert_ts", 0)
+            if _now - _last_alert >= 300:
+                self._last_breaker_alert_ts = _now
+                if self.telegram_bot and self._telegram_ready.is_set():
+                    try:
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_error(
+                                f"🚨 Circuit breaker active — not trading.\n"
+                                f"Drawdown: {loss_pct:.2%} (limit {circuit_breaker:.2%})\n"
+                                f"Will keep checking every 5 min."
+                            )
                         )
-                    )
-                except:
-                    pass
+                    except Exception:
+                        pass
             return False
 
-        # ── DAILY PROFIT LOCK ─────────────────────────────────────────────────
-        # Two-tier system:
-        #   soft_lock  → scale position sizing to 50% (still trades, but smaller)
-        #   hard_lock  → block all new entries for the rest of the day
-        # Both are expressed as % of session_start_equity in config.
-        # Set either to 0 to disable that tier.
-        _profit_lock_cfg = risk_cfg.get("daily_profit_lock", {})
-        _soft_pct = _profit_lock_cfg.get("soft_lock_pct", 0.0)
-        _hard_pct = _profit_lock_cfg.get("hard_lock_pct", 0.0)
-        if _pm.session_start_equity and _pm.session_start_equity > 0:
-            _realized_gain = max(0.0, _pm.realized_pnl_today)
-            _daily_profit_pct = _realized_gain / _pm.session_start_equity
-        else:
-            _daily_profit_pct = 0.0
+        # Item 1.3: daily profit-lock system removed entirely — explicit
+        # decision: no scaling down or stopping trading because a profit
+        # target was hit. self._profit_soft_lock_active stays at its __init__
+        # default (False) and its one downstream reader (execute_signal's
+        # position-sizing halving) already treats that as "off", so removing
+        # this block cannot leave a half-configured state behind.
 
-        if _hard_pct > 0 and _daily_profit_pct >= _hard_pct:
-            # Allow /resume Telegram command to override the hard lock manually
-            if getattr(self, "_profit_lock_override", False):
-                logger.info(
-                    f"[PROFIT LOCK] Hard lock bypassed by manual override "
-                    f"(realized {_daily_profit_pct:.2%})"
-                )
-            else:
-                self._last_limit_reason = (
-                    f"Daily profit hard-lock: realized {_daily_profit_pct:.2%} ≥ {_hard_pct:.2%} target. "
-                    f"No new entries until next session."
-                )
-                logger.warning(
-                    f"[PROFIT LOCK] Hard lock active — realized {_daily_profit_pct:.2%} ≥ {_hard_pct:.2%}. "
-                    f"Blocking new entries."
-                )
-                return False
-
-        if _soft_pct > 0 and _daily_profit_pct >= _soft_pct:
-            # Flag used downstream in execute_signal() to halve the position size
-            self._profit_soft_lock_active = True
-            logger.info(
-                f"[PROFIT LOCK] Soft lock active — realized {_daily_profit_pct:.2%} ≥ {_soft_pct:.2%}. "
-                f"Sizing reduced to 50%."
-            )
-        else:
-            self._profit_soft_lock_active = False
-        # ──────────────────────────────────────────────────────────────────────
-
-        trading_cfg = self.config.get("trading", {})
-        if trading_cfg.get("allow_simultaneous_positions", True):
-            max_positions = trading_cfg.get("max_simultaneous_positions", 2)
-            current = self.portfolio_manager.get_open_positions_count()
-            if current >= max_positions:
-                self._last_limit_reason = (
-                    f"Max simultaneous positions reached ({current}/{max_positions})"
-                )
-                logger.info(f"[LIMIT] Max positions ({current}/{max_positions})")
-                return False
+        # Item 1.1: cross-asset position cap removed — one asset having a
+        # position open should not block a different asset from trading.
+        # The 4-hour per-asset cooldown (check_min_time_between_trades) is
+        # untouched and still applies per-asset.
 
         return True
 
@@ -4345,9 +4325,12 @@ class TradingBot:
           1. Time floor: block until startup_quarantine_minutes have elapsed.
           2. Price sanity (MT5 assets only): block until mt5_handler actively
              confirms a clean live price for this asset via
-             _get_verified_current_price. Binance/BTC has no equivalent sanity
-             mechanism yet, so BTC is governed by the time floor alone — a gap
-             to close if a BTC-side stale-cache incident recurs.
+             _get_verified_current_price. BTC's exchange is genuinely "mt5"
+             in config.json (routed as a broker CFD symbol, BTCUSDm) — not
+             Binance as the project overview might suggest — so BTC gets the
+             same live sanity coverage as Gold/FX/USTEC, not the time floor
+             alone. (Corrected 2026-07: an earlier pass here incorrectly
+             assumed BTC had no MT5 coverage.)
 
         Returns True  → still in quarantine, caller should return early.
         Returns False → quarantine cleared, normal trading allowed.
@@ -5298,6 +5281,17 @@ class TradingBot:
             # mode AND ran before the post-processing gates, making the
             # "passed_to_execution" count meaningless. Now logged here once,
             # covering council, performance, and hybrid modes uniformly.
+            # Item 2.3: cache this cycle's score per asset so the NEXT cycle can
+            # order execution strongest-conviction-first. total_score doesn't
+            # exist on CompositeState/_cached_composite (verified — the doc's
+            # own snippet flagged this field name as unconfirmed), it's an
+            # ephemeral local in this method's `details` dict — so it has to
+            # be persisted somewhere to survive to the next cycle's ordering
+            # decision.
+            if not hasattr(self, "_last_cycle_scores"):
+                self._last_cycle_scores = {}
+            self._last_cycle_scores[asset_name] = abs(details.get("total_score", 0) or 0)
+
             if getattr(self, "funnel_logger", None) is not None:
                 try:
                     self.funnel_logger.record(asset_name, signal, details)
@@ -5466,7 +5460,10 @@ class TradingBot:
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
-                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_trading_limits"})
+                        self.funnel_logger.record(
+                            asset_name, 0,
+                            {"reasoning": self._last_limit_reason or "blocked_trading_limits"},
+                        )
                     except Exception:
                         pass
                 return

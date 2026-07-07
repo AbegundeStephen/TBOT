@@ -111,13 +111,14 @@ def analyze_funnel(days):
             f"passed={c.get('passed_to_execution', 0)}  executed={c.get('executed', 0)}"
         )
         blocks = {k: v for k, v in c.items()
-                  if k.startswith("blocked") or k == "no_raw_signal"}
+                  if k.startswith("blocked") or k == "no_raw_signal"
+                  or k == "risk_capped_shared_budget"}
         for k, v in sorted(blocks.items(), key=lambda x: -x[1]):
             out.append(f"      {k:<26} {v:>6}  ({_pct(v, ev)} of evals)")
 
     out.append("\n--- Veto families ranked across all assets (most blocking first) ---")
     for k, v in sorted(stage_totals.items(), key=lambda x: -x[1]):
-        if k.startswith("blocked") or k == "no_raw_signal":
+        if k.startswith("blocked") or k == "no_raw_signal" or k == "risk_capped_shared_budget":
             out.append(f"  {k:<26} {v:>7}")
     return out
 

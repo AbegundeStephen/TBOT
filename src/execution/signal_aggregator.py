@@ -14,7 +14,7 @@ import logging
 import numpy as np
 from typing import Dict, Tuple, Optional
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.utils.trap_filter import validate_candle_structure
 from src.indicators.divergence import RSIDivergenceDetector
 from src.analysis.break_retest import BreakRetestValidator
@@ -1093,6 +1093,11 @@ class PerformanceWeightedAggregator:
         # AI validator path in the judge).
         self._compute_institutional_pattern(df, state)
 
+        # Item 6.1: price-OBV divergence, computed once here so the Volume
+        # judge (council_aggregator.py, Item 6.2) can read it directly instead
+        # of each consumer recomputing OBV independently.
+        self._compute_volume_divergence(df, state)
+
         # ── PHASE 2: vol_down_ratio ──────────────────────────────────────────
         # Volume on down-close bars vs up-close bars over the last 20 1H bars.
         # Used as MR Mode 1 veto (Phase 3A) and Scenario B continuation veto.
@@ -1541,7 +1546,7 @@ class PerformanceWeightedAggregator:
                 lvl
                 for lvl in self._structure_levels[asset]
                 if abs(current_price - lvl["price"]) / _atr <= 3.0
-                and lvl.get("age_hours", 0) < 336
+                and lvl.get("age_hours", 0) < 2160
             ]
 
             # Age all levels
@@ -1554,8 +1559,12 @@ class PerformanceWeightedAggregator:
             for lvl in self._structure_levels[asset]:
                 if lvl["type"] == "swing_high" and current_price > lvl["price"] * 1.003:
                     lvl["type"] = "swing_low"
+                    lvl["role_flipped_at"] = datetime.now(timezone.utc).isoformat()
+                    lvl["tests"] = 0
                 elif lvl["type"] == "swing_low" and current_price < lvl["price"] * 0.997:
                     lvl["type"] = "swing_high"
+                    lvl["role_flipped_at"] = datetime.now(timezone.utc).isoformat()
+                    lvl["tests"] = 0
 
             # Add new 4H swing points if available
             if df_4h is not None and len(df_4h) >= 10:
@@ -1629,6 +1638,48 @@ class PerformanceWeightedAggregator:
                 # stops and RetestEngine when the primary level is broken.
                 state.nearby_4h_level_2 = top3[1]["price"] if len(top3) > 1 else None
                 state.nearby_4h_level_3 = top3[2]["price"] if len(top3) > 2 else None
+
+            # Item 3.1/3.5: direction-split support/resistance, each with its
+            # own distinct-visit test count. Kept alongside nearby_4h_level
+            # above rather than replacing it — VTM structural stops, the
+            # BREAKOUT/CHASE tiers, and transition_detector.py still read the
+            # single-level fields and are out of this item's scope.
+            # Uses its own _last_dist_atr_side distance-memory key (separate
+            # from the block above's _last_dist_atr) so the two systems'
+            # debounce bookkeeping can't interfere with each other on a level
+            # that happens to be picked by both.
+            supports = [
+                l for l in self._structure_levels[asset]
+                if l["type"] == "swing_low" and l["price"] < current_price
+            ]
+            resistances = [
+                l for l in self._structure_levels[asset]
+                if l["type"] == "swing_high" and l["price"] > current_price
+            ]
+            _best_support = min(supports, key=lambda l: current_price - l["price"], default=None)
+            _best_resistance = min(resistances, key=lambda l: l["price"] - current_price, default=None)
+
+            if _best_support is not None:
+                _support_dist = (current_price - _best_support["price"]) / _atr
+                _support_was_away = _best_support.get("_last_dist_atr_side", 99) >= 0.5
+                if _support_dist < 0.3 and _support_was_away:
+                    _best_support["tests"] = _best_support.get("tests", 0) + 1
+                _best_support["_last_dist_atr_side"] = _support_dist
+            state.nearby_support_level = _best_support["price"] if _best_support else None
+            state.nearby_support_level_tests = (
+                _best_support.get("tests", 0) if _best_support else 0
+            )
+
+            if _best_resistance is not None:
+                _resistance_dist = (_best_resistance["price"] - current_price) / _atr
+                _resistance_was_away = _best_resistance.get("_last_dist_atr_side", 99) >= 0.5
+                if _resistance_dist < 0.3 and _resistance_was_away:
+                    _best_resistance["tests"] = _best_resistance.get("tests", 0) + 1
+                _best_resistance["_last_dist_atr_side"] = _resistance_dist
+            state.nearby_resistance_level = _best_resistance["price"] if _best_resistance else None
+            state.nearby_resistance_level_tests = (
+                _best_resistance.get("tests", 0) if _best_resistance else 0
+            )
         except Exception:
             pass
 
@@ -1770,37 +1821,98 @@ class PerformanceWeightedAggregator:
         except Exception:
             pass
 
-    def _compute_institutional_pattern(self, df, state) -> None:
-        """Item 2.7: live institutional-pattern classification from Livermore
-        state + volume ratio + range tightness, feeding the Pattern judge's
-        primary (ACCUMULATION/DISTRIBUTION/COMPRESSION) recognized labels
-        instead of leaving it to fall back to the legacy candlestick check.
+    def _detect_upthrust(self, df) -> tuple:
+        """
+        Item 5.1: Wyckoff upthrust — the bearish mirror of
+        s_mean_reversion._detect_spring(). A bar's wick sweeps above a prior
+        swing high then closes back below it within spring_recovery_max_bars,
+        with current-bar volume lower than the upthrust bar's (upthrust bar =
+        buying climax; entry bar = quiet absorption). Reuses Mode 1's spring
+        config thresholds since an upthrust is the mirror-image pattern of a
+        spring, not a distinct phenomenon needing its own tuning.
 
-        Note: the 0.8 volume-ratio and 2.5x-ATR range thresholds are
-        reasonable starting shapes, not yet validated against real outcomes —
-        flag for review once Item 1.8's judge-level logging has real data.
+        Returns: (found: bool, strength: float 0-1)
+        """
+        cfg = self.s_mean_reversion._mr3_cfg["mode1"]
+        min_pen, max_pen = cfg["spring_min_penetration"], cfg["spring_max_penetration"]
+        max_bars, swing_lb = cfg["spring_recovery_max_bars"], cfg["spring_swing_lookback"]
+        if len(df) < swing_lb + max_bars + 2:
+            return False, 0.0
+        high, close, volume = df["high"].values, df["close"].values, df["volume"].values
+        _win_end, _win_start = -(max_bars + 1), -(max_bars + 1) - swing_lb
+        prior_swing_high = float(np.max(high[_win_start:_win_end]))
+        for k in range(1, max_bars + 1):
+            bar_idx = -(k + 1)
+            bar_high, bar_close = float(high[bar_idx]), float(close[bar_idx])
+            if bar_high <= prior_swing_high or bar_close >= prior_swing_high:
+                continue
+            penetration = (bar_high - prior_swing_high) / prior_swing_high
+            if not (min_pen <= penetration <= max_pen):
+                continue
+            if volume[bar_idx] > 0 and volume[-1] >= volume[bar_idx]:
+                continue
+            strength = max(0.30, 1.0 - abs(penetration - 0.025) / 0.025)
+            return True, float(min(strength, 1.0))
+        return False, 0.0
+
+    def _compute_institutional_pattern(self, df, state) -> None:
+        """Item 5.2: rebuilt, tiered institutional-pattern classification.
+
+        Real Wyckoff spring/upthrust detection takes priority (genuine price
+        action evidence, high confidence) over the Livermore-state + volume/
+        range heuristic (Item 2.7's version, now the fallback tier, lower
+        confidence). Populates institutional_pattern_confidence alongside
+        institutional_pattern so downstream consumers (AI validator Item 5.4,
+        Pattern judge) can tell a confirmed spring from a soft heuristic read.
         """
         try:
+            _spring_found, _spring_strength = self.s_mean_reversion._detect_spring(df)
+            if _spring_found and _spring_strength >= 0.5:
+                state.institutional_pattern = "ACCUMULATION"
+                state.institutional_pattern_confidence = _spring_strength
+                return
+
+            _upthrust_found, _upthrust_strength = self._detect_upthrust(df)
+            if _upthrust_found and _upthrust_strength >= 0.5:
+                state.institutional_pattern = "DISTRIBUTION"
+                state.institutional_pattern_confidence = _upthrust_strength
+                return
+
             lsm = getattr(state, "livermore_state_1h", None)
             vol_ratio = df["volume"].iloc[-10:].mean() / max(df["volume"].iloc[-30:-10].mean(), 1e-9)
             range_pct = (df["high"].iloc[-10:].max() - df["low"].iloc[-10:].min()) / df["close"].iloc[-1]
             atr = getattr(state, "atr_fast", None) or df["close"].diff().abs().rolling(14).mean().iloc[-1]
             is_tight_range = range_pct < (2.5 * atr / df["close"].iloc[-1])
 
-            _basing_bull_states = ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-            _basing_bear_states = ("NATURAL_REBOUND", "SECONDARY_REBOUND")
+            _basing_bull = ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _basing_bear = ("NATURAL_REBOUND", "SECONDARY_REBOUND")
 
-            if lsm in _basing_bull_states and is_tight_range and vol_ratio < 0.8:
-                state.institutional_pattern = "ACCUMULATION"
-            elif lsm in _basing_bear_states and is_tight_range and vol_ratio < 0.8:
-                state.institutional_pattern = "DISTRIBUTION"
+            if lsm in _basing_bull and (is_tight_range or vol_ratio > 1.3):
+                state.institutional_pattern, state.institutional_pattern_confidence = "ACCUMULATION", 0.4
+            elif lsm in _basing_bear and (is_tight_range or vol_ratio > 1.3):
+                state.institutional_pattern, state.institutional_pattern_confidence = "DISTRIBUTION", 0.4
             elif is_tight_range:
-                state.institutional_pattern = "COMPRESSION"
+                state.institutional_pattern, state.institutional_pattern_confidence = "COMPRESSION", 0.3
             else:
-                state.institutional_pattern = None
+                state.institutional_pattern, state.institutional_pattern_confidence = None, 0.0
         except Exception as e:
             logger.debug(f"[PATTERN] compute error: {e}")
             state.institutional_pattern = None
+            state.institutional_pattern_confidence = 0.0
+
+    def _compute_volume_divergence(self, df, state) -> None:
+        """Item 6.1: price-OBV divergence, computed once and shared via
+        CompositeState instead of each consumer recomputing OBV separately."""
+        try:
+            price_chg = df["close"].diff()
+            obv = (np.sign(price_chg) * df["volume"]).fillna(0).cumsum()
+            obv_chg = obv.diff()
+            state.bullish_divergence = bool((price_chg.iloc[-1] < 0) and (obv_chg.iloc[-1] > 0))
+            state.bearish_divergence = bool((price_chg.iloc[-1] > 0) and (obv_chg.iloc[-1] < 0))
+        except Exception as e:
+            logger.debug(f"[VOLUME DIVERGENCE] compute error: {e}")
+            state.bullish_divergence = False
+            state.bearish_divergence = False
 
     # ── Section I: Confluence Engine ─────────────────────────────────────
 

@@ -1386,6 +1386,7 @@ class PortfolioManager:
             # ✅ MRS FIX: Grace window prevents one large position (GOLD) from
             #             starving other assets when total risk is slightly over cap.
             # ================================================================
+            requested_risk_pct = risk_pct
             max_total_risk_pct = self.risk_cfg.get("max_total_open_risk", 0.10)
             # How far over the cap before blocking entirely (default: 5%).
             # e.g. cap=25% → block only when total > 30%.
@@ -1454,6 +1455,18 @@ class PortfolioManager:
                         f"trade blocked"
                     )
                     risk_pct = 0.0
+
+            # Item 2.2: funnel visibility for the shared-risk-budget cap —
+            # previously a trade capped or fully blocked here left no trace
+            # distinguishing it from any other block.
+            if getattr(self, "funnel_logger", None) is not None:
+                try:
+                    if risk_pct == 0.0:
+                        self.funnel_logger.record(asset, 0, {"reasoning": "blocked_total_risk_cap"})
+                    elif risk_pct < requested_risk_pct:
+                        self.funnel_logger.record(asset, 0, {"reasoning": "risk_capped_shared_budget"})
+                except Exception:
+                    pass
 
             # ================================================================
             # STEP 5.5: Risk Floor (Enforce Minimum Risk USD)

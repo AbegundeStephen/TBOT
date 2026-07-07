@@ -28,7 +28,7 @@ class InstitutionalCouncilAggregator:
     1. TREND (1.5 pts)     - The Boss: EMA alignment
     2. STRUCTURE (1.5 pts) - The Location: S/R + AI pivots
     3. MOMENTUM (1.0 pt)   - The Fuel: RSI + MACD
-    4. PATTERN (0.5 pt)    - The Trigger: AI candlestick patterns
+    4. PATTERN (0.5 pt)    - The Trigger: Wyckoff spring/upthrust + structure
     5. VOLUME (0.5 pt)     - The Validator: Volume confirmation
 
     Total: 5.0 points
@@ -285,7 +285,7 @@ class InstitutionalCouncilAggregator:
         logger.info(f"   1. TREND      ({self.w_trend:.1f} pts) - EMA alignment")
         logger.info(f"   2. STRUCTURE  ({self.w_structure:.1f} pts) - S/R + AI pivots")
         logger.info(f"   3. MOMENTUM   ({self.w_momentum:.1f} pt)  - RSI + MACD")
-        logger.info(f"   4. PATTERN    ({self.w_pattern:.1f} pt)  - AI candlesticks")
+        logger.info(f"   4. PATTERN    ({self.w_pattern:.1f} pt)  - Wyckoff structure")
         logger.info(f"   5. VOLUME     ({self.w_volume:.1f} pt)  - Volume confirmation")
         logger.info("")
         _configured_ceiling = (
@@ -1497,6 +1497,44 @@ class InstitutionalCouncilAggregator:
             # ✨ NEW: Detect Breakout State to enable adaptive logic
             is_breakout_mode = self._detect_breakout_state(df)
 
+            # Item 3.8: RetestEngine classification moved ahead of the judges
+            # (was previously computed only after every judge had already
+            # scored, further down this method) so Structure judge (Item 4.2)
+            # can consult this cycle's retest_type instead of none at all.
+            # The consuming logic (ABSOLUTE VETO, THRESHOLD MODIFIERS) stays
+            # in its original location further below — only the computation
+            # moved.
+            _rt_buy = None
+            _rt_sell = None
+            try:
+                if not hasattr(self, "_council_retest_engine"):
+                    import json as _j_re
+                    try:
+                        with open("config/aggregator_presets.json") as _f_re:
+                            _re_cfg = _j_re.load(_f_re)
+                        from src.analysis.retest_engine import RetestEngine as _RE
+                        self._council_retest_engine = _RE(
+                            _re_cfg.get("RETEST_ENGINE", {})
+                        )
+                        logger.info(
+                            "[COUNCIL GATE] RetestEngine loaded for council mode"
+                        )
+                    except Exception as _re_load_err:
+                        logger.warning(
+                            "[COUNCIL GATE] RetestEngine failed to load: %s",
+                            _re_load_err,
+                        )
+                        self._council_retest_engine = None
+
+                _cre = getattr(self, "_council_retest_engine", None)
+                if _cre is not None and _composite_state is not None:
+                    _rt_buy  = _cre.classify(df, _composite_state, self.asset_type, direction=+1)
+                    _rt_sell = _cre.classify(df, _composite_state, self.asset_type, direction=-1)
+            except Exception as _rt_early_err:
+                logger.debug(
+                    "[COUNCIL GATE] Early RetestEngine classify failed: %s", _rt_early_err
+                )
+
             # Run all judges for both directions
             buy_scores["trend"], sell_scores["trend"], trend_exp = (
                 self._judge_trend_bidirectional(
@@ -1509,7 +1547,8 @@ class InstitutionalCouncilAggregator:
             # Pass breakout flag and ADX to adaptive judges
             buy_scores["structure"], sell_scores["structure"], structure_exp = (
                 self._judge_structure_bidirectional(
-                    df, is_breakout_mode, w_structure, adx, governor_data=governor_data
+                    df, is_breakout_mode, w_structure, adx, governor_data=governor_data,
+                    rt_buy=_rt_buy, rt_sell=_rt_sell,
                 )
             )
             buy_explanations.append(structure_exp["buy"])
@@ -1550,7 +1589,10 @@ class InstitutionalCouncilAggregator:
                 )
             else:
                 buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
-                    self._judge_reversion_bidirectional(df, w_momentum)
+                    self._judge_reversion_bidirectional(
+                        df, w_momentum, governor_data=governor_data,
+                        mr_signal=mr_signal, mr_conf=mr_conf,
+                    )
                 )
 
             buy_explanations.append(momentum_exp["buy"])
@@ -1768,35 +1810,14 @@ class InstitutionalCouncilAggregator:
             buy_total = sum(buy_scores.values())
             sell_total = sum(sell_scores.values())
 
-            # ── MR Direct Routing ─────────────────────────────────────────────
-            # MR signal is collected above but never reached the council total.
-            # In MR's primary states (NATURAL_RETRACEMENT = long spring,
-            # NATURAL_REBOUND = short spring) the signal is directionally
-            # authoritative — add it directly so the judges' trend-following
-            # bias cannot silence a correct MR call. Weight 0.75 is additive
-            # only — MR alone cannot clear the 2.75 trend threshold.
-            _lsm_1h_for_mr = (
-                getattr(_composite_state, "livermore_state_1h", None)
-                if _composite_state is not None
-                else None
-            )
-            _MR_LONG_STATES  = ("NATURAL_RETRACEMENT",)
-            _MR_SHORT_STATES = ("NATURAL_REBOUND",)
-            _MR_WEIGHT = 0.75
-            if mr_signal == 1 and _lsm_1h_for_mr in _MR_LONG_STATES:
-                buy_total += mr_conf * _MR_WEIGHT
-                logger.info(
-                    f"[COUNCIL MR ROUTE] {self.asset_type}: Mode1 long "
-                    f"(conf={mr_conf:.2f}) added {mr_conf * _MR_WEIGHT:.2f} to buy_total "
-                    f"→ buy_total now {buy_total:.2f}"
-                )
-            elif mr_signal == -1 and _lsm_1h_for_mr in _MR_SHORT_STATES:
-                sell_total += mr_conf * _MR_WEIGHT
-                logger.info(
-                    f"[COUNCIL MR ROUTE] {self.asset_type}: Mode1 short "
-                    f"(conf={mr_conf:.2f}) added {mr_conf * _MR_WEIGHT:.2f} to sell_total "
-                    f"→ sell_total now {sell_total:.2f}"
-                )
+            # Item 8.1: the standalone "MR Direct Routing" block that used to
+            # sit here has been removed. It added mr_conf directly to
+            # buy_total/sell_total OUTSIDE the judge-weight system, which
+            # broke the achievable-max accounting (Item 2.5) — buy_total
+            # could exceed _achievable_max, driving _buy_score_pct above
+            # 100%. MR is now the sole responsibility of the rebuilt
+            # Reversion judge (Item 8.2), scored within its w_momentum slot
+            # like every other judge.
 
             # ── Item 19b: 4H Livermore / macro-regime disagreement gate ──────
             # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
@@ -1932,30 +1953,10 @@ class InstitutionalCouncilAggregator:
             # quality of the structural location.
             # ══════════════════════════════════════════════════════════════════
             try:
-                if not hasattr(self, "_council_retest_engine"):
-                    import json as _j_re
-                    try:
-                        with open("config/aggregator_presets.json") as _f_re:
-                            _re_cfg = _j_re.load(_f_re)
-                        from src.analysis.retest_engine import RetestEngine as _RE
-                        self._council_retest_engine = _RE(
-                            _re_cfg.get("RETEST_ENGINE", {})
-                        )
-                        logger.info(
-                            "[COUNCIL GATE] RetestEngine loaded for council mode"
-                        )
-                    except Exception as _re_load_err:
-                        logger.warning(
-                            "[COUNCIL GATE] RetestEngine failed to load: %s",
-                            _re_load_err,
-                        )
-                        self._council_retest_engine = None
-
-                _cre = getattr(self, "_council_retest_engine", None)
-                if _cre is not None and _composite_state is not None:
+                # Item 3.8: _rt_buy/_rt_sell are now computed earlier (before
+                # the judges run) — this block only consumes them.
+                if _rt_buy is not None and _rt_sell is not None:
                     _likely_dir = 1 if buy_total >= sell_total else -1
-                    _rt_buy  = _cre.classify(df, _composite_state, self.asset_type, direction=+1)
-                    _rt_sell = _cre.classify(df, _composite_state, self.asset_type, direction=-1)
 
                     _buy_type  = _rt_buy.retest_type  if _rt_buy  is not None else "UNKNOWN"
                     _sell_type = _rt_sell.retest_type if _rt_sell is not None else "UNKNOWN"
@@ -2106,6 +2107,30 @@ class InstitutionalCouncilAggregator:
             _buy_threshold  = _effective_trend_threshold   if (is_bull or _is_neutral_regime) else _effective_counter_threshold
             _sell_threshold = _effective_trend_threshold   if (not is_bull or _is_neutral_regime) else _effective_counter_threshold
 
+            # Item 7.1: TF/EMA as confirmation, not veto. Nudges buy_total/
+            # sell_total by how many of {TF, EMA} agree or disagree with that
+            # side, BEFORE the achievable-max clear/no-clear decision below —
+            # not after, which is where the old hard block (Item 7.2, removed)
+            # used to sit, too late to let a genuinely strong signal survive a
+            # borderline TF/EMA disagreement. Applied per-side (buy_total,
+            # sell_total) rather than against a single post-decision `signal`,
+            # since neither `signal` nor `total_score` exist yet at this point
+            # — the whole point is to influence which side wins, not react
+            # after the fact.
+            _buy_tf_agree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
+            _buy_tf_disagree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
+            if _buy_tf_agree == 2:
+                buy_total = min(buy_total + 0.15, 5.0)
+            elif _buy_tf_disagree == 2:
+                buy_total = max(buy_total - 0.15, 0.0)
+
+            _sell_tf_agree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
+            _sell_tf_disagree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
+            if _sell_tf_agree == 2:
+                sell_total = min(sell_total + 0.15, 5.0)
+            elif _sell_tf_disagree == 2:
+                sell_total = max(sell_total - 0.15, 0.0)
+
             # Achievable-max normalization (Item 2.5): judge weights sum to 5.0
             # today, including through the SLIGHTLY regime reweight above — but
             # that's a hand-checked coincidence, not an enforced invariant. The
@@ -2223,105 +2248,12 @@ class InstitutionalCouncilAggregator:
                 except Exception as e:
                     logger.warning(f"[COUNCIL] Initial price calculation failed: {e}")
 
-                # 0. OPPOSITE TREND BLOCK (SAFETY VETO)
-                # Reason: Prevents Council from "fighting" a strong trend (e.g., buying while TF is screaming SELL)
-                if self.use_gatekeeper:
-                    base_threshold = self.config.get("trend_safety_threshold", 0.50)
-
-                    # Regime-adaptive threshold: in ambiguous regimes TF must be
-                    # much more confident to override the Council's consensus.
-                    if consensus_regime == "NEUTRAL":
-                        safety_threshold = max(base_threshold, 0.75)
-                    elif consensus_regime in ("SLIGHTLY_BULLISH", "SLIGHTLY_BEARISH"):
-                        safety_threshold = max(base_threshold, 0.65)
-                    else:
-                        # STRONGLY trending — keep original tight threshold
-                        safety_threshold = base_threshold
-
-                    # High-conviction Council override: when Council ≥ 4.0/5.0
-                    # and the macro is NOT in a full confirmed trend, a borderline
-                    # TF signal should not veto it. "STRONGLY_BULLISH/BEARISH"
-                    # never existed in the 5-tier model — the correct guard is
-                    # "BULLISH"/"BEARISH" (the full-trend labels that ARE produced).
-                    if total_score >= 4.0 and consensus_regime not in (
-                        "BULLISH",
-                        "BEARISH",
-                    ):
-                        safety_threshold = max(safety_threshold, 0.80)
-
-                    # Near-unanimous Council (≥ 4.5/5.0) in NEUTRAL/SLIGHTLY regime:
-                    # Council + AI are both signalling reversal — TF momentum lag
-                    # should not be able to override a near-unanimous Council.
-                    # Effectively disable the veto by requiring TF to be > 100%.
-                    if total_score >= 4.5 and consensus_regime in (
-                        "NEUTRAL",
-                        "SLIGHTLY_BULLISH",
-                        "SLIGHTLY_BEARISH",
-                    ):
-                        safety_threshold = 1.01  # impossible to exceed — veto bypassed
-
-                    if self.detailed_logging:
-                        logger.debug(
-                            f"[VETO] Opposite-Trend gate: regime={consensus_regime}, "
-                            f"council={total_score:.2f}/5.0, tf_conf={tf_conf:.2f}, "
-                            f"threshold={safety_threshold:.2f}"
-                        )
-
-                    # ✅ FIX: Only apply the TF veto when the council's signal is
-                    # COUNTER-TREND. The veto was designed to stop the council from
-                    # fighting strong trends (BUY in BEARISH, SELL in BULLISH).
-                    # Previously it fired symmetrically, also blocking trend-aligned
-                    # council trades (e.g., SELL in BEARISH) whenever TF picked up
-                    # short-term counter-trend momentum. A TF counter-trend reading
-                    # should NOT override a high-conviction trend-aligned council —
-                    # it's noise, not a regime change.
-                    _council_counter_trend = (
-                        signal == 1 and not is_bull
-                    ) or (  # BUY in BEARISH regime
-                        signal == -1 and is_bull
-                    )  # SELL in BULLISH regime
-
-                    if not _council_counter_trend:
-                        # Trend-aligned council — log TF opposition for visibility
-                        # but bypass the veto entirely.
-                        if (signal == 1 and tf_signal == -1) or (
-                            signal == -1 and tf_signal == 1
-                        ):
-                            logger.info(
-                                f"[VETO] ⚡ TF counter-trend opposition noted "
-                                f"(tf_conf={tf_conf:.2f}, threshold={safety_threshold:.2f}) "
-                                f"but council is TREND-ALIGNED — veto bypassed."
-                            )
-                    elif (
-                        signal == 1 and tf_signal == -1 and tf_conf >= safety_threshold
-                    ) or (
-                        signal == -1 and tf_signal == 1 and tf_conf >= safety_threshold
-                    ):
-                        logger.info(
-                            f"[VETO] ❌ BLOCKED - Opposite Trend: TF signals strong opposition ({tf_conf:.2f} >= {safety_threshold}) while Council disagrees."
-                        )
-                        return 0, {
-                            "timestamp": timestamp,
-                            "signal": 0,
-                            "asset": self.asset_type,
-                            "decision_type": f"BLOCKED (Opposite Trend)",
-                            "action": "rejected",
-                            "original_signal": signal,
-                            "reasoning": "blocked_by_opposite_trend",
-                            "final_signal": 0,
-                            "signal_quality": 0.0,
-                            "total_score": total_score,
-                            "scores": chosen_scores,
-                            "buy_total": buy_total,
-                            "sell_total": sell_total,
-                            "regime": regime_name,
-                            "mr_signal": mr_signal,
-                            "mr_confidence": mr_conf,
-                            "tf_signal": tf_signal,
-                            "tf_confidence": tf_conf,
-                            "ema_signal": ema_signal,
-                            "ema_confidence": ema_conf,
-                        }
+                # Item 7.2: the old OPPOSITE TREND BLOCK hard veto has been
+                # removed entirely. TF/EMA now act as a pre-decision
+                # confirmation modifier (Item 7.1, applied to buy_total/
+                # sell_total before the achievable-max clear/no-clear
+                # decision) instead of a post-decision hard block on the
+                # already-chosen signal.
 
                 # 1. MACRO GOVERNOR (ABSOLUTE VETO)
                 # Reason: Proves macro alignment (1D 200 EMA). Sacrosanct macro rule.
@@ -3544,6 +3476,8 @@ class InstitutionalCouncilAggregator:
         weight: float,
         adx: float = 20.0,
         governor_data: Optional[Dict] = None,
+        rt_buy=None,
+        rt_sell=None,
     ) -> Tuple[float, float, Dict]:
         """
         JUDGE 2: STRUCTURE (Bidirectional & Adaptive)
@@ -3552,6 +3486,12 @@ class InstitutionalCouncilAggregator:
               rejection_at_level, failed_breakout from CompositeState
               directly. No redundant raw-OHLCV recomputation in the judge."
         Fallback: legacy BreakRetestValidator + raw OHLCV when composite_state absent.
+
+        Item 4.2: rt_buy/rt_sell are this cycle's RetestEngine classifications
+        (Item 3.8 moved that computation to run before this judge). Only WICK
+        and CHASE_SOFT/CHASE_HARD react here — CLEAN is deliberately excluded
+        since it overlaps this judge's own defense-strength logic above and
+        would double-count the same evidence.
         """
         try:
             buy_score, sell_score = 0.0, 0.0
@@ -3704,6 +3644,60 @@ class InstitutionalCouncilAggregator:
                                 sell_exp += f" +LV_nat_high({_dist_high:.2f}ATR)"
                 except Exception:
                     pass  # non-blocking — standard SMC scoring already ran above
+
+                # ── Item 4.1: Proven-level corroboration ────────────────────
+                # Does a persistent, direction-split 4H level (Section 3)
+                # actually back up this score? A level tested multiple times
+                # earns a bonus; a score with no persistent level behind it at
+                # all gets a haircut instead of being trusted at face value.
+                _support = _cs("nearby_support_level", None)
+                _support_tests = _cs("nearby_support_level_tests", 0)
+                if buy_score > 0 and _support is not None:
+                    _proven_bonus = min(_support_tests * 0.05, 0.20)
+                    buy_score = min(buy_score + (_proven_bonus * weight), weight)
+                    buy_exp += f" | proven support (tests={_support_tests}, +{_proven_bonus:.2f})"
+                elif buy_score > 0 and _support is None:
+                    buy_score *= 0.85
+                    buy_exp += " | ⚠️ no persistent level corroborates this"
+
+                _resistance = _cs("nearby_resistance_level", None)
+                _resistance_tests = _cs("nearby_resistance_level_tests", 0)
+                if sell_score > 0 and _resistance is not None:
+                    _proven_bonus = min(_resistance_tests * 0.05, 0.20)
+                    sell_score = min(sell_score + (_proven_bonus * weight), weight)
+                    sell_exp += f" | proven resistance (tests={_resistance_tests}, +{_proven_bonus:.2f})"
+                elif sell_score > 0 and _resistance is None:
+                    sell_score *= 0.85
+                    sell_exp += " | ⚠️ no persistent level corroborates this"
+
+                # ── Item 4.2: React to RetestEngine's structural read ───────
+                # WICK confirms a genuine spring/upthrust off structure — a
+                # small reinforcing bonus. CHASE_SOFT/CHASE_HARD mean price is
+                # structurally extended even if the raw BOS/Donchian check
+                # above looked clean — haircut accordingly. CLEAN excluded
+                # (see docstring).
+                _rt_buy_type = rt_buy.retest_type if rt_buy is not None else None
+                _rt_sell_type = rt_sell.retest_type if rt_sell is not None else None
+                if buy_score > 0:
+                    if _rt_buy_type == "WICK":
+                        buy_score = min(buy_score + 0.15 * weight, weight)
+                        buy_exp += " | RT:WICK confirms"
+                    elif _rt_buy_type == "CHASE_HARD":
+                        buy_score *= 0.3
+                        buy_exp += " | RT:CHASE_HARD — too extended"
+                    elif _rt_buy_type == "CHASE_SOFT":
+                        buy_score *= 0.7
+                        buy_exp += " | RT:CHASE_SOFT — extended"
+                if sell_score > 0:
+                    if _rt_sell_type == "WICK":
+                        sell_score = min(sell_score + 0.15 * weight, weight)
+                        sell_exp += " | RT:WICK confirms"
+                    elif _rt_sell_type == "CHASE_HARD":
+                        sell_score *= 0.3
+                        sell_exp += " | RT:CHASE_HARD — too extended"
+                    elif _rt_sell_type == "CHASE_SOFT":
+                        sell_score *= 0.7
+                        sell_exp += " | RT:CHASE_SOFT — extended"
 
             else:
                 # ── Fallback: legacy BreakRetestValidator + raw OHLCV ─────────
@@ -4119,7 +4113,11 @@ class InstitutionalCouncilAggregator:
         MRS: "PATTERN judge reads institutional_pattern from performance aggregator.
               ACCUMULATION confirmed = PATTERN judge scores it.
               This connection was completely absent."
-        Fallback: ai_validator._check_pattern() when institutional_pattern is None.
+        Item 5.3: the ai_validator._check_pattern() candlestick fallback has
+        been removed entirely — institutional_pattern is now always real
+        Wyckoff spring/upthrust detection or a Livermore-state heuristic
+        (Item 5.2), never absent by accident. None means honestly no pattern:
+        both scores stay 0.0 rather than reaching for the old, weak fallback.
         """
         try:
             buy_score = 0.0
@@ -4165,65 +4163,51 @@ class InstitutionalCouncilAggregator:
                             "sell": f"PATTERN SELL: ⚠️ {inst_pattern} ({sell_score:.1f}) — range bound",
                         },
                     )
-                # Unknown institutional_pattern string → fall through to ai_validator
-
-            # ── Fallback: ai_validator pattern check (legacy path) ─────────────
-            if not self.ai_validator:
-                return (
-                    0.0,
-                    0.0,
-                    {"buy": "PATTERN: AI disabled", "sell": "PATTERN: AI disabled"},
-                )
-
-            # Check bullish pattern
-            pattern_buy = self.ai_validator._check_pattern(
-                df=df,
-                signal=1,
-                min_confidence=self.config["pattern_confidence_min"],
+            # Item 5.3: candlestick fallback removed entirely. institutional_pattern
+            # is now always one of ACCUMULATION/DISTRIBUTION/COMPRESSION/None
+            # (Item 5.2's rebuilt _compute_institutional_pattern) — no other
+            # string value is ever set, so there is no longer an "unknown
+            # pattern" case to fall through on. None means honestly no
+            # pattern: both scores stay 0.0 rather than reaching for the old,
+            # weak candlestick heuristic as a consolation score.
+            return (
+                buy_score, sell_score,
+                {
+                    "buy": "PATTERN BUY: ❌ No institutional pattern",
+                    "sell": "PATTERN SELL: ❌ No institutional pattern",
+                },
             )
-
-            if pattern_buy.get("pattern_confirmed"):
-                conf = pattern_buy.get("confidence", 0)
-                name = pattern_buy.get("pattern_name", "Unknown")
-
-                if conf > 0.75:
-                    buy_score = weight
-                    buy_exp = (
-                        f"PATTERN BUY: ✅ Full ({weight:.1f}) - {name} ({conf:.0%})"
-                    )
-                else:
-                    buy_score = weight * 0.8
-                    buy_exp = f"PATTERN BUY: ⚠️ Partial ({buy_score:.1f}) - {name} ({conf:.0%})"
-            else:
-                buy_exp = "PATTERN BUY: ❌ No pattern"
-
-            # Check bearish pattern
-            pattern_sell = self.ai_validator._check_pattern(
-                df=df,
-                signal=-1,
-                min_confidence=self.config["pattern_confidence_min"],
-            )
-
-            if pattern_sell.get("pattern_confirmed"):
-                conf = pattern_sell.get("confidence", 0)
-                name = pattern_sell.get("pattern_name", "Unknown")
-
-                if conf > 0.75:
-                    sell_score = weight
-                    sell_exp = (
-                        f"PATTERN SELL: ✅ Full ({weight:.1f}) - {name} ({conf:.0%})"
-                    )
-                else:
-                    sell_score = weight * 0.8
-                    sell_exp = f"PATTERN SELL: ⚠️ Partial ({sell_score:.1f}) - {name} ({conf:.0%})"
-            else:
-                sell_exp = "PATTERN SELL: ❌ No pattern"
-
-            return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
         except Exception as e:
             logger.error(f"[PATTERN] Error: {e}")
             return 0.0, 0.0, {"buy": "PATTERN: Error", "sell": "PATTERN: Error"}
+
+    def _apply_volume_divergence_bonus(self, buy_score, sell_score, buy_exp, sell_exp, cs, weight):
+        """Item 6.2: Livermore-scaled, directional divergence bonus — bullish
+        divergence only helps buy_score, bearish only helps sell_score. The
+        first genuine buy/sell asymmetry in an otherwise fully symmetric
+        judge (both branches above return one shared score for both sides).
+        Shared by both Volume judge branches (MT5-CFD spread-based and raw
+        crypto volume-based) since divergence is equally valid signal in
+        either data-quality regime.
+        """
+        if cs is None:
+            return buy_score, sell_score, buy_exp, sell_exp
+        _get = (lambda k, d=None: cs.get(k, d)) if isinstance(cs, dict) else (lambda k, d=None: getattr(cs, k, d))
+        _lsm_1h = _get("livermore_state_1h")
+        if _lsm_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+            _div_bonus = 0.20
+        elif _lsm_1h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+            _div_bonus = 0.25
+        else:
+            _div_bonus = 0.10
+        if bool(_get("bullish_divergence", False)):
+            buy_score = min(buy_score + _div_bonus * weight, weight)
+            buy_exp += f" +bull_divergence({_div_bonus:.2f})"
+        if bool(_get("bearish_divergence", False)):
+            sell_score = min(sell_score + _div_bonus * weight, weight)
+            sell_exp += f" +bear_divergence({_div_bonus:.2f})"
+        return buy_score, sell_score, buy_exp, sell_exp
 
     def _judge_volume_bidirectional(
         self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
@@ -4259,7 +4243,10 @@ class InstitutionalCouncilAggregator:
             else:
                 tag, score = "NORMAL", weight * 0.5
             exp = f"VOL: {tag} (spread {_spread_ratio:.1f}x avg, score={score:.2f})"
-            return score, score, {"buy": exp, "sell": exp}
+            _buy_score, _sell_score, _buy_exp, _sell_exp = self._apply_volume_divergence_bonus(
+                score, score, exp, exp, _cs_v, weight
+            )
+            return _buy_score, _sell_score, {"buy": _buy_exp, "sell": _sell_exp}
 
         try:
             if "volume" not in df.columns:
@@ -4322,60 +4309,52 @@ class InstitutionalCouncilAggregator:
                     score = min(weight, score + 0.20 * weight)
                     exp  += " +ob_wall"
 
-            return score, score, {"buy": exp, "sell": exp}
+            _buy_score, _sell_score, _buy_exp, _sell_exp = self._apply_volume_divergence_bonus(
+                score, score, exp, exp, _cs_v, weight
+            )
+            return _buy_score, _sell_score, {"buy": _buy_exp, "sell": _sell_exp}
 
         except Exception as e:
             logger.error(f"[VOLUME] Error: {e}")
             return 0.0, 0.0, {"buy": "VOL: Error", "sell": "VOL: Error"}
 
     def _judge_reversion_bidirectional(
-        self, df: pd.DataFrame, weight: float
+        self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None,
+        mr_signal: int = 0, mr_conf: float = 0.0,
     ) -> Tuple[float, float, Dict]:
         """
         JUDGE 6: REVERSION (Structural Mean Reversion)
-        Objective: Prevents catching falling knives by requiring RSI reversal + price break.
+
+        Item 8.2: rebuilt as the single, governed home for the MR strategy's
+        signal — previously MR's confidence was added straight to buy_total/
+        sell_total by a standalone "MR Direct Routing" block (Item 8.1,
+        removed) OUTSIDE the judge-weight system, while this judge slot
+        independently scored its own unrelated RSI-extreme-cross check. MR is
+        directionally authoritative only in its primary Livermore states
+        (NATURAL_RETRACEMENT = long spring, NATURAL_REBOUND = short spring);
+        outside those states its signal isn't scored here at all.
         """
-        try:
-            if len(df) < 5:
-                return 0.0, 0.0, {"buy": "REV: No data", "sell": "REV: No data"}
-
-            # Calculate RSI
-            close = df["close"].values
-            high = df["high"].values
-            low = df["low"].values
-
-            rsi_series = ta.RSI(close, timeperiod=14)
-            current_rsi = rsi_series[-1]
-            previous_rsi = rsi_series[-2]
-
-            current_close = close[-1]
-            previous_high = high[-2]
-            previous_low = low[-2]
-
-            buy_score = 0.0
-            sell_score = 0.0
-            buy_exp = "REV BUY: ❌ No structural reversal"
-            sell_exp = "REV SELL: ❌ No structural reversal"
-
-            # LONG ENTRY CONDITIONS
-            if (
-                previous_rsi < 30
-                and current_rsi >= 30
-                and current_close > previous_high
-            ):
-                buy_score = weight
-                buy_exp = f"REV BUY: ✅ Structural Reversal ({weight:.1f}) - RSI {previous_rsi:.1f}->{current_rsi:.1f} + Price > Prev High"
-
-            # SHORT ENTRY CONDITIONS
-            if previous_rsi > 70 and current_rsi <= 70 and current_close < previous_low:
-                sell_score = weight
-                sell_exp = f"REV SELL: ✅ Structural Reversal ({weight:.1f}) - RSI {previous_rsi:.1f}->{current_rsi:.1f} + Price < Prev Low"
-
-            return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
-
-        except Exception as e:
-            logger.error(f"[REVERSION] Error: {e}")
-            return 0.0, 0.0, {"buy": "REV: Error", "sell": "REV: Error"}
+        cs = (governor_data or {}).get("composite_state") if governor_data else None
+        # composite_state may be a CompositeState dataclass or a dict (same
+        # dual-form handling as every other judge in this file, e.g. the
+        # Structure judge's _cs() helper) — getattr() alone silently returns
+        # None on a dict instead of raising, which would permanently and
+        # invisibly zero out this judge whenever composite_state is a dict.
+        if cs is None:
+            lsm_1h = None
+        elif isinstance(cs, dict):
+            lsm_1h = cs.get("livermore_state_1h")
+        else:
+            lsm_1h = getattr(cs, "livermore_state_1h", None)
+        buy_score, sell_score = 0.0, 0.0
+        if lsm_1h == "NATURAL_RETRACEMENT" and mr_signal == 1:
+            buy_score = min(mr_conf * weight, weight)
+        elif lsm_1h == "NATURAL_REBOUND" and mr_signal == -1:
+            sell_score = min(mr_conf * weight, weight)
+        return buy_score, sell_score, {
+            "buy": f"REV BUY: {'✅' if buy_score else '❌'} MR confidence {mr_conf:.2f} ({buy_score:.2f})",
+            "sell": f"REV SELL: {'✅' if sell_score else '❌'} MR confidence {mr_conf:.2f} ({sell_score:.2f})",
+        }
 
     # ========================================================================
     # HELPER METHODS

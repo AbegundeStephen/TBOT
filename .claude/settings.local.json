@@ -9,7 +9,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/execution/signal_aggregator.py', encoding='utf-8'\\).read\\(\\)\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/execution/council_aggregator.py', encoding='utf-8'\\).read\\(\\)\\)\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(awk 'NR<=237 && /^    def /{line=NR; name=$0} END{print line\": \"name}' src/ai/hybrid_validator.py)",
+      "Bash(python -m pytest tests/ -q)"
     ]
   }
 }
