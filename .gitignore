@@ -5,6 +5,10 @@ config.backup.json
 *.key
 *.pem
 
+# Claude Code local settings (per-machine, must not sync across clones)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
 # Python
 __pycache__/
 *.py[cod]
