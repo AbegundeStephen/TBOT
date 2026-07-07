@@ -620,6 +620,43 @@ class MLStrategy(bt.Strategy):
             )
             logger.info(f"[AGGREGATOR] PerformanceWeightedAggregator selected")
 
+        # ── LSM companion — composite_state for the Council path ────────────
+        # InstitutionalCouncilAggregator has no _build_composite_state of its
+        # own; live trading (main.py) builds one via a lightweight
+        # PerformanceWeightedAggregator companion and injects it into
+        # governor_data before calling the Council aggregator. BacktestGovernor
+        # never populated this key, so every composite_state-dependent judge
+        # path (Structure's proven-level/sweep checks, the Pattern judge,
+        # Volume's divergence bonus, the Reversion judge, RetestEngine's
+        # sweep/chase reaction) was silently dead in every Council-mode
+        # backtest — not erroring, just never firing. Mirrors the live
+        # LSM-companion pattern (main.py ~line 1388) so this actually gets
+        # exercised.
+        #
+        # Simplification vs. live: live trading explicitly warm-starts the
+        # companion's Livermore state machine from historical CSVs before
+        # trusting its state, and holds Council signals until that warm-up
+        # completes. A backtest processes its own long bar history through
+        # _build_composite_state repeatedly, so the state machine warms up
+        # organically within the run instead — the first handful of bars may
+        # use a cold/default Livermore state, same as any fresh live restart
+        # before it converges.
+        self._lsm_companion = None
+        if agg_type == "council":
+            self._lsm_companion = PerformanceWeightedAggregator(
+                mean_reversion_strategy=self.mean_reversion,
+                trend_following_strategy=self.trend_following,
+                ema_strategy=self.ema_strategy,
+                asset_type=self.asset_key,
+                config=confidence_config,
+                ai_validator=None,
+                enable_ai_circuit_breaker=False,
+                enable_detailed_logging=False,
+                use_macro_governor=False,
+                use_gatekeeper=False,
+            )
+            logger.info("[AGGREGATOR] LSM companion (composite_state builder) attached for Council mode")
+
         self.order        = None
         self.trade_count  = 0
         self.signal_log   = []
@@ -785,6 +822,20 @@ class MLStrategy(bt.Strategy):
                 governor_data = self.governor.get_regime_at(current_dt)
             else:
                 governor_data = None
+
+            # LSM companion: build composite_state and inject it before the
+            # Council aggregator runs, same as main.py's live LSM-companion
+            # pattern. Without this, every composite_state-dependent judge
+            # branch (Structure, Pattern, Volume divergence, Reversion,
+            # RetestEngine) silently never fires in a Council-mode backtest.
+            if self._lsm_companion is not None and governor_data is not None:
+                try:
+                    _cs = self._lsm_companion._build_composite_state(
+                        df, governor_data.get("df_4h"), governor_data
+                    )
+                    governor_data["composite_state"] = _cs
+                except Exception as _cs_err:
+                    logger.debug(f"[LSM companion] composite_state build failed: {_cs_err}")
 
             signal, details = self.aggregator.get_aggregated_signal(
                 df,
