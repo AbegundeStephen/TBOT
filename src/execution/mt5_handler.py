@@ -934,6 +934,13 @@ class MT5ExecutionHandler:
                 f"Req: ${requested_price:,.2f}, Fill: ${execution_price:,.2f}, "
                 f"Diff: ${slippage:,.2f} ({slippage_pct:.4f}%)"
             )
+            # Item 4: feed this real, observed slippage back into the shadow
+            # engine's friction-cost estimate instead of letting it sit unused.
+            if getattr(self, "shadow_trader", None) is not None:
+                try:
+                    self.shadow_trader.update_friction_penalty(asset, slippage_pct)
+                except Exception as _fp_err:
+                    logger.debug(f"[SLIPPAGE] Friction penalty update failed: {_fp_err}")
 
             # Add to Portfolio
             if signal_details is None:

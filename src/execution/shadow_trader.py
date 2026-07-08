@@ -323,6 +323,33 @@ class ShadowTradingEngine:
             f"cooldown={cooldown_minutes}min, archive={self._archive_dir})"
         )
 
+    def update_friction_penalty(self, asset: str, observed_slippage_pct: float) -> None:
+        """Item 4: let real fill slippage correct the static FRICTION_PENALTIES
+        estimate, instead of it being a fixed number nobody ever revisits.
+
+        Call once per real trade close, passing the slippage_pct already
+        computed at the fill site (mt5_handler.py / binance_handler.py) —
+        that value is in PERCENT units (e.g. 0.03 meaning 0.03%), matching
+        the "(slippage_pct:.4f}%)" log line it comes from. FRICTION_PENALTIES
+        stores FRACTIONS (e.g. 0.0003 = 0.03%, per its own "# 0.03%
+        round-trip" comments), so this converts before writing — feeding the
+        percent value in directly would overstate every asset's friction
+        penalty by 100x.
+        """
+        try:
+            _observed_fraction = observed_slippage_pct / 100.0
+            _history = getattr(self, "_slippage_history", {})
+            _history.setdefault(asset.upper(), []).append(_observed_fraction)
+            _history[asset.upper()] = _history[asset.upper()][-50:]  # rolling window, last 50 trades
+            self._slippage_history = _history
+            FRICTION_PENALTIES[asset.upper()] = sum(_history[asset.upper()]) / len(_history[asset.upper()])
+            logger.debug(
+                f"[SHADOW] Friction penalty for {asset.upper()} updated to "
+                f"{FRICTION_PENALTIES[asset.upper()]:.5f} from {len(_history[asset.upper()])} observed fills"
+            )
+        except Exception as e:
+            logger.warning(f"[SHADOW] update_friction_penalty failed for {asset}: {e}")
+
     def open_position(
         self,
         asset: str,

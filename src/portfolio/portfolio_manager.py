@@ -296,6 +296,10 @@ class Position:
                     trade_type=signal_details.get("trade_type", "TREND"),
                     min_lot_override=self.min_lot,
                     lot_precision_override=self.lot_precision,
+                    # Item 5: no producer populates these keys yet — resolves
+                    # to None today, starts flowing once a future tier does.
+                    structure_levels_ref=signal_details.get("structure_levels_ref"),
+                    entry_retest_type=signal_details.get("retest_type"),
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -1007,6 +1011,10 @@ class PortfolioManager:
                                     # whatever size the live trade actually has, even if it
                                     # has dipped below broker minimum after partial closes.
                                     min_lot_override=position.quantity,
+                                    # Item 5: no producer populates these keys yet — resolves
+                                    # to None today, starts flowing once a future tier does.
+                                    structure_levels_ref=signal_details.get("structure_levels_ref"),
+                                    entry_retest_type=signal_details.get("retest_type"),
                                 )
                                 logger.info(
                                     f"[STATE] VTM for {position_id} successfully created."
