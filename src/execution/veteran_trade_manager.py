@@ -327,7 +327,9 @@ class VeteranTradeManager:
         current_ask: float = 0.0,       # ✨ NEW: For spread floor
         current_bid: float = 0.0,       # ✨ NEW: For spread floor
         min_lot_override: Optional[float] = None,      # ✨ NEW: Exness compatibility
-        lot_precision_override: Optional[int] = None   # ✨ NEW: Exness compatibility
+        lot_precision_override: Optional[int] = None,  # ✨ NEW: Exness compatibility
+        structure_levels_ref: Optional[list] = None,   # Item 5: level traded against
+        entry_retest_type: Optional[str] = None,       # Item 5: RetestEngine tier at entry
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -347,7 +349,14 @@ class VeteranTradeManager:
         self.current_bid = current_bid
         self.min_lot_override = min_lot_override
         self.lot_precision_override = lot_precision_override
-        
+
+        # Item 5: structure-aware plumbing — shared prerequisite for this
+        # batch and the brain rebuild's later tiers. Nothing reads these yet;
+        # this just makes sure they exist so later work isn't blocked on it.
+        self.structure_levels_ref = structure_levels_ref
+        self.entry_retest_type = entry_retest_type
+        self.atr_at_entry = self._calculate_atr()
+
         # Determine asset type for leverage ceiling
         self.asset_category = "FOREX"
         crypto_keywords = ["BTC", "ETH", "SOL", "BNB", "XRP", "USDT"]
@@ -583,6 +592,13 @@ class VeteranTradeManager:
         except Exception as e:
             logger.error(f"[VTM] Initialization error: {e}")
             raise
+
+        # Item 5: captured here rather than earlier alongside
+        # structure_levels_ref/entry_retest_type above — self.current_stop_loss
+        # is only a None placeholder until _calculate_initial_levels() runs;
+        # capturing it before that would always store None instead of the
+        # real level this trade was actually stopped against.
+        self.structural_stop_level = self.current_stop_loss
 
         # Log initialization summary
         logger.info("=" * 80)

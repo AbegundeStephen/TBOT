@@ -1358,32 +1358,13 @@ class InstitutionalCouncilAggregator:
         # STEP 1 — Governor-First Protocol
         # ====================================================================
         # Move macro regime check to the very first step.
+        # Item 2: the preliminary TF signal that used to be computed here
+        # (a second, throwaway call to generate_signal purely to feed this
+        # advisory log line) has been removed. The log now runs once, after
+        # the real TF call below, reusing that result instead of paying for
+        # the strategy's full computation twice per cycle.
         if self.use_macro_governor:
             macro_regime = self._check_macro_regime(self.asset_type)
-
-            # Determine preliminary signal from Trend Following to enable immediate veto
-            # Reason: Must check veto BEFORE computing RSI, ATR, or AI validation.
-            try:
-                # We use a fast, low-compute check of the Trend Following strategy
-                prelim_signal, _ = self.s_trend_following.generate_signal(
-                    df, silent=True
-                )
-
-                # T1.3: Smart Gatekeeper — preliminary TF check is advisory only.
-                # The authoritative regime gate is _check_governor_filter() called
-                # after full council scoring. Hard-vetoing here based on a single
-                # strategy's prelim signal was blocking valid counter-trend signals
-                # that the full scorecard would have rejected anyway.
-                if macro_regime == "BEARISH" and prelim_signal == 1:
-                    logger.info(
-                        "[COUNCIL] ⚠️ Governor pre-check: Bearish regime vs LONG prelim — proceeding to full scoring."
-                    )
-                if macro_regime == "BULLISH" and prelim_signal == -1:
-                    logger.info(
-                        "[COUNCIL] ⚠️ Governor pre-check: Bullish regime vs SHORT prelim — proceeding to full scoring."
-                    )
-            except Exception as e:
-                logger.debug(f"[COUNCIL] Governor-First check skipped: {e}")
 
         try:
             # ================================================================
@@ -1460,6 +1441,19 @@ class InstitutionalCouncilAggregator:
                     )
                 except Exception as e:
                     logger.error(f"[COUNCIL] TF signal error: {e}")
+
+                # Item 2: governor pre-check log, moved here from the deleted
+                # duplicate preliminary TF call above — advisory only, reuses
+                # this cycle's real tf_signal instead of computing a second one.
+                if self.use_macro_governor:
+                    if macro_regime == "BEARISH" and tf_signal == 1:
+                        logger.info(
+                            "[COUNCIL] ⚠️ Governor pre-check: Bearish regime vs LONG prelim — proceeding to full scoring."
+                        )
+                    if macro_regime == "BULLISH" and tf_signal == -1:
+                        logger.info(
+                            "[COUNCIL] ⚠️ Governor pre-check: Bullish regime vs SHORT prelim — proceeding to full scoring."
+                        )
 
             if self.s_ema:
                 try:

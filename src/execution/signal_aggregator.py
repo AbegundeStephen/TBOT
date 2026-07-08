@@ -3398,17 +3398,28 @@ class PerformanceWeightedAggregator:
             )
 
             if not _state_is_fresh and _candle_time is not None:
-                # New candle closed — rebuild the full composite state
-                self._cached_composite = self._build_composite_state(
-                    df,
-                    governor_data.get("df_4h") if governor_data else None,
-                    governor_data or {},
-                )
-                self._last_state_candle_time = _candle_time
-                self._persist_state()
-                logger.debug(
-                    f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}"
-                )
+                # New candle closed — rebuild the full composite state.
+                # Item 1: previously, any exception here left the rebuild
+                # half-done with no warning — the cycle would silently keep
+                # trading on yesterday's cached state forever. Now it logs
+                # loudly and explicitly keeps the last known good state.
+                try:
+                    _new_state = self._build_composite_state(
+                        df,
+                        governor_data.get("df_4h") if governor_data else None,
+                        governor_data or {},
+                    )
+                    self._cached_composite = _new_state
+                    self._last_state_candle_time = _candle_time
+                    self._persist_state()
+                    logger.debug(
+                        f"[STATE] Rebuilt composite state for {self.asset_type} at {_candle_time}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[STATE] Composite rebuild failed for {self.asset_type}, "
+                        f"keeping last known state: {e}"
+                    )
 
             # Use cached state for all downstream logic
             state = getattr(self, "_cached_composite", None)

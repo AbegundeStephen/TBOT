@@ -1174,6 +1174,17 @@ class TradingBot:
             logger.warning(f"Invalid mode '{mode}', defaulting to 'performance'")
             mode = "performance"
 
+        # Item 3: mode-drift tripwire. "hybrid" (and "performance") are still
+        # accepted by valid_modes above, so the existing check doesn't catch
+        # a config quietly drifting away from the intended production mode —
+        # only a fully invalid value. This applies to every asset (mode is
+        # read once, globally, before per-asset aggregator setup below), so
+        # a silent drift here silently affects all of them.
+        if mode != "council":
+            logger.warning(
+                f"[STARTUP] aggregator_settings.mode={mode!r}, expected 'council' — check config."
+            )
+
         # ================================================================
         # STEP 2: Define Preset Configurations
         # ================================================================
@@ -3692,6 +3703,10 @@ class TradingBot:
                                 # minimum (e.g. 0.0029 BTC after partial closes).
                                 # The min-lot guard is only meaningful for NEW orders.
                                 min_lot_override=position.quantity,
+                                # Item 5: no producer populates these keys yet — resolves
+                                # to None today, starts flowing once a future tier does.
+                                structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
+                                entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
                             )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
@@ -6954,6 +6969,15 @@ class TradingBot:
             except Exception as _se:
                 logger.warning(f"[SHADOW] load_state at startup failed: {_se}")
                 logger.info("[SHADOW] Shadow trading engine started (fresh)")
+
+            # Item 4: let real fill slippage correct the shadow engine's
+            # static FRICTION_PENALTIES estimate. Handlers are constructed
+            # before shadow_trader exists, so wire the reference here instead
+            # of at handler-construction time.
+            if self.mt5_handler is not None:
+                self.mt5_handler.shadow_trader = self.shadow_trader
+            if self.binance_handler is not None:
+                self.binance_handler.shadow_trader = self.shadow_trader
 
             # F.4: Start CVD WebSocket for BTC real-time order flow — only when
             # BTC is actually on Binance. When BTC uses MT5, the _btc_is_binance
