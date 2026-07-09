@@ -300,6 +300,7 @@ class Position:
                     # to None today, starts flowing once a future tier does.
                     structure_levels_ref=signal_details.get("structure_levels_ref"),
                     entry_retest_type=signal_details.get("retest_type"),
+                    telegram=self.telegram_bot,  # Brain rebuild Part 0.3
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -721,10 +722,12 @@ class PortfolioManager:
         execution_handlers: Dict = None,
         telegram_bot=None,
         aggregators: Dict = None,
+        outcome_pipeline=None,  # Brain rebuild Part 0.2
     ):
         self.config = config
         self.telegram_bot = telegram_bot
         self.aggregators = aggregators  # O4c: reference to aggregators dict
+        self.outcome_pipeline = outcome_pipeline  # Brain rebuild Part 0.2
         self.portfolio_config = config["portfolio"]
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
@@ -1015,6 +1018,7 @@ class PortfolioManager:
                                     # to None today, starts flowing once a future tier does.
                                     structure_levels_ref=signal_details.get("structure_levels_ref"),
                                     entry_retest_type=signal_details.get("retest_type"),
+                                    telegram=self.telegram_bot,  # Brain rebuild Part 0.3
                                 )
                                 logger.info(
                                     f"[STATE] VTM for {position_id} successfully created."
@@ -3812,6 +3816,66 @@ class PortfolioManager:
                 logger.error(
                     f"[TELEGRAM] Failed to send close notification from PM: {e}"
                 )
+
+        # Part 1.9 (Brain Rebuild): RLHF-light. Record this closed trade's
+        # outcome, then — only for a real, DB-tracked trade — prompt for a
+        # quick qualitative label via Telegram inline buttons.
+        _vtm = getattr(position, "trade_manager", None)
+        if self.outcome_pipeline is not None:
+            try:
+                self.outcome_pipeline.record(
+                    position, _vtm, trade_result["reason"], human_label=None
+                )
+            except Exception as e:
+                logger.debug(f"[RLHF] outcome_pipeline.record failed: {e}")
+
+            _rlhf_trade_id = getattr(position, "db_trade_id", None)
+            if _rlhf_trade_id and self.telegram_bot and self.telegram_bot._current_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.telegram_bot.send_rlhf_label_prompt(
+                            asset=trade_result["asset"],
+                            pnl_pct=trade_result["pnl_pct"] * 100,
+                            trade_id=_rlhf_trade_id,
+                        ),
+                        self.telegram_bot._current_loop,
+                    )
+                except Exception as e:
+                    logger.debug(f"[RLHF] label prompt send failed: {e}")
+
+        # Part 3.2 (Brain Rebuild): D2/D3 — feed real trade outcomes back
+        # into the structure-level records so future CLEAN-tier scoring and
+        # RetestEngine classification can see which levels actually hold
+        # under pressure vs. which only look defended on paper.
+        # Reason strings vary ("VTM_stop_loss", "sell_signal", "VTM_take_profit_2",
+        # etc. — see close_position's many callers) so normalise the same way
+        # notify_trade_closed already does before matching against ExitReason.
+        if (
+            getattr(_vtm, "structural_stop_level", None) is not None
+            and getattr(_vtm, "structure_levels_ref", None) is not None
+        ):
+            try:
+                _atr_entry = getattr(_vtm, "atr_at_entry", None) or 1e-9
+                _reason_norm = str(trade_result["reason"]).lower()
+                if _reason_norm.startswith("vtm_"):
+                    _reason_norm = _reason_norm[4:]
+                _level_held = _reason_norm != ExitReason.STOP_LOSS.value
+                for lvl in _vtm.structure_levels_ref:
+                    if abs(lvl["price"] - _vtm.structural_stop_level) < 0.1 * _atr_entry:
+                        if _level_held:
+                            lvl["tests"] = lvl.get("tests", 0) + 1
+                        else:
+                            lvl["failed_tests"] = lvl.get("failed_tests", 0) + 1
+                        if getattr(_vtm, "entry_retest_type", None) == "CLEAN" and _reason_norm in (
+                            ExitReason.TAKE_PROFIT_1.value,
+                            ExitReason.TAKE_PROFIT_2.value,
+                            ExitReason.TAKE_PROFIT_3.value,
+                        ):
+                            lvl["clean_retest_success_count"] = (
+                                lvl.get("clean_retest_success_count", 0) + 1
+                            )
+            except Exception as e:
+                logger.debug(f"[D2/D3] structure-level outcome tracking failed: {e}")
 
         return trade_result
 

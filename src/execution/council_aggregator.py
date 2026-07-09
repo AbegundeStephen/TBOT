@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import talib as ta  # ✨ Added for Volatility/ATR checks
 import logging
+import time
 from typing import Dict, Tuple, Optional
 from collections import deque
 from datetime import datetime
@@ -18,6 +19,21 @@ from src.execution.transition_detector import TransitionDetector
 from src.strategies.trend_following import compute_adx_slope
 
 logger = logging.getLogger(__name__)
+
+# Brain rebuild Part 0.7 — dependency registry, reshaped. Read by Part 4's
+# correlation discount (_effective_vote_count) so judges sharing an
+# underlying enrichment source (e.g. the same Livermore 1H read) don't each
+# count as a fully independent vote. 0.10/0.15 are reasoned starting points,
+# not measured — revisit once housekeeping's judge-liveness data gives real
+# per-enrichment averages.
+JUDGE_SOURCE_REGISTRY = {
+    "trend":     [("independent", 0.90), ("livermore_1h", 0.10)],
+    "momentum":  [("independent", 0.85), ("livermore_1h", 0.15)],
+    "pattern":   [("independent", 1.0)],
+    "structure": [("independent", 0.85), ("livermore_1h", 0.15)],
+    "volume":    [("independent", 0.85), ("livermore_1h", 0.15)],
+    "reversion": [("independent", 1.0)],
+}
 
 
 class InstitutionalCouncilAggregator:
@@ -63,6 +79,7 @@ class InstitutionalCouncilAggregator:
         config: Optional[Dict] = None,
         mtf_integration=None,  # ✨ INJECTED: The Governor
         performance_tracker=None,  # ✨ INJECTED: Performance Analytics
+        outcome_pipeline=None,  # Brain rebuild Part 0.2
         use_macro_governor: bool = True,
         use_gatekeeper: bool = True,
     ):
@@ -74,6 +91,7 @@ class InstitutionalCouncilAggregator:
         self.detailed_logging = enable_detailed_logging
         self.mtf_integration = mtf_integration
         self.performance_tracker = performance_tracker
+        self.outcome_pipeline = outcome_pipeline  # Brain rebuild Part 0.2
         # L7: telemetry tag for the most recent TREND judge / Livermore agreement
         # check — read by funnel/shadow logging, not behavior-critical itself.
         self._last_trend_judge_tag: str = "LSM_UNAVAILABLE"
@@ -1123,6 +1141,51 @@ class InstitutionalCouncilAggregator:
             logger.debug(f"[MOMENTUM] Overrule check error: {e}")
             return False
 
+    def _effective_vote_count(self, contributing_judges, registry) -> float:
+        """
+        Part 4.1 (Brain Rebuild): correlation discount. Judges that fired
+        this cycle are supposed to represent independent evidence, but
+        several secretly share an underlying enrichment source (e.g. the
+        same Livermore 1H read, per JUDGE_SOURCE_REGISTRY) — so N firing
+        judges isn't N independent votes. For each shared source, only the
+        first judge to draw on it gets full credit; subsequent judges
+        drawing on the SAME source get discounted by how much of that
+        source's "capacity" is already spent (seen_shared_fields).
+        Independent-only judges always get full credit.
+        """
+        seen_shared_fields = {}
+        effective = 0.0
+        for judge in contributing_judges:
+            entries = registry.get(judge, [("independent", 1.0)])
+            judge_total = 0.0
+            for source, share in entries:
+                if source == "independent":
+                    judge_total += share
+                else:
+                    prior_use = seen_shared_fields.get(source, 0.0)
+                    judge_total += share * max(0.0, 1.0 - prior_use)
+                    seen_shared_fields[source] = min(1.0, prior_use + share)
+            effective += judge_total
+        return effective
+
+    def _consecutive_maxed_cycles(self, direction: str) -> int:
+        """
+        Part 1.3 (Brain Rebuild): counts how many consecutive most-recent
+        cycles the Trend judge has sat maxed at its own weight ceiling for
+        `direction` ("buy"/"sell"), with conviction_dying breaking the streak.
+        Used by the CHASE_HARD absolute veto to let a trend that has been
+        maxed-out and still holding conviction for long enough override a
+        structural "too extended to chase" classification.
+        """
+        trend_key = f"trend_maxed_{direction}"
+        streak = 0
+        for cycle in reversed(self.score_history):
+            if cycle.get(trend_key) and not cycle.get("conviction_dying", False):
+                streak += 1
+            else:
+                break
+        return streak
+
     def _get_aggregated_signal_impl(
         self,
         df: pd.DataFrame,
@@ -1513,12 +1576,24 @@ class InstitutionalCouncilAggregator:
                         logger.info(
                             "[COUNCIL GATE] RetestEngine loaded for council mode"
                         )
+                        # Part 1.3 (Brain Rebuild): per-asset CHASE_HARD trend-
+                        # continuation override — how many consecutive cycles
+                        # trend must sit maxed before a structurally CHASE_HARD
+                        # side is allowed through anyway.
+                        _re_assets = _re_cfg.get("RETEST_ENGINE", {}).get("assets", {})
+                        _override_asset_cfg = _re_assets.get(
+                            self.asset_type, _re_assets.get("DEFAULT", {})
+                        )
+                        self._chase_override_min_cycles = int(
+                            _override_asset_cfg.get("chase_hard_override_min_cycles", 10)
+                        )
                     except Exception as _re_load_err:
                         logger.warning(
                             "[COUNCIL GATE] RetestEngine failed to load: %s",
                             _re_load_err,
                         )
                         self._council_retest_engine = None
+                        self._chase_override_min_cycles = 10
 
                 _cre = getattr(self, "_council_retest_engine", None)
                 if _cre is not None and _composite_state is not None:
@@ -1529,11 +1604,28 @@ class InstitutionalCouncilAggregator:
                     "[COUNCIL GATE] Early RetestEngine classify failed: %s", _rt_early_err
                 )
 
+            # Brain Rebuild Part 5.1: dual-track dispatch. tier3_shadow_enabled
+            # (default False = new judges live from day one) picks which
+            # side actually drives the decision; the other is still computed
+            # every cycle purely as a live reference for Part 5.3's
+            # divergence tagging and the emergency-brake comparison. Flip
+            # the flag to True to instantly revert Trend to the pre-Part-2.1
+            # (Item 2.8) behavior with no redeploy.
+            _tier3_shadow_mode = self.config.get("phase_config", {}).get(
+                "tier3_shadow_enabled", False
+            )
+
             # Run all judges for both directions
+            _old_buy_trend, _old_sell_trend, _old_trend_exp = self._judge_trend_bidirectional_legacy(
+                df, is_bull, w_trend, consensus_regime, governor_data=governor_data
+            )
+            _new_buy_trend, _new_sell_trend, _new_trend_exp = self._judge_trend_bidirectional(
+                df, is_bull, w_trend, ema_signal=ema_signal, ema_conf=ema_conf,
+                consensus_regime=consensus_regime, governor_data=governor_data
+            )
             buy_scores["trend"], sell_scores["trend"], trend_exp = (
-                self._judge_trend_bidirectional(
-                    df, is_bull, w_trend, consensus_regime, governor_data=governor_data
-                )
+                (_old_buy_trend, _old_sell_trend, _old_trend_exp) if _tier3_shadow_mode
+                else (_new_buy_trend, _new_sell_trend, _new_trend_exp)
             )
             buy_explanations.append(trend_exp["buy"])
             sell_explanations.append(trend_exp["sell"])
@@ -1571,16 +1663,21 @@ class InstitutionalCouncilAggregator:
                     f"— overriding to trend-aligned momentum judge"
                 )
             if is_breakout_mode or is_trending_regime:
-                buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
-                    self._judge_momentum_bidirectional(
-                        df,
-                        is_bull,
-                        is_breakout_mode,
-                        w_momentum,
-                        adx,
-                        governor_data=governor_data,
-                    )
+                # Brain Rebuild Part 5.1: _judge_momentum_bidirectional_legacy
+                # is a thin delegate to the same implementation (Part 2.2's
+                # proposed rewrite matched what was already live — see its
+                # docstring), so there's nothing to gain from calling the
+                # expensive momentum logic twice per cycle here; both sides
+                # of the shadow flag are the same result by construction.
+                momentum_result = self._judge_momentum_bidirectional(
+                    df,
+                    is_bull,
+                    is_breakout_mode,
+                    w_momentum,
+                    adx,
+                    governor_data=governor_data,
                 )
+                buy_scores["momentum"], sell_scores["momentum"], momentum_exp = momentum_result
             else:
                 buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
                     self._judge_reversion_bidirectional(
@@ -1592,6 +1689,10 @@ class InstitutionalCouncilAggregator:
             buy_explanations.append(momentum_exp["buy"])
             sell_explanations.append(momentum_exp["sell"])
 
+            # Brain Rebuild Part 5.1: _judge_pattern_bidirectional_legacy is a
+            # thin delegate (see its docstring — Part 2.3 changed upstream
+            # institutional_pattern computation, not this judge), so no
+            # duplicate call needed here either.
             buy_scores["pattern"], sell_scores["pattern"], pattern_exp = (
                 self._judge_pattern_bidirectional(
                     df, w_pattern, governor_data=governor_data
@@ -1793,10 +1894,42 @@ class InstitutionalCouncilAggregator:
             self.score_history.append(
                 {
                     "timestamp": timestamp,
-                    "buy_scores": _raw_buy_scores,
+                    # Part 1.8 (Brain Rebuild): "timestamp" above is the bar's
+                    # OWN close time (str(df.index[-1])) — it only advances
+                    # once per candle, not once per evaluation cycle, so it
+                    # can't detect a stalled loop (an hourly bar can sit
+                    # "fresh" for up to an hour of dead cycles). HealthMonitor's
+                    # check_cadence/check_decision_completeness need actual
+                    # wall-clock time instead.
+                    "wall_clock_ts": time.time(),
+                    "buy_scores": _raw_buy_scores,   # live by default (Part 5.1) — the NEW judges
                     "sell_scores": _raw_sell_scores,
+                    # Part 5.2 (Brain Rebuild): legacy reference — momentum/
+                    # pattern read straight from the live scorecard since
+                    # their _legacy is a delegate (see Part 5.1), so there's
+                    # nothing to diverge; trend uses the genuinely separate
+                    # old computation regardless of which one is driving.
+                    "legacy_reference_buy_scores": {
+                        "trend": _old_buy_trend,
+                        "momentum": _raw_buy_scores.get("momentum", 0.0),
+                        "pattern": _raw_buy_scores.get("pattern", 0.0),
+                    },
+                    "legacy_reference_sell_scores": {
+                        "trend": _old_sell_trend,
+                        "momentum": _raw_sell_scores.get("momentum", 0.0),
+                        "pattern": _raw_sell_scores.get("pattern", 0.0),
+                    },
                     "buy_total": sum(_raw_buy_scores.values()),
                     "sell_total": sum(_raw_sell_scores.values()),
+                    # Part 1.3 (Brain Rebuild): feeds _consecutive_maxed_cycles,
+                    # the CHASE_HARD trend-continuation override below.
+                    "trend_maxed_buy": _raw_buy_scores.get("trend", 0.0) >= w_trend - 1e-9,
+                    "trend_maxed_sell": _raw_sell_scores.get("trend", 0.0) >= w_trend - 1e-9,
+                    "conviction_dying": bool(
+                        getattr(_composite_state, "conviction_dying", False)
+                        if not isinstance(_composite_state, dict)
+                        else (_composite_state or {}).get("conviction_dying", False)
+                    ),
                 }
             )
 
@@ -1969,21 +2102,51 @@ class InstitutionalCouncilAggregator:
                     # (the preliminary lean), so a direction that was CHASE_HARD but
                     # happened to be the minority lean still passed the threshold
                     # comparison and could win by margin in the UNIFIED block.
+                    # Part 1.3 (Brain Rebuild): CHASE-1 trend-continuation
+                    # override. A structurally CHASE_HARD side is still let
+                    # through if Trend has sat maxed at its ceiling (with
+                    # conviction not dying) for at least this asset's
+                    # chase_hard_override_min_cycles — a trend that has kept
+                    # printing new structure long enough that "too extended
+                    # to chase" is no longer the right read.
+                    _buy_overridden = False
+                    _sell_overridden = False
                     if _buy_type == "CHASE_HARD":
-                        logger.info(
-                            "[COUNCIL GATE] %s BUY direction CHASE_HARD — "
-                            "structural veto on long",
-                            self.asset_type,
-                        )
-                        buy_total = 0.0
+                        _buy_streak = self._consecutive_maxed_cycles("buy")
+                        if _buy_streak >= self._chase_override_min_cycles:
+                            _buy_overridden = True
+                            logger.info(
+                                "[COUNCIL GATE] %s BUY direction CHASE_HARD but "
+                                "trend maxed %d/%d cycles — override, veto lifted",
+                                self.asset_type, _buy_streak, self._chase_override_min_cycles,
+                            )
+                        else:
+                            logger.info(
+                                "[COUNCIL GATE] %s BUY direction CHASE_HARD — "
+                                "structural veto on long",
+                                self.asset_type,
+                            )
+                            buy_total = 0.0
                     if _sell_type == "CHASE_HARD":
-                        logger.info(
-                            "[COUNCIL GATE] %s SELL direction CHASE_HARD — "
-                            "structural veto on short",
-                            self.asset_type,
-                        )
-                        sell_total = 0.0
-                    if _buy_type == "CHASE_HARD" and _sell_type == "CHASE_HARD":
+                        _sell_streak = self._consecutive_maxed_cycles("sell")
+                        if _sell_streak >= self._chase_override_min_cycles:
+                            _sell_overridden = True
+                            logger.info(
+                                "[COUNCIL GATE] %s SELL direction CHASE_HARD but "
+                                "trend maxed %d/%d cycles — override, veto lifted",
+                                self.asset_type, _sell_streak, self._chase_override_min_cycles,
+                            )
+                        else:
+                            logger.info(
+                                "[COUNCIL GATE] %s SELL direction CHASE_HARD — "
+                                "structural veto on short",
+                                self.asset_type,
+                            )
+                            sell_total = 0.0
+                    if (
+                        _buy_type == "CHASE_HARD" and _sell_type == "CHASE_HARD"
+                        and not _buy_overridden and not _sell_overridden
+                    ):
                         decision_type = "HOLD (structural_chase_hard)"
 
                     # ── THRESHOLD MODIFIERS ─────────────────────────────────
@@ -2136,8 +2299,21 @@ class InstitutionalCouncilAggregator:
             # against a fixed 5.0 would silently drift the moment a future
             # weight change stops summing to 5.0 — compare percentages instead.
             _achievable_max = w_trend + w_structure + w_momentum + w_pattern + w_volume
-            _buy_score_pct  = (buy_total  / _achievable_max) if _achievable_max > 0 else 0.0
-            _sell_score_pct = (sell_total / _achievable_max) if _achievable_max > 0 else 0.0
+
+            # Part 4.1 (Brain Rebuild): correlation discount. Judges sharing
+            # an underlying enrichment source (JUDGE_SOURCE_REGISTRY, Part
+            # 0.7) don't each count as a fully independent vote — scale each
+            # side's percentage by how much independent evidence actually
+            # backs it, not just how many judges nominally fired.
+            _buy_contributing  = [j for j in JUDGE_SOURCE_REGISTRY if buy_scores.get(j, 0) > 0]
+            _sell_contributing = [j for j in JUDGE_SOURCE_REGISTRY if sell_scores.get(j, 0) > 0]
+            _buy_eff_n  = self._effective_vote_count(_buy_contributing, JUDGE_SOURCE_REGISTRY)
+            _sell_eff_n = self._effective_vote_count(_sell_contributing, JUDGE_SOURCE_REGISTRY)
+            _buy_scale  = (_buy_eff_n  / len(_buy_contributing))  if _buy_contributing  else 1.0
+            _sell_scale = (_sell_eff_n / len(_sell_contributing)) if _sell_contributing else 1.0
+
+            _buy_score_pct  = (buy_total  * _buy_scale  / _achievable_max) if _achievable_max > 0 else 0.0
+            _sell_score_pct = (sell_total * _sell_scale / _achievable_max) if _achievable_max > 0 else 0.0
             _buy_required_pct  = _buy_threshold  / 5.0
             _sell_required_pct = _sell_threshold / 5.0
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
@@ -2152,25 +2328,42 @@ class InstitutionalCouncilAggregator:
                     f"with macro regime lean ({_regime_lean_c}) — HOLD "
                     f"(lsm_regime_disagreement_gate_enabled, buy={buy_total:.2f} sell={sell_total:.2f})"
                 )
-            # 4. Both sides cleared — take whichever is further past its bar.
+            # 4. Both sides cleared — Part 4.2 (Brain Rebuild) "wait for
+            # clarity": previously picked whichever had the bigger margin
+            # past its own bar, which is really just measuring which
+            # threshold was easier to clear (buy_threshold vs sell_threshold
+            # can differ), not which side price action actually favors. Let
+            # the Structure judge — the one reading price location directly —
+            # break the tie; if it doesn't lean either way, this is genuine
+            # ambiguity and the right answer is to wait, not guess.
             elif _buy_clears and _sell_clears:
-                _buy_margin  = buy_total  - _buy_threshold
-                _sell_margin = sell_total - _sell_threshold
-                if _buy_margin >= _sell_margin:
+                _price_action_leans_buy  = buy_scores.get("structure", 0) > sell_scores.get("structure", 0)
+                _price_action_leans_sell = sell_scores.get("structure", 0) > buy_scores.get("structure", 0)
+                if _price_action_leans_buy and not _price_action_leans_sell:
                     signal, total_score, required_score, chosen_scores = (
                         1, buy_total, _buy_threshold, buy_scores
                     )
                     logger.debug(
                         "[COUNCIL GATE] %s both sides cleared — BUY wins "
-                        "(margin %.2f vs SELL %.2f)", self.asset_type, _buy_margin, _sell_margin,
+                        "(structure judge leans buy)", self.asset_type,
                     )
-                else:
+                elif _price_action_leans_sell and not _price_action_leans_buy:
                     signal, total_score, required_score, chosen_scores = (
                         -1, sell_total, _sell_threshold, sell_scores
                     )
                     logger.debug(
                         "[COUNCIL GATE] %s both sides cleared — SELL wins "
-                        "(margin %.2f vs BUY %.2f)", self.asset_type, _sell_margin, _buy_margin,
+                        "(structure judge leans sell)", self.asset_type,
+                    )
+                else:
+                    signal, total_score, required_score, chosen_scores = (
+                        0, 0.0, max(_buy_threshold, _sell_threshold), {}
+                    )
+                    decision_type = "HOLD (ambiguous_both_sides_cleared)"
+                    logger.info(
+                        "[COUNCIL GATE] %s both sides cleared, structure judge "
+                        "doesn't lean either way — waiting for clarity "
+                        "(buy=%.2f sell=%.2f)", self.asset_type, buy_total, sell_total,
                     )
             elif _buy_clears:
                 signal, total_score, required_score, chosen_scores = (
@@ -2358,6 +2551,33 @@ class InstitutionalCouncilAggregator:
                                     f"(score={_te.total_score:+.3f}, conditions={_te.conditions_met}/4, "
                                     f"dir={_te.direction}) [{self.asset_type}]"
                                 )
+                                # Part 1.4 (Brain Rebuild): TransitionDetector firing IS
+                                # a softening event — feed it to the shared outcome
+                                # pipeline (Tier 6.2) so RLHF/near-miss tracking has
+                                # visibility into these, not just judge-level signals.
+                                if getattr(self, "outcome_pipeline", None) is not None:
+                                    try:
+                                        from datetime import timezone as _tz_1_4
+                                        _close_now = (
+                                            float(df["close"].iloc[-1])
+                                            if df is not None and len(df)
+                                            else None
+                                        )
+                                        if _close_now is not None:
+                                            self.outcome_pipeline.tag(
+                                                asset=self.asset_type,
+                                                direction=(
+                                                    "bullish" if "BULLISH" in _te.direction
+                                                    else "bearish"
+                                                ),
+                                                price=_close_now,
+                                                timestamp=datetime.now(_tz_1_4.utc),
+                                                event_type="softening",
+                                            )
+                                    except Exception as _op_tag_err:
+                                        logger.debug(
+                                            f"[COUNCIL] outcome_pipeline tag failed: {_op_tag_err}"
+                                        )
                             else:
                                 logger.debug(
                                     f"[COUNCIL] SLIGHTLY_COUNTER: insufficient transition evidence "
@@ -3148,6 +3368,13 @@ class InstitutionalCouncilAggregator:
                 "sell_scores": sell_scores,
                 "buy_total": buy_total,
                 "sell_total": sell_total,
+                # Part 5.2/5.3 (Brain Rebuild): legacy trend reference, for
+                # main.py's divergence check (Part 5.3) — momentum/pattern
+                # aren't included here since their _legacy is a delegate
+                # (see Part 5.1), so buy_scores/sell_scores above already
+                # equal what legacy would have said for those two.
+                "legacy_reference_buy_trend": _old_buy_trend,
+                "legacy_reference_sell_trend": _old_sell_trend,
                 "regime": regime_name,
                 "regime_confidence": regime_conf,
                 "explanations": chosen_explanations,
@@ -3351,7 +3578,7 @@ class InstitutionalCouncilAggregator:
     # BIDIRECTIONAL JUDGES
     # ========================================================================
 
-    def _judge_trend_bidirectional(
+    def _judge_trend_bidirectional_legacy(
         self,
         df: pd.DataFrame,
         is_bull: bool,
@@ -3360,15 +3587,16 @@ class InstitutionalCouncilAggregator:
         governor_data: Optional[Dict] = None,
     ) -> Tuple[float, float, Dict]:
         """
-        JUDGE 1: TREND (Bidirectional)
+        JUDGE 1: TREND (Bidirectional) — LEGACY (Item 2.8 design).
 
-        Item 2.8: redefined from "is price above the EMA" to "do the 1H and 4H
-        Livermore reads actually agree" — Livermore's own state machine already
-        answers the EMA-above/below question more reliably than a raw crossover,
-        so deriving it twice (once via EMA, once via the old L7 confirmation
-        nudge bolted on afterward) was redundant. Full weight to whichever side
-        both timeframes agree on; a flat 0.3x baseline to both sides when they
-        don't (no clear structural read, not a confident bet either way).
+        Brain Rebuild Part 5.1: kept as the emergency-brake reference.
+        Computed every cycle alongside the new judge below but drives
+        nothing unless phase_config.tier3_shadow_enabled is flipped to True.
+        Preserved verbatim from before the Part 2.1 rewrite: full weight to
+        whichever side both 1H and 4H Livermore reads agree on — Livermore's
+        own state machine answers the EMA-above/below question more
+        reliably than a raw crossover — with a flat 0.3x baseline to both
+        sides when they disagree.
         """
         try:
             cs = (governor_data or {}).get("composite_state") if governor_data else None
@@ -3406,9 +3634,6 @@ class InstitutionalCouncilAggregator:
                     "LSM_NEUTRAL" if (lsm_1h or lsm_4h) else "LSM_UNAVAILABLE"
                 )
 
-            # ── O2a: Orphan signal wiring — slopes_aligned, conviction_dying ──
-            # Pre-computed Confluence signals that the trend judge was ignoring
-            # while independently re-deriving similar information.
             if governor_data is not None:
                 _cs_t = (governor_data or {}).get("composite_state")
                 _slopes_aligned = bool(
@@ -3420,12 +3645,6 @@ class InstitutionalCouncilAggregator:
                     else _cs_t.get("conviction_dying", False)
                 )
 
-                # slopes_aligned = 1H and 4H EMA slopes agree in direction.
-                # The field is a boolean with no direction stored, so we infer
-                # direction from the trend judge's own EMA scores: if buy_score
-                # > sell_score the EMA picture is bullish, so aligned slopes
-                # confirm the bull — and vice versa. This prevents bearish
-                # slope alignment from boosting a buy signal.
                 if _slopes_aligned:
                     _slopes_bullish = buy_score > sell_score
                     if _slopes_bullish and buy_score > 0:
@@ -3435,17 +3654,12 @@ class InstitutionalCouncilAggregator:
                         sell_score = min(weight, sell_score * 1.10)
                         sell_exp  += " +slopes_aligned_bear"
 
-                # conviction_dying = candle body momentum fading. Discount
-                # both directions — a fading trend is worth less than a fresh
-                # one regardless of which way it's going.
                 if _conviction_dying:
                     _cd_directional = self.config.get("phase_config", {}).get(
                         "conviction_dying_directional_enabled", False
                     )
                     _lsm_state_1h = getattr(_cs_t, "livermore_state_1h", None)
                     if _cd_directional and _lsm_state_1h == "NATURAL_REBOUND":
-                        # Dying bounce inside a downtrend is bearish evidence, not
-                        # neutral. Penalise BUY only — SELL keeps its score.
                         buy_score = buy_score * 0.75
                         if buy_score > 0:
                             buy_exp += " -conviction_dying(NATURAL_REBOUND, BUY-only)"
@@ -3460,8 +3674,52 @@ class InstitutionalCouncilAggregator:
             return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
         except Exception as e:
+            logger.error(f"[TREND-LEGACY] Error: {e}")
+            return 0.0, 0.0, {"buy": "TREND: Error", "sell": "TREND: Error"}
+
+    def _judge_trend_bidirectional(
+        self,
+        df: pd.DataFrame,
+        is_bull: bool,
+        weight: float,
+        ema_signal: int = 0,
+        ema_conf: float = 0.0,
+        consensus_regime: str = "NEUTRAL",
+        governor_data: Optional[Dict] = None,
+    ) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 1: TREND (Bidirectional)
+
+        Brain Rebuild Part 2.1 (applied verbatim per explicit instruction,
+        2026-07-09): raw EMA-signal/confidence is the primary score again,
+        with 1H Livermore agreement folded in as a capped +15% bonus rather
+        than the primary driver. This replaces the Item 2.8 design (full
+        weight on 1H/4H Livermore agreement, 0.3x baseline on disagreement)
+        and drops that design's O2a slopes_aligned/conviction_dying handling.
+        """
+        try:
+            buy_score = weight * ema_conf if ema_signal == 1 else 0.0
+            sell_score = weight * ema_conf if ema_signal == -1 else 0.0
+            buy_exp = f"TREND BUY: {'OK' if buy_score else 'NO'} EMA aligned ({buy_score:.2f})"
+            sell_exp = f"TREND SELL: {'OK' if sell_score else 'NO'} EMA aligned ({sell_score:.2f})"
+
+            lv_1h = (governor_data or {}).get("composite_state")
+            lv_state = (
+                getattr(lv_1h, "livermore_state_1h", None)
+                if lv_1h and not isinstance(lv_1h, dict)
+                else (lv_1h.get("livermore_state_1h") if isinstance(lv_1h, dict) else None)
+            )
+            _bull_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _bear_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            if buy_score > 0 and lv_state in _bull_states:
+                buy_score = min(buy_score * 1.15, weight)
+            if sell_score > 0 and lv_state in _bear_states:
+                sell_score = min(sell_score * 1.15, weight)
+
+            return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
+        except Exception as e:
             logger.error(f"[TREND] Error: {e}")
-            return 0.0, 0.0, {"buy": f"TREND: Error", "sell": f"TREND: Error"}
+            return 0.0, 0.0, {"buy": "TREND: Error", "sell": "TREND: Error"}
 
     def _judge_structure_bidirectional(
         self,
@@ -3510,6 +3768,7 @@ class InstitutionalCouncilAggregator:
                 failed_breakout = bool(_cs("failed_breakout", False))
                 sweep_direction = int(_cs("sweep_direction", 0))
                 is_bullish_regime = bool((governor_data or {}).get("is_bullish", False))
+                is_bearish_regime = bool((governor_data or {}).get("is_bearish", False))  # Brain rebuild Part 1.1
 
                 # ── BUY scoring ───────────────────────────────────────────────
                 if (
@@ -3600,6 +3859,12 @@ class InstitutionalCouncilAggregator:
                 if choch_detected and is_bullish_regime:
                     sell_score = min(sell_score + 0.3 * weight, weight)
                     sell_exp += " +CHoCH"
+                # Brain rebuild Part 1.1: the mirror case was simply missing —
+                # CHoCH in a bearish regime = potential bottom, a bullish
+                # reversal warning, but nothing here ever scored it.
+                if choch_detected and is_bearish_regime:
+                    buy_score = min(buy_score + 0.3 * weight, weight)
+                    buy_exp += " +CHoCH"
 
                 # ── Livermore Anchor Proximity ────────────────────────────────
                 # The SMC-derived fields above detect structure from recent price
@@ -3811,6 +4076,29 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.error(f"[STRUCTURE] Error: {e}", exc_info=True)
             return 0.0, 0.0, {"buy": "STRUCT: Error", "sell": "STRUCT: Error"}
+
+    def _judge_momentum_bidirectional_legacy(
+        self,
+        df: pd.DataFrame,
+        is_bull: bool,
+        is_breakout_mode: bool,
+        weight: float,
+        adx: float,
+        governor_data: Optional[Dict] = None,
+    ) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 3: MOMENTUM (Bidirectional & Adaptive) — LEGACY reference.
+
+        Brain Rebuild Part 5.1: Part 2.2's proposed rewrite turned out to be
+        a fragmentary excerpt whose substance (ADX-slope delta table,
+        Livermore-aware interpretation, conviction_dying handling) already
+        matched this implementation — no new version was created, so this
+        is a thin delegate rather than a duplicate copy that could drift
+        out of sync with the live judge below.
+        """
+        return self._judge_momentum_bidirectional(
+            df, is_bull, is_breakout_mode, weight, adx, governor_data=governor_data
+        )
 
     def _judge_momentum_bidirectional(
         self,
@@ -4098,6 +4386,23 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[MOMENTUM] Error: {e}", exc_info=True)
             return 0.0, 0.0, {"buy": "MOM: Error", "sell": "MOM: Error"}
 
+    def _judge_pattern_bidirectional_legacy(
+        self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
+    ) -> Tuple[float, float, Dict]:
+        """
+        JUDGE 4: PATTERN (Bidirectional) — LEGACY reference.
+
+        Brain Rebuild Part 5.1: Part 2.3's change was to institutional_pattern's
+        upstream computation (signal_aggregator.py's _compute_institutional_pattern
+        fallback tier), not to this judge function itself, which just reads
+        whatever institutional_pattern already says — so there's no separate
+        "old judge" to preserve here. Thin delegate for interface parity with
+        the trend/momentum legacy pair, so the shadow flag has a uniform
+        three-judge surface even though flipping it doesn't change this one's
+        behavior.
+        """
+        return self._judge_pattern_bidirectional(df, weight, governor_data=governor_data)
+
     def _judge_pattern_bidirectional(
         self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
     ) -> Tuple[float, float, Dict]:
@@ -4177,30 +4482,30 @@ class InstitutionalCouncilAggregator:
             return 0.0, 0.0, {"buy": "PATTERN: Error", "sell": "PATTERN: Error"}
 
     def _apply_volume_divergence_bonus(self, buy_score, sell_score, buy_exp, sell_exp, cs, weight):
-        """Item 6.2: Livermore-scaled, directional divergence bonus — bullish
-        divergence only helps buy_score, bearish only helps sell_score. The
-        first genuine buy/sell asymmetry in an otherwise fully symmetric
-        judge (both branches above return one shared score for both sides).
-        Shared by both Volume judge branches (MT5-CFD spread-based and raw
-        crypto volume-based) since divergence is equally valid signal in
-        either data-quality regime.
+        """
+        Brain Rebuild Part 2.4 (applied verbatim per explicit instruction,
+        2026-07-09): dedicated baseline + separate Livermore top-up, summing
+        to the same 0.10/0.20/0.25 tiers as Item 6.2's version it replaces
+        (MAIN / NATURAL / SECONDARY) — same final bonus, split into two
+        labelled components instead of one.
         """
         if cs is None:
             return buy_score, sell_score, buy_exp, sell_exp
         _get = (lambda k, d=None: cs.get(k, d)) if isinstance(cs, dict) else (lambda k, d=None: getattr(cs, k, d))
+        _div_bonus = 0.10
         _lsm_1h = _get("livermore_state_1h")
+        _lsm_topup = 0.0
         if _lsm_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
-            _div_bonus = 0.20
+            _lsm_topup = 0.10
         elif _lsm_1h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
-            _div_bonus = 0.25
-        else:
-            _div_bonus = 0.10
+            _lsm_topup = 0.15
+        _total = _div_bonus + _lsm_topup
         if bool(_get("bullish_divergence", False)):
-            buy_score = min(buy_score + _div_bonus * weight, weight)
-            buy_exp += f" +bull_divergence({_div_bonus:.2f})"
+            buy_score = min(buy_score + _total * weight, weight)
+            buy_exp += f" +bull_divergence(dedicated={_div_bonus:.2f}, Livermore+{_lsm_topup:.2f})"
         if bool(_get("bearish_divergence", False)):
-            sell_score = min(sell_score + _div_bonus * weight, weight)
-            sell_exp += f" +bear_divergence({_div_bonus:.2f})"
+            sell_score = min(sell_score + _total * weight, weight)
+            sell_exp += f" +bear_divergence(dedicated={_div_bonus:.2f}, Livermore+{_lsm_topup:.2f})"
         return buy_score, sell_score, buy_exp, sell_exp
 
     def _judge_volume_bidirectional(

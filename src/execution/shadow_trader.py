@@ -492,6 +492,10 @@ class ShadowTradingEngine:
                 "ema_signal":   signal_details.get("ema_signal", 0),
                 "ema_conf":     signal_details.get("ema_confidence", 0.0),
                 "signal_quality": signal_details.get("signal_quality", 0.0),
+                # Part 1.6 (Brain Rebuild): six council judge scorecards —
+                # empty dicts (falsy, safely) for non-council signal_details.
+                "judge_buy_scores":  signal_details.get("buy_scores", {}),
+                "judge_sell_scores": signal_details.get("sell_scores", {}),
             },
             # J2.1: CompositeState snapshot
             composite_state=composite_state or {},

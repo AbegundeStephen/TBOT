@@ -195,6 +195,52 @@ def analyze_shadow(days):
     return out
 
 
+def grade_tier3_live_performance(shadow_records, min_n=15):
+    """
+    Brain Rebuild Part 5.4. No longer a go/no-go gate — this runs
+    continuously now. A result showing the new judges losing isn't a
+    reason to wait and see; it's the trigger to flip
+    phase_config.tier3_shadow_enabled back to True while the actual issue
+    gets diagnosed. Reports the live (new-judge) win rate on cases where
+    they disagreed with the legacy reference — there is no automatic
+    comparison baseline; whether that number is "clearly below what the
+    old judges were managing" is a human call (Part 5.5), not something
+    this function decides.
+    """
+    live_side = [
+        r for r in shadow_records
+        if r.get("gate_blocked_by", "").startswith("tier3_divergence_live")
+    ]
+    if len(live_side) < min_n:
+        return {"n": len(live_side), "status": "insufficient_sample_still_forming"}
+    wins = sum(1 for r in live_side if r.get("net_pnl_pct", 0) > 0)
+    return {"n": len(live_side), "win_rate": wins / len(live_side)}
+
+
+def analyze_tier3_divergence(days):
+    rows = _read_jsonl(_files_within(SHADOW_DIR, "closed", days))
+    out = ["", "=" * 78,
+           "4. TIER 3 DIVERGENCE  (live judges vs. legacy reference, Part 5.4)",
+           "=" * 78]
+    result = grade_tier3_live_performance(rows)
+    if result.get("status") == "insufficient_sample_still_forming":
+        out.append(
+            f"n={result['n']} divergence events (need 15+ per Part 5.5 before "
+            f"this number means anything — don't overreact to a handful of cases)."
+        )
+    else:
+        out.append(
+            f"n={result['n']} divergence events, live-judge win rate: "
+            f"{result['win_rate'] * 100:.1f}%"
+        )
+        out.append(
+            "No automatic verdict — compare against what the legacy judges were "
+            "managing on comparable cases. Clearly worse is the trigger for the "
+            "emergency brake (phase_config.tier3_shadow_enabled = True)."
+        )
+    return out
+
+
 def analyze_ai(days):
     rows = _read_jsonl(_files_within(FUNNEL_DIR, "ai_rejects", days))
     out = ["", "=" * 78, "3. AI FILTER REJECTIONS", "=" * 78]
@@ -227,6 +273,7 @@ def main():
                  f"generated {datetime.now(timezone.utc).isoformat()})")
     lines += analyze_funnel(args.days)
     lines += analyze_shadow(args.days)
+    lines += analyze_tier3_divergence(args.days)
     lines += analyze_ai(args.days)
     lines.append("")
     lines.append("=" * 78)

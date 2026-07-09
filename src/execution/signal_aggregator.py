@@ -1470,11 +1470,28 @@ class PerformanceWeightedAggregator:
             _atr_raw   = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
             _min_depth = 0.3 * _atr_raw if _atr_raw > 0 else 0.0
 
+            # Brain rebuild Part 0.5 (Tier X.1) — four real problems fixed:
+            #  1. No bound on how far back "recent" could search — now capped
+            #     at MAX_LOOKBACK_BARS.
+            #  2. The swing-low classification used to be gated on
+            #     `not state.bos_detected` / `not state.choch_detected`, so
+            #     whichever direction's swing-high check fired first silently
+            #     blocked the other direction's own, independent signal.
+            #     Removed — both directions are now evaluated unconditionally.
+            #  3. Appended the wick (highs_arr[i]/lows_arr[i]) despite the
+            #     depth check already measuring against prior CLOSES (see
+            #     this method's own docstring) — now appends closes_arr[i]
+            #     for real close-based comparison, not wick noise.
+            #  4. Failed completely silently (`except Exception: pass`) — now
+            #     logs loudly and leaves state at its last good value instead
+            #     of pretending nothing happened.
+            MAX_LOOKBACK_BARS = 50  # bounds how far back a "recent" pivot can be
             swing_highs = []
             swing_lows  = []
+            _search_floor = max(6, len(highs_arr) - 3 - MAX_LOOKBACK_BARS)
 
             # ── Swing HIGH: 4 left, 2 right, depth vs prior closes ──────────
-            for i in range(len(highs_arr) - 3, 6, -1):
+            for i in range(len(highs_arr) - 3, _search_floor, -1):
                 if (
                     highs_arr[i] > highs_arr[i - 1]
                     and highs_arr[i] > highs_arr[i - 2]
@@ -1484,12 +1501,12 @@ class PerformanceWeightedAggregator:
                     and highs_arr[i] > highs_arr[i + 2]
                     and (highs_arr[i] - max(closes_arr[i - 4:i]) >= _min_depth)
                 ):
-                    swing_highs.append(highs_arr[i])
+                    swing_highs.append(closes_arr[i])
                     if len(swing_highs) >= 2:
                         break
 
             # ── Swing LOW: symmetric, depth vs prior closes ─────────────────
-            for i in range(len(lows_arr) - 3, 6, -1):
+            for i in range(len(lows_arr) - 3, _search_floor, -1):
                 if (
                     lows_arr[i] < lows_arr[i - 1]
                     and lows_arr[i] < lows_arr[i - 2]
@@ -1499,11 +1516,11 @@ class PerformanceWeightedAggregator:
                     and lows_arr[i] < lows_arr[i + 2]
                     and (min(closes_arr[i - 4:i]) - lows_arr[i] >= _min_depth)
                 ):
-                    swing_lows.append(lows_arr[i])
+                    swing_lows.append(closes_arr[i])
                     if len(swing_lows) >= 2:
                         break
 
-            # ── CHoCH / BOS classification ───────────────────────────────────
+            # ── CHoCH / BOS classification — both directions independent ────
             if len(swing_highs) >= 2:
                 if swing_highs[0] > swing_highs[1]:
                     state.bos_detected = True    # Higher high — trend continuing
@@ -1511,13 +1528,15 @@ class PerformanceWeightedAggregator:
                     state.choch_detected = True  # Lower high — reversal warning
 
             if len(swing_lows) >= 2:
-                if swing_lows[0] < swing_lows[1] and not state.bos_detected:
+                if swing_lows[0] < swing_lows[1]:
                     state.bos_detected = True    # Lower low — downtrend continuing
-                elif swing_lows[0] > swing_lows[1] and not state.choch_detected:
+                elif swing_lows[0] > swing_lows[1]:
                     state.choch_detected = True  # Higher low — reversal warning
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"[BOS/CHOCH] Swing detection failed for {self.asset_type}, state left stale: {e}"
+            )
 
     # ── E.2: MTF Structure Memory ─────────────────────────────────────────
 
@@ -1878,19 +1897,30 @@ class PerformanceWeightedAggregator:
                 state.institutional_pattern_confidence = _upthrust_strength
                 return
 
-            lsm = getattr(state, "livermore_state_1h", None)
+            # Brain Rebuild Part 2.3 (applied verbatim per explicit instruction,
+            # 2026-07-09): fallback-tier "basing" definition changed from
+            # Livermore-state category to nearest-level distance. Replaces
+            # Item 2.7's lsm-based version (this was its only consumer of
+            # `lsm`, so that lookup is dropped too).
             vol_ratio = df["volume"].iloc[-10:].mean() / max(df["volume"].iloc[-30:-10].mean(), 1e-9)
             range_pct = (df["high"].iloc[-10:].max() - df["low"].iloc[-10:].min()) / df["close"].iloc[-1]
             atr = getattr(state, "atr_fast", None) or df["close"].diff().abs().rolling(14).mean().iloc[-1]
             is_tight_range = range_pct < (2.5 * atr / df["close"].iloc[-1])
 
-            _basing_bull = ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-            _basing_bear = ("NATURAL_REBOUND", "SECONDARY_REBOUND")
+            _close = df["close"].iloc[-1]
+            _supp = getattr(state, "nearby_support_level", None)
+            _res = getattr(state, "nearby_resistance_level", None)
+            _dist_supp = abs(_close - _supp) if _supp is not None else float("inf")
+            _dist_res = abs(_close - _res) if _res is not None else float("inf")
+            _basing_bullish = _dist_supp < _dist_res
+            _basing_bearish = _dist_res < _dist_supp
 
-            if lsm in _basing_bull and (is_tight_range or vol_ratio > 1.3):
-                state.institutional_pattern, state.institutional_pattern_confidence = "ACCUMULATION", 0.4
-            elif lsm in _basing_bear and (is_tight_range or vol_ratio > 1.3):
-                state.institutional_pattern, state.institutional_pattern_confidence = "DISTRIBUTION", 0.4
+            if _basing_bullish and (is_tight_range or vol_ratio > 1.3):
+                _conf = 0.3 + 0.2 * min(1.0, atr / max(_dist_supp, 1e-9))
+                state.institutional_pattern, state.institutional_pattern_confidence = "ACCUMULATION", _conf
+            elif _basing_bearish and (is_tight_range or vol_ratio > 1.3):
+                _conf = 0.3 + 0.2 * min(1.0, atr / max(_dist_res, 1e-9))
+                state.institutional_pattern, state.institutional_pattern_confidence = "DISTRIBUTION", _conf
             elif is_tight_range:
                 state.institutional_pattern, state.institutional_pattern_confidence = "COMPRESSION", 0.3
             else:

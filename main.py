@@ -76,6 +76,7 @@ from src.utils.trade_logger import log_trade_event
 from src.utils.calendar_updater import CalendarUpdater
 from src.audit_logger.audit_logger import log_trade
 from src.monitoring.health_monitor import HealthMonitor
+from src.monitoring.outcome_tracker import OutcomeTracker
 from src.execution.system_validator import SystemValidator
 from src.portfolio.hedging_support import (
     enable_hedging_for_portfolio,
@@ -417,6 +418,14 @@ class TradingBot:
         # reads this cache instead, accepting staleness up to one main-loop
         # cycle (~5 min). Values are CompositeState.to_dict() dicts, not objects.
         self._latest_composite_state: dict = {}
+        # Brain Rebuild Part 3.4: sibling cache for the human-alert layer
+        # (Part 3.5) — {"buy": {...judge scores...}, "sell": {...}} per asset.
+        # Read from cache rather than re-invoking get_aggregated_signal from
+        # the tick loop, which would pollute InstitutionalCouncilAggregator's
+        # score_history with sub-minute entries and corrupt Part 1.3's
+        # CHASE-1 cycle counting and Part 1.8's cadence/completeness checks
+        # (both assume one score_history entry per ~5-min main cycle).
+        self._latest_judge_scores: dict = {}
 
         # Main bot state
         self._shutdown_requested = False
@@ -450,6 +459,15 @@ class TradingBot:
         # F.4: CVD WebSocket consumer for BTC order flow
         self.cvd_consumer: Optional[CVDConsumer] = None
         self.cvd_thread: Optional[threading.Thread] = None
+
+        # Brain rebuild Part 0.1/0.2: shared outcome pipeline — softening
+        # events, near-miss tracking, and RLHF human labels all write here
+        # instead of each fix inventing its own logger. Must be set before
+        # _initialize_telegram() below, which now receives it directly —
+        # the doc's suggested placement (alongside self.health_monitor,
+        # further down) is too late: _initialize_telegram() runs first and
+        # would hit AttributeError on self.outcome_pipeline before it's set.
+        self.outcome_pipeline = OutcomeTracker()
 
         # Initialize components in CORRECT order
         self._initialize_telegram()
@@ -602,6 +620,7 @@ class TradingBot:
                 db_manager=self.db_manager,
                 telegram_bot=self.telegram_bot,
                 aggregators=getattr(self, "aggregators", None),  # O4c: wire aggregators
+                outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
             )
             # Item 2.2: let the shared-risk-budget cap record funnel visibility
             # when it caps or blocks a trade.
@@ -682,6 +701,7 @@ class TradingBot:
                     client=self.data_manager.get_futures_client(),
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
+                    aggregators=self.aggregators,  # Brain rebuild Part 0.4
                 )
 
                 self.binance_handler.trading_bot = self
@@ -710,6 +730,7 @@ class TradingBot:
                     config=self.config,
                     portfolio_manager=self.portfolio_manager,
                     data_manager=self.data_manager,
+                    aggregators=self.aggregators,  # Brain rebuild Part 0.4
                 )
 
                 self.mt5_handler.trading_bot = self
@@ -833,10 +854,11 @@ class TradingBot:
                 return
 
             self.telegram_bot = TradingTelegramBot(
-                token=token, 
-                admin_ids=admin_ids, 
+                token=token,
+                admin_ids=admin_ids,
                 trading_bot=self,
-                signal_monitor=self.signal_monitor
+                signal_monitor=self.signal_monitor,
+                outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
             )
             
             logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s) (Loop will be started by main thread)")
@@ -1391,7 +1413,8 @@ class TradingBot:
                         mtf_integration=self.mtf_integration,
                         performance_tracker=self.portfolio_manager.performance_tracker,
                         use_macro_governor=use_macro_gov,
-                        use_gatekeeper=use_gatekeeper
+                        use_gatekeeper=use_gatekeeper,
+                        outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
                     )
                     # Lightweight companion for Livermore state machines + composite_state.
                     # Council aggregator has no Livermore of its own — without this companion
@@ -1480,7 +1503,8 @@ class TradingBot:
                         mtf_integration=self.mtf_integration,  # ✅ FIX: Wire MTF so _check_macro_regime works
                         performance_tracker=self.portfolio_manager.performance_tracker,
                         use_macro_governor=use_macro_gov,
-                        use_gatekeeper=use_gatekeeper
+                        use_gatekeeper=use_gatekeeper,
+                        outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
                     )
 
                     # Fix 1 (hybrid path): same gap as the council path above — without
@@ -2014,11 +2038,27 @@ class TradingBot:
                 details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
                 # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
                 self._latest_composite_state[asset_name] = details["composite_state"]
+                # Brain Rebuild Part 3.4: sibling judge-scores cache for the
+                # human-alert layer (Part 3.5) — this call site's indentation
+                # differs from Location A/B so it didn't match that edit;
+                # added separately here on the validation pass.
+                self._latest_judge_scores[asset_name] = {
+                    "buy": details.get("buy_scores", {}),
+                    "sell": details.get("sell_scores", {}),
+                }
                 _lsm1h = getattr(_cs, "livermore_state_1h", None)
                 if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                     details["trade_type"] = "TREND"
                 elif _lsm1h is not None:
                     details["trade_type"] = "REVERSION"
+            # Brain Rebuild Part 3.2 prerequisite (mirrors Location A/B).
+            details["structure_levels_ref"] = getattr(_perf_agg, "_structure_levels", {}).get(asset_name, [])
+            # Brain Rebuild Part 5.3: divergence tagging (see method docstring).
+            self._check_tier3_divergence(
+                asset_name, signal, details, df,
+                live_price if live_price is not None else float(df["close"].iloc[-1]),
+                self.config.get("assets", {}).get(asset_name, {}),
+            )
 
             logger.info(
                 f"[COUNCIL] Total Score: {details.get('total_score', 0):.2f}/5.0"
@@ -2077,6 +2117,8 @@ class TradingBot:
                 f"[PERFORMANCE] Signal Quality: {details.get('signal_quality', 0):.2%}"
             )
             logger.info(f"[PERFORMANCE] Reasoning: {details.get('reasoning', 'N/A')}")
+            # Brain Rebuild Part 3.2 prerequisite (mirrors Location A/B).
+            details["structure_levels_ref"] = getattr(aggregator, "_structure_levels", {}).get(asset_name, [])
 
         # ================================================================
         # AI validation is now guaranteed by the aggregator contract:
@@ -2691,13 +2733,28 @@ class TradingBot:
             _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
             _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
             _src = details.get("aggregator_mode", "PERF").upper()
-            # J2.1: Pass CompositeState snapshot at entry
+            # J2.1: Pass CompositeState snapshot at entry.
+            # Part 1.5 (Brain Rebuild): _aggregator was never unwrapped from
+            # its hybrid/council dict form, so hasattr(_aggregator,
+            # '_cached_composite') silently failed for every council-mode
+            # asset (the dict itself has no such attribute), always logging
+            # an empty composite_state here — despite the OTHER shadow-open
+            # call site further below (~line 6404) explicitly claiming parity
+            # with this method. Unwrapped the same way that call site
+            # actually does it (InstitutionalCouncilAggregator itself has no
+            # _cached_composite; only the "performance"/"livermore" companion does).
             _aggregator = self.aggregators.get(asset_name)
             _comp_state_dict = {}
-            if _aggregator and hasattr(_aggregator, '_cached_composite') and \
-               _aggregator._cached_composite is not None:
+            _target_agg = _aggregator
+            if isinstance(_aggregator, dict):
+                _target_agg = (
+                    _aggregator.get("performance")
+                    or _aggregator.get("livermore")
+                )
+            if _target_agg and hasattr(_target_agg, '_cached_composite') and \
+               _target_agg._cached_composite is not None:
                 try:
-                    _comp_state_dict = _aggregator._cached_composite.to_dict()
+                    _comp_state_dict = _target_agg._cached_composite.to_dict()
                 except Exception:
                     pass
             self.shadow_trader.open_position(
@@ -2715,6 +2772,67 @@ class TradingBot:
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
             logger.debug(f"[SHADOW] _shadow_open_blocked failed: {_e}")
+
+    def _check_tier3_divergence(
+        self, asset_name: str, signal: int, details: dict, df, current_price: float, asset_cfg: dict,
+    ) -> None:
+        """
+        Part 5.3 (Brain Rebuild): tags and shadow-tracks cycles where the
+        legacy Trend judge (Part 5.1's reference, computed every cycle
+        regardless of which one is live) would have produced a different
+        final signal than what's actually live.
+
+        Approximation, not a full re-run of the veto/tiebreak cascade:
+        substitutes the legacy Trend score back into buy_total/sell_total
+        and re-checks against `required_score` (the chosen side's actual
+        bar this cycle). structure/momentum/pattern/volume are held at
+        their live values either way, and momentum/pattern have no legacy
+        delta to substitute (Part 5.1 — their _legacy is a delegate, not a
+        separate computation). Good enough to catch "would Trend swapping
+        back have changed the outcome," which is what Part 5.4/5.5's daily
+        watch actually cares about — not a claim of exact parity with a
+        full old-judges run. Non-fatal: never raises, never blocks trading.
+        """
+        try:
+            _old_buy_trend = details.get("legacy_reference_buy_trend")
+            _old_sell_trend = details.get("legacy_reference_sell_trend")
+            if _old_buy_trend is None or _old_sell_trend is None:
+                return  # not a full council decision cycle (early-veto path, etc.)
+
+            buy_scores = details.get("buy_scores") or {}
+            sell_scores = details.get("sell_scores") or {}
+            buy_total = details.get("buy_total", 0.0) or 0.0
+            sell_total = details.get("sell_total", 0.0) or 0.0
+            required_score = details.get("required_score", 0.0) or 0.0
+            if required_score <= 0:
+                return
+
+            _old_buy_total = buy_total - buy_scores.get("trend", 0.0) + _old_buy_trend
+            _old_sell_total = sell_total - sell_scores.get("trend", 0.0) + _old_sell_trend
+            _old_buy_clears = _old_buy_total >= required_score
+            _old_sell_clears = _old_sell_total >= required_score
+            if _old_buy_clears and _old_sell_clears:
+                _old_final_signal = 1 if _old_buy_total >= _old_sell_total else -1
+            elif _old_buy_clears:
+                _old_final_signal = 1
+            elif _old_sell_clears:
+                _old_final_signal = -1
+            else:
+                _old_final_signal = 0
+
+            _new_final_signal = signal
+            if _old_final_signal != _new_final_signal:
+                details["tier3_divergence"] = {
+                    "signal_to_shadow": _new_final_signal,  # always the new signal — it's what's live
+                    "gate_label": f"tier3_divergence_live_{asset_name}",
+                }
+                _div = details["tier3_divergence"]
+                self._shadow_open_blocked(
+                    asset_name, _div["signal_to_shadow"], details, df, current_price,
+                    _div["gate_label"], asset_cfg,
+                )
+        except Exception as e:
+            logger.debug(f"[TIER3 DIVERGENCE] check failed for {asset_name}: {e}")
 
     def _notify_blocked(
         self,
@@ -2930,7 +3048,8 @@ class TradingBot:
                     mtf_integration=self.mtf_integration,  # ✅ FIX: Wire MTF so _check_macro_regime works
                     performance_tracker=self.portfolio_manager.performance_tracker,
                     use_macro_governor=use_macro_gov,
-                    use_gatekeeper=use_gatekeeper
+                    use_gatekeeper=use_gatekeeper,
+                    outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
                 )
 
                 # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
@@ -2974,7 +3093,8 @@ class TradingBot:
                     mtf_integration=self.mtf_integration,
                     performance_tracker=self.portfolio_manager.performance_tracker,
                     use_macro_governor=use_macro_gov,
-                    use_gatekeeper=use_gatekeeper
+                    use_gatekeeper=use_gatekeeper,
+                    outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
                 )
                 # Create a lightweight PerformanceWeightedAggregator companion whose sole
                 # purpose is to own the Livermore state machines and build composite_state.
@@ -3289,6 +3409,11 @@ class TradingBot:
                     self.shadow_trader.candle_update_all(current_prices)
                     self.shadow_trader.tick_update_all(current_prices)
                     logger.debug(f"[SHADOW] {self.shadow_trader.summary}")
+                    # Scalp alert's own dedicated shadow-tracking positions
+                    # (Item 8) — separate engine instance, fed the same price
+                    # map so its GO-IN alerts actually close on SL/TP/timeout.
+                    if self.scalp_alert_engine:
+                        self.scalp_alert_engine.update_shadow_prices(current_prices)
                     # Persist snapshot for dashboard
                     import os as _os
                     _shadow_path = _os.path.join(
@@ -3707,6 +3832,7 @@ class TradingBot:
                                 # to None today, starts flowing once a future tier does.
                                 structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
                                 entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
+                                telegram=self.telegram_bot,  # Brain rebuild Part 0.3
                             )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
@@ -4625,21 +4751,6 @@ class TradingBot:
                         asset_name=asset_name, symbol=symbol, exchange=exchange
                     )
                     self._current_regime_data[asset_name] = mtf_regime
-
-                    # Personal scalp-alignment alert (off by default, see
-                    # config["scalp_alerts"]). Pure observer — never affects
-                    # signal, sizing, or execution below.
-                    if self.scalp_alert_engine and self.scalp_alert_engine.enabled:
-                        try:
-                            scalp_msg = self.scalp_alert_engine.process(asset_name, mtf_regime)
-                            if scalp_msg and self.telegram_bot:
-                                self._send_telegram_notification(
-                                    self.telegram_bot.send_notification(
-                                        scalp_msg, parse_mode="HTML"
-                                    )
-                                )
-                        except Exception as e:
-                            logger.error(f"[SCALP ALERT] Failed for {asset_name}: {e}")
                 except Exception as e:
                     logger.error(f"[MTF] Failed to update regime for {asset_name}: {e}")
                     mtf_regime = self._current_regime_data.get(asset_name, {})
@@ -4698,11 +4809,30 @@ class TradingBot:
                     details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
                     # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
                     self._latest_composite_state[asset_name] = details["composite_state"]
+                    # Brain Rebuild Part 3.4: sibling judge-scores cache for the
+                    # human-alert layer (Part 3.5).
+                    self._latest_judge_scores[asset_name] = {
+                        "buy": details.get("buy_scores", {}),
+                        "sell": details.get("sell_scores", {}),
+                    }
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
                     elif _lsm1h is not None:
                         details["trade_type"] = "REVERSION"
+                # Brain Rebuild Part 3.2 prerequisite: structure_levels_ref was
+                # a VTM constructor param since Batch 4 but nothing ever
+                # populated it in signal_details, so the D2/D3 test-tracking
+                # gate in portfolio_manager.py was permanently unreachable.
+                # _structure_levels lives on the LSM companion, not the
+                # council aggregator itself (mirrors the _cached_composite
+                # split fixed in Part 1.5).
+                details["structure_levels_ref"] = getattr(_lsm_comp, "_structure_levels", {}).get(asset_name, [])
+                # Brain Rebuild Part 5.3: divergence tagging (see method docstring).
+                self._check_tier3_divergence(
+                    asset_name, signal, details, df, current_price,
+                    self.config.get("assets", {}).get(asset_name, {}),
+                )
 
             else:
                 # PERFORMANCE / plain council (non-dict) mode
@@ -4717,13 +4847,64 @@ class TradingBot:
                 # internally, so the validator, VTM tick loop, and council
                 # exemption logic can all see it on this and later cycles.
                 mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
+                # Brain Rebuild Part 3.2 prerequisite (see council branch above).
+                details["structure_levels_ref"] = getattr(aggregator, "_structure_levels", {}).get(asset_name, [])
                 details["aggregator_mode"] = (
                     "council"
                     if isinstance(aggregator, InstitutionalCouncilAggregator)
                     else "performance"
                 )
+                # Cache alongside the council branch's equivalent above (line
+                # ~4690) — was previously only populated for council-mode
+                # assets, leaving performance-mode assets' cache stale for
+                # any consumer (manual /scalp check, MarketWatcher) reading it.
+                if details.get("composite_state"):
+                    self._latest_composite_state[asset_name] = details["composite_state"]
+                    # Brain Rebuild Part 3.4: sibling judge-scores cache (see above).
+                    self._latest_judge_scores[asset_name] = {
+                        "buy": details.get("buy_scores", {}),
+                        "sell": details.get("sell_scores", {}),
+                    }
 
             details["price"] = current_price
+
+            # Personal scalp-alignment alert (off by default, see
+            # config["scalp_alerts"]). Pure observer — never affects signal,
+            # sizing, or execution. Moved here (was right after the MTF
+            # regime refresh, before the aggregator call) so composite_state
+            # actually exists by the time this runs — previously the engine
+            # was always reading None for support/resistance and spread_ratio.
+            if self.scalp_alert_engine and self.scalp_alert_engine.enabled:
+                try:
+                    _scalp_cs = details.get("composite_state")
+                    if not isinstance(_scalp_cs, dict):
+                        _mtf_cs = mtf_regime.get("composite_state") if mtf_regime else None
+                        _scalp_cs = _mtf_cs.to_dict() if hasattr(_mtf_cs, "to_dict") else None
+                    _scalp_atr = None
+                    try:
+                        if not df.empty and len(df) >= 14:
+                            _tr = pd.concat([
+                                df["high"] - df["low"],
+                                (df["high"] - df["close"].shift()).abs(),
+                                (df["low"] - df["close"].shift()).abs(),
+                            ], axis=1).max(axis=1)
+                            _scalp_atr = float(_tr.rolling(14).mean().iloc[-1])
+                    except Exception:
+                        _scalp_atr = None
+                    scalp_msg = self.scalp_alert_engine.process(
+                        asset_name, mtf_regime,
+                        current_price=current_price,
+                        composite_state=_scalp_cs,
+                        atr=_scalp_atr,
+                    )
+                    if scalp_msg and self.telegram_bot:
+                        self._send_telegram_notification(
+                            self.telegram_bot.send_notification(
+                                scalp_msg, parse_mode="HTML"
+                            )
+                        )
+                except Exception as e:
+                    logger.error(f"[SCALP ALERT] Failed for {asset_name}: {e}")
 
             # ── SYSTEM VALIDATOR — per-asset update ────────────────────────────
             # Pass the composite_state and signal_details so the validator can
@@ -6267,11 +6448,24 @@ class TradingBot:
                     details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
                     # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
                     self._latest_composite_state[asset_name] = details["composite_state"]
+                    # Brain Rebuild Part 3.4: sibling judge-scores cache for the
+                    # human-alert layer (Part 3.5).
+                    self._latest_judge_scores[asset_name] = {
+                        "buy": details.get("buy_scores", {}),
+                        "sell": details.get("sell_scores", {}),
+                    }
                     _lsm1h = getattr(_cs, "livermore_state_1h", None)
                     if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
                         details["trade_type"] = "TREND"
                     elif _lsm1h is not None:
                         details["trade_type"] = "REVERSION"
+                # Brain Rebuild Part 3.2 prerequisite (mirrors Location A).
+                details["structure_levels_ref"] = getattr(_lsm_comp, "_structure_levels", {}).get(asset_name, [])
+                # Brain Rebuild Part 5.3: divergence tagging (see method docstring).
+                self._check_tier3_divergence(
+                    asset_name, signal, details, df, current_price,
+                    self.config.get("assets", {}).get(asset_name, {}),
+                )
             else:
                 # PERFORMANCE or plain council (non-dict) mode
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
@@ -6296,6 +6490,8 @@ class TradingBot:
                     # Surface the composite_state the aggregator already built
                     # internally (mirrors the injection done for Location A/B).
                     mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
+                    # Brain Rebuild Part 3.2 prerequisite (mirrors Location A).
+                    details["structure_levels_ref"] = getattr(aggregator, "_structure_levels", {}).get(asset_name, [])
                     details["aggregator_mode"] = "performance"
             # T3.1: Shadow trade — open virtual position for every blocked signal
             # so we can measure what gates are costing us in real P&L terms.
@@ -6770,6 +6966,47 @@ class TradingBot:
         except Exception as _wdog_err:
             logger.debug("[WATCHDOG] connection_watchdog error: %s", _wdog_err)
 
+    def send_daily_health_digest(self) -> None:
+        """
+        Part 1.8 (Brain Rebuild): once-daily Telegram rollup of judge
+        liveness, cadence, decision completeness, and connection status.
+        Non-fatal: never raises, never blocks trading.
+        """
+        try:
+            if not getattr(self, "health_monitor", None) or not getattr(self, "aggregators", None):
+                return
+            liveness = self.health_monitor.check_judge_liveness(self.aggregators)
+            cadence = self.health_monitor.check_cadence(self.aggregators)
+            completeness = self.health_monitor.check_decision_completeness(self.aggregators)
+            connections = {
+                "mt5_down_since": getattr(self, "_mt5_down_since", None),
+                "binance_stale": self.binance_handler.is_stale() if self.binance_handler else None,
+                "cvd_stale": self.cvd_consumer.is_stale() if self.cvd_consumer else None,
+            }
+            # jd is either {"status": "no_history"} (performance-mode asset —
+            # skip, it's not a per-judge dict) or {judge_name: {...}} — guard
+            # with isinstance(v, dict) so the former doesn't raise on v.get().
+            dead_judges = [
+                f"{a}:{j}" for a, jd in liveness.items() if isinstance(jd, dict)
+                for j, v in jd.items() if isinstance(v, dict) and v.get("flag") == "DEAD"
+            ]
+            late_assets = [a for a, c in cadence.items() if c.get("late")]
+            gap_assets = [a for a, c in completeness.items() if c.get("flag") == "GAPS_DETECTED"]
+            msg = (
+                f"📋 Daily health digest\n"
+                f"Dead judges: {dead_judges or 'none'}\n"
+                f"Late cycles: {late_assets or 'none'}\n"
+                f"Gaps detected: {gap_assets or 'none'}\n"
+                f"Connections: {connections}"
+            )
+            if self.telegram_bot:
+                self._send_telegram_notification(
+                    self.telegram_bot.send_notification(msg, parse_mode="HTML")
+                )
+            logger.info(f"[HEALTH DIGEST] {msg}")
+        except Exception as e:
+            logger.debug(f"[HEALTH DIGEST] send_daily_health_digest failed: {e}")
+
     # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
 
     def _load_lsm_csv(self, asset_name: str, symbol: str, tf_suffix: str, expected_hours: int):
@@ -7111,6 +7348,8 @@ class TradingBot:
             schedule.every(5).minutes.do(self._run_validator_watchdog)
             # Fix 7: Connection watchdog — pings MT5/Binance, attempts reconnect on failure
             schedule.every(5).minutes.do(self._run_connection_watchdog)
+            # Part 1.8 (Brain Rebuild): daily judge/cadence/connection health digest
+            schedule.every().day.at("07:00").do(self.send_daily_health_digest)
 
             self.is_running = True
             self._main_loop_running = True
