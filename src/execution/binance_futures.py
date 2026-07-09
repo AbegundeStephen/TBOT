@@ -44,7 +44,7 @@ class BinanceFuturesHandler:
 
         # Hedging Configuration
         self.allow_hedging = self.config.get("trading", {}).get(
-            "allow_simultaneous_long_short", True
+            "allow_simultaneous_long_short", False  # Fail closed: hedging OFF if key missing
         )
 
         # Verify Futures API access and load filters
@@ -70,12 +70,12 @@ class BinanceFuturesHandler:
             # --- NEW: Get actual current position mode from Binance ---
             try:
                 position_mode_info = self.client.futures_get_position_mode()
-                self._actual_hedge_mode_enabled = position_mode_info.get('dualSidePosition', True) # Default to True (HEDGE) if not found
+                self._actual_hedge_mode_enabled = position_mode_info.get('dualSidePosition', False) # Default to False (ONE-WAY) if not found
                 logger.info(f"[FUTURES] Actual Binance Futures Mode: {'HEDGE' if self._actual_hedge_mode_enabled else 'ONE-WAY'} (from API)")
             except Exception as e:
                 logger.error(f"[FUTURES] Failed to get actual position mode: {e}")
-                self._actual_hedge_mode_enabled = True # Assume HEDGE mode as fallback to be safe
-                logger.warning("[FUTURES] Assuming HEDGE mode due to error fetching actual mode.")
+                self._actual_hedge_mode_enabled = False  # S1.3: assume ONE-WAY on failure — safe default
+                logger.critical("[FUTURES] Could not read position mode from Binance — assuming ONE-WAY (one-way is safer; hedge fields cause -4061 on one-way accounts).")
             # --- END NEW ---
 
         except Exception as e:
@@ -204,23 +204,37 @@ class BinanceFuturesHandler:
         stop_price: float,
         quantity: float,
     ) -> bool:
-                """
-                [DISABLED]
-                This function is disabled because repeated tests have shown the Binance
-                Testnet API does not reliably support the required STOP_MARKET orders
-                with the necessary 'reduceOnly' parameter to ensure safety.
-        
-                The bot will now rely exclusively on the VeteranTradeManager (VTM) to
-                monitor prices and execute a market close if a stop loss is hit.
-                
-                This function will always return True to prevent the emergency close
-                logic from being triggered.
-                """
-                logger.warning(
-                    "[STOP LOSS]  DISABLED - Exchange-side stop-loss is disabled. "
-                    "VTM is responsible for all trade exits."
-                )
-                return True
+        """
+        Fix 6: Place a real STOP_MARKET reduceOnly order on Binance Futures.
+        Returns True on success, False on failure.
+
+        side          — "long" or "short" (the position side being protected)
+        position_side — "LONG" or "SHORT" (Binance hedge-mode positionSide; use "BOTH" for one-way)
+        stop_price    — trigger price
+        quantity      — contracts to close (must pass symbol precision)
+        """
+        # Closing a long → sell STOP_MARKET; closing a short → buy STOP_MARKET
+        order_side = "SELL" if side.lower() == "long" else "BUY"
+        try:
+            stop_price_str = str(self._round_price(stop_price))
+            qty_str        = str(self._round_quantity(quantity))
+            order_params = {
+                "symbol": self.symbol, "side": order_side, "type": "STOP_MARKET",
+                "stopPrice": stop_price_str, "quantity": qty_str, "reduceOnly": True,
+            }
+            if getattr(self, "_actual_hedge_mode_enabled", False):
+                order_params["positionSide"] = position_side.upper()
+                order_params.pop("reduceOnly", None)
+            order = self.client.futures_create_order(**order_params)
+            self.last_sl_order_id = order.get("orderId"); self.last_sl_price = str(stop_price)
+            logger.info(
+                f"[STOP LOSS] STOP_MARKET placed: side={order_side} stopPrice={stop_price_str} "
+                f"qty={qty_str} orderId={order.get('orderId')} status={order.get('status')}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[STOP LOSS] Failed to place STOP_MARKET for {self.symbol}: {e}")
+            return False
 
     def open_short_position(
         self, quantity: float, stop_loss: float = None, take_profit: float = None
@@ -381,13 +395,17 @@ class BinanceFuturesHandler:
 
                     close_side = SIDE_SELL if side == "long" else SIDE_BUY
                     try:
-                        emergency_order = self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=close_side,
-                            positionSide=position_side,
-                            type=FUTURE_ORDER_TYPE_MARKET,
-                            quantity=quantity,
-                        )
+                        _em_params = {
+                            "symbol": self.symbol,
+                            "side": close_side,
+                            "type": FUTURE_ORDER_TYPE_MARKET,
+                            "quantity": quantity,
+                        }
+                        if getattr(self, "_actual_hedge_mode_enabled", False):
+                            _em_params["positionSide"] = position_side
+                        else:
+                            _em_params["reduceOnly"] = True
+                        emergency_order = self.client.futures_create_order(**_em_params)
                         logger.critical(
                             f"[FUTURES] ✓ EMERGENCY CLOSE: {emergency_order.get('orderId')}"
                         )
@@ -395,7 +413,7 @@ class BinanceFuturesHandler:
                         logger.critical(
                             f"[FUTURES] ☠️ EMERGENCY CLOSE FAILED: {close_error}"
                         )
-                    return None
+                    return {"emergency_closed": True, "reason": "sl_placement_failed"}
 
             # 3. Take profit (optional)
             if take_profit:
@@ -408,16 +426,19 @@ class BinanceFuturesHandler:
 
                 if take_profit:
                     try:
-                        tp_order = self.client.futures_create_order(
-                            symbol=self.symbol,
-                            side=tp_side,
-                            positionSide=position_side,
-                            type=FUTURE_ORDER_TYPE_LIMIT,
-                            price=take_profit,
-                            quantity=quantity,
-                            timeInForce="GTC",
-                            reduceOnly=True,
-                        )
+                        _tp_params = {
+                            "symbol": self.symbol,
+                            "side": tp_side,
+                            "type": FUTURE_ORDER_TYPE_LIMIT,
+                            "price": take_profit,
+                            "quantity": quantity,
+                            "timeInForce": "GTC",
+                        }
+                        if getattr(self, "_actual_hedge_mode_enabled", False):
+                            _tp_params["positionSide"] = position_side
+                        else:
+                            _tp_params["reduceOnly"] = True
+                        tp_order = self.client.futures_create_order(**_tp_params)
                         logger.info(f"  ✓ TP: ${take_profit:,.{self.price_precision}f}")
                     except Exception as e:
                         logger.warning(f"  ⚠️ TP Failed: {e}")
@@ -625,7 +646,7 @@ class BinanceFuturesHandler:
             return active_positions
         except Exception as e:
             logger.error(f"[FUTURES] Error getting all positions: {e}")
-            return []
+            return None  # Fix 5: None signals fetch failure; [] means broker confirmed no positions
 
     def get_unrealized_pnl(self) -> float:
         """Get unrealized P&L for current position"""
@@ -686,299 +707,6 @@ def integrate_futures_into_handler(handler):
         return False
 
 
-def patch_open_position_method(handler):
-    """
-    Patch the _open_position method to use Futures for BOTH longs and shorts
-    """
-
-    original_open_position = handler._open_position
-
-    def _open_position_with_futures(
-        signal: int, current_price: float, asset_name: str, **kwargs
-    ):
-        """
-        Enhanced _open_position that uses Futures API for both LONG and SHORT
-        """
-
-        side = "long" if signal == 1 else "short"
-
-        # If Futures is enabled, use it for BOTH directions
-        if hasattr(handler, "futures_handler"):
-            try:
-                logger.info(f"[FUTURES] Using Futures API for {side.upper()} position")
-
-                # Calculate SL/TP prices
-                risk = handler.asset_config.get("risk", {})
-
-                if side == "long":
-                    stop_loss_pct = risk.get("stop_loss_pct", 0.05)
-                    take_profit_pct = risk.get("take_profit_pct", 0.10)
-                    trailing_stop_pct = risk.get("trailing_stop_pct", 0.03)
-
-                    stop_loss_price = current_price * (1 - stop_loss_pct)
-                    take_profit_price = current_price * (1 + take_profit_pct)
-                else:  # short
-                    stop_loss_pct = risk.get(
-                        "stop_loss_pct_short", risk.get("stop_loss_pct", 0.04)
-                    )
-                    take_profit_pct = risk.get(
-                        "take_profit_pct_short", risk.get("take_profit_pct", 0.08)
-                    )
-                    trailing_stop_pct = risk.get(
-                        "trailing_stop_pct_short", risk.get("trailing_stop_pct", 0.025)
-                    )
-
-                    stop_loss_price = current_price * (1 + stop_loss_pct)
-                    take_profit_price = current_price * (1 - take_profit_pct)
-
-                # ✅ FIX: Round stop loss to correct precision BEFORE sizing
-                stop_loss_price = round(stop_loss_price, 2)
-
-                # Calculate position size using risk-based method
-                position_size_usd, sizing_metadata = (
-                    handler.sizer.calculate_size_risk_based(
-                        asset=asset_name,
-                        entry_price=current_price,
-                        stop_loss_price=stop_loss_price,
-                        signal=signal,
-                        confidence_score=kwargs.get("confidence_score"),
-                        market_condition=kwargs.get("market_condition", "neutral"),
-                        sizing_mode=kwargs.get("sizing_mode", "automated"),
-                        manual_size_usd=kwargs.get("manual_size_usd"),
-                        override_reason=kwargs.get("override_reason"),
-                    )
-                )
-
-                if position_size_usd <= 0:
-                    logger.error(
-                        f"[FUTURES] Invalid position size: ${position_size_usd:.2f}"
-                    )
-                    return False
-
-                # Calculate quantity and round it
-                quantity = position_size_usd / current_price
-                quantity = handler.futures_handler._round_quantity(quantity)
-
-                logger.info(
-                    f"[FUTURES] Opening {side.upper()} position:\n"
-                    f"  Size: ${position_size_usd:,.2f}\n"
-                    f"  Quantity: {quantity:.6f} BTC\n"
-                    f"  Entry: ${current_price:,.2f}\n"
-                    f"  Stop Loss: ${stop_loss_price:,.2f}\n"
-                    f"  Take Profit: ${take_profit_price:,.2f}"
-                )
-
-                # Open position on Futures
-                if side == "long":
-                    order = handler.futures_handler.open_long_position(
-                        quantity=quantity,
-                        stop_loss=stop_loss_price,
-                        take_profit=take_profit_price,
-                    )
-                else:
-                    order = handler.futures_handler.open_short_position(
-                        quantity=quantity,
-                        stop_loss=stop_loss_price,
-                        take_profit=take_profit_price,
-                    )
-
-                if not order:
-                    logger.error(f"[FUTURES] Failed to open {side.upper()} position")
-                    return False
-
-                order_id = order.get("orderId")
-
-                # Fetch OHLC for VTM
-                ohlc_data = None
-                if handler.data_manager:
-                    try:
-                        from datetime import datetime, timedelta, timezone
-
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=10)
-
-                        df = handler.data_manager.fetch_binance_data(
-                            symbol=handler.symbol,
-                            interval=handler.asset_config.get("interval", "1h"),
-                            start_date=start_time.strftime("%Y-%m-%d"),
-                            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-
-                        if len(df) > 0:
-                            ohlc_data = {
-                                "high": df["high"].values,
-                                "low": df["low"].values,
-                                "close": df["close"].values,
-                            }
-                    except Exception as e:
-                        logger.warning(f"[VTM] OHLC fetch failed: {e}")
-
-                # Add to portfolio
-                success = handler.portfolio_manager.add_position(
-                    asset=asset_name,
-                    symbol=handler.symbol,
-                    side=side,
-                    entry_price=current_price,
-                    position_size_usd=position_size_usd,
-                    stop_loss=None,  # VTM will manage
-                    take_profit=None,
-                    trailing_stop_pct=trailing_stop_pct,
-                    binance_order_id=order_id,
-                    ohlc_data=ohlc_data,
-                    use_dynamic_management=True,
-                )
-
-                if success:
-                    logger.info(
-                        f"[OK] {asset_name} {side.upper()} position opened via Futures"
-                    )
-                    logger.info(f"  └─ Order ID: {order_id}")
-                    if ohlc_data:
-                        logger.info(f"  └─ VTM: ACTIVE")
-                    return True
-                else:
-                    logger.error(f"[FAIL] Portfolio rejected {side.upper()} position")
-                    # Rollback - close the Futures position
-                    if side == "long":
-                        handler.futures_handler.close_long_position(quantity=quantity)
-                    else:
-                        handler.futures_handler.close_short_position(quantity=quantity)
-                    return False
-
-            except Exception as e:
-                logger.error(
-                    f"[FUTURES] Error opening {side.upper()}: {e}", exc_info=True
-                )
-                return False
-
-        # Fallback to original method (Spot) if Futures disabled
-        else:
-            return original_open_position(
-                signal=signal,
-                current_price=current_price,
-                asset_name=asset_name,
-                **kwargs,
-            )
-
-    # Replace method
-    handler._open_position = _open_position_with_futures
-    logger.info("[FUTURES] _open_position method patched for LONG+SHORT")
-
-
-def patch_close_position_method(handler):
-    """
-    Patch the _close_position method to use Futures for BOTH longs and shorts
-    """
-
-    original_close_position = handler._close_position
-
-    def _close_position_with_futures(
-        position, current_price: float, asset_name: str, reason: str
-    ):
-        """
-        Enhanced _close_position that uses Futures API for both LONG and SHORT
-        """
-
-        # If Futures enabled, use it for both directions
-        if hasattr(handler, "futures_handler") and handler.futures_handler:
-            try:
-                side = position.side
-                quantity = position.quantity
-                order_id = position.binance_order_id
-
-                logger.info(
-                    f"[FUTURES] Closing {side.upper()} position via Futures API\n"
-                    f"  Position ID: {position.position_id}\n"
-                    f"  Order ID:    {order_id}\n"
-                    f"  Quantity:    {quantity:.6f}\n"
-                    f"  Reason:      {reason}"
-                )
-
-                # Get current P&L from Futures before closing
-                futures_position = handler.futures_handler.get_position_info(side=side)
-                if futures_position:
-                    futures_pnl = float(futures_position.get("unRealizedProfit", 0))
-                    logger.info(f"  Unrealized P&L: ${futures_pnl:,.2f}")
-                else:
-                    logger.warning(f"  Could not fetch Futures position info")
-                    futures_pnl = 0
-
-                # ✅ CRITICAL FIX: Close on Futures with proper error handling
-                success = False
-
-                if side == "long":
-                    success = handler.futures_handler.close_long_position(
-                        quantity=quantity, order_id=order_id
-                    )
-                elif side == "short":
-                    success = handler.futures_handler.close_short_position(
-                        quantity=quantity, order_id=order_id
-                    )
-                else:
-                    logger.error(f"[FUTURES] Invalid side: {side}")
-                    return False
-
-                # ✅ Check if close was successful
-                if not success:
-                    logger.error(
-                        f"[FUTURES] ❌ Failed to close {side.upper()} position\n"
-                        f"  Position ID: {position.position_id}\n"
-                        f"  Order ID:    {order_id}\n"
-                        f"  Quantity:    {quantity:.6f}\n"
-                        f"  Reason:      Futures API returned False\n"
-                        f"  Action:      Position remains open on exchange"
-                    )
-                    return False
-
-                # ✅ Success - log details
-                logger.info(
-                    f"[FUTURES] ✅ {side.upper()} position closed successfully\n"
-                    f"  Position ID: {position.position_id}\n"
-                    f"  Final P&L:   ${futures_pnl:,.2f}"
-                )
-
-                # Close in portfolio
-                trade_result = handler.portfolio_manager.close_position(
-                    position_id=position.position_id,
-                    exit_price=current_price,
-                    reason=reason,
-                )
-
-                if trade_result:
-                    logger.info(f"[OK] Portfolio updated after {side.upper()} close")
-                    return True
-                else:
-                    logger.error(
-                        f"[FAIL] Portfolio close failed for {side.upper()}\n"
-                        f"  Warning: Position closed on exchange but not in portfolio!"
-                    )
-                    return False
-
-            except Exception as e:
-                logger.error(
-                    f"[FUTURES] ❌ Exception closing {position.side.upper()} position\n"
-                    f"  Position ID: {position.position_id}\n"
-                    f"  Error:       {str(e)}\n"
-                    f"  Traceback:",
-                    exc_info=True,
-                )
-                return False
-
-        # Fallback to original method (Spot) if Futures disabled
-        else:
-            logger.warning(f"[FUTURES] Handler not available, using fallback method")
-            return original_close_position(
-                position=position,
-                current_price=current_price,
-                asset_name=asset_name,
-                reason=reason,
-            )
-
-    # Replace method
-    handler._close_position = _close_position_with_futures
-    logger.info("[FUTURES] _close_position method patched for LONG+SHORT")
-
-
 def enable_futures_for_binance_handler(handler):
     """
     MAIN FUNCTION: Enable Futures trading for BOTH LONG and SHORT positions
@@ -1015,4 +743,4 @@ def enable_futures_for_binance_handler(handler):
 
     except Exception as e:
         logger.error(f"[FUTURES] Enablement failed: {e}", exc_info=True)
-        return False
+        return

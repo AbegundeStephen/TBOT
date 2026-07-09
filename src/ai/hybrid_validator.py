@@ -13,10 +13,11 @@ Key fixes:
 import pandas as pd
 import numpy as np
 import logging
+import json
 import talib as ta
 from typing import Tuple, Dict, Optional
 from collections import deque, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -25,39 +26,6 @@ class HybridSignalValidator:
     """
     AI-powered signal validation with  realistic thresholds
     """
-
-    # Pattern classifications
-    BULLISH_PATTERNS = {
-        "Engulfing",
-        "Morning Star",
-        "Hammer",
-        "Inverted Hammer",
-        "Three White Soldiers",
-        "Piercing",
-        "Harami",
-        "Three Inside",
-        "Dragonfly Doji",
-        "Bullish Engulfing",
-        "Bullish Harami",
-        "Marubozu",
-    }
-
-    BEARISH_PATTERNS = {
-        "Evening Star",
-        "Shooting Star",
-        "Hanging Man",
-        "Three Black Crows",
-        "Dark Cloud",
-        "Gravestone Doji",
-        "Bearish Engulfing",
-        "Three Outside",
-        "Dark Cloud Cover",
-        "Bearish Harami",
-    }
-    NEUTRAL_PATTERNS = {
-        "Doji",  # Context-dependent
-        "Spinning Top",
-    }
 
     def __init__(
         self,
@@ -71,11 +39,26 @@ class HybridSignalValidator:
         strong_signal_bypass_threshold=0.85,
         circuit_breaker_threshold=0.70,
         enable_detailed_logging=False,
+        phase_config=None,
+        db_manager=None,
     ):
+        # Item 18d: phase_config gate flags (mirrors the pattern main.py already
+        # uses to inject phase_config into the aggregators/CompositeState). Lets
+        # validate_signal's third-path redesign stay OFF by default without a
+        # separate config-loading mechanism.
+        self.phase_config = phase_config or {}
+
+        # Item 18e: optional DB handle for calibration logging at the end of
+        # validate_signal. None-safe everywhere it's used — if the caller
+        # doesn't pass one (e.g. backtest.py, or main.py before Supabase is
+        # configured), logging is just skipped, never raises.
+        self.db_manager = db_manager
+
         self.analyst = analyst
-        self.sniper = sniper
-        self.pattern_id_map = pattern_id_map
-        self.reverse_pattern_map = {v: k for k, v in pattern_id_map.items()}
+        # PAT-1: pattern detection module removed — sniper/pattern maps stubbed
+        self.sniper = None
+        self.pattern_id_map = {}
+        self.reverse_pattern_map = {}
 
         # Configuration
         self.base_sr_threshold = sr_threshold_pct
@@ -84,6 +67,38 @@ class HybridSignalValidator:
         self.enable_adaptive = enable_adaptive_thresholds
         self.strong_signal_bypass = strong_signal_bypass_threshold
         self.bypass_threshold = circuit_breaker_threshold
+
+        # Item 18b: AI_VALIDATOR calibration block (config/aggregator_presets.json).
+        # Centralizes constants that were previously bare numeric literals scattered
+        # through this file (see AI_VALIDATOR._bucket_a/_bucket_b/_bucket_c comments
+        # in the json for which are data-backed vs. still-needs-real-calibration).
+        # Falls back to {} on any load error so a missing/malformed file degrades to
+        # the exact pre-existing hardcoded defaults rather than crashing the bot —
+        # every .get() below carries that original literal as its default.
+        try:
+            with open("config/aggregator_presets.json") as _av_f:
+                _av_cfg = json.load(_av_f).get("AI_VALIDATOR", {})
+        except Exception as _e:
+            logger.warning(
+                f"[AI VALIDATOR] Could not load AI_VALIDATOR calibration block from "
+                f"aggregator_presets.json ({_e}); using hardcoded defaults."
+            )
+            _av_cfg = {}
+        self._av_cfg = _av_cfg
+        self.bypass_threshold = _av_cfg.get("circuit_breaker_threshold", circuit_breaker_threshold)
+        self.flash_crash_atr_mult = _av_cfg.get("flash_crash_atr_mult", 4.0)
+        self.flash_crash_ema_span = _av_cfg.get("flash_crash_ema_span", 20)
+        self.atr_period = _av_cfg.get("atr_period", 14)
+        self.volume_confirmation_mult = _av_cfg.get("volume_confirmation_mult", 2.0)
+        self.sr_update_interval = _av_cfg.get("sr_cache_refresh_seconds", 3600)
+        self.sr_ema_fallback_atr_mult = _av_cfg.get("sr_ema_fallback_distance_atr_mult", 0.5)
+        self.third_path_min_quality = _av_cfg.get("third_path_min_signal_quality", 0.65)
+        self.third_path_penalty = _av_cfg.get("third_path_penalty", 0.08)
+        self.soft_pass_penalty_sr = _av_cfg.get("soft_pass_penalty_sr_only", 0.05)
+        self.soft_pass_penalty_pattern = _av_cfg.get("soft_pass_penalty_pattern_only", 0.05)
+        self.soft_pass_penalty_uncertain = _av_cfg.get("soft_pass_penalty_uncertain_sr", 0.05)
+        self.soft_pass_penalty_momentum = _av_cfg.get("soft_pass_penalty_momentum_partial", 0.04)
+
         self.detailed_logging = enable_detailed_logging
 
         # Current adaptive thresholds
@@ -92,7 +107,7 @@ class HybridSignalValidator:
 
         # S/R cache
         self.sr_cache: Dict[str, Dict] = {}
-        self.sr_update_interval = 3600  # 1 hour
+        # sr_update_interval is set above from self._av_cfg (item 18b)
 
         # Circuit breaker
         self.rejection_window = deque(maxlen=50)
@@ -131,13 +146,6 @@ class HybridSignalValidator:
         # Threshold adjustment history
         self.threshold_history = deque(maxlen=100)
 
-        # AI-5: Within-cycle pattern result cache.
-        # _check_pattern() runs the TF neural net — expensive. In the council path it
-        # gets called up to 3× per signal (sniper penalty, validate_signal, format_viz).
-        # Cache keyed on (last_close_hash, signal) so identical evaluations hit memory.
-        # Cache is cleared at the start of each validate_signal() call via clear_pattern_cache().
-        self._pattern_cache: dict = {}
-
         self._log_initialization()
 
     def _log_initialization(self):
@@ -155,12 +163,12 @@ class HybridSignalValidator:
         logger.info(f"  Strong Bypass:    {self.strong_signal_bypass:.0%}")
         logger.info(f"  Circuit Breaker:  {self.bypass_threshold:.0%}")
         logger.info(f"  Detailed Logging: {'ON' if self.detailed_logging else 'OFF'}")
-        logger.info(f"  Patterns Loaded:  {len(self.pattern_id_map)}")
+        logger.info(f"  Pattern Module:   DISABLED")
         logger.info("=" * 70)
         logger.info("")
 
     def validate_signal(
-        self, signal: int, signal_details: dict, df: pd.DataFrame
+        self, signal: int, signal_details: dict, df: pd.DataFrame, composite_state=None
     ) -> Tuple[int, dict]:
         validation_start = datetime.now()
         self.stats["total_checks"] += 1
@@ -176,35 +184,15 @@ class HybridSignalValidator:
         if signal == 0:
             return self._skip_validation(signal, signal_details, "hold_signal")
 
-        # Layer 1: Circuit Breaker
+        # Layer 1: Circuit Breaker (S10.1 — log-only, never skip validation)
+        # bypass_mode flag is still SET by _check_circuit_breaker when rejection rate is high,
+        # but it no longer causes validation to be skipped — it just logs a warning.
         if self.bypass_mode:
-            self.bypass_cooldown -= 1
-            if self.bypass_cooldown <= 0:
-                self._reset_circuit_breaker()
-            else:
-                result = self._bypass_validation(
-                    signal,
-                    signal_details,
-                    reason="circuit_breaker",
-                    cooldown=self.bypass_cooldown,
-                )
-                self.stats["bypassed_circuit_breaker"] += 1
-                self.strategy_stats[strategy]["approved"] += 1
-                return result
-
-        # Layer 1.5: Strong Signal Bypass
-        signal_quality = signal_details.get("signal_quality", 0.0)
-        if signal_quality >= self.strong_signal_bypass:
-            result = self._bypass_validation(
-                signal,
-                signal_details,
-                reason="strong_signal",
-                quality=signal_quality,
-                threshold=self.strong_signal_bypass,
+            self.stats["circuit_breaker_warnings"] = self.stats.get("circuit_breaker_warnings", 0) + 1
+            logger.warning(
+                "[AI] Circuit-breaker active (high rejection rate) — validation CONTINUES. "
+                f"Warnings: {self.stats['circuit_breaker_warnings']}"
             )
-            self.stats["bypassed_strong_signal"] += 1
-            self.strategy_stats[strategy]["approved"] += 1
-            return result
 
         # Layer 2: Adaptive Thresholds
         if self.enable_adaptive:
@@ -212,20 +200,29 @@ class HybridSignalValidator:
 
         # Layer 2.5: Flash Crash Breaker (Extreme Dislocation)
         # Reason: Prevents mean reversion during vertical moves or liquidity voids.
+        # atr_fast is initialized here (item 18d) so a failure inside the try below
+        # leaves it as None rather than undefined — the third-path branch further
+        # down references atr_fast outside this try block, and an unset name there
+        # used to raise NameError, get swallowed by council_aggregator's outer
+        # except, and silently force the signal to 0 (HOLD).
+        atr_fast = None
         try:
             current_price = float(df["close"].iloc[-1])
-            ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
-            distance = abs(current_price - ema_20)
-            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)[-1]
-            
-            if distance > (4.0 * atr_fast):
+            ema_fast = df["close"].ewm(span=self.flash_crash_ema_span, adjust=False).mean().iloc[-1]
+            distance = abs(current_price - ema_fast)
+            atr_fast = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=self.atr_period)[-1]
+
+            if distance > (self.flash_crash_atr_mult * atr_fast):
                 if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
-                    logger.warning(f"[AI] Flash Crash VETO: Distance {distance:.2f} > 4xATR. Blocking REVERSION.")
+                    logger.warning(
+                        f"[AI] Flash Crash VETO: Distance {distance:.2f} > "
+                        f"{self.flash_crash_atr_mult}xATR. Blocking REVERSION."
+                    )
                     return self._reject_signal(
-                        signal_details, 
-                        {"near_level": False, "reason": "flash_crash"}, 
-                        None, 
-                        reason="flash_crash_breaker", 
+                        signal_details,
+                        {"near_level": False, "reason": "flash_crash"},
+                        None,
+                        reason="flash_crash_breaker",
                         strategy=strategy
                     )
         except Exception as e:
@@ -238,9 +235,18 @@ class HybridSignalValidator:
         )
 
         # Layer 4: Pattern Confirmation
-        pattern_result = self._check_pattern(
-            df, signal, min_confidence=self.current_pattern_threshold, strategy=strategy
-        )
+        # Item 5.4: candlestick fallback (_check_pattern) removed — reads
+        # composite_state.institutional_pattern directly (Item 5.2's rebuilt,
+        # tiered classifier) instead of the old, weak candlestick heuristic.
+        _inst_pattern = getattr(composite_state, "institutional_pattern", None) if composite_state is not None else None
+        _inst_conf = getattr(composite_state, "institutional_pattern_confidence", 0.0) if composite_state is not None else 0.0
+        pattern_result = {
+            "pattern_confirmed": _inst_pattern is not None and (
+                (signal > 0 and _inst_pattern == "ACCUMULATION") or
+                (signal < 0 and _inst_pattern == "DISTRIBUTION")
+            ),
+            "model_uncertain": _inst_conf < 0.5,
+        }
 
         sr_passed = sr_result["near_level"]
         pattern_passed = pattern_result["pattern_confirmed"]
@@ -285,6 +291,13 @@ class HybridSignalValidator:
         )
         h1_momentum_confirmed = h1_momentum_aligned and h1_dir != "FLAT"
 
+        # Signal quality (0–1), computed upstream in council_aggregator and
+        # passed through signal_details. Needed below for the high-confidence
+        # trend-bypass check — was previously read bare/undefined here, which
+        # raised NameError and got swallowed by council_aggregator's outer
+        # except, silently forcing every such signal to 0 (HOLD).
+        signal_quality = signal_details.get("signal_quality", 0.0)
+
         if sr_passed and pattern_passed:
             # Full approval — both layers confirmed
             pass  # fall through to _approve_signal
@@ -294,18 +307,18 @@ class HybridSignalValidator:
                 f"[AI] Soft-pass: S/R ✓ | Pattern ✗ ({pattern_result.get('reason','?')}) "
                 f"| regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_sr}
         elif pattern_passed and not sr_passed and regime_aligned:
             # Pattern confirmed, no nearby S/R level, but trend-aligned → soft pass
             logger.info(
                 f"[AI] Soft-pass: Pattern ✓ ({pattern_result.get('pattern_name','?')}) "
                 f"| S/R ✗ ({sr_result.get('reason','?')}) | regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_pattern}
         elif model_uncertain and sr_passed:
             # Model couldn't read the candle (uncertain output) but S/R is solid → soft pass
             logger.info(f"[AI] Soft-pass: S/R ✓ | Model uncertain → approve with quality penalty")
-            signal_details = {**signal_details, "ai_quality_penalty": 0.05}
+            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_uncertain}
         elif regime_aligned and h1_momentum_confirmed and (sr_passed or pattern_passed):
             # ── 1H MOMENTUM SOFT-PASS (new) ──────────────────────────────────
             # Regime aligns with signal direction AND the 1H session is actively
@@ -322,18 +335,92 @@ class HybridSignalValidator:
                 f"1H dir={h1_dir} | lower_highs={h1_lower_highs} | higher_lows={h1_higher_lows} "
                 f"| regime-aligned → approve with quality penalty"
             )
-            signal_details = {**signal_details, "ai_quality_penalty": 0.04, "h1_momentum_pass": True}
-        elif regime_aligned and h1_momentum_confirmed and signal_quality >= 0.65:
-            # ── HIGH CONFIDENCE TREND BYPASS (new) ──────────────────────────
-            # If the 4H trend and 1H momentum are perfectly aligned and signal
-            # quality is high (>65%), we allow entry even if BOTH S/R and 
-            # pattern filters fail. This prevents being 'locked out' of strong
-            # moves that are mid-air (no S/R) and momentum-based (no pattern).
-            logger.info(
-                f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
-                f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
-            )
-            signal_details = {**signal_details, "ai_quality_penalty": 0.08, "trend_bypass": True}
+            signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_momentum, "h1_momentum_pass": True}
+        elif regime_aligned and h1_momentum_confirmed and signal_quality >= self.third_path_min_quality:
+            # ── PATH 3: HIGH CONFIDENCE TREND BYPASS ─────────────────────────
+            # item 18d redesign, flag-gated OFF by default (phase_config.
+            # ai_third_path_structural_anchor_enabled). Today this is a bare
+            # confidence bypass (regime+momentum+quality alone, no
+            # price-structure confirmation). The redesign below additionally
+            # requires a real, nearby Livermore structural anchor — which then
+            # doubles as the SL reference VTM uses — before approving. Default
+            # OFF because no live caller passes composite_state into this
+            # function yet without the flag, so flipping this on unguarded
+            # would turn every former bypass-approval into a reject.
+            if self.phase_config.get("ai_third_path_structural_anchor_enabled", False):
+                _anchor = None
+                _anchor_dist_atr = None
+                if composite_state is not None:
+                    _side_long = signal > 0
+                    _raw_anchor = (
+                        getattr(composite_state, "livermore_anchor_main_up_max", None) if _side_long
+                        else getattr(composite_state, "livermore_anchor_main_down_min", None)
+                    )
+                    if _raw_anchor and atr_fast and atr_fast > 0:
+                        _anchor_dist_atr = abs(current_price - _raw_anchor) / atr_fast
+                        if _anchor_dist_atr <= 6.0:
+                            _anchor = _raw_anchor
+
+                # Item 2.10: an anchor alone isn't a second opinion — the
+                # Structure judge may have already used this exact Livermore
+                # anchor to produce the signal being validated here. Require
+                # genuinely separate evidence (order-book imbalance, or a
+                # simple recent-price-direction check when imbalance isn't
+                # available) before treating the anchor as confirmation.
+                _independent_confirm = False
+                if composite_state is not None:
+                    if getattr(composite_state, "order_book_imbalance", None) is not None:
+                        _independent_confirm = (
+                            (signal > 0 and composite_state.order_book_imbalance > 0.15) or
+                            (signal < 0 and composite_state.order_book_imbalance < -0.15)
+                        )
+                    elif len(df) >= 3:
+                        _independent_confirm = (
+                            (signal > 0 and df["close"].iloc[-1] > df["close"].iloc[-3]) or
+                            (signal < 0 and df["close"].iloc[-1] < df["close"].iloc[-3])
+                        )
+
+                if _anchor is not None and _independent_confirm:
+                    logger.info(
+                        f"[AI] Structural-momentum pass: anchor={_anchor:.2f} "
+                        f"({_anchor_dist_atr:.2f}x ATR) | quality={signal_quality:.2f} | "
+                        f"1H dir={h1_dir} | regime-aligned + independent confirmation → "
+                        f"approve with quality penalty"
+                    )
+                    signal_details = {
+                        **signal_details,
+                        "ai_quality_penalty": self.third_path_penalty,
+                        "structural_anchor": _anchor,
+                        "anchor_distance_atr": round(_anchor_dist_atr, 2),
+                        "third_path_pass": True,
+                    }
+                elif _anchor is not None:
+                    logger.info(
+                        f"[AI] Structural-momentum reject: anchor={_anchor:.2f} present but "
+                        f"no independent confirmation (order-book/price-direction) — the anchor "
+                        f"alone may just be re-confirming what Structure already used."
+                    )
+                    return self._reject_signal(
+                        signal_details, sr_result, pattern_result,
+                        reason="anchor_without_independent_confirmation", strategy=strategy,
+                    )
+                else:
+                    logger.info(
+                        f"[AI] Structural-momentum reject: regime+1H momentum agreed "
+                        f"(quality={signal_quality:.2f}) but no nearby Livermore anchor "
+                        f"to set a stop from."
+                    )
+                    return self._reject_signal(
+                        signal_details, sr_result, pattern_result,
+                        reason="no_structural_anchor", strategy=strategy,
+                    )
+            else:
+                # Pre-existing behavior, unchanged while the flag is off.
+                logger.info(
+                    f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
+                    f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
+                )
+                signal_details = {**signal_details, "ai_quality_penalty": self.third_path_penalty, "trend_bypass": True}
         else:
             # Hard reject — either both failed, or counter-trend with one missing,
             # or 1H momentum contradicts the signal direction.
@@ -369,6 +456,34 @@ class HybridSignalValidator:
         self.stats["approved"] += 1
         self.strategy_stats[strategy]["approved"] += 1
         self.rejection_window.append(False)
+
+        # Item 18e: calibration logging (non-blocking, approval path only —
+        # the early returns above for ai_disabled/hold/flash-crash/no-anchor/
+        # hard-reject all bypass this and are NOT logged here).
+        # Note: the patch text this was based on referenced signal_details.get(
+        # "action") and a bare `quality_penalty` local, neither of which exist —
+        # _approve_signal/_reject_signal/_skip_validation all key off
+        # "ai_validation" (not "action"), and the penalty lives in signal_details
+        # under "ai_quality_penalty" (merged into result[1] by _approve_signal),
+        # not as a standalone local variable. Reading from result[1] below is the
+        # corrected version of that intent. Requires the ai_validator_log table
+        # to exist in Supabase — until then, self.db_manager.log_ai_validator_decision
+        # itself swallows the insert failure (logged at debug level) so this is
+        # always safe to deploy ahead of that one-time setup.
+        try:
+            if self.db_manager is not None:
+                self.db_manager.log_ai_validator_decision({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "asset": asset,
+                    "strategy": strategy,
+                    "action": result[1].get("ai_validation", "approved"),
+                    "signal_quality": signal_quality,
+                    "quality_penalty": result[1].get("ai_quality_penalty", 0.0),
+                    "sr_passed": sr_passed,
+                    "pattern_passed": pattern_passed,
+                })
+        except Exception:
+            pass
 
         return result
 
@@ -601,115 +716,12 @@ class HybridSignalValidator:
             return {}
 
     def clear_pattern_cache(self):
-        """Clear the within-cycle pattern cache. Call at the start of each evaluation cycle."""
-        self._pattern_cache.clear()
+        """PAT-1: pattern module removed — no-op stub kept for call-site compatibility."""
+        pass
 
     def _check_pattern(self, df: pd.DataFrame, signal: int, min_confidence: float = 0.60, strategy: str = "UNKNOWN") -> dict:
-        try:
-            if len(df) < 15: return {"pattern_confirmed": False, "reason": "insufficient_data"}
-
-            # AI-5: Cache check — avoid triple neural net inference per council signal.
-            # Key: last close price (proxy for df identity) + signal direction.
-            try:
-                cache_key = (round(float(df["close"].iloc[-1]), 6), signal)
-                if cache_key in self._pattern_cache:
-                    cached = self._pattern_cache[cache_key]
-                    # Re-apply min_confidence gate since different callers may use different thresholds
-                    if cached.get("pattern_confirmed") and cached.get("confidence", 0) < min_confidence:
-                        return {**cached, "pattern_confirmed": False, "reason": "low_confidence_recalc"}
-                    return cached
-            except Exception:
-                cache_key = None  # Cache miss — proceed normally
-
-            snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-            if snippet[0, 0] <= 0: return {"pattern_confirmed": False, "reason": "invalid_data"}
-            snippet_input = (snippet / snippet[0, 0] - 1).reshape(1, 15, 4)
-            predicted_id, confidence = self.sniper.predict_single(snippet_input)
-            pattern_name = self.reverse_pattern_map.get(predicted_id, "Unknown")
-            
-            # --- Noise Filter ---
-            if "noise" in pattern_name.lower():
-                return {
-                    "pattern_confirmed": False,
-                    "confidence": 0,
-                    "reason": "noise_detected"
-                }
-
-            if predicted_id == 0:
-                # Fix: old code returned pattern_confirmed=True when confidence < 0.70 —
-                # inverse logic (uncertain "no pattern" = confirmed pattern). Corrected:
-                # - High confidence no-pattern (≥ 0.70): model is sure there's nothing → fail
-                # - Low confidence no-pattern (< 0.70): model is uncertain → soft-pass with flag
-                #   so validate_signal() can use S/R-only approval path instead of hard-failing.
-                if confidence >= 0.70:
-                    return {"pattern_confirmed": False, "reason": "no_pattern_detected", "pattern_name": "Noise", "confidence": confidence, "model_uncertain": False}
-                else:
-                    return {"pattern_confirmed": False, "reason": "model_uncertain_no_pattern", "pattern_name": "Uncertain", "confidence": confidence, "model_uncertain": True}
-
-            # Alignment check
-            is_bullish = pattern_name in self.BULLISH_PATTERNS
-            is_bearish = pattern_name in self.BEARISH_PATTERNS
-            
-            if signal == 1 and not is_bullish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
-            if signal == -1 and not is_bearish: return {"pattern_confirmed": False, "reason": "direction_mismatch"}
-
-            # ================================================================
-            # MR PATTERN CONFIRMATION: Institutional Reversal Pattern List
-            # AI-4 Fix: expanded from 3 to 7 per direction. Original list blocked
-            # valid reversal patterns (Harami, Piercing, Inverted Hammer, Dragonfly
-            # Doji) that are established in institutional reversal playbooks.
-            # ================================================================
-            if strategy.upper() == "REVERSION" or strategy == "mean_reversion":
-                allowed_long = [
-                    "hammer", "morning_star", "bullish_engulfing",
-                    "harami", "bullish_harami", "piercing",
-                    "inverted_hammer", "dragonfly_doji", "three_inside",
-                ]
-                allowed_short = [
-                    "shooting_star", "evening_star", "bearish_engulfing",
-                    "bearish_harami", "dark_cloud", "dark_cloud_cover",
-                    "gravestone_doji", "hanging_man", "three_outside",
-                ]
-
-                # Normalize for matching
-                norm_pattern = pattern_name.lower().replace(" ", "_")
-
-                if signal == 1 and norm_pattern not in allowed_long:
-                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for LONG.")
-                    return {
-                        "pattern_confirmed": False,
-                        "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
-                    }
-
-                if signal == -1 and norm_pattern not in allowed_short:
-                    logger.info(f"[AI] MR Blocked: Pattern '{pattern_name}' is not in allowed institutional list for SHORT.")
-                    return {
-                        "pattern_confirmed": False,
-                        "confidence": 0.0,
-                        "reason": f"unsupported_mr_pattern_{norm_pattern}"
-                    }
-            
-            # --- Volume Weighting ---
-            if 'volume' in df.columns and len(df) > 20:
-                avg_vol = df['volume'].iloc[-21:-1].mean()
-                volume = df['volume'].iloc[-1]
-                if volume > (2.0 * avg_vol):
-                    min_confidence = max(0.45, min_confidence - 0.20)
-
-            if confidence < min_confidence:
-                result = {"pattern_confirmed": False, "reason": "low_confidence", "confidence": confidence}
-                if cache_key:
-                    self._pattern_cache[cache_key] = result
-                return result
-
-            result = {"pattern_confirmed": True, "pattern_name": pattern_name, "confidence": confidence}
-            if cache_key:
-                self._pattern_cache[cache_key] = result
-            return result
-        except Exception as e:
-            logger.error(f"[PATTERN] Error: {e}")
-            return {"pattern_confirmed": False, "reason": "error"}
+        """PAT-1: pattern module removed — always returns unconfirmed stub."""
+        return {"pattern_confirmed": False, "pattern_name": None, "confidence": 0.0, "reason": "pattern_module_disabled"}
 
     def _approve_signal(self, signal: int, signal_details: dict, sr_result: dict, pattern_result: dict, strategy: str, validation_time: float, df: Optional[pd.DataFrame] = None) -> Tuple[int, dict]:
         self.rejection_window.append(False)
@@ -769,17 +781,26 @@ class HybridSignalValidator:
         return signal, {**details, "ai_validation": f"bypassed_{reason}"}
 
     def _check_circuit_breaker(self):
-        if len(self.rejection_window) < 30: return
-        if sum(self.rejection_window) / len(self.rejection_window) > self.bypass_threshold:
+        # S10.1: circuit breaker now warns only — never bypasses validation.
+        if len(self.rejection_window) < 30:
+            return
+        rate = sum(self.rejection_window) / len(self.rejection_window)
+        if rate > self.bypass_threshold and not self.bypass_mode:
             self.bypass_mode = True
-            # AI-4 Fix: raised from 15 to 30 cycles (was 75 min, now 150 min).
-            # At 15 cycles the circuit breaker reset too quickly — the model would
-            # re-enter rejection mode within the same session if the root cause
-            # (bad market regime, stale model) hadn't been resolved.
-            self.bypass_cooldown = 30
+            self.stats["circuit_breaker_warnings"] = self.stats.get("circuit_breaker_warnings", 0) + 1
+            logger.warning(
+                f"[AI] Circuit-breaker threshold crossed: {rate:.0%} rejects of last "
+                f"{len(self.rejection_window)} signals (thr {self.bypass_threshold:.0%}). "
+                "Validation CONTINUES — investigate model or regime quality."
+            )
+        elif rate <= self.bypass_threshold and self.bypass_mode:
+            self.bypass_mode = False
+            self.rejection_window.clear()
+            logger.info("[AI] Circuit-breaker cleared — rejection rate back below threshold.")
 
     def _reset_circuit_breaker(self):
         self.bypass_mode = False
+        self.bypass_cooldown = 0
         self.rejection_window.clear()
 
     def get_statistics(self) -> dict:

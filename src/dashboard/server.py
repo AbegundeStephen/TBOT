@@ -38,6 +38,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for real-time updates
 
+# Dashboard auth — shared secret required on endpoints that change settings
+# or restart the bot. Set DASHBOARD_API_KEY in .env (same pattern already
+# used for telegram_token/supabase_key in this file).
+DASHBOARD_API_KEY = os.environ.get("DASHBOARD_API_KEY")
+if not DASHBOARD_API_KEY:
+    logger.warning(
+        "[SECURITY] DASHBOARD_API_KEY not set — /api/config/save and "
+        "/api/bot/restart will reject all requests until it is."
+    )
+
+def require_dashboard_auth(fn):
+    from functools import wraps
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        supplied = request.headers.get("X-Dashboard-Key", "")
+        if not DASHBOARD_API_KEY or supplied != DASHBOARD_API_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+        return fn(*args, **kwargs)
+    return _wrapped
+
 
 # Load from environment or config
 SUPABASE_URL = os.getenv("SUPABASE_URL", "YOUR_SUPABASE_URL")
@@ -958,6 +978,7 @@ def get_editable_config():
 
 
 @app.route("/api/config/save", methods=["POST"])
+@require_dashboard_auth
 def save_config():
     """
     Receives {updates: {dot_path: new_value, ...}}, validates each path is
@@ -1041,6 +1062,7 @@ def save_config():
 
 
 @app.route("/api/bot/restart", methods=["POST"])
+@require_dashboard_auth
 def request_bot_restart():
     """Writes logs/restart.flag — main.py picks it up on next loop iteration."""
     try:
@@ -1119,6 +1141,92 @@ def health_check():
 
 
 # ============================================================================
+# LOG DOWNLOADS
+# ============================================================================
+
+@app.route("/api/download")
+def download_logs():
+    """
+    Download log files as file attachments.
+
+    ?type=bot_log             — full trading_bot.log
+    ?type=funnel&days=N       — funnel + ai_rejects JSONL for last N days (0 = all)
+    ?type=shadow&days=N       — shadow closed JSONL for last N days (0 = all)
+    """
+    import io
+    import glob as _glob
+    from flask import send_file
+
+    log_type = request.args.get("type", "bot_log")
+    days_str = request.args.get("days", "0")
+
+    try:
+        n_days = int(days_str)
+    except ValueError:
+        n_days = 0
+
+    if log_type == "bot_log":
+        log_path = os.path.join(project_root, "logs", "trading_bot.log")
+        if not os.path.exists(log_path):
+            return jsonify({"error": "trading_bot.log not found"}), 404
+        return send_file(
+            log_path,
+            as_attachment=True,
+            download_name="trading_bot.log",
+            mimetype="text/plain",
+        )
+
+    elif log_type in ("funnel", "shadow"):
+        if log_type == "funnel":
+            log_dir = os.path.join(project_root, "logs", "funnel")
+            prefixes = ("funnel_", "ai_rejects_")
+            out_name = f"funnel_data_last{n_days}d.jsonl" if n_days > 0 else "funnel_data_all.jsonl"
+        else:
+            log_dir = os.path.join(project_root, "logs", "shadow")
+            prefixes = ("closed_",)
+            out_name = f"shadow_data_last{n_days}d.jsonl" if n_days > 0 else "shadow_data_all.jsonl"
+
+        if not os.path.isdir(log_dir):
+            return jsonify({"error": f"Log directory not found"}), 404
+
+        cutoff = (datetime.now() - timedelta(days=n_days)).date() if n_days > 0 else None
+
+        segments = []
+        for prefix in prefixes:
+            for filepath in sorted(_glob.glob(os.path.join(log_dir, f"{prefix}*.jsonl"))):
+                if cutoff:
+                    fname = os.path.basename(filepath)
+                    date_part = fname[len(prefix):].replace(".jsonl", "")
+                    try:
+                        if datetime.strptime(date_part, "%Y-%m-%d").date() < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                        data = f.read().strip()
+                    if data:
+                        segments.append(data)
+                except Exception:
+                    continue
+
+        if not segments:
+            return jsonify({"error": "No log files found for the selected range"}), 404
+
+        buf = io.BytesIO("\n".join(segments).encode("utf-8"))
+        buf.seek(0)
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=out_name,
+            mimetype="application/x-ndjson",
+        )
+
+    else:
+        return jsonify({"error": f"Unknown type: {log_type}"}), 400
+
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
@@ -1153,6 +1261,6 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",  # Allow external connections
         port=5000,
-        debug=True,  # Set to False in production
+        debug=False,
         threaded=True,
     )

@@ -326,6 +326,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("preset_history", self.cmd_preset_history))
         # /debug_positions removed — no implementation existed, caused AttributeError on use
         self.application.add_handler(CommandHandler("test_viz", self.cmd_test_viz))
+        self.application.add_handler(CommandHandler("scalp", self.cmd_scalp))
 
 
         # Admin Commands
@@ -473,7 +474,8 @@ class TradingTelegramBot:
             "/regimes — Regime change log per asset\n"
             "/overrides — Signal override events log\n"
             "/lastdecision — Most recent decision + filter that fired\n"
-            "/chart [ASSET] — Live AI decision chart (all assets if no arg)\n\n"
+            "/chart [ASSET] — Live AI decision chart (all assets if no arg)\n"
+            "/scalp ASSET — On-demand 1H/4H alignment check + GO IN/WAIT (works even when scalp_alerts is off)\n\n"
 
             "📈 <b>Positions &amp; Trades</b>\n"
             "/positions — Open positions with P&amp;L, SL, TP, VTM state\n"
@@ -1289,6 +1291,37 @@ class TradingTelegramBot:
             if "✅" in result:
                 position.stop_loss = new_sl
 
+                # Immediately push the new SL to the broker.
+                # Without this, the VTM loop only pushes when it naturally
+                # trails the SL in check_exit(), meaning manual overrides
+                # never reach the exchange unless the VTM happens to move
+                # the SL in the same cycle.
+                try:
+                    asset_cfg = self.trading_bot.config.get("assets", {}).get(
+                        position.asset, {}
+                    )
+                    trading_cfg = self.trading_bot.config.get("trading", {})
+                    mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+
+                    if (
+                        asset_cfg.get("exchange", "mt5") == "mt5"
+                        and mt5_handler
+                        and position.mt5_ticket
+                        and trading_cfg.get("place_vtm_sl_on_exchange", False)
+                    ):
+                        symbol = mt5_handler._resolve_symbol(position.asset)
+                        if symbol:
+                            push_ok = mt5_handler._push_sl_to_exchange(
+                                position.mt5_ticket, symbol, new_sl
+                            )
+                            if push_ok:
+                                result += "\n📡 Exchange SL updated ✅"
+                            else:
+                                result += "\n⚠️ Exchange SL push failed — check VTM-SL logs"
+                except Exception as _push_err:
+                    logger.error(f"[TG] /set_sl exchange push failed: {_push_err}")
+                    result += "\n⚠️ Exchange push error — see bot logs"
+
             await update.message.reply_text(
                 f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
             )
@@ -1356,6 +1389,33 @@ class TradingTelegramBot:
             # Sync portfolio_manager's cached take profit (tier-0 = primary TP)
             if "✅" in result and tier == 0:
                 position.take_profit = new_tp
+
+                # Immediately push the new TP to the broker.
+                try:
+                    asset_cfg = self.trading_bot.config.get("assets", {}).get(
+                        position.asset, {}
+                    )
+                    trading_cfg = self.trading_bot.config.get("trading", {})
+                    mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+
+                    if (
+                        asset_cfg.get("exchange", "mt5") == "mt5"
+                        and mt5_handler
+                        and position.mt5_ticket
+                        and trading_cfg.get("place_vtm_tp_on_exchange", False)
+                    ):
+                        symbol = mt5_handler._resolve_symbol(position.asset)
+                        if symbol:
+                            push_ok = mt5_handler._push_tp_to_exchange(
+                                position.mt5_ticket, symbol, new_tp
+                            )
+                            if push_ok:
+                                result += "\n📡 Exchange TP updated ✅"
+                            else:
+                                result += "\n⚠️ Exchange TP push failed — check VTM-TP logs"
+                except Exception as _push_err:
+                    logger.error(f"[TG] /set_tp exchange push failed: {_push_err}")
+                    result += "\n⚠️ Exchange push error — see bot logs"
 
             await update.message.reply_text(
                 f"<pre>{html.escape(result)}</pre>", parse_mode="HTML"
@@ -1599,41 +1659,51 @@ class TradingTelegramBot:
             return
 
         pm = self.trading_bot.portfolio_manager
+        bot = self.trading_bot
 
-        # Diagnose current breaker state before overriding
+        # Diagnose current states before overriding
         halted, reason = pm.check_circuit_breaker()
+        profit_locked = getattr(bot, "_profit_lock_override", False) is False and (
+            getattr(pm, "realized_pnl_today", 0) / max(getattr(pm, "session_start_equity", 1), 1)
+            >= bot.config.get("risk", {}).get("daily_profit_lock", {}).get("hard_lock_pct", 0.20)
+        )
 
-        # Set override flag
+        # Override circuit breaker
         pm._circuit_breaker_override = True
 
+        # Override profit lock (hard + soft)
+        bot._profit_lock_override = True
+        bot._profit_soft_lock_active = False
+
         # Also make sure the bot loop is actually running
-        was_stopped = not self.trading_bot.is_running
+        was_stopped = not bot.is_running
         if was_stopped:
-            self.trading_bot.is_running = True
+            bot.is_running = True
 
-        lines = [
-            "🟡 <b>Circuit Breaker Overridden</b>",
-            "",
-        ]
+        lines = ["🟢 <b>Trading Resumed</b>", ""]
+
         if halted:
-            lines.append(f"Was halted because: <i>{reason}</i>")
-        else:
-            lines.append("ℹ️ Circuit breaker was not currently active — override set anyway.")
+            lines.append(f"🔓 Circuit breaker cleared (was: <i>{reason}</i>)")
+        if profit_locked:
+            lines.append("🔓 Profit lock cleared (hard + soft)")
+
+        if not halted and not profit_locked:
+            lines.append("ℹ️ No active blocks — override set as precaution.")
 
         if was_stopped:
-            lines.append("▶️ Bot loop was stopped — restarted.")
+            lines.append("▶️ Bot loop restarted.")
 
         lines += [
             "",
             "⚠️ <b>New positions may now be opened.</b>",
-            "Override clears automatically at the next session start (midnight).",
-            "Use /stop_trading to re-engage the halt manually.",
+            "All overrides clear automatically at midnight (next session reset).",
+            "Use /stop_trading to halt manually.",
         ]
 
         user = update.effective_user
         logger.warning(
-            f"[TG] /resume: circuit-breaker override set by "
-            f"{user.username or user.id}. Prior reason: {reason or 'none'}"
+            f"[TG] /resume: all locks overridden by "
+            f"{user.username or user.id}. CB reason: {reason or 'none'}"
         )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -2516,6 +2586,50 @@ class TradingTelegramBot:
             logger.error(f"[TG] /regimes error: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching regime info")
 
+    async def cmd_scalp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle /scalp <ASSET> — on-demand 1H/4H scalp alignment check.
+
+        Read-only: calls ScalpAlertEngine.peek(), which never touches the
+        engine's ADX/RSI history or fire-once dedup state, so checking here
+        can't suppress or double-fire the automatic push alert. Works
+        regardless of config["scalp_alerts"]["enabled"] or the asset
+        whitelist — those only gate the automatic push, not a manual check.
+        """
+        try:
+            if not context.args:
+                await update.message.reply_text(
+                    "⚠️ Usage: <code>/scalp BTC</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset = context.args[0].upper()
+            valid_assets = list(self.trading_bot.config["assets"].keys())
+            if asset not in valid_assets:
+                await update.message.reply_text(
+                    f"⚠️ Invalid asset. Available: {valid_assets}"
+                )
+                return
+
+            engine = getattr(self.trading_bot, "scalp_alert_engine", None)
+            if engine is None:
+                await update.message.reply_text(
+                    "⚠️ Scalp engine isn't initialized yet — try again once the bot is fully up."
+                )
+                return
+
+            mtf_regime = self.trading_bot._current_regime_data.get(asset) if hasattr(
+                self.trading_bot, "_current_regime_data"
+            ) else None
+
+            msg = engine.peek(asset, mtf_regime)
+            await update.message.reply_text(msg, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"[TG] /scalp error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error checking scalp alignment")
+
     async def cmd_overrides(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /overrides — signal override events (Golden Cross etc.)"""
         try:
@@ -2804,6 +2918,20 @@ class TradingTelegramBot:
                                     hybrid_selector=self.trading_bot.hybrid_selector,
                                 )
                             )
+                        elif isinstance(agg, dict) and agg.get("mode") == "council":
+                            # Council mode: dict wraps council + livermore companion
+                            mtf_regime = {}
+                            if (
+                                hasattr(self.trading_bot, "_current_regime_data")
+                                and asset_name in self.trading_bot._current_regime_data
+                            ):
+                                mtf_regime = self.trading_bot._current_regime_data[asset_name]
+                            sig, det = agg["council"].get_aggregated_signal(
+                                df_15.copy(),
+                                current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                                is_bull_market=mtf_regime.get("is_bull", False),
+                                governor_data=mtf_regime,
+                            )
                         else:
                             # Single-mode aggregator (council or performance object)
                             mtf_regime = {}
@@ -2840,9 +2968,12 @@ class TradingTelegramBot:
                         await loop.run_in_executor(None, _generate_chart_data)
                     )
 
-                    await status_message.edit_text(
-                        f"🎨 Rendering {asset_name} chart..."
-                    )
+                    try:
+                        await status_message.edit_text(
+                            f"🎨 Rendering {asset_name} chart..."
+                        )
+                    except Exception:
+                        pass  # Status edit failure is cosmetic — continue
 
                     # Send chart
                     if self.trading_bot.chart_sender:
@@ -2855,14 +2986,29 @@ class TradingTelegramBot:
                             current_price=current_price,
                         )
                         charts_sent += 1
+                    else:
+                        # chart_sender unavailable — send raw signal summary instead
+                        sig_str = "🟢 BUY" if signal == 1 else "🔴 SELL" if signal == -1 else "⚪ HOLD"
+                        regime  = details.get("regime", "?")
+                        quality = details.get("signal_quality", 0)
+                        await update.message.reply_text(
+                            f"📊 *{asset_name}* — {sig_str}\n"
+                            f"Regime: {regime} | Quality: {quality:.0%}\n"
+                            f"_(Chart renderer not available — restart bot to enable)_",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                        charts_sent += 1  # count as sent so we don't show "failed"
 
                 except Exception as e:
                     logger.error(
                         f"[CHART CMD] Error for {asset_name}: {e}", exc_info=True
                     )
-                    await update.message.reply_text(
-                        f"❌ Error generating {asset_name} chart: {str(e)[:100]}"
-                    )
+                    try:
+                        await update.message.reply_text(
+                            f"❌ Error generating {asset_name} chart: {str(e)[:100]}"
+                        )
+                    except Exception:
+                        pass
 
             # Final status
             if charts_sent > 0:
@@ -3061,6 +3207,8 @@ class TradingTelegramBot:
         margin_type: str = "SPOT",
         is_futures: bool = False,
         vtm_is_active: bool = False,
+        entry_type: str = None,
+        stop_type: str = None,
     ):
         """
         ✅ FIXED: Notify when a trade is opened with correct futures/spot detection
@@ -3124,10 +3272,24 @@ class TradingTelegramBot:
             if sl and sl > 0:
                 msg += (
                     f"🛑 Stop Loss: ${sl:,.2f}\n"
-                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n\n"
+                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n"
                 )
             else:
-                msg += "🛑 Stop Loss: VTM Dynamic\n\n"
+                msg += "🛑 Stop Loss: VTM Dynamic\n"
+
+            # Stop type + entry classification
+            _stop_icons = {
+                "structural": "🏗️ Structural",
+                "atr_capped": "📐 ATR cap (anchor too far)",
+                "atr":        "📐 ATR baseline",
+            }
+            _stop_label = _stop_icons.get(stop_type or "atr", "📐 ATR baseline")
+            # Replace underscores in entry_type names (e.g. TREND_FOLLOWING,
+            # MR_PULLBACK) — Telegram Markdown treats _ as italic delimiter
+            # and throws "can't find end of entity" when it sees an odd count.
+            _entry_display = entry_type.replace("_", " ") if entry_type else None
+            _entry_label = f" · {_entry_display}" if _entry_display else ""
+            msg += f"   └─ Type: {_stop_label}{_entry_label}\n\n"
 
             # Add TP info if available
             if tp and tp > 0:

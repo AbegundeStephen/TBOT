@@ -1,16 +1,15 @@
 {
   "AGGREGATOR_PRESETS": {
-
     "BTC": {
       "conservative": {
         "description": "High thresholds, requires almost unanimous Council agreement. Focus: Capital Preservation.",
         "buy_threshold": 0.32,
         "sell_threshold": 0.34,
         "two_strategy_bonus": 0.18,
-        "three_strategy_bonus": 0.20,
-        "bull_buy_boost": 0.10,
+        "three_strategy_bonus": 0.2,
+        "bull_buy_boost": 0.1,
         "bull_sell_penalty": 0.12,
-        "bear_sell_boost": 0.10,
+        "bear_sell_boost": 0.1,
         "bear_buy_penalty": 0.12,
         "min_confidence_to_use": 0.12,
         "min_signal_quality": 0.32,
@@ -21,27 +20,31 @@
         "verbose": false,
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5,
-        "mean_reversion_weight": 0.20,
+        "mean_reversion_weight": 0.2,
         "trend_following_weight": 0.85,
-        "ema_weight": 0.30,
+        "ema_weight": 0.3,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Veteran rewrite 2026-06-24: blocks a trend-aligned entry ONLY when min_agreement/candles recent CLOSED candles oppose the trade AND net displacement >= adverse_atr_mult x ATR (a real counter-move, not candle-colour noise). mode 'soft' = require council score >= required + soft_penalty instead of a hard veto; a strong_adx trend halves the penalty (pullback = entry). mode: 'soft'|'off'|'veto'. Set adverse_atr_mult=0 + mode='veto' to restore the legacy candle-colour hard block.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "balanced": {
         "description": "Standard thresholds, standard Council rules. Focus: Balanced Growth.",
-        "buy_threshold": 0.30,
+        "buy_threshold": 0.3,
         "sell_threshold": 0.32,
-        "two_strategy_bonus": 0.20,
+        "two_strategy_bonus": 0.2,
         "three_strategy_bonus": 0.22,
         "bull_buy_boost": 0.11,
         "bull_sell_penalty": 0.11,
         "bear_sell_boost": 0.11,
         "bear_buy_penalty": 0.11,
-        "min_confidence_to_use": 0.10,
+        "min_confidence_to_use": 0.1,
         "min_signal_quality": 0.28,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
@@ -52,12 +55,16 @@
         "council_counter_trend": 4.0,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.75,
-        "ema_weight": 0.40,
+        "ema_weight": 0.4,
         "momentum_alignment": {
-          "_comment": "Blocks trend entries when all 3 recent candles oppose the trade direction. Requires unanimous disagreement to block — gives trades room to breathe through shallow pullbacks.",
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "aggressive": {
@@ -74,19 +81,23 @@
         "min_signal_quality": 0.25,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
-        "opposition_penalty": 0.60,
+        "single_override_threshold": 0.7,
+        "opposition_penalty": 0.6,
         "verbose": false,
         "council_trend_aligned": 2.9,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.45,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.50,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Slightly looser: requires all 3 candles against trade to block (aggressive preset tolerates 1 opposing candle).",
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "scalper": {
@@ -95,33 +106,32 @@
         "buy_threshold": 0.24,
         "sell_threshold": 0.24,
         "two_strategy_bonus": 0.25,
-        "three_strategy_bonus": 0.30,
+        "three_strategy_bonus": 0.3,
         "bull_buy_boost": 0.15,
-        "bull_sell_penalty": 0.10,
+        "bull_sell_penalty": 0.1,
         "bear_sell_boost": 0.15,
-        "bear_buy_penalty": 0.10,
+        "bear_buy_penalty": 0.1,
         "min_confidence_to_use": 0.08,
-        "min_signal_quality": 0.20,
+        "min_signal_quality": 0.2,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.05,
-        "opposition_penalty": 0.60,
+        "opposition_penalty": 0.6,
         "council_trend_aligned": 2.7,
         "council_counter_trend": 3.5,
-        "mean_reversion_weight": 0.30,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.50,
+        "mean_reversion_weight": 0.3,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disable momentum alignment check — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disable momentum alignment check \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 2
         }
       }
     },
-
     "GOLD": {
       "conservative": {
         "description": "Strict GOLD settings. Focus: Capital Preservation.",
@@ -134,7 +144,7 @@
         "bear_sell_boost": 0.07,
         "bear_buy_penalty": 0.09,
         "min_confidence_to_use": 0.12,
-        "min_signal_quality": 0.30,
+        "min_signal_quality": 0.3,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.75,
@@ -143,25 +153,30 @@
         "council_trend_aligned": 4.0,
         "council_counter_trend": 4.5,
         "mean_reversion_weight": 0.25,
-        "trend_following_weight": 0.80,
-        "ema_weight": 0.30,
+        "trend_following_weight": 0.8,
+        "ema_weight": 0.3,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "balanced": {
         "description": "Standard GOLD settings. Focus: Balanced Growth.",
         "buy_threshold": 0.33,
         "sell_threshold": 0.34,
-        "two_strategy_bonus": 0.20,
+        "two_strategy_bonus": 0.2,
         "three_strategy_bonus": 0.25,
         "bull_buy_boost": 0.08,
         "bull_sell_penalty": 0.08,
         "bear_sell_boost": 0.08,
         "bear_buy_penalty": 0.08,
-        "min_confidence_to_use": 0.10,
+        "min_confidence_to_use": 0.1,
         "min_signal_quality": 0.28,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
@@ -171,40 +186,50 @@
         "council_trend_aligned": 3.5,
         "council_counter_trend": 4.0,
         "mean_reversion_weight": 0.35,
-        "trend_following_weight": 0.70,
-        "ema_weight": 0.40,
+        "trend_following_weight": 0.7,
+        "ema_weight": 0.4,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "aggressive": {
-        "description": "Active GOLD settings. Focus: Trend Catching.",
-        "buy_threshold": 0.28,
-        "sell_threshold": 0.28,
+        "description": "Active GOLD/USTEC/USOIL settings. Focus: Trend Catching. Tightened: adx_required=true for USTEC/USDJPY TF; raised thresholds to reduce low-conviction chop entries.",
+        "buy_threshold": 0.32,
+        "sell_threshold": 0.32,
         "two_strategy_bonus": 0.22,
-        "three_strategy_bonus": 0.30,
+        "three_strategy_bonus": 0.3,
         "bull_buy_boost": 0.09,
         "bull_sell_penalty": 0.09,
         "bear_sell_boost": 0.09,
         "bear_buy_penalty": 0.09,
         "min_confidence_to_use": 0.08,
-        "min_signal_quality": 0.22,
+        "min_signal_quality": 0.3,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
-        "opposition_penalty": 0.60,
+        "single_override_threshold": 0.7,
+        "opposition_penalty": 0.6,
         "verbose": false,
         "council_trend_aligned": 3.0,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.45,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50,
+        "ema_weight": 0.5,
         "momentum_alignment": {
+          "_comment": "Veteran rewrite 2026-06-24: net-displacement + soft-penalty. See BTC/conservative momentum_alignment for full notes. mode: 'soft'|'off'|'veto'; adverse_atr_mult=0 + mode='veto' restores legacy.",
           "enabled": true,
+          "mode": "soft",
           "candles": 3,
-          "min_agreement": 3
+          "min_agreement": 3,
+          "adverse_atr_mult": 1.0,
+          "strong_adx": 28.0,
+          "soft_penalty": 0.75
         }
       },
       "scalper": {
@@ -225,29 +250,28 @@
         "single_override_threshold": 0.65,
         "verbose": false,
         "min_quality_margin": 0.06,
-        "opposition_penalty": 0.60,
+        "opposition_penalty": 0.6,
         "council_trend_aligned": 2.8,
         "council_counter_trend": 3.5,
         "mean_reversion_weight": 0.35,
         "trend_following_weight": 0.65,
-        "ema_weight": 0.50,
+        "ema_weight": 0.5,
         "momentum_alignment": {
-          "_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.",
+          "_comment": "Scalper mode: disabled \u2014 scalpers trade fast reversals intentionally.",
           "enabled": false,
           "candles": 3,
           "min_agreement": 3
         }
       }
     },
-
     "FX": {
-      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals — so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
+      "_comment": "Used for EURUSD, EURJPY, GBPUSD, GBPAUD, USDJPY. FX pairs are more mean-reverting within sessions, have tighter volatility, and produce weaker signals \u2014 so thresholds are lower, MR weight is higher, and opposition penalty is softer.",
       "conservative": {
         "description": "Strict FX settings. Focus: Capital Preservation.",
         "buy_threshold": 0.28,
         "sell_threshold": 0.26,
         "two_strategy_bonus": 0.16,
-        "three_strategy_bonus": 0.20,
+        "three_strategy_bonus": 0.2,
         "bull_buy_boost": 0.07,
         "bull_sell_penalty": 0.07,
         "bear_sell_boost": 0.07,
@@ -279,19 +303,19 @@
         "min_signal_quality": 0.22,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
-        "single_override_threshold": 0.70,
+        "single_override_threshold": 0.7,
         "opposition_penalty": 0.45,
         "verbose": false,
         "council_trend_aligned": 3.3,
         "council_counter_trend": 3.8,
-        "mean_reversion_weight": 0.50,
-        "trend_following_weight": 0.60,
-        "ema_weight": 0.40
+        "mean_reversion_weight": 0.5,
+        "trend_following_weight": 0.6,
+        "ema_weight": 0.4
       },
       "aggressive": {
-        "description": "Active FX settings. Focus: Trend and Range Catching.",
-        "buy_threshold": 0.22,
-        "sell_threshold": 0.20,
+        "description": "Active FX settings. Focus: Trend and Range Catching. Tightened: raised thresholds to reduce weak-ADX chop entries on USDJPY and other FX pairs.",
+        "buy_threshold": 0.27,
+        "sell_threshold": 0.25,
         "two_strategy_bonus": 0.18,
         "three_strategy_bonus": 0.22,
         "bull_buy_boost": 0.07,
@@ -299,7 +323,7 @@
         "bear_sell_boost": 0.07,
         "bear_buy_penalty": 0.06,
         "min_confidence_to_use": 0.04,
-        "min_signal_quality": 0.19,
+        "min_signal_quality": 0.25,
         "hold_contribution_pct": 0.0,
         "allow_single_override": true,
         "single_override_threshold": 0.68,
@@ -314,10 +338,10 @@
       "scalper": {
         "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
         "description": "High frequency FX settings. Focus: Volume & Speed.",
-        "buy_threshold": 0.20,
+        "buy_threshold": 0.2,
         "sell_threshold": 0.18,
         "two_strategy_bonus": 0.16,
-        "three_strategy_bonus": 0.20,
+        "three_strategy_bonus": 0.2,
         "bull_buy_boost": 0.07,
         "bull_sell_penalty": 0.05,
         "bear_sell_boost": 0.07,
@@ -332,11 +356,302 @@
         "opposition_penalty": 0.32,
         "council_trend_aligned": 2.5,
         "council_counter_trend": 3.2,
-        "mean_reversion_weight": 0.50,
+        "mean_reversion_weight": 0.5,
         "trend_following_weight": 0.55,
-        "ema_weight": 0.50
+        "ema_weight": 0.5
       }
     }
-
+  },
+  "LIVERMORE_PIVOTS": {
+    "BTC": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "BTC 4H Jan2024-Feb2026: 1.48 transitions/week, 5/6 turning-point score"
+    },
+    "GOLD": {
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
+      "atr_period": 14,
+      "_calibration": "GOLD 4H Feb-Jun2026: 1.43 t/w, main_frac=35%, avg_main_dur=41 bars"
+    },
+    "EURUSD": {
+      "major_mult": 4.0,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
+      "atr_period": 14,
+      "_calibration": "EURUSD 4H Feb-Jun2026: 1.24 t/w, main_frac=42%, avg_main_dur=44 bars"
+    },
+    "EURJPY": {
+      "major_mult": 4.0,
+      "minor_mult": 0.5,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "EURJPY 4H Feb-Jun2026: 1.08 t/w, main_frac=43%, avg_main_dur=53 bars"
+    },
+    "USTEC": {
+      "major_mult": 3.0,
+      "minor_mult": 0.5,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "USTEC 4H Feb-Jun2026: 1.48 t/w, main_frac=49%, avg_main_dur=39 bars"
+    },
+    "GBPAUD": {
+      "major_mult": 4.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "GBPAUD 4H Feb-Jun2026: 1.20 t/w, main_frac=45%, avg_main_dur=78 bars"
+    },
+    "USOIL": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "USOIL 4H Feb-Jun2026: low-confidence calibration (0.53 t/w, main_frac=15%) \u2014 kept major=3.5 from calibration, minor=1.0 for stability; re-run after 6mo data",
+      "_watch": "Low-confidence calibration \u2014 verify state labels against chart in week 1 of paper trading"
+    },
+    "USDJPY": {
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
+      "atr_period": 14,
+      "_calibration": "USDJPY 4H Feb-Jun2026: 1.11 t/w, main_frac=31%, avg_main_dur=43 bars"
+    }
+  },
+  "REQUIRED_SCORE_MODIFIER": {
+    "_comment": "Phase 2: Livermore state-conditional threshold deltas. Applied additively to BOTH buy and sell thresholds after regime-adjusted thresholds are computed. Full retest-type modifiers (CLEAN/BREAKOUT/WICK/CHASE_SOFT/CHASE_HARD) are wired in Phase 3B. SECONDARY states raise the bar \u2014 entries still allowed but harder to clear. NATURAL states are gated by the Hard Veto + Gatekeeper HOLD before reaching this modifier.",
+    "state_modifiers": {
+      "MAIN_UP": 0.0,
+      "MAIN_DOWN": 0.0,
+      "NATURAL_RETRACEMENT": 0.0,
+      "NATURAL_REBOUND": 0.0,
+      "SECONDARY_RETRACEMENT": 0.4,
+      "SECONDARY_REBOUND": 0.4
+    },
+    "modifier_cap": 1.5,
+    "vtm_circuit_breaker_atr_mult": 3.0,
+    "_note": "All numeric thresholds live here per MRS zero-magic-numbers rule.",
+    "lifecycle_age_thresholds": {
+      "_comment": "Bars of 4H state age before MAIN states graduate PICKUP\u2192CONFIRMATION\u2192ESTABLISHED. Calibrate per asset based on typical trend duration.",
+      "BTC": {
+        "pickup_max": 5,
+        "confirmation_max": 15
+      },
+      "GOLD": {
+        "pickup_max": 4,
+        "confirmation_max": 12
+      },
+      "EURUSD": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
+      "EURJPY": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
+      "USTEC": {
+        "pickup_max": 5,
+        "confirmation_max": 14
+      },
+      "GBPAUD": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
+      "GBPUSD": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
+      "USOIL": {
+        "pickup_max": 4,
+        "confirmation_max": 12
+      },
+      "USDJPY": {
+        "pickup_max": 3,
+        "confirmation_max": 10
+      },
+      "default": {
+        "pickup_max": 4,
+        "confirmation_max": 12
+      }
+    }
+  },
+  "MR_THREE_MODE": {
+    "_comment": "Phase 3A: MR Three-Mode Rebuild thresholds. Zero magic numbers \u2014 all constants here. Mode 1 = Pullback Completion (NATURAL_RETRACEMENT, spring mandatory). Mode 2 = Counter-Trend (SECONDARY states, ADX<25, 4/4 optional). Mode 3 = Climax Fade (MAIN states, stretched leg + reversal candle).",
+    "mode1": {
+      "_comment": "Pullback Completion \u2014 NATURAL_RETRACEMENT, LONG only.",
+      "spring_min_penetration": 0.005,
+      "spring_max_penetration": 0.05,
+      "spring_recovery_max_bars": 5,
+      "spring_swing_lookback": 20,
+      "vol_contraction_avg_pct": 0.8,
+      "vol_spike_max_pct": 1.5,
+      "bb_lower_zone_threshold": 0.2,
+      "ma_proximity_atr_mult": 0.5,
+      "optional_min_count": 2,
+      "vol_down_ratio_veto": 1.2,
+      "btc_ema200_4h_modifier": -0.1
+    },
+    "mode2": {
+      "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT. optional_min_count lowered 4\u21923: requiring all 4 simultaneously is statistically near-impossible on hourly data.",
+      "adx_max": 30,
+      "optional_min_count": 2,
+      "bb_inside_required": true,
+      "btc_long_zscore_threshold": -2.0,
+      "btc_short_zscore_threshold": 3.5
+    },
+    "mode3": {
+      "_comment": "Climax Fade \u2014 MAIN states. MAIN_UP\u2192SHORT, MAIN_DOWN\u2192LONG. Target is EMA20, NOT a reversal call. candle_lookback_bars=3: reversal candle accepted within last 3 bars, not just the current bar \u2014 otherwise the gate fires only ~1-2% of eligible cycles. require_above_avg_volume=false: MT5 tick volume is not real market volume; unreliable for this gate.",
+      "leg_stretch_ratio_min": 1.2,
+      "leg_stretch_window": 10,
+      "leg_stretch_lookback": 50,
+      "price_anchor_atr_mult": 2.0,
+      "require_above_avg_volume": false,
+      "volume_avg_lookback": 20,
+      "candle_lookback_bars": 5
+    },
+    "bb_kc_squeeze": {
+      "_comment": "BB(20,2\u03c3) inside Keltner(20 EMA, 1.5\u00d7ATR14) for 5+ bars. bbw_percentile bottom 30th = compressed volatility.",
+      "min_squeeze_bars": 3,
+      "bbw_percentile_threshold": 30.0,
+      "kc_ema_period": 20,
+      "kc_atr_mult": 1.5
+    },
+    "nr7_lookback": 7
+  },
+  "RETEST_ENGINE": {
+    "_comment": "Phase 3B: 5-Tier Retest Engine thresholds. Priority cascade: CLEAN \u2192 BREAKOUT \u2192 WICK \u2192 CHASE_HARD \u2192 CHASE_SOFT \u2192 NO_LEVEL_NEARBY. All ATR multiples are measured from nearby_4h_level. modifier_* values are ADDITIVE deltas to the required score threshold. Negative delta = easier to enter; positive = harder.",
+    "clean_proximity_atr_mult": 0.5,
+    "breakout_age_max_bars": 5,
+    "modifier_clean": -0.2,
+    "modifier_wick": 0.0,
+    "modifier_chase_soft": 0.75,
+    "modifier_chase_hard": 1.5,
+    "modifier_no_level_default": 0.35,
+    "modifier_breakout_aligned_btc": 0.1,
+    "modifier_breakout_aligned_fx": 0.2,
+    "modifier_breakout_misaligned": 0.4,
+    "assets": {
+      "_comment": "Per-asset overrides. chase_soft/chase_hard: ATR multiples from level at which entry is penalised. breakout_proximity_atr_mult: max distance to still classify as a breakout continuation. modifier_no_level: delta when no structural level found.",
+      "BTC": {
+        "chase_soft_atr_mult": 1.2,
+        "chase_hard_atr_mult": 2.0,
+        "breakout_proximity_atr_mult": 2.0,
+        "modifier_no_level": 0.4
+      },
+      "GOLD": {
+        "chase_soft_atr_mult": 1.5,
+        "chase_hard_atr_mult": 2.5,
+        "breakout_proximity_atr_mult": 1.5,
+        "modifier_no_level": 0.35
+      },
+      "EURUSD": {
+        "chase_soft_atr_mult": 1.8,
+        "chase_hard_atr_mult": 3.0,
+        "breakout_proximity_atr_mult": 1.25,
+        "modifier_no_level": 0.3
+      },
+      "EURJPY": {
+        "chase_soft_atr_mult": 1.6,
+        "chase_hard_atr_mult": 2.5,
+        "breakout_proximity_atr_mult": 1.25,
+        "modifier_no_level": 0.35
+      },
+      "GBPAUD": {
+        "chase_soft_atr_mult": 1.4,
+        "chase_hard_atr_mult": 2.2,
+        "breakout_proximity_atr_mult": 1.25,
+        "modifier_no_level": 0.35
+      },
+      "USTEC": {
+        "chase_soft_atr_mult": 1.3,
+        "chase_hard_atr_mult": 2.0,
+        "breakout_proximity_atr_mult": 1.5,
+        "modifier_no_level": 0.35
+      },
+      "USOIL": {
+        "chase_soft_atr_mult": 1.3,
+        "chase_hard_atr_mult": 2.0,
+        "breakout_proximity_atr_mult": 1.5,
+        "modifier_no_level": 0.35
+      },
+      "DEFAULT": {
+        "_comment": "Fallback for any symbol not listed above.",
+        "chase_soft_atr_mult": 1.4,
+        "chase_hard_atr_mult": 2.2,
+        "breakout_proximity_atr_mult": 1.5,
+        "modifier_no_level": 0.35
+      }
+    },
+    "continuation": {
+      "_comment": "Phase 4 ext: CONTINUATION entry_type (Scenario B - tight 1H consolidation breaking out inside an established 4H MAIN leg). Gated entirely by phase_config.continuation_targets_enabled (default OFF) - these thresholds have no effect while the flag is off.",
+      "min_bars": 4,
+      "max_bars": 15,
+      "max_range_atr_mult": 2.0,
+      "breakout_buffer_atr_mult": 0.1,
+      "min_flagpole_atr_mult": 1.0,
+      "modifier_aligned_btc": 0.1,
+      "modifier_aligned_fx": 0.2
+    },
+    "range_ladder": {
+      "_comment": "Phase 4 ext: range top/bottom lookback for the RANGE_BOUNDARY/SPRING_ENTRY target ladder (midpoint/top/measured-move). Gated by phase_config.continuation_targets_enabled (default OFF).",
+      "lookback_bars": 30
+    }
+  },
+  "AI_VALIDATOR": {
+    "_bucket_a_data_backed": "Values below have real justification — see inline notes. Do not change without re-running the same analysis.",
+    "session_multipliers": {
+      "_data": "T2.7 simulation: TF Asian 00-08 UTC 62%WR/+114%P&L -> lower bar. MR London 08-12 UTC 48%WR/-6.5%P&L -> raise bar. MR NY-close 17-21 UTC 67%WR/+19.7%P&L -> lower bar.",
+      "asian_hour_start": 0,
+      "asian_hour_end": 8,
+      "asian_mult": 0.85,
+      "london_hour_start": 8,
+      "london_hour_end": 12,
+      "london_mult": 1.20,
+      "ny_close_hour_start": 17,
+      "ny_close_hour_end": 21,
+      "ny_close_mult": 0.85
+    },
+    "sr_ema_fallback_distance_atr_mult": 0.5,
+    "sr_ema_fallback_distance_note": "Widened from 0.25x after observed chain rejections in practice.",
+    "pattern_penetration": {
+      "_data": "TA-Lib standard candlestick recognition parameters.",
+      "penetration_1": 0.3,
+      "penetration_2": 0.3,
+      "penetration_3": 0.5
+    },
+    "_bucket_b_convention_backed": "Common technical-analysis convention, not yet tested against our own trade history.",
+    "flash_crash_atr_mult": 4.0,
+    "flash_crash_ema_span": 20,
+    "atr_period": 14,
+    "volume_confirmation_mult": 2.0,
+    "_bucket_c_needs_real_calibration": "No stated rationale anywhere in the original code. Kept at current live values to avoid blind re-tuning. Logging added below so these get replaced with real numbers once enough trade outcomes accumulate.",
+    "soft_pass_penalty_sr_only": 0.05,
+    "soft_pass_penalty_pattern_only": 0.05,
+    "soft_pass_penalty_uncertain_sr": 0.05,
+    "soft_pass_penalty_momentum_partial": 0.04,
+    "third_path_penalty": 0.08,
+    "third_path_min_signal_quality": 0.65,
+    "circuit_breaker_threshold": 0.70,
+    "strategy_mult_default": 1.0,
+    "strategy_mult_mr": 1.5,
+    "strategy_mult_tf": 1.2,
+    "volatility_mult_low": 1.3,
+    "volatility_mult_normal": 1.15,
+    "volatility_mult_high": 0.9,
+    "sr_threshold_floor": 0.015,
+    "sr_threshold_ceiling": 0.060,
+    "regime_mult_aligned": 0.90,
+    "regime_mult_counter": 0.95,
+    "pattern_threshold_floor": 0.40,
+    "pattern_threshold_ceiling": 0.75,
+    "sr_cache_refresh_seconds": 3600,
+    "pattern_strength_magnitude_cutoff": 200,
+    "pattern_strength_high_confidence": 0.85,
+    "pattern_strength_low_confidence": 0.70,
+    "volume_boost_discount_floor": 0.45,
+    "volume_boost_discount_amount": 0.20
   }
 }

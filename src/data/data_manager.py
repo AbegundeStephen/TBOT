@@ -472,8 +472,11 @@ class DataManager:
             # Update the price cache with the latest close
             if not df.empty:
                 last_close = df['close'].iloc[-1]
-                price_cache.set(symbol, last_close)
-                logger.info(f"[CACHE] Price cache updated with last kline close: {last_close}")
+                _accepted = price_cache.set(symbol, last_close, timeframe=interval)
+                if _accepted:
+                    logger.info(f"[CACHE] Price cache updated with last kline close: {last_close}")
+                else:
+                    logger.debug(f"[CACHE] Bar-close {last_close} for {symbol} skipped — fresher tick already cached")
 
             return self.clean_data(df)
 
@@ -617,8 +620,11 @@ class DataManager:
             # Update the price cache with the latest close
             if not df.empty:
                 last_close = df['close'].iloc[-1]
-                price_cache.set(symbol, last_close)
-                logger.info(f"[CACHE] Price cache updated with last kline close from MT5: {last_close}")
+                _accepted = price_cache.set(symbol, last_close, timeframe=timeframe)
+                if _accepted:
+                    logger.info(f"[CACHE] Price cache updated with last kline close from MT5: {last_close}")
+                else:
+                    logger.debug(f"[CACHE] Bar-close {last_close} for {symbol} skipped — fresher tick already cached")
 
             return self.clean_data(df)
 
@@ -641,6 +647,19 @@ class DataManager:
         df = df.sort_index()
 
         if df.isnull().any().any():
+            # Phase 6.4: ffill carries the last good bar forward across gaps,
+            # which can create a phantom flat candle that misleads regime
+            # detection on the live path. We keep the fill (downstream code
+            # assumes no NaNs) but WARN so gap-fills are visible rather than
+            # silent. If this fires often on live data, investigate the feed
+            # before trusting regime/structure reads from that window.
+            _nan_rows = int(df.isnull().any(axis=1).sum())
+            if _nan_rows > 0:
+                logger.warning(
+                    f"[DATA] clean_data filled {_nan_rows} row(s) containing NaNs "
+                    f"via ffill — possible data gap; regime/structure reads on these "
+                    f"bars may be unreliable."
+                )
             df = df.ffill().dropna()
 
         # ✨ ENHANCED VALIDATION: Ensure no corrupted inputs

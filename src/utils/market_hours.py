@@ -352,9 +352,18 @@ class MarketHours:
         # GBPAUD: best during London/Sydney overlap + London session.
         # Spreads blow out in late NY/Asian hours.
         "GBPAUD": [(0, 17)],
-        # Indices and commodities: US session driven
-        "USTEC":  [(13, 21)],
-        "USOIL":  [(7, 21)],
+        # Indices and commodities: US session driven.
+        # Upper bound is 22 (not 21) so winter close at 21:00 UTC (4pm EST)
+        # isn't clipped by the < comparison. should_trade() remains the
+        # binding gate — it closes at the actual market close regardless.
+        "USTEC":  [(13, 22)],
+        # USOIL: data-derived from data/raw/USOILm_1h.csv hourly volume
+        # (40%-of-peak threshold), not the FX-style copy-paste this used to be.
+        # Peak vol ~12.7k @ 13:00 UTC. Vol drops to 5.1k (40% of peak) by hour 6
+        # on the open side and to 3.7k (29% of peak) by hour 20 on the close
+        # side — the old (7,21) window missed real hour-6 activity and let
+        # entries through during the low-liquidity hour-20 tail. Reviewed 2026-06-16.
+        "USOIL":  [(6, 20)],
         # BTC: 24/7 but enforce a minimum liquidity window
         "BTC":    [(0, 24)],  # no restriction by default
     }

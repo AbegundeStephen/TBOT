@@ -75,12 +75,20 @@ class ShadowPosition:
     # Identity
     asset: str
     side: str               # "long" | "short"
-    strategy_source: str    # "TF" | "MR" | "EMA" | "consensus"
+    strategy_source: str    # "TF" | "MR" | "EMA" | "consensus" | "COUNCIL"
     gate_blocked_by: str    # e.g. "blocked_by_governor", "no_sniper_confirmation"
 
     # Entry
     entry_price: float
     entry_time: datetime
+
+    # Item 2.17: categories matching the council judge system (previously only
+    # the old single-strategy system's labels existed here).
+    judge_driver: str = "unknown"    # which judge contributed most to the score
+    score_pct_of_max: float = 0.0    # total_score / achievable_max (Item 2.5)
+    qualify_tag: str = ""            # plain-English score-margin label (Item 2.6)
+    livermore_state_1h: str = ""
+
     regime_score: float = 0.0
     regime_name: str = "UNKNOWN"
 
@@ -286,17 +294,61 @@ class ShadowTradingEngine:
         self,
         max_positions: int = 500,
         max_closed: int = 10000,
+        cooldown_minutes: int = 60,
+        archive_dir: str = "logs/shadow",
     ):
         self.open_positions: List[ShadowPosition] = []
         self.closed_results: List[dict] = []
         self._max_positions = max_positions
         self._max_closed    = max_closed
+        self._cooldown_minutes = cooldown_minutes
+        # last close time per asset (for cooldown gate)
+        self._last_close_time: Dict[str, datetime] = {}
+
+        # Phase 2.4: durable archive. Closed shadow trades were previously held
+        # only in memory and wiped on every restart, so the gate scorecard never
+        # accumulated the 200+ closed trades the calibration logic needs. We now
+        # append every closed trade to an append-only daily JSONL and reload the
+        # recent history on startup so the scorecard survives restarts.
+        self._archive_dir = archive_dir
+        try:
+            import os as _os
+            _os.makedirs(self._archive_dir, exist_ok=True)
+        except Exception as _e:
+            logger.warning(f"[SHADOW] Could not create archive dir {self._archive_dir}: {_e}")
 
         logger.info(
             f"[SHADOW] ShadowTradingEngine initialised "
             f"(max_open={max_positions}, max_closed={max_closed}, "
-            f"no cooldown, no per-asset cap)"
+            f"cooldown={cooldown_minutes}min, archive={self._archive_dir})"
         )
+
+    def update_friction_penalty(self, asset: str, observed_slippage_pct: float) -> None:
+        """Item 4: let real fill slippage correct the static FRICTION_PENALTIES
+        estimate, instead of it being a fixed number nobody ever revisits.
+
+        Call once per real trade close, passing the slippage_pct already
+        computed at the fill site (mt5_handler.py / binance_handler.py) —
+        that value is in PERCENT units (e.g. 0.03 meaning 0.03%), matching
+        the "(slippage_pct:.4f}%)" log line it comes from. FRICTION_PENALTIES
+        stores FRACTIONS (e.g. 0.0003 = 0.03%, per its own "# 0.03%
+        round-trip" comments), so this converts before writing — feeding the
+        percent value in directly would overstate every asset's friction
+        penalty by 100x.
+        """
+        try:
+            _observed_fraction = observed_slippage_pct / 100.0
+            _history = getattr(self, "_slippage_history", {})
+            _history.setdefault(asset.upper(), []).append(_observed_fraction)
+            _history[asset.upper()] = _history[asset.upper()][-50:]  # rolling window, last 50 trades
+            self._slippage_history = _history
+            FRICTION_PENALTIES[asset.upper()] = sum(_history[asset.upper()]) / len(_history[asset.upper()])
+            logger.debug(
+                f"[SHADOW] Friction penalty for {asset.upper()} updated to "
+                f"{FRICTION_PENALTIES[asset.upper()]:.5f} from {len(_history[asset.upper()])} observed fills"
+            )
+        except Exception as e:
+            logger.warning(f"[SHADOW] update_friction_penalty failed for {asset}: {e}")
 
     def open_position(
         self,
@@ -336,6 +388,26 @@ class ShadowTradingEngine:
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
 
+        # S5.1 — Dedup: skip if a shadow position already open for same asset+side
+        for _existing in self.open_positions:
+            if _existing.asset.upper() == asset_key and _existing.side == side:
+                logger.debug(
+                    f"[SHADOW] Dedup: {asset_key} {side.upper()} already open, skipping"
+                )
+                return None
+
+        # S5.2 — Cooldown: skip if a shadow closed for this asset within cooldown window
+        _last_close = self._last_close_time.get(asset_key)
+        if _last_close is not None:
+            from datetime import timedelta as _td
+            _elapsed = (now - _last_close).total_seconds() / 60
+            if _elapsed < self._cooldown_minutes:
+                logger.debug(
+                    f"[SHADOW] Cooldown: {asset_key} last closed {_elapsed:.0f}min ago "
+                    f"(need {self._cooldown_minutes}min), skipping"
+                )
+                return None
+
         # Compute SL/TP using VTM's formula:
         #   SL distance = atr × atr_multiplier  (clamped: min 0.5×atr, max 5.0×atr)
         #   TP1          = entry ± atr × first partial_target multiple
@@ -369,11 +441,39 @@ class ShadowTradingEngine:
             else:
                 _tp1_price = entry_price - _tp1_dist
 
+        # Item 2.17: derive the new judge-system fields from signal_details —
+        # judge_scores (Item 1.8), judge_weights, total_score/required_score
+        # are all already present on council-sourced signals; default safely
+        # for non-council (single-strategy) signals where they're absent.
+        _judge_scores = signal_details.get("judge_scores") or {}
+        _judge_driver = max(_judge_scores, key=_judge_scores.get) if _judge_scores else "unknown"
+
+        _judge_weights = signal_details.get("judge_weights") or {}
+        _achievable_max = sum(_judge_weights.values()) if _judge_weights else 0.0
+        _total_score = signal_details.get("total_score", 0.0) or 0.0
+        _score_pct_of_max = (_total_score / _achievable_max) if _achievable_max > 0 else 0.0
+
+        _required_score = signal_details.get("required_score", 0.0) or 0.0
+        if _required_score > 0:
+            _margin = _total_score - _required_score
+            _qualify_tag = "CLEARED" if _margin >= 0.5 else "MARGINAL" if _margin >= 0 else "BLOCKED"
+        else:
+            _qualify_tag = ""
+
+        _lsm_1h = signal_details.get("livermore_state_1h")
+        if hasattr(_lsm_1h, "value"):
+            _lsm_1h = _lsm_1h.value
+        _lsm_1h = _lsm_1h or ""
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
             strategy_source=strategy_source,
             gate_blocked_by=gate_blocked_by,
+            judge_driver=_judge_driver,
+            score_pct_of_max=_score_pct_of_max,
+            qualify_tag=_qualify_tag,
+            livermore_state_1h=_lsm_1h,
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
@@ -451,11 +551,88 @@ class ShadowTradingEngine:
         self.open_positions = still_open
 
     def _archive(self, pos: ShadowPosition) -> None:
-        """Move a closed position to results store."""
-        self.closed_results.append(pos.to_dict())
+        """Move a closed position to results store (in-memory + durable JSONL)."""
+        _rec = pos.to_dict()
+        self.closed_results.append(_rec)
         # Keep results bounded
         if len(self.closed_results) > self._max_closed:
             self.closed_results = self.closed_results[-self._max_closed:]
+        # S5.2 — record close time for per-asset cooldown
+        self._last_close_time[pos.asset.upper()] = datetime.now(timezone.utc)
+
+        # Phase 2.4: append-only durable record so the gate scorecard survives
+        # restarts. One file per UTC day; failures never block trading.
+        try:
+            import os as _os
+            import json as _json
+            _day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _path = _os.path.join(self._archive_dir, f"closed_{_day}.jsonl")
+            with open(_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(_rec, default=str) + "\n")
+        except Exception as _e:
+            logger.debug(f"[SHADOW] archive append failed: {_e}")
+
+    def load_state(self, lookback_days: int = 30) -> int:
+        """
+        Phase 2.4: reload recently-closed shadow trades from the durable JSONL
+        archive so the gate scorecard persists across restarts. Loads at most
+        the last `lookback_days` files, bounded to `_max_closed`. Returns the
+        number of records restored. Never raises.
+        """
+        try:
+            import os as _os
+            import json as _json
+            import glob as _glob
+
+            files = sorted(_glob.glob(_os.path.join(self._archive_dir, "closed_*.jsonl")))
+            if lookback_days and len(files) > lookback_days:
+                files = files[-lookback_days:]
+
+            restored: List[dict] = []
+            for fp in files:
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                restored.append(_json.loads(line))
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+
+            if not restored:
+                logger.info("[SHADOW] No prior closed-trade archive to restore.")
+                return 0
+
+            # Bound to capacity (keep most recent)
+            if len(restored) > self._max_closed:
+                restored = restored[-self._max_closed:]
+            self.closed_results = restored + self.closed_results
+
+            # Rebuild per-asset cooldown timestamps from the restored records.
+            for r in restored:
+                try:
+                    _a = str(r.get("asset", "")).upper()
+                    _ct = r.get("close_time")
+                    if _a and _ct:
+                        _dt = datetime.fromisoformat(str(_ct).replace("Z", "+00:00"))
+                        prev = self._last_close_time.get(_a)
+                        if prev is None or _dt > prev:
+                            self._last_close_time[_a] = _dt
+                except Exception:
+                    continue
+
+            logger.info(
+                f"[SHADOW] Restored {len(restored)} closed shadow trades from "
+                f"{len(files)} archive file(s) - gate scorecard now persists across restarts."
+            )
+            return len(restored)
+        except Exception as _e:
+            logger.warning(f"[SHADOW] load_state failed: {_e}")
+            return 0
 
     def get_gate_scorecard(self) -> Dict[str, dict]:
         """
@@ -539,7 +716,18 @@ class ShadowTradingEngine:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(state, f, default=str)
-            os.replace(tmp, path)          # atomic write
+            try:
+                os.replace(tmp, path)
+            except OSError:
+                # Windows: os.replace raises WinError 5 (Access Denied) when the
+                # destination is briefly locked by a reader (dashboard, antivirus).
+                # Fall back to remove-then-rename — not atomic but good enough for
+                # a read-only dashboard snapshot.
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                os.rename(tmp, path)
         except Exception as exc:
             logger.warning(f"[SHADOW] dump_state failed: {exc}")
 

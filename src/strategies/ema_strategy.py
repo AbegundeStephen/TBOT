@@ -265,6 +265,9 @@ class EMAStrategy(BaseStrategy):
             logger.warning(f"[{self.name}] Error calculating ATR: {e}")
             df["atr"] = df["close"] * 0.01
 
+        # L6: Livermore state one-hot ML features (flag-gated, see base_strategy.py)
+        df = self._add_livermore_features(df, timeframe="1H")
+
         # Final NaN cleanup
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         df[numeric_columns] = df[numeric_columns].fillna(0)
@@ -353,7 +356,7 @@ class EMAStrategy(BaseStrategy):
         
         return context
 
-    def generate_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None) -> tuple:
+    def generate_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, composite_state=None) -> tuple:
         """
         Generate real-time signal based on current EMA conditions.
         Now detects uptrends/downtrends even without crossovers.
@@ -527,6 +530,9 @@ class EMAStrategy(BaseStrategy):
 
             if signal == 0:
                 return 0, 0.0
+
+            # L10: Livermore 4H state awareness nudge (flag-gated, see base_strategy.py)
+            confidence = self._livermore_confidence_nudge(signal, confidence, composite_state=composite_state)
 
             confidence = max(0.0, min(1.0, confidence))
             return signal, confidence

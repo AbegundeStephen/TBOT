@@ -34,7 +34,7 @@ FF_URLS = [
 ]
 
 # Currencies the bot trades — only block on events for these
-RELEVANT_CURRENCIES = {"USD", "EUR", "JPY"}
+RELEVANT_CURRENCIES = {"USD", "EUR", "JPY", "AUD", "GBP"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANCHOR SCHEDULE  (hard-coded 2026 dates; FF data overrides where available)
@@ -152,6 +152,26 @@ class CalendarUpdater:
                         anchor.append({**ev, "impact": "HIGH", "source": "schedule"})
                 except Exception:
                     continue
+
+            # 2b. EIA crude oil inventory — weekly recurring, generated rather
+            # than hardcoded since it's the single biggest USOIL volatility
+            # event and happens every Wednesday.
+            for _w in range(12):
+                _eia_dt = now + timedelta(weeks=_w)
+                _days_to_wed = (2 - _eia_dt.weekday()) % 7
+                _eia_dt = (_eia_dt + timedelta(days=_days_to_wed)).replace(
+                    hour=14, minute=30, second=0, microsecond=0
+                )
+                if _eia_dt >= now - timedelta(hours=24):
+                    anchor.append({
+                        "datetime": _eia_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "event": "EIA Crude Oil Inventory",
+                        "currency": "OIL",
+                        "block_hours_before": 1,
+                        "block_hours_after": 1,
+                        "impact": "HIGH",
+                        "source": "schedule",
+                    })
 
             # 3. Merge (live takes priority over anchor for same day + event name)
             merged = self._merge(live_events, anchor)

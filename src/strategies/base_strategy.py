@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 class BaseStrategy(ABC):
     """Abstract base class for trading strategies with ML integration"""
 
+    # Override to False in purely rule-based strategies that don't use a
+    # trained sklearn model.  The startup model loader will skip these so
+    # they don't generate spurious "[FAIL] Not found: …" errors.
+    requires_trained_model: bool = True
+
     def __init__(self, config: Dict, name: str):
         self.config = config
         self.name = name
@@ -35,6 +40,12 @@ class BaseStrategy(ABC):
             f"[{self.name}] Confidence threshold (info only): {self.min_confidence:.2f}"
         )
 
+        # L10: telemetry tag for the most recent Livermore-awareness score nudge
+        # applied in generate_signal (TF/EMA only — read by funnel/shadow logging,
+        # not behavior-critical itself). Gated by
+        # phase_config.strategy_livermore_awareness_enabled (default False).
+        self._last_livermore_score_tag: str = "LSM_UNAVAILABLE"
+
     @abstractmethod
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate strategy-specific features"""
@@ -44,6 +55,215 @@ class BaseStrategy(ABC):
     def generate_labels(self, df: pd.DataFrame) -> pd.Series:
         """Generate training labels based on strategy logic"""
         pass
+
+    # ─────────────────────────────────────────────────────────────────────
+    # L6: ML feature set — Livermore state one-hot
+    # ─────────────────────────────────────────────────────────────────────
+    def _add_livermore_features(self, df: pd.DataFrame, timeframe: str = "1H") -> pd.DataFrame:
+        """
+        Append Livermore-state-derived ML features to a feature dataframe.
+
+        Gated by phase_config.ml_livermore_features_enabled (default False).
+        Disabled by default because changing a model's input dimensionality
+        is a high-risk change — see L5's fail-closed promotion-gate fix, which
+        exists specifically to catch shape mismatches like this if a retrain
+        is skipped or only partially rolled out.
+
+        Design notes:
+          - This replays the Livermore state machine FRESH over this df's own
+            close/atr history rather than reading a live CompositeState. That's
+            deliberate: generate_features() is called both at training time
+            (pure historical batch, no live CompositeState exists) and at
+            live-inference time (tail of df, e.g. df.tail(250)). Recomputing
+            from price history at both call sites means train-time and
+            serve-time features come from the identical code path — no
+            train/serve skew.
+          - self.feature_columns is fixed at train time and selected BY NAME
+            at inference (see generate_signal / get_signal_with_details), so
+            toggling this flag is safe for an already-trained model UNLESS you
+            disable it after training a model with it on — that model's saved
+            feature_columns would include lsm_* columns this method would stop
+            producing, raising a KeyError at inference. Always retrain after
+            toggling phase_config.ml_livermore_features_enabled.
+          - Multipliers come from self.config.get("livermore_pivots", {}) if a
+            caller has injected a per-asset calibration block; otherwise falls
+            back to the same class defaults (major=3.5, minor=1.0, dual=2)
+            used by signal_aggregator.py's BTC fallback path.
+        """
+        try:
+            if not self.config.get("phase_config", {}).get(
+                "ml_livermore_features_enabled", False
+            ):
+                return df
+            if "close" not in df.columns or len(df) < 20:
+                return df
+
+            from src.execution.livermore_state_machine import (
+                LivermoreStateMachine,
+                atr14,
+                STATES,
+            )
+
+            if "atr" in df.columns:
+                _atr_series = df["atr"]
+            else:
+                _atr_series = atr14(df)
+
+            _lp_cfg = self.config.get("livermore_pivots", {}) or {}
+            lsm = LivermoreStateMachine(
+                asset=self.config.get("asset", self.name),
+                timeframe=timeframe,
+                major_mult=_lp_cfg.get("major_mult", 3.5),
+                minor_mult=_lp_cfg.get("minor_mult", 1.0),
+                dual_confirm=_lp_cfg.get("dual_confirm", 2),
+                atr_period=_lp_cfg.get("atr_period", 14),
+            )
+
+            _closes = df["close"].values
+            _atrs = _atr_series.values
+            _states, _ages, _silent, _dist = [], [], [], []
+            for _c, _a in zip(_closes, _atrs):
+                _a_clean = 0.0 if (_a is None or _a != _a) else float(_a)  # NaN-safe
+                snap = lsm.update(float(_c), _a_clean)
+                _states.append(snap.state)
+                _ages.append(snap.state_age)
+                _silent.append(1 if snap.is_silent_zone else 0)
+                _anchor = (
+                    snap.anchor_main_up_max
+                    if snap.state in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+                    else snap.anchor_main_down_min
+                )
+                if _anchor is not None and _a_clean > 0:
+                    _dist.append((float(_c) - _anchor) / _a_clean)
+                else:
+                    _dist.append(0.0)
+
+            for _s in sorted(STATES):
+                df[f"lsm_is_{_s.lower()}"] = [1 if s == _s else 0 for s in _states]
+            df["lsm_state_age"] = _ages
+            df["lsm_is_silent_zone"] = _silent
+            df["lsm_distance_to_anchor_atr"] = _dist
+        except Exception as e:
+            logger.warning(
+                f"[{self.name}] L6 Livermore feature generation failed, skipping: {e}"
+            )
+        return df
+
+    def _livermore_score_nudge(
+        self,
+        bullish_score: float,
+        bearish_score: float,
+        composite_state=None,
+        confirm_weight: float = 0.40,
+        contrarian_weight: float = 0.60,
+    ) -> Tuple[float, float]:
+        """
+        L10: shared bullish/bearish score nudge used by TF and EMA strategies'
+        live-inference path to reflect agreement/disagreement with the live
+        Livermore 4H state carried on `composite_state`. Purely additive —
+        never flips which side currently leads, only narrows or widens the
+        gap. Gated by phase_config.strategy_livermore_awareness_enabled
+        (default False); sets self._last_livermore_score_tag for telemetry.
+
+        Returns (bullish_score, bearish_score) unchanged if the flag is off,
+        composite_state is unavailable, or the LSM state doesn't map cleanly.
+        """
+        self._last_livermore_score_tag = "LSM_UNAVAILABLE"
+        try:
+            phase_config = self.config.get("phase_config", {}) or {}
+            if not phase_config.get("strategy_livermore_awareness_enabled", False):
+                self._last_livermore_score_tag = "LSM_DISABLED"
+                return bullish_score, bearish_score
+
+            if composite_state is None:
+                return bullish_score, bearish_score
+
+            lsm_4h = (
+                composite_state.get("livermore_state_4h")
+                if isinstance(composite_state, dict)
+                else getattr(composite_state, "livermore_state_4h", None)
+            )
+            if not lsm_4h:
+                return bullish_score, bearish_score
+
+            bullish_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            bearish_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            lsm_bull = lsm_4h in bullish_states
+            lsm_bear = lsm_4h in bearish_states
+
+            if not (lsm_bull or lsm_bear):
+                self._last_livermore_score_tag = f"LSM_UNKNOWN({lsm_4h})"
+                return bullish_score, bearish_score
+
+            if lsm_bull:
+                bullish_score += confirm_weight
+                bearish_score = max(bearish_score - contrarian_weight, 0.0)
+                self._last_livermore_score_tag = f"LSM_CONFIRM_BULL({lsm_4h})"
+            else:
+                bearish_score += confirm_weight
+                bullish_score = max(bullish_score - contrarian_weight, 0.0)
+                self._last_livermore_score_tag = f"LSM_CONFIRM_BEAR({lsm_4h})"
+
+            return bullish_score, bearish_score
+        except Exception as e:
+            logger.debug(f"[{self.name}] L10 Livermore score nudge skipped: {e}")
+            return bullish_score, bearish_score
+
+    def _livermore_confidence_nudge(
+        self,
+        signal: int,
+        confidence: float,
+        composite_state=None,
+        confirm_boost: float = 0.07,
+        contrarian_penalty: float = 0.12,
+    ) -> float:
+        """
+        L10: variant of _livermore_score_nudge() for strategies (EMA) whose
+        live path already collapses to a single (signal, confidence) pair
+        rather than separate bullish/bearish scores. Same gating, telemetry,
+        and "additive only" guarantees. Result is NOT re-clamped here — the
+        caller's existing final `max(0.0, min(1.0, confidence))` clamp covers it.
+        """
+        self._last_livermore_score_tag = "LSM_UNAVAILABLE"
+        try:
+            if signal == 0:
+                return confidence
+
+            phase_config = self.config.get("phase_config", {}) or {}
+            if not phase_config.get("strategy_livermore_awareness_enabled", False):
+                self._last_livermore_score_tag = "LSM_DISABLED"
+                return confidence
+
+            if composite_state is None:
+                return confidence
+
+            lsm_4h = (
+                composite_state.get("livermore_state_4h")
+                if isinstance(composite_state, dict)
+                else getattr(composite_state, "livermore_state_4h", None)
+            )
+            if not lsm_4h:
+                return confidence
+
+            bullish_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            bearish_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            lsm_bull = lsm_4h in bullish_states
+            lsm_bear = lsm_4h in bearish_states
+
+            if not (lsm_bull or lsm_bear):
+                self._last_livermore_score_tag = f"LSM_UNKNOWN({lsm_4h})"
+                return confidence
+
+            agrees = (signal == 1 and lsm_bull) or (signal == -1 and lsm_bear)
+            if agrees:
+                self._last_livermore_score_tag = f"LSM_CONFIRM({lsm_4h})"
+                return confidence + confirm_boost
+            else:
+                self._last_livermore_score_tag = f"LSM_CONTRARIAN({lsm_4h})"
+                return max(confidence - contrarian_penalty, 0.0)
+        except Exception as e:
+            logger.debug(f"[{self.name}] L10 Livermore confidence nudge skipped: {e}")
+            return confidence
 
     def get_warmup_period(self) -> int:
         """Calculate the minimum warmup period needed for indicators"""

@@ -1,0 +1,350 @@
+"""
+review_livermore_calibration.py — STANDALONE, MANUAL-RUN ONLY.
+
+NOT imported, deployed, or executed by the live bot. This is a calibration
+audit tool a human runs by hand (periodically, e.g. every few months, or
+whenever a new asset is added) to check whether the per-asset Livermore
+State Machine multipliers in config/aggregator_presets.json's
+LIVERMORE_PIVOTS block are still well-calibrated against fresh data.
+
+Background: those multipliers (major_mult/minor_mult/dual_confirm/atr_period)
+were hand-tuned per asset against a specific historical window (see each
+asset's "_calibration" comment in aggregator_presets.json, e.g. "GOLD 4H
+Feb-Jun2026"). Markets drift. If nobody re-checks these, the state machine
+can quietly degrade — e.g. chopping state too fast (too many transitions/week,
+each one a misleading "trend change" signal downstream) or freezing in one
+state for too long (mostly inert, the structural overlays it feeds never
+fire). USOIL's calibration is explicitly flagged "_watch": "Low-confidence
+... verify state labels against chart in week 1 of paper trading" — this
+script is the manual check that note asks for, repeatable on demand instead
+of done once and forgotten.
+
+What it does:
+  1. Loads each asset's cached 4H OHLCV CSV from data/raw/ (the same files
+     backtest.py reads — no live API/MT5 connection required).
+  2. Replays it through LivermoreStateMachine using the asset's CURRENT
+     calibration from config/aggregator_presets.json.
+  3. Reports the same diagnostic stats the calibration comments already use
+     (transitions/week, % of bars in a MAIN state, avg MAIN-state duration),
+     plus state distribution and longest streaks, so they can be compared
+     against the calibration notes by eye.
+  4. Flags assets whose live stats have drifted far from what their
+     "_calibration" comment claims, or whose data file is stale/missing.
+
+It does NOT modify aggregator_presets.json. It only prints a report. Any
+re-tuning based on this report's findings is a deliberate, separate, manual
+edit by a human — this script's job ends at "here's what the data shows now."
+
+Usage:
+    python scripts/review_livermore_calibration.py
+    python scripts/review_livermore_calibration.py --asset GOLD
+    python scripts/review_livermore_calibration.py --timeframe 1h
+    python scripts/review_livermore_calibration.py --json > calibration_report.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.execution.livermore_state_machine import LivermoreStateMachine, atr14  # noqa: E402
+
+PRESETS_PATH = REPO_ROOT / "config" / "aggregator_presets.json"
+CONFIG_PATH = REPO_ROOT / "config" / "config.json"
+DATA_DIR = REPO_ROOT / "data" / "raw"
+
+# Bars/week for drift-flagging math — depends on timeframe.
+BARS_PER_WEEK = {"4h": 42, "1h": 168}
+
+
+def _load_json(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _derive_csv_symbol(asset_name: str, cfg: dict) -> str:
+    """Mirrors backtest.py's _derive_csv_symbol so this script reads the
+    exact same CSV files backtest.py would for the same asset."""
+    exchange = cfg.get("exchange", "binance")
+    if exchange == "mt5":
+        return cfg.get("mt5_symbol", cfg.get("symbol", asset_name))
+    return cfg.get("symbol", asset_name)
+
+
+def _find_csv(asset_key: str, asset_cfg: dict, timeframe: str) -> Optional[Path]:
+    symbol = _derive_csv_symbol(asset_key, asset_cfg)
+    candidate = DATA_DIR / f"{symbol}_{timeframe}.csv"
+    if candidate.exists():
+        return candidate
+    # Fall back to a fuzzy match (broker suffix variants like BTCUSDm vs BTCUSDTm)
+    matches = sorted(DATA_DIR.glob(f"{asset_key}*_{timeframe}.csv"))
+    return matches[-1] if matches else None
+
+
+def load_ohlcv_csv(filepath: Path) -> pd.DataFrame:
+    """Same loader contract as backtest.py's load_ohlcv_csv (kept local so
+    this script has zero import-time dependency on backtest.py's argparse
+    setup / module-load side effects)."""
+    df = pd.read_csv(filepath)
+    df.columns = df.columns.str.lower().str.strip()
+
+    date_col = None
+    for col in df.columns:
+        if col in ("timestamp", "date", "datetime", "time"):
+            sample = df[col].dropna().head(5)
+            if len(sample) > 0:
+                try:
+                    pd.to_datetime(sample)
+                    date_col = col
+                    break
+                except Exception:
+                    continue
+    if date_col is None:
+        raise ValueError(f"No datetime column found in {filepath}. Columns: {df.columns.tolist()}")
+
+    df[date_col] = pd.to_datetime(df[date_col], utc=True, errors="coerce")
+    df = df.dropna(subset=[date_col])
+    df = df.set_index(date_col)
+    df.index = df.index.tz_localize(None)
+    df = df.sort_index()
+
+    required = {"open", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns {missing} in {filepath}")
+    for col in required:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=list(required))
+
+
+@dataclass
+class ReplayResult:
+    asset: str
+    timeframe: str
+    csv_path: Optional[str]
+    bars: int = 0
+    days_span: float = 0.0
+    transitions: int = 0
+    transitions_per_week: float = 0.0
+    state_bar_counts: dict = field(default_factory=dict)
+    state_pct: dict = field(default_factory=dict)
+    main_frac_pct: float = 0.0
+    avg_main_state_duration_bars: float = 0.0
+    longest_state_run: dict = field(default_factory=dict)  # state -> max bars
+    final_state: Optional[str] = None
+    final_state_age: Optional[int] = None
+    calibration_used: dict = field(default_factory=dict)
+    calibration_note: str = ""
+    watch_note: str = ""
+    error: Optional[str] = None
+
+
+def replay_asset(asset_key: str, pivots_cfg: dict, asset_cfg: dict, timeframe: str) -> ReplayResult:
+    result = ReplayResult(asset=asset_key, timeframe=timeframe, csv_path=None,
+                           calibration_used={
+                               "major_mult": pivots_cfg.get("major_mult", 3.5),
+                               "minor_mult": pivots_cfg.get("minor_mult", 1.0),
+                               "dual_confirm": pivots_cfg.get("dual_confirm", 2),
+                               "atr_period": pivots_cfg.get("atr_period", 14),
+                           },
+                           calibration_note=pivots_cfg.get("_calibration", ""),
+                           watch_note=pivots_cfg.get("_watch", ""))
+
+    csv_path = _find_csv(asset_key, asset_cfg, timeframe)
+    if csv_path is None:
+        result.error = f"No {timeframe} CSV found under data/raw/ for {asset_key}"
+        return result
+    result.csv_path = str(csv_path.relative_to(REPO_ROOT))
+
+    try:
+        df = load_ohlcv_csv(csv_path)
+    except Exception as e:
+        result.error = f"Failed to load {csv_path.name}: {e}"
+        return result
+
+    if len(df) < 30:
+        result.error = f"Only {len(df)} bars in {csv_path.name} — too few to calibrate meaningfully"
+        return result
+
+    df["atr"] = atr14(df, period=result.calibration_used["atr_period"])
+    df = df.dropna(subset=["atr"])
+
+    lsm = LivermoreStateMachine(
+        asset=asset_key,
+        timeframe=timeframe.upper(),
+        major_mult=result.calibration_used["major_mult"],
+        minor_mult=result.calibration_used["minor_mult"],
+        dual_confirm=result.calibration_used["dual_confirm"],
+        atr_period=result.calibration_used["atr_period"],
+    )
+
+    state_bar_counts: dict[str, int] = {}
+    main_state_durations: list[int] = []
+    longest_run: dict[str, int] = {}
+    transitions = 0
+    prev_state = None
+    run_len = 0
+
+    for _, row in df.iterrows():
+        snap = lsm.update(close=float(row["close"]), atr=float(row["atr"]))
+        state_bar_counts[snap.state] = state_bar_counts.get(snap.state, 0) + 1
+
+        if prev_state is not None and snap.state != prev_state:
+            transitions += 1
+            if prev_state in ("MAIN_UP", "MAIN_DOWN"):
+                main_state_durations.append(run_len)
+            longest_run[prev_state] = max(longest_run.get(prev_state, 0), run_len)
+            run_len = 1
+        else:
+            run_len += 1
+        prev_state = snap.state
+
+    if prev_state is not None:
+        longest_run[prev_state] = max(longest_run.get(prev_state, 0), run_len)
+
+    total_bars = len(df)
+    bars_per_week = BARS_PER_WEEK.get(timeframe.lower(), 42)
+    days_span = (df.index[-1] - df.index[0]).total_seconds() / 86400.0
+    weeks_span = max(days_span / 7.0, 1e-9)
+
+    main_bars = state_bar_counts.get("MAIN_UP", 0) + state_bar_counts.get("MAIN_DOWN", 0)
+
+    final_snap = lsm.snapshot()
+
+    result.bars = total_bars
+    result.days_span = round(days_span, 1)
+    result.transitions = transitions
+    result.transitions_per_week = round(transitions / weeks_span, 2)
+    result.state_bar_counts = state_bar_counts
+    result.state_pct = {s: round(100.0 * c / total_bars, 1) for s, c in state_bar_counts.items()}
+    result.main_frac_pct = round(100.0 * main_bars / total_bars, 1)
+    result.avg_main_state_duration_bars = (
+        round(sum(main_state_durations) / len(main_state_durations), 1)
+        if main_state_durations else 0.0
+    )
+    result.longest_state_run = longest_run
+    result.final_state = final_snap.state
+    result.final_state_age = final_snap.state_age
+    return result
+
+
+def _parse_calibration_note(note: str) -> Optional[dict]:
+    """Best-effort extraction of the t/w and main_frac numbers embedded in the
+    free-text "_calibration" comment, so we can diff against fresh results.
+    Returns None if the note doesn't match the expected pattern (older/odd
+    notes are still shown verbatim in the report, just without a drift flag).
+    """
+    tw_match = re.search(r"([\d.]+)\s*t/w", note)
+    frac_match = re.search(r"main_frac=(\d+)%", note)
+    if not tw_match and not frac_match:
+        return None
+    return {
+        "transitions_per_week": float(tw_match.group(1)) if tw_match else None,
+        "main_frac_pct": float(frac_match.group(1)) if frac_match else None,
+    }
+
+
+def print_report(results: list[ReplayResult]) -> None:
+    print("=" * 78)
+    print("LIVERMORE STATE MACHINE — CALIBRATION REVIEW (manual, read-only)")
+    print("=" * 78)
+    for r in results:
+        print(f"\n--- {r.asset} ({r.timeframe.upper()}) ---")
+        if r.error:
+            print(f"  ⚠️  {r.error}")
+            continue
+
+        print(f"  Data: {r.csv_path}  ({r.bars} bars, {r.days_span} days)")
+        cal = r.calibration_used
+        print(f"  Calibration in use: major={cal['major_mult']} minor={cal['minor_mult']} "
+              f"dual_confirm={cal['dual_confirm']} atr_period={cal['atr_period']}")
+        if r.calibration_note:
+            print(f"  Stored note: {r.calibration_note}")
+        if r.watch_note:
+            print(f"  ⚠️  WATCH FLAG: {r.watch_note}")
+
+        print(f"  Fresh stats: {r.transitions_per_week} transitions/week | "
+              f"main_frac={r.main_frac_pct}% | avg_MAIN_duration={r.avg_main_state_duration_bars} bars")
+        print(f"  State distribution (% of bars): "
+              + ", ".join(f"{s}={p}%" for s, p in sorted(r.state_pct.items(), key=lambda kv: -kv[1])))
+        print(f"  Longest single-state run (bars): "
+              + ", ".join(f"{s}={n}" for s, n in sorted(r.longest_state_run.items(), key=lambda kv: -kv[1])))
+        print(f"  Current live state: {r.final_state} (age={r.final_state_age} bars)")
+
+        stored = _parse_calibration_note(r.calibration_note)
+        if stored:
+            flags = []
+            if stored["transitions_per_week"] is not None:
+                delta = r.transitions_per_week - stored["transitions_per_week"]
+                if abs(delta) > 0.5 * max(stored["transitions_per_week"], 0.1):
+                    flags.append(
+                        f"transitions/week drifted {stored['transitions_per_week']} → "
+                        f"{r.transitions_per_week} (>50% change)"
+                    )
+            if stored["main_frac_pct"] is not None:
+                delta = r.main_frac_pct - stored["main_frac_pct"]
+                if abs(delta) > 15:
+                    flags.append(
+                        f"main_frac drifted {stored['main_frac_pct']}% → {r.main_frac_pct}% "
+                        f"({delta:+.1f}pp)"
+                    )
+            if flags:
+                print("  🔶 DRIFT FLAGGED — recalibration worth considering:")
+                for f_ in flags:
+                    print(f"     - {f_}")
+            else:
+                print("  ✅ Within expected range of stored calibration note.")
+        else:
+            print("  (No parseable t/w or main_frac figures in stored note — skipped drift check.)")
+
+    print("\n" + "=" * 78)
+    print("This script only reports. No files were modified. If an asset is")
+    print("flagged, re-tune its LIVERMORE_PIVOTS entry in")
+    print("config/aggregator_presets.json by hand and re-run to confirm.")
+    print("=" * 78)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--asset", help="Limit to one asset key (e.g. GOLD, BTC, EURUSD). Default: all.")
+    parser.add_argument("--timeframe", default="4h", choices=["4h", "1h"],
+                         help="Which cached CSV timeframe to replay (default: 4h, matching the LSM's trend instance).")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report.")
+    parser.add_argument("--presets-path", default=None,
+                         help="Override path to aggregator_presets.json (default: config/aggregator_presets.json).")
+    parser.add_argument("--config-path", default=None,
+                         help="Override path to config.json, used only for CSV symbol-mapping hints "
+                              "(default: config/config.json).")
+    args = parser.parse_args()
+
+    presets_path = Path(args.presets_path) if args.presets_path else PRESETS_PATH
+    presets = _load_json(presets_path)
+    pivots = presets.get("LIVERMORE_PIVOTS", {})
+    if not pivots:
+        print("No LIVERMORE_PIVOTS block found in config/aggregator_presets.json — nothing to review.")
+        sys.exit(1)
+
+    config_path = Path(args.config_path) if args.config_path else CONFIG_PATH
+    bot_config = _load_json(config_path) if config_path.exists() else {"assets": {}}
+    assets_cfg = bot_config.get("assets", {})
+
+    asset_keys = [args.asset.upper()] if args.asset else sorted(pivots.keys())
+    unknown = [a for a in asset_keys if a not in pivots]
+    if unknown:
+        print(f"Unknown asset(s) {unknown} — not present in LIVERMORE_PIVOTS. "
+              f"Known: {sorted(pivots.keys())}")
+        sys.exit(1)
+
+    results = []
+    for asset_key in asset_keys:
+        # asset_cfg lookup is best-effort (for symbol/exchange hints); the
+        # asset 

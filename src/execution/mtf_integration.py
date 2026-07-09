@@ -142,8 +142,13 @@ class MTFRegimeIntegration:
                         "timestamp": regime_status.timestamp.isoformat(),
                         "consensus_regime": regime_status.consensus_regime,
                         "consensus_confidence": confidence,
-                        "timeframe_agreement": confidence, 
-                        "trend_coherence": confidence,     
+                        # Real cross-timeframe comparison (fraction of 1h/4h/1d
+                        # whose own trend_direction matches the consensus
+                        # direction) — previously aliased to `confidence`,
+                        # which only measures how far the consensus itself
+                        # leans, not whether timeframes agree with each other.
+                        "timeframe_agreement": regime_status.timeframe_agreement,
+                        "trend_coherence": regime_status.timeframe_agreement,
                         "risk_level": "low" if confidence > 0.5 else "high",
                         "volatility_regime": "normal" if confidence > 0.5 else "high",
                         "recommended_mode": "council",
@@ -323,14 +328,10 @@ class MTFRegimeIntegration:
                 # council_aggregator uses governor_data.get("consensus_regime", "NEUTRAL")
                 # Previously only "regime" existed, causing both to always read the default.
                 "consensus_regime": regime_status.consensus_regime,
-                # ✅ FIX: Expose trade_type so _is_transition_trade in _build_composite_state
-                # can fire for NEUTRAL+FX assets (EURUSD/EURJPY in consolidation).
-                # "TRANSITION" matches the string returned by _check_governor_filter()
-                # for NEUTRAL regimes, enabling TransitionDetector on those assets.
-                "trade_type": (
-                    "TRANSITION" if regime_status.consensus_regime == "NEUTRAL"
-                    else regime_status.trade_type.value
-                ),
+                # MRS §6 Phase 0: TRANSITION path removed.
+                # NEUTRAL regime passes as "TREND" — Livermore Hard Veto handles
+                # structural blocking. No score raise for MTF NEUTRAL.
+                "trade_type": regime_status.trade_type.value,
                 "regime_score": regime_status.score,
                 "is_bullish": regime_status.is_bullish,
                 "is_bearish": regime_status.is_bearish,
@@ -339,8 +340,15 @@ class MTFRegimeIntegration:
                 "ema_1d_200": regime_status.ema_1d_200,
                 "ema_4h_200": regime_status.ema_4h_200,
                 "ema_4h_50": regime_status.ema_4h_50,
+                # Item 19a: graduated EMA-200 burn-in observability. Not read by
+                # any gating logic today — for dashboard/logging visibility into
+                # how mature a 1D regime read is (1.0 = full 400-bar maturity).
+                "daily_bars_available": regime_status.daily_bars_available,
+                "regime_maturity": regime_status.regime_maturity,
                 "confidence": confidence,
-                "timeframe_agreement": confidence, # Proxy for agreement in 5-tier
+                # Real cross-timeframe direction match (1h/4h/1d vs consensus),
+                # not a proxy for consensus strength. See RegimeStatus.timeframe_agreement.
+                "timeframe_agreement": regime_status.timeframe_agreement,
                 "recommended_mode": "council",
                 "risk_level": risk_level,
                 "volatility": volatility,

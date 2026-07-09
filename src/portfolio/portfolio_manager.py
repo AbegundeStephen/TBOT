@@ -4,6 +4,7 @@ Portfolio Manager - Enhanced with MT5 real-time profit tracking
 
 import logging
 import asyncio
+import os
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import numpy as np
@@ -11,6 +12,7 @@ import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import pickle
+import copy
 from pathlib import Path
 from src.execution.veteran_trade_manager import VeteranTradeManager, ExitReason
 from src.utils.trade_logger import log_trade_event
@@ -21,11 +23,128 @@ from src.utils.alert_manager import send_alert
 from src.global_error_handler import handle_errors, ErrorSeverity
 from datetime import datetime, timedelta, timezone
 
-
 logger = logging.getLogger(__name__)
 
 # Portfolio Exposure Control
 USD_INVERSE_BUCKET = ["GOLD", "EURUSD", "BTC"]
+
+
+def _sanitize_for_pickle(
+    obj, path="positions", _memo=None, _depth=0, _max_depth=14, _dropped=None
+):
+    """
+    Best-effort recursive copy of `obj` with any leaf that fails to pickle
+    on its own (e.g. a threading.RLock buried inside some nested dict/object)
+    replaced with None, so a single bad attribute can no longer abort the
+    entire save_portfolio_state() pickle.dump().
+
+    This mirrors the existing Position.__getstate__ pattern (which already
+    strips the known-bad `db_manager` attribute) but applies generically and
+    recursively, since `cannot pickle '_thread.RLock' object` has recurred
+    despite that earlier fix — meaning some OTHER reachable attribute (most
+    likely something nested deep inside trade_manager.signal_details, e.g.
+    mtf_regime/governor/full_regime_status) is now the carrier, and exhaustive
+    static tracing hasn't conclusively pinned down which one.
+
+    `_dropped` collects (path, type, repr) tuples for every leaf that had to
+    be swapped to None, purely so the caller can log exactly what was lost --
+    this turns the next occurrence into a precise root-cause confirmation
+    instead of another round of guessing.
+
+    `_memo` maps id(obj) -> already-sanitized result. This is real memoization,
+    not just a cycle guard: Position.signal_details and Position.trade_manager.
+    signal_details are typically the SAME shared dict object (both set from the
+    same `details` dict at position-open time), so without memoization the
+    second encounter would either redo wasted work or -- worse, with a naive
+    "seen" set -- skip sanitizing it and put the still-broken original back.
+    Memoizing means whichever path reaches a shared object first builds the
+    sanitized version once, and every other reference reuses that same result.
+
+    Never mutates the original object graph: dict/list/tuple are rebuilt as
+    new containers, and arbitrary objects are shallow-copied via copy.copy()
+    before any attribute is overwritten.
+    """
+    if _memo is None:
+        _memo = {}
+    if _dropped is None:
+        _dropped = []
+
+    obj_id = id(obj)
+    if obj_id in _memo:
+        return _memo[obj_id], _dropped
+
+    if _depth >= _max_depth:
+        try:
+            pickle.dumps(obj)
+            return obj, _dropped
+        except Exception:
+            _dropped.append((path, type(obj).__name__, repr(obj)[:200]))
+            return None, _dropped
+
+    if isinstance(obj, dict):
+        out = {}
+        _memo[obj_id] = (
+            out  # register before recursing -- safe even if a true cycle exists
+        )
+        for k, v in obj.items():
+            sv, _dropped = _sanitize_for_pickle(
+                v, f"{path}[{k!r}]", _memo, _depth + 1, _max_depth, _dropped
+            )
+            out[k] = sv
+        return out, _dropped
+    if isinstance(obj, list):
+        out = []
+        _memo[obj_id] = out
+        for i, v in enumerate(obj):
+            sv, _dropped = _sanitize_for_pickle(
+                v, f"{path}[{i}]", _memo, _depth + 1, _max_depth, _dropped
+            )
+            out.append(sv)
+        return out, _dropped
+    if isinstance(obj, tuple):
+        # Immutable -- can't pre-register a mutable placeholder, so build
+        # then memoize. Cycles through tuples don't occur in this codebase's
+        # data shapes, so this ordering is safe in practice.
+        out = []
+        for i, v in enumerate(obj):
+            sv, _dropped = _sanitize_for_pickle(
+                v, f"{path}[{i}]", _memo, _depth + 1, _max_depth, _dropped
+            )
+            out.append(sv)
+        result = tuple(out)
+        _memo[obj_id] = result
+        return result, _dropped
+
+    # Cheap fast path: most attributes (numbers, strings, numpy arrays,
+    # datetimes, pandas DataFrames) pickle fine on their own.
+    try:
+        pickle.dumps(obj)
+        _memo[obj_id] = obj
+        return obj, _dropped
+    except Exception:
+        pass
+
+    # Not directly picklable -- if it's a plain object with a __dict__,
+    # shallow-copy it and recursively sanitize its attributes in place on
+    # the COPY only, so e.g. one rogue attribute deep inside a dataclass
+    # doesn't force dropping the whole object.
+    if hasattr(obj, "__dict__") and not isinstance(obj, type):
+        try:
+            obj_copy = copy.copy(obj)
+            _memo[obj_id] = obj_copy  # register before recursing -- cycle-safe
+            for k, v in list(vars(obj_copy).items()):
+                sv, _dropped = _sanitize_for_pickle(
+                    v, f"{path}.{k}", _memo, _depth + 1, _max_depth, _dropped
+                )
+                setattr(obj_copy, k, sv)
+            pickle.dumps(obj_copy)  # confirm the sanitized copy now actually pickles
+            return obj_copy, _dropped
+        except Exception:
+            pass
+
+    _dropped.append((path, type(obj).__name__, repr(obj)[:200]))
+    _memo[obj_id] = None
+    return None, _dropped
 
 
 class Position:
@@ -55,8 +174,8 @@ class Position:
         leverage: int = 1,
         margin_type: str = "SPOT",
         is_futures: bool = False,
-        min_lot: Optional[float] = None,      # ✨ NEW: Exness compatibility
-        lot_precision: Optional[int] = None   # ✨ NEW: Exness compatibility
+        min_lot: Optional[float] = None,  # ✨ NEW: Exness compatibility
+        lot_precision: Optional[int] = None,  # ✨ NEW: Exness compatibility
     ):
         self.asset = asset
         self.symbol = symbol
@@ -176,7 +295,11 @@ class Position:
                     signal_details=signal_details,
                     trade_type=signal_details.get("trade_type", "TREND"),
                     min_lot_override=self.min_lot,
-                    lot_precision_override=self.lot_precision
+                    lot_precision_override=self.lot_precision,
+                    # Item 5: no producer populates these keys yet — resolves
+                    # to None today, starts flowing once a future tier does.
+                    structure_levels_ref=signal_details.get("structure_levels_ref"),
+                    entry_retest_type=signal_details.get("retest_type"),
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -210,10 +333,14 @@ class Position:
                     if self.trade_manager.take_profit_levels:
                         self.take_profit = self.trade_manager.take_profit_levels[0]
 
-                    logger.info(f"\n[VTM] ✓ Initialized with hybrid-optimized parameters")
+                    logger.info(
+                        f"\n[VTM] ✓ Initialized with hybrid-optimized parameters"
+                    )
                     logger.info(f"  Account Risk: {account_risk:.3f}")
                     logger.info(f"  Stop Loss:    ${self.stop_loss:,.2f}")
-                    logger.info(f"  Take Profit:  {f'${self.take_profit:,.2f}' if self.take_profit is not None else 'N/A'}")
+                    logger.info(
+                        f"  Take Profit:  {f'${self.take_profit:,.2f}' if self.take_profit is not None else 'N/A'}"
+                    )
 
             except Exception as e:
                 # Catch failures (including "Position size too large") so the object still initializes
@@ -223,7 +350,9 @@ class Position:
                 # ✅ Fallback to provided basic levels if VTM fails to init
                 self.stop_loss = stop_loss if stop_loss else None
                 self.take_profit = take_profit if take_profit else None
-                self.trailing_stop_pct = trailing_stop_pct if trailing_stop_pct else None
+                self.trailing_stop_pct = (
+                    trailing_stop_pct if trailing_stop_pct else None
+                )
 
         else:
             # ✅ No VTM requested or missing data - use passed levels
@@ -262,20 +391,25 @@ class Position:
                     if "action" in exit_info:
                         action = exit_info["action"]
                         logger.info(f"[VTM] {self.asset} action triggered: {action}")
-                        return exit_info # Return the whole dict to the caller
+                        return exit_info  # Return the whole dict to the caller
 
                     # ✅ Handle standard exits — preserve size so caller can do partial close
                     reason = exit_info.get("reason")
                     if self.db_manager and self.db_trade_id:
                         self.db_manager.update_trade_vtm_event(
                             trade_id=self.db_trade_id,
-                            event_type=reason.value if hasattr(reason, "value") else str(reason),
+                            event_type=(
+                                reason.value
+                                if hasattr(reason, "value")
+                                else str(reason)
+                            ),
                             current_price=exit_info.get("price", close),
                             metadata={"size": exit_info.get("size", 1.0)},
                         )
 
                     # Convert enum to string for compatibility
                     from src.execution.veteran_trade_manager import ExitReason
+
                     if isinstance(reason, ExitReason):
                         reason_str = reason.value
                     else:
@@ -289,7 +423,11 @@ class Position:
                         f"@ ${exit_price_actual:,.2f} (size={exit_size:.0%})"
                     )
                     # Return dict so PortfolioManager can route partial vs full close
-                    return {"reason": reason_str, "size": exit_size, "price": exit_price_actual}
+                    return {
+                        "reason": reason_str,
+                        "size": exit_size,
+                        "price": exit_price_actual,
+                    }
 
                 # ✅ Update position's SL/TP with VTM's current levels
                 # (VTM may trail stops or move to break-even)
@@ -314,14 +452,20 @@ class Position:
 
                 if exit_info:
                     reason = exit_info["reason"]
-                    reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
+                    reason_str = (
+                        reason.value if isinstance(reason, ExitReason) else str(reason)
+                    )
                     exit_size = exit_info.get("size", 1.0)
 
                     logger.info(
                         f"[VTM] {self.asset} real-time exit: {reason_str} "
                         f"@ ${current_price:,.2f} (size={exit_size:.0%})"
                     )
-                    return {"reason": reason_str, "size": exit_size, "price": current_price}
+                    return {
+                        "reason": reason_str,
+                        "size": exit_size,
+                        "price": current_price,
+                    }
 
                 # Update position's stop loss (may have trailed)
                 self.stop_loss = self.trade_manager.current_stop_loss
@@ -344,6 +488,7 @@ class Position:
             exit_info = self.trade_manager.check_exit(current_price)
             if exit_info:
                 from src.execution.veteran_trade_manager import ExitReason
+
                 reason = exit_info["reason"]
                 exit_signal = (
                     reason.value if isinstance(reason, ExitReason) else str(reason)
@@ -387,7 +532,7 @@ class Position:
 
             # ✅ FIX: Get the current_price that VTM calculated or used.
             current_price = levels["current_price"]
-            
+
             next_target = levels.get("take_profit")
 
             # Calculate absolute P&L (Prioritize exchange-reported profit)
@@ -396,10 +541,17 @@ class Position:
             if exchange_pnl != 0.0:
                 # Broker P&L includes swap/commission — keep abs and pct consistent
                 pnl_abs = exchange_pnl
-                pnl_pct = (exchange_pnl / position_notional * 100) if position_notional > 0 else levels["pnl_pct"]
+                pnl_pct = (
+                    (exchange_pnl / position_notional * 100)
+                    if position_notional > 0
+                    else levels["pnl_pct"]
+                )
             else:
-                pnl_abs = (current_price - self.entry_price) * self.quantity if self.side == "long" else \
-                          (self.entry_price - current_price) * self.quantity
+                pnl_abs = (
+                    (current_price - self.entry_price) * self.quantity
+                    if self.side == "long"
+                    else (self.entry_price - current_price) * self.quantity
+                )
                 pnl_pct = levels["pnl_pct"]
 
             return {
@@ -407,12 +559,16 @@ class Position:
                 "entry_price": levels["entry_price"],
                 "current_price": levels["current_price"],
                 "pnl_pct": pnl_pct,
-                "pnl_abs": pnl_abs, # Absolute P&L (Exchange-synced)
+                "pnl_abs": pnl_abs,  # Absolute P&L (Exchange-synced)
                 "stop_loss": levels["stop_loss"],
                 "take_profit": (
                     next_target
                     if next_target
-                    else levels.get("all_targets", [])[-1] if levels.get("all_targets") else None
+                    else (
+                        levels.get("all_targets", [])[-1]
+                        if levels.get("all_targets")
+                        else None
+                    )
                 ),
                 "distance_to_sl_pct": levels["distance_to_sl_pct"],
                 "distance_to_tp_pct": levels["distance_to_tp_pct"],
@@ -423,33 +579,52 @@ class Position:
                 "update_count": levels["update_count"],
                 "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 # Runner trail / early-lock dynamics
-                "runner_trail_atr_multiplier": getattr(self.trade_manager, "runner_trail_atr_multiplier", None),
-                "early_lock_atr_multiplier":   getattr(self.trade_manager, "early_lock_atr_multiplier", None),
+                "runner_trail_atr_multiplier": getattr(
+                    self.trade_manager, "runner_trail_atr_multiplier", None
+                ),
+                "early_lock_atr_multiplier": getattr(
+                    self.trade_manager, "early_lock_atr_multiplier", None
+                ),
                 "current_early_lock_threshold_pct": (
                     # early_lock fires when profit > early_lock_atr_multiplier × ATR
                     # Express as % of entry so the display is meaningful
-                    (getattr(self.trade_manager, "early_lock_atr_multiplier", 0.5)
-                     * self.trade_manager._calculate_atr()
-                     / self.entry_price)
-                    if self.entry_price > 0 else 0.0
+                    (
+                        getattr(self.trade_manager, "early_lock_atr_multiplier", 0.5)
+                        * self.trade_manager._calculate_atr()
+                        / self.entry_price
+                    )
+                    if self.entry_price > 0
+                    else 0.0
                 ),
                 "current_runner_trail_pct": (
                     # Actual trail width = gap between extreme price and current SL as % of current price
                     abs(
-                        (self.trade_manager.highest_price_reached - self.trade_manager.current_stop_loss)
+                        (
+                            self.trade_manager.highest_price_reached
+                            - self.trade_manager.current_stop_loss
+                        )
                         / current_price
-                    ) if (
+                    )
+                    if (
                         getattr(self.trade_manager, "runner_activated", False)
                         and self.side == "long"
                         and self.trade_manager.highest_price_reached > 0
-                    ) else abs(
-                        (self.trade_manager.current_stop_loss - self.trade_manager.lowest_price_reached)
-                        / current_price
-                    ) if (
-                        getattr(self.trade_manager, "runner_activated", False)
-                        and self.side == "short"
-                        and self.trade_manager.lowest_price_reached > 0
-                    ) else 0.0
+                    )
+                    else (
+                        abs(
+                            (
+                                self.trade_manager.current_stop_loss
+                                - self.trade_manager.lowest_price_reached
+                            )
+                            / current_price
+                        )
+                        if (
+                            getattr(self.trade_manager, "runner_activated", False)
+                            and self.side == "short"
+                            and self.trade_manager.lowest_price_reached > 0
+                        )
+                        else 0.0
+                    )
                 ),
             }
         except Exception as e:
@@ -458,10 +633,14 @@ class Position:
 
     def get_position_value(self, current_price: float) -> float:
         """Get current position value in USD"""
+        if current_price is None:
+            return 0.0
         return self.quantity * current_price
 
     def get_pnl(self, current_price: float) -> float:
         """Get current profit/loss"""
+        if current_price is None:
+            return 0.0
         if self.side == "long":
             return (current_price - self.entry_price) * self.quantity
         else:
@@ -508,8 +687,8 @@ class Position:
         """
         state = self.__dict__.copy()
         # Remove the unpickleable db_manager attribute
-        if 'db_manager' in state:
-            del state['db_manager']
+        if "db_manager" in state:
+            del state["db_manager"]
         return state
 
     def __setstate__(self, state):
@@ -524,7 +703,6 @@ class Position:
         # Always reset closing flags on reload to prevent stuck positions
         self.closing = False
         self.last_close_attempt = None
-
 
 
 class PortfolioManager:
@@ -542,9 +720,11 @@ class PortfolioManager:
         db_manager=None,
         execution_handlers: Dict = None,
         telegram_bot=None,
+        aggregators: Dict = None,
     ):
         self.config = config
         self.telegram_bot = telegram_bot
+        self.aggregators = aggregators  # O4c: reference to aggregators dict
         self.portfolio_config = config["portfolio"]
         self.max_positions_per_asset = config.get("trading", {}).get(
             "max_positions_per_asset", 3
@@ -555,8 +735,10 @@ class PortfolioManager:
         self.db_manager = db_manager
         self.execution_handlers = execution_handlers or {}
         self.risk_cfg = config.get("risk_management", {})
-        
-        self.correlation_threshold = self.portfolio_config.get("correlation_threshold", 0.65)
+
+        self.correlation_threshold = self.portfolio_config.get(
+            "correlation_threshold", 0.65
+        )
         logger.info(f"[RISK] Correlation threshold: {self.correlation_threshold:.0%}")
 
         self.mode = config["trading"].get("mode", "paper")
@@ -577,12 +759,18 @@ class PortfolioManager:
 
         self.positions: Dict[str, Position] = {}
         self.closed_positions: List[Dict] = []
-        self.price_history: Dict[str, List[float]] = {asset: [] for asset in config["assets"].keys()}
+        self.price_history: Dict[str, List[float]] = {
+            asset: [] for asset in config["assets"].keys()
+        }
         self.realized_pnl_today = 0.0
-        self.performance_tracker = PerformanceTracker()  # ✨ NEW: Strategy Performance Tracking
+        self.performance_tracker = (
+            PerformanceTracker()
+        )  # ✨ NEW: Strategy Performance Tracking
         self.loss_streak = 0  # ✨ NEW: Consecutive Loss Tracking
         self._loss_streak_alerted = False  # Guard: send alert only ONCE per streak
-        self._circuit_breaker_override = False  # Manual override via /resume Telegram command
+        self._circuit_breaker_override = (
+            False  # Manual override via /resume Telegram command
+        )
 
         self.session_start_time = None
         self.session_start_equity = None
@@ -632,15 +820,45 @@ class PortfolioManager:
                     logger.error(f"[STATE] Error removing stale state file: {e}")
             return
 
-        temp_file_path = self.state_file.with_suffix('.pkl.tmp')
+        temp_file_path = self.state_file.with_suffix(".pkl.tmp")
         try:
             self.state_file.parent.mkdir(exist_ok=True)
-            with open(temp_file_path, "wb") as f:
-                pickle.dump(self.positions, f)
-            
-            # Atomically rename the temp file to the final file
-            temp_file_path.rename(self.state_file)
-            logger.info(f"[STATE] Successfully saved {len(self.positions)} open positions to {self.state_file}")
+            try:
+                with open(temp_file_path, "wb") as f:
+                    pickle.dump(self.positions, f)
+            except (TypeError, pickle.PicklingError) as pe:
+                # Known recurring failure mode: some attribute deep inside a
+                # position (most likely trade_manager.signal_details ->
+                # mtf_regime/governor/full_regime_status) holds a live,
+                # unpicklable object (e.g. a threading.RLock). Rather than
+                # losing the entire save every cycle, fall back to a
+                # best-effort sanitized copy with only the offending
+                # leaf(ves) dropped -- core position fields (entry/SL/TP/
+                # quantity/trade_manager numeric state) survive intact.
+                logger.error(
+                    f"[STATE] Direct pickle failed ({pe}); retrying with sanitized "
+                    f"fallback copy (this should be reported -- it means a new "
+                    f"unpicklable object got attached to a position)."
+                )
+                sanitized, dropped = _sanitize_for_pickle(self.positions)
+                with open(temp_file_path, "wb") as f:
+                    pickle.dump(sanitized, f)
+                for d_path, d_type, d_repr in dropped:
+                    logger.warning(
+                        f"[STATE] Sanitized fallback dropped non-picklable attribute "
+                        f"at {d_path} (type={d_type}, value={d_repr}) -- this object "
+                        f"is NOT persisted across restarts; everything else was saved."
+                    )
+
+            # Atomically replace the final file. MUST use replace(), not rename():
+            # on Windows Path.rename()/os.rename refuses to overwrite an existing
+            # target (WinError 183), whereas os.replace() overwrites atomically on
+            # both Windows and POSIX. With periodic saves the target always exists,
+            # so rename() failed every cycle.
+            os.replace(temp_file_path, self.state_file)
+            logger.info(
+                f"[STATE] Successfully saved {len(self.positions)} open positions to {self.state_file}"
+            )
 
             # ✨ NEW: Save non-picklable system metrics to JSON
             system_metrics = {
@@ -648,7 +866,7 @@ class PortfolioManager:
                 "loss_streak": self.loss_streak,
                 "realized_pnl_today": self.realized_pnl_today,
                 "mode": self.mode,  # Save the mode (live/paper)
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
             save_system_state(system_metrics)
 
@@ -658,7 +876,9 @@ class PortfolioManager:
                 try:
                     temp_file_path.unlink()
                 except Exception as e_del:
-                    logger.error(f"[STATE] Failed to clean up temp file {temp_file_path}: {e_del}")
+                    logger.error(
+                        f"[STATE] Failed to clean up temp file {temp_file_path}: {e_del}"
+                    )
 
     def load_portfolio_state(self, data_manager):
         """Loads open positions from a file and re-initializes them."""
@@ -669,10 +889,12 @@ class PortfolioManager:
         if not self.state_file.exists():
             logger.info("[STATE] No portfolio state file found. Starting fresh.")
             return
-            
+
         # Check for empty file to prevent EOFError
         if self.state_file.stat().st_size == 0:
-            logger.warning(f"[STATE] State file {self.state_file} is empty. Deleting and starting fresh.")
+            logger.warning(
+                f"[STATE] State file {self.state_file} is empty. Deleting and starting fresh."
+            )
             self.state_file.unlink()
             return
 
@@ -688,12 +910,14 @@ class PortfolioManager:
             system_state = load_system_state()
             if system_state:
                 saved_mode = system_state.get("mode")
-                
+
                 # Only restore metrics if the mode matches
                 if saved_mode == self.mode:
                     self.peak_equity = system_state.get("peak_equity", self.peak_equity)
                     self.loss_streak = system_state.get("loss_streak", 0)
-                    self.realized_pnl_today = system_state.get("realized_pnl_today", 0.0)
+                    self.realized_pnl_today = system_state.get(
+                        "realized_pnl_today", 0.0
+                    )
                     logger.info(
                         f"[STATE] Metrics restored for {self.mode.upper()} mode: "
                         f"Peak Equity=${self.peak_equity:,.2f}, Loss Streak={self.loss_streak}"
@@ -705,90 +929,132 @@ class PortfolioManager:
                     )
 
             for position_id, position in loaded_positions.items():
-                logger.info(f"[STATE] Reloading position: {position_id} ({position.asset} {position.side})")
-                
+                logger.info(
+                    f"[STATE] Reloading position: {position_id} ({position.asset} {position.side})"
+                )
+
                 # Critical step: Re-initialize the VTM with fresh OHLC data
                 try:
-                    asset_config = self.config['assets'].get(position.asset)
+                    asset_config = self.config["assets"].get(position.asset)
                     if asset_config:
-                        symbol = asset_config['symbol']
-                        interval = asset_config.get('interval', '1h')
-                        exchange = asset_config.get('exchange', 'binance')
-                        
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=10) # Fetch enough data
+                        symbol = asset_config["symbol"]
+                        interval = asset_config.get("interval", "1h")
+                        exchange = asset_config.get("exchange", "binance")
 
-                        logger.info(f"[STATE] Fetching fresh OHLC data for {position.asset} ({symbol})...")
-                        if exchange == 'binance':
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=10)  # Fetch enough data
+
+                        logger.info(
+                            f"[STATE] Fetching fresh OHLC data for {position.asset} ({symbol})..."
+                        )
+                        if exchange == "binance":
                             df = data_manager.fetch_binance_data(
-                                symbol=symbol, interval=interval,
+                                symbol=symbol,
+                                interval=interval,
                                 start_date=start_time.strftime("%Y-%m-%d"),
-                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                             )
-                        else: # mt5
+                        else:  # mt5
                             df = data_manager.fetch_mt5_data(
-                                symbol=symbol, timeframe=interval,
+                                symbol=symbol,
+                                timeframe=interval,
                                 start_date=start_time.strftime("%Y-%m-%d"),
-                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S")
+                                end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                             )
-                        
+
                         if len(df) > 50:
                             if position.trade_manager:
                                 # Re-sync existing trade manager
-                                position.trade_manager.high = df['high'].values
-                                position.trade_manager.low = df['low'].values
-                                position.trade_manager.close = df['close'].values
-                                position.trade_manager.volume = df['volume'].values if 'volume' in df else None
-                                logger.info(f"[STATE] VTM for {position_id} successfully re-synced with {len(df)} candles.")
+                                position.trade_manager.high = df["high"].values
+                                position.trade_manager.low = df["low"].values
+                                position.trade_manager.close = df["close"].values
+                                position.trade_manager.volume = (
+                                    df["volume"].values if "volume" in df else None
+                                )
+                                logger.info(
+                                    f"[STATE] VTM for {position_id} successfully re-synced with {len(df)} candles."
+                                )
                             else:
                                 # Create NEW trade manager if it was missing
-                                logger.info(f"[STATE] VTM missing for {position_id}. Creating new manager...")
-                                risk_config = getattr(position, 'risk_config', asset_config.get('risk', {}))
-                                signal_details = getattr(position, 'signal_details', {})
-                                
+                                logger.info(
+                                    f"[STATE] VTM missing for {position_id}. Creating new manager..."
+                                )
+                                risk_config = getattr(
+                                    position,
+                                    "risk_config",
+                                    asset_config.get("risk", {}),
+                                )
+                                # Inject phase_config so VTM gates are controllable
+                                risk_config = dict(risk_config)
+                                risk_config["phase_config"] = self.config.get(
+                                    "phase_config", {}
+                                )
+                                signal_details = getattr(position, "signal_details", {})
+
                                 position.trade_manager = VeteranTradeManager(
                                     entry_price=position.entry_price,
                                     side=position.side,
                                     asset=position.asset,
                                     risk_config=risk_config,
-                                    high=df['high'].values,
-                                    low=df['low'].values,
-                                    close=df['close'].values,
-                                    volume=df['volume'].values if 'volume' in df else None,
+                                    high=df["high"].values,
+                                    low=df["low"].values,
+                                    close=df["close"].values,
+                                    volume=(
+                                        df["volume"].values if "volume" in df else None
+                                    ),
                                     quantity=position.quantity,
                                     signal_details=signal_details,
-                                    trade_type=signal_details.get("trade_type", "TREND"),
+                                    trade_type=signal_details.get(
+                                        "trade_type", "TREND"
+                                    ),
                                     # Restoring VTM for an already-open position: accept
                                     # whatever size the live trade actually has, even if it
                                     # has dipped below broker minimum after partial closes.
                                     min_lot_override=position.quantity,
+                                    # Item 5: no producer populates these keys yet — resolves
+                                    # to None today, starts flowing once a future tier does.
+                                    structure_levels_ref=signal_details.get("structure_levels_ref"),
+                                    entry_retest_type=signal_details.get("retest_type"),
                                 )
-                                logger.info(f"[STATE] VTM for {position_id} successfully created.")
+                                logger.info(
+                                    f"[STATE] VTM for {position_id} successfully created."
+                                )
                         else:
-                            logger.warning(f"[STATE] Could not fetch enough OHLC data for {position_id}. VTM may be impaired.")
+                            logger.warning(
+                                f"[STATE] Could not fetch enough OHLC data for {position_id}. VTM may be impaired."
+                            )
                     else:
-                        logger.warning(f"[STATE] Asset config not found for {position.asset}. Cannot initialize VTM.")
+                        logger.warning(
+                            f"[STATE] Asset config not found for {position.asset}. Cannot initialize VTM."
+                        )
 
                 except Exception as e:
-                    logger.error(f"[STATE] Failed to re-initialize VTM for {position_id}: {e}", exc_info=True)
-                
+                    logger.error(
+                        f"[STATE] Failed to re-initialize VTM for {position_id}: {e}",
+                        exc_info=True,
+                    )
+
                 # Re-link the db_manager
                 if self.db_manager:
                     position.db_manager = self.db_manager
 
                 self.positions[position_id] = position
 
-            logger.info(f"[STATE] Successfully loaded and re-initialized {len(self.positions)} positions.")
-            
+            logger.info(
+                f"[STATE] Successfully loaded and re-initialized {len(self.positions)} positions."
+            )
+
             # Clean up state file after successful load
             self.state_file.unlink()
-            logger.info(f"[STATE] Removed state file {self.state_file} after successful load.")
+            logger.info(
+                f"[STATE] Removed state file {self.state_file} after successful load."
+            )
 
         except Exception as e:
             logger.error(f"[STATE] Failed to load portfolio state: {e}", exc_info=True)
             # If loading fails, start with a clean slate to avoid corruption
             self.positions = {}
-            
+
     def _get_quote_to_usd_rate(self, symbol: str) -> float:
         """
         Returns a multiplier to convert a value denominated in the symbol's
@@ -804,7 +1070,11 @@ class PortfolioManager:
         base = symbol.upper().replace("M", "").strip()
 
         # USD-quoted: no conversion needed
-        if base.endswith("USD") or "USDT" in base or base in ("BTC", "GOLD", "USTEC", "USOIL"):
+        if (
+            base.endswith("USD")
+            or "USDT" in base
+            or base in ("BTC", "GOLD", "USTEC", "USOIL")
+        ):
             return 1.0
 
         # JPY-quoted: need 1/USDJPY
@@ -827,10 +1097,14 @@ class PortfolioManager:
 
             if not usdjpy_rate:
                 usdjpy_rate = 155.0
-                logger.debug("[CURRENCY] USDJPY rate unavailable — using fallback 155.0")
+                logger.debug(
+                    "[CURRENCY] USDJPY rate unavailable — using fallback 155.0"
+                )
 
             self._usdjpy_cache = (usdjpy_rate, now)
-            logger.debug(f"[CURRENCY] USDJPY rate: {usdjpy_rate:.3f} → conversion factor {1/usdjpy_rate:.6f}")
+            logger.debug(
+                f"[CURRENCY] USDJPY rate: {usdjpy_rate:.3f} → conversion factor {1/usdjpy_rate:.6f}"
+            )
             return 1.0 / usdjpy_rate
 
         # AUD-quoted: need AUDUSD rate  (e.g. GBPAUD, EURAUD — price is in AUD)
@@ -845,18 +1119,20 @@ class PortfolioManager:
                 if self.mt5_handler:
                     for sym in ("AUDUSDm", "AUDUSD"):
                         price = self.mt5_handler.get_current_price(sym)
-                        if price and 0.4 < price < 1.2:   # sanity: AUDUSD ~0.6–0.7
+                        if price and 0.4 < price < 1.2:  # sanity: AUDUSD ~0.6–0.7
                             audusd_rate = price
                             break
             except Exception:
                 pass
 
             if not audusd_rate:
-                audusd_rate = 0.65   # fallback approximate rate
+                audusd_rate = 0.65  # fallback approximate rate
                 logger.debug("[CURRENCY] AUDUSD rate unavailable — using fallback 0.65")
 
             self._audusd_cache = (audusd_rate, now)
-            logger.debug(f"[CURRENCY] AUDUSD rate: {audusd_rate:.5f} → conversion factor {audusd_rate:.6f}")
+            logger.debug(
+                f"[CURRENCY] AUDUSD rate: {audusd_rate:.5f} → conversion factor {audusd_rate:.6f}"
+            )
             return audusd_rate
 
         # CAD-quoted: need 1/USDCAD
@@ -910,7 +1186,9 @@ class PortfolioManager:
             return 1.0 / usdchf_rate
 
         # Unknown quote currency — assume USD (safe default, logs a warning)
-        logger.warning(f"[CURRENCY] Unknown quote currency for symbol '{symbol}' — assuming USD")
+        logger.warning(
+            f"[CURRENCY] Unknown quote currency for symbol '{symbol}' — assuming USD"
+        )
         return 1.0
 
     def get_risk_budget(
@@ -918,11 +1196,11 @@ class PortfolioManager:
         asset: str,
         strategy_type: str = "TREND",
         confidence_score: Optional[float] = None,
-        market_condition: Optional[str] = None
+        market_condition: Optional[str] = None,
     ) -> float:
         """
         ✨ STRATEGIC RISK GOVERNOR
-        
+
         Calculates risk budget for a new trade based on:
         1. Base risk (from config)
         2. Signal confidence adjustment (from hybrid_position.py)
@@ -931,13 +1209,13 @@ class PortfolioManager:
         5. Correlation malus (reduce risk if holding correlated assets)
         6. Drawdown shield (reduce risk in drawdown)
         7. Total risk limit (cap aggregate open risk)
-        
+
         Args:
             asset: Asset name (e.g., "BTC", "GOLD")
             strategy_type: "TREND" or "SCALP"
             confidence_score: Optional signal confidence (0.0 to 1.0)
             market_condition: Optional market regime description
-            
+
         Returns:
             Risk percentage (e.g., 0.015 for 1.5%)
         """
@@ -948,7 +1226,7 @@ class PortfolioManager:
             # ================================================================
             fixed_risk_config = asset_cfg.get("fixed_risk_usd")
             base_risk = self.portfolio_config.get("target_risk_per_trade", 0.015)
-            
+
             # ✅ T2.1: Apply logic ported from orphaned hybrid_position.py
             if confidence_score is not None:
                 # Confidence-based scaling (0.3 to 1.5x)
@@ -956,7 +1234,9 @@ class PortfolioManager:
                 confidence_scalar = 0.5 + (confidence_score * 1.0)
                 confidence_scalar = max(0.3, min(1.5, confidence_scalar))
                 base_risk *= confidence_scalar
-                logger.info(f"  Confidence Adjustment: {confidence_scalar:.2f}x (Conf: {confidence_score:.2f})")
+                logger.info(
+                    f"  Confidence Adjustment: {confidence_scalar:.2f}x (Conf: {confidence_score:.2f})"
+                )
 
             if market_condition:
                 condition = market_condition.lower()
@@ -966,16 +1246,18 @@ class PortfolioManager:
                     "bearish": 0.8,
                     "uncertain": 0.6,
                     "extreme_volatility": 0.5,
-                    "bear": 0.8, # Handle variants
-                    "bull": 1.1
+                    "bear": 0.8,  # Handle variants
+                    "bull": 1.1,
                 }
                 condition_scalar = condition_scalars.get(condition, 1.0)
                 if condition_scalar != 1.0:
                     base_risk *= condition_scalar
-                    logger.info(f"  Market Condition Adjustment: {condition_scalar:.2f}x (Regime: {market_condition})")
+                    logger.info(
+                        f"  Market Condition Adjustment: {condition_scalar:.2f}x (Regime: {market_condition})"
+                    )
 
             strategy_multiplier = 1.0
-            
+
             logger.info(f"\n[RISK BUDGET] Calculating for {asset} {strategy_type}")
 
             if fixed_risk_config and isinstance(fixed_risk_config, dict):
@@ -984,11 +1266,15 @@ class PortfolioManager:
                 if risk_usd:
                     if self.current_capital > 0:
                         risk_pct = risk_usd / self.current_capital
-                        logger.info(f"  Fixed Dollar Risk: ${risk_usd} ({strategy_type})")
+                        logger.info(
+                            f"  Fixed Dollar Risk: ${risk_usd} ({strategy_type})"
+                        )
                         logger.info(f"  Account Capital: ${self.current_capital:,.2f}")
                         logger.info(f"  Calculated Risk: {risk_pct:.3%}")
                     else:
-                        logger.error("[RISK] Cannot calculate fixed risk, current capital is zero.")
+                        logger.error(
+                            "[RISK] Cannot calculate fixed risk, current capital is zero."
+                        )
                         return 0.0
                 else:
                     # Fallback to percentage if strategy type not in fixed config
@@ -997,7 +1283,7 @@ class PortfolioManager:
             else:
                 # ORIGINAL PERCENTAGE-BASED LOGIC
                 logger.info(f"  Base Risk: {base_risk:.3%}")
-            
+
                 # ================================================================
                 # STEP 2: Strategy Type Adjustment (Asymmetric)
                 # ================================================================
@@ -1012,9 +1298,9 @@ class PortfolioManager:
                 else:
                     strategy_multiplier = 1.0
                     logger.info(f"  Default Multiplier: {strategy_multiplier:.2f}x")
-                
+
                 risk_pct = base_risk * strategy_multiplier
-            
+
             # ================================================================
             # STEP 3: Correlation Malus (Institutional Upgrade)
             # ✅ TASK 24: Rolling Pearson Correlation
@@ -1023,32 +1309,36 @@ class PortfolioManager:
                 "correlation_threshold", 0.65
             )
             correlation_malus = 1.0
-            
+
             # Check if we hold correlated positions
             if len(self.positions) > 0:
                 max_corr = 0.0
                 correlated_asset = None
-                
-                for pos_asset, position in self.positions.items():
-                    if pos_asset == asset: continue # Skip self
-                    
+
+                for position in self.positions.values():
+                    pos_asset = getattr(position, "asset", None)
+                    if not pos_asset or pos_asset == asset:
+                        continue  # Skip self / malformed entry
+
                     # Numerical Correlation check (Pearson)
                     num_corr = abs(self.check_correlation(asset, pos_asset))
                     if num_corr > max_corr:
                         max_corr = num_corr
                         correlated_asset = pos_asset
-                
+
                 # Apply dynamic malus if threshold breached
                 if max_corr > correlation_threshold:
                     # Dynamic reduction: e.g., 0.8 corr -> 0.2 multiplier (80% reduction)
                     # Clamped at 0.3 minimum multiplier (70% max reduction)
                     correlation_malus = max(0.3, 1.0 - max_corr)
-                    
+
                     logger.warning(
                         f"  ⚠️ Correlation Malus: High linkage with {correlated_asset} ({max_corr:.2f})"
                     )
-                    logger.info(f"  Risk reduced to {correlation_malus:.0%} of original budget")
-            
+                    logger.info(
+                        f"  Risk reduced to {correlation_malus:.0%} of original budget"
+                    )
+
             risk_pct *= correlation_malus
 
             # ================================================================
@@ -1059,12 +1349,21 @@ class PortfolioManager:
             # correlation but needs 30 bars of price history.  This check is
             # instantaneous and semantics-driven — no history required.
             # ================================================================
-            _side_for_new_trade = "long" if getattr(self, "_pending_signal_side", None) != -1 else "short"
+            _side_for_new_trade = (
+                "long" if getattr(self, "_pending_signal_side", None) != -1 else "short"
+            )
             # _pending_signal_side is set by mt5_handler before calling get_risk_budget.
             # Fall back gracefully if not set — no penalty in that case.
-            if hasattr(self, "_pending_signal_side") and self._pending_signal_side is not None:
-                _side_for_new_trade = "long" if self._pending_signal_side == 1 else "short"
-                usd_multiplier = self.get_usd_directional_multiplier(asset, _side_for_new_trade)
+            if (
+                hasattr(self, "_pending_signal_side")
+                and self._pending_signal_side is not None
+            ):
+                _side_for_new_trade = (
+                    "long" if self._pending_signal_side == 1 else "short"
+                )
+                usd_multiplier = self.get_usd_directional_multiplier(
+                    asset, _side_for_new_trade
+                )
                 if usd_multiplier < 1.0:
                     logger.info(f"  USD Directional Malus: ×{usd_multiplier:.2f}")
                 risk_pct *= usd_multiplier
@@ -1074,27 +1373,38 @@ class PortfolioManager:
             # ================================================================
             drawdown_threshold = self.portfolio_config.get("max_drawdown", 0.15)
             current_drawdown = 0.0
-            
+
             if self.peak_equity > 0:
                 current_drawdown = (self.peak_equity - self.equity) / self.peak_equity
-            
+
             drawdown_malus = 1.0
-            
+
             if current_drawdown > 0.08:  # 8% drawdown trigger
                 drawdown_malus = 0.65
                 logger.warning(
                     f"  ⚠️ Drawdown Shield: {current_drawdown:.2%} drawdown detected"
                 )
                 logger.info(f"  Risk reduced by {1 - drawdown_malus:.0%}")
-            
+
             risk_pct *= drawdown_malus
-            
+
             # ================================================================
             # STEP 5: Total Risk Limit (Aggregate Cap)
             # ✅ IMPROVED: Use Dollar Risk at SL (not notional exposure)
+            # ✅ MRS FIX: Grace window prevents one large position (GOLD) from
+            #             starving other assets when total risk is slightly over cap.
             # ================================================================
+            requested_risk_pct = risk_pct
             max_total_risk_pct = self.risk_cfg.get("max_total_open_risk", 0.10)
-            
+            # How far over the cap before blocking entirely (default: 5%).
+            # e.g. cap=25% → block only when total > 30%.
+            total_risk_grace_pct = self.risk_cfg.get("total_risk_grace_pct", 0.05)
+            # Minimum entry size allowed while inside the grace window (default: 0.5%).
+            # Keeps USOIL/EURUSD/etc. alive even while GOLD holds most of the budget.
+            total_risk_min_entry_pct = self.risk_cfg.get(
+                "total_risk_min_entry_pct", 0.005
+            )
+
             # Calculate current total risk (Dollar amount at risk across all positions)
             current_total_risk_usd = 0.0
             for position in self.positions.values():
@@ -1102,31 +1412,70 @@ class PortfolioManager:
                 quote_to_usd = self._get_quote_to_usd_rate(position.symbol)
                 if position.stop_loss:
                     # Risk = |Entry - SL| * Quantity  (in quote currency) → convert to USD
-                    pos_risk = abs(position.entry_price - position.stop_loss) * position.quantity
+                    pos_risk = (
+                        abs(position.entry_price - position.stop_loss)
+                        * position.quantity
+                    )
                     current_total_risk_usd += pos_risk * quote_to_usd
                 else:
                     # Fallback: estimate 5% of notional (in quote currency) → convert to USD
-                    current_total_risk_usd += (position.entry_price * position.quantity * 0.05) * quote_to_usd
-            
+                    current_total_risk_usd += (
+                        position.entry_price * position.quantity * 0.05
+                    ) * quote_to_usd
+
             current_total_risk_pct = (
-                current_total_risk_usd / self.current_capital 
-                if self.current_capital > 0 
+                current_total_risk_usd / self.current_capital
+                if self.current_capital > 0
                 else 0
             )
-            
+
             # Check if adding new trade would exceed limit
             remaining_risk_budget_pct = max_total_risk_pct - current_total_risk_pct
-            
+
             if risk_pct > remaining_risk_budget_pct:
                 logger.warning(
                     f"  ⚠️ Total Risk Limit: Current {current_total_risk_pct:.2%}, "
                     f"Max {max_total_risk_pct:.2%}"
                 )
-                logger.info(
-                    f"  Risk capped from {risk_pct:.3%} to {max(0, remaining_risk_budget_pct):.3%}"
-                )
-                risk_pct = max(0, remaining_risk_budget_pct)
-            
+                if remaining_risk_budget_pct > 0:
+                    # Budget still positive but smaller than requested: use what's left.
+                    logger.info(
+                        f"  Risk capped from {risk_pct:.3%} to {remaining_risk_budget_pct:.3%}"
+                    )
+                    risk_pct = remaining_risk_budget_pct
+                elif (
+                    current_total_risk_pct <= max_total_risk_pct + total_risk_grace_pct
+                ):
+                    # Slightly over cap but within grace window.
+                    # Allow a minimum viable entry so one large position (e.g. GOLD)
+                    # cannot completely starve other assets like USOIL/EURUSD.
+                    logger.info(
+                        f"  ⚠️ Over cap by {-remaining_risk_budget_pct:.2%} — within "
+                        f"grace window ({total_risk_grace_pct:.0%}); "
+                        f"sizing to min-entry {total_risk_min_entry_pct:.3%}"
+                    )
+                    risk_pct = total_risk_min_entry_pct
+                else:
+                    # Significantly over cap (total > cap + grace): block entirely.
+                    logger.warning(
+                        f"  ❌ Total risk {current_total_risk_pct:.2%} exceeds "
+                        f"cap + grace ({max_total_risk_pct + total_risk_grace_pct:.2%}); "
+                        f"trade blocked"
+                    )
+                    risk_pct = 0.0
+
+            # Item 2.2: funnel visibility for the shared-risk-budget cap —
+            # previously a trade capped or fully blocked here left no trace
+            # distinguishing it from any other block.
+            if getattr(self, "funnel_logger", None) is not None:
+                try:
+                    if risk_pct == 0.0:
+                        self.funnel_logger.record(asset, 0, {"reasoning": "blocked_total_risk_cap"})
+                    elif risk_pct < requested_risk_pct:
+                        self.funnel_logger.record(asset, 0, {"reasoning": "risk_capped_shared_budget"})
+                except Exception:
+                    pass
+
             # ================================================================
             # STEP 5.5: Risk Floor (Enforce Minimum Risk USD)
             # ================================================================
@@ -1139,7 +1488,7 @@ class PortfolioManager:
                         f"(${min_risk_usd:.2f} minimum)"
                     )
                     risk_pct = min_risk_pct
-            
+
             # ================================================================
             # STEP 6: Final Validation
             # ================================================================
@@ -1151,13 +1500,42 @@ class PortfolioManager:
                 )
                 logger.error(f"  → Trade should be rejected")
                 return 0.0
-            
+
             # Ensure we don't exceed maximum risk
             max_risk = self.portfolio_config.get("max_risk_per_trade", 0.025)
             if risk_pct > max_risk:
                 logger.warning(f"  ⚠️ Risk capped at maximum {max_risk:.3%}")
                 risk_pct = max_risk
-            
+
+            # ── O4c: Recent loss context ──────────────────────────────────
+            # time_since_last_loss_hours was being computed every candle
+            # and immediately discarded. Modest tighten when a loss happened
+            # very recently (within 2 hours) — reduces sizing while reviewing
+            # what went wrong, not as a punitive measure.
+            try:
+                _cs_rb = None
+                _agg = (
+                    self.aggregators.get(asset)
+                    if hasattr(self, "aggregators")
+                    else None
+                )
+                if isinstance(_agg, dict):
+                    _agg = _agg.get("performance") or _agg.get("livermore")
+                if _agg is not None:
+                    _cs_rb = getattr(_agg, "_cached_composite", None)
+                if _cs_rb is not None:
+                    _hrs_since_loss = float(
+                        getattr(_cs_rb, "time_since_last_loss_hours", 999.0)
+                    )
+                    if _hrs_since_loss < 2.0:
+                        risk_pct = risk_pct * 0.85
+                        logger.info(
+                            f"  [O4c] Recent loss ({_hrs_since_loss:.1f}h ago) — "
+                            f"risk budget tightened 15%%"
+                        )
+            except Exception:
+                pass
+
             # ================================================================
             # STEP 7: Log Final Budget
             # ================================================================
@@ -1171,9 +1549,9 @@ class PortfolioManager:
             logger.info(f"    Drawdown:     ×{drawdown_malus:.2f}")
             logger.info(f"    Final:        {risk_pct:.3%}")
             logger.info(f"  → ${self.current_capital * risk_pct:,.2f} at risk\n")
-            
+
             return risk_pct
-            
+
         except Exception as e:
             logger.error(f"[RISK BUDGET] Error calculating risk: {e}", exc_info=True)
             # Return safe default
@@ -1182,28 +1560,28 @@ class PortfolioManager:
     def _get_asset_group(self, asset: str) -> str:
         """
         Helper: Categorize assets into correlation groups
-        
+
         Returns:
             Group name: "crypto", "precious_metals", "indices", "forex", "other"
         """
         asset = asset.upper()
-        
+
         # Crypto group
         if asset in ["BTC", "BITCOIN", "BTCUSD", "BTCUSDT", "ETH", "ETHEREUM"]:
             return "crypto"
-        
+
         # Precious metals group
         if asset in ["GOLD", "XAU", "XAUUSDm", "SILVER", "XAG", "XAGUSD"]:
             return "precious_metals"
-        
+
         # Indices group
         if any(x in asset for x in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW", "USTEC"]):
             return "indices"
-        
+
         # Forex group
         if any(x in asset for x in ["EUR", "GBP", "JPY", "USD", "AUD", "CHF", "CAD"]):
             return "forex"
-        
+
         return "other"
 
     def check_circuit_breaker(self) -> tuple:
@@ -1215,25 +1593,32 @@ class PortfolioManager:
             return False, ""
 
         if self.session_start_equity and self.session_start_equity > 0:
-            daily_loss = (self.session_start_equity - self.equity) / self.session_start_equity
-            limit = self.risk_cfg.get('max_daily_loss_pct', 0.03)
+            daily_loss = (
+                self.session_start_equity - self.equity
+            ) / self.session_start_equity
+            limit = self.risk_cfg.get("max_daily_loss_pct", 0.03)
 
             if daily_loss > limit:
-                return True, f'Daily loss {daily_loss:.1%} > limit {limit:.1%}'
+                return True, f"Daily loss {daily_loss:.1%} > limit {limit:.1%}"
 
         if self.peak_equity > 0:
             drawdown = (self.peak_equity - self.equity) / self.peak_equity
-            
+
             # Layer 1: Hard Max Drawdown (15%) - Severe protection
-            max_dd = self.portfolio_config.get('max_drawdown', 0.15)
+            max_dd = self.portfolio_config.get("max_drawdown", 0.15)
             if drawdown > max_dd:
-                return True, f'CRITICAL: Hard Drawdown {drawdown:.1%} > max {max_dd:.1%}'
-            
+                return (
+                    True,
+                    f"CRITICAL: Hard Drawdown {drawdown:.1%} > max {max_dd:.1%}",
+                )
+
             # Layer 2: Profit Lock (15%) - Protects recent gains from peak
             # Triggered when equity drops from its highest ever point based on config
-            profit_lock_threshold = self.portfolio_config.get('profit_lock_threshold', 0.15)
+            profit_lock_threshold = self.portfolio_config.get(
+                "profit_lock_threshold", 0.15
+            )
             if drawdown > profit_lock_threshold:
-                reason = f'PROFIT LOCK: Equity dropped {drawdown:.1%} from peak. Protecting gains.'
+                reason = f"PROFIT LOCK: Equity dropped {drawdown:.1%} from peak. Protecting gains."
                 send_alert(reason)
                 return True, reason
 
@@ -1244,13 +1629,13 @@ class PortfolioManager:
         # and would halt the bot after a single position's partial exits.
         _max_streak = self.risk_cfg.get("max_loss_streak", 5)
         if self.loss_streak >= _max_streak:
-            reason = f'Consecutive loss streak of {self.loss_streak} trades (limit: {_max_streak})'
+            reason = f"Consecutive loss streak of {self.loss_streak} trades (limit: {_max_streak})"
             if not self._loss_streak_alerted:
                 send_alert(reason)
                 self._loss_streak_alerted = True
             return True, reason
 
-        return False, ''
+        return False, ""
 
     def _fetch_total_capital(self, strict: bool = False) -> float:
         """
@@ -1329,14 +1714,18 @@ class PortfolioManager:
         if strict and not self.is_paper_mode and total_capital == 0:
             if self.mt5_handler is None and self.binance_client is None:
                 # Handlers not wired yet — normal during very early init
-                logger.warning("[BALANCE] No handlers initialized yet, initial capital set to 0. Will refresh later.")
+                logger.warning(
+                    "[BALANCE] No handlers initialized yet, initial capital set to 0. Will refresh later."
+                )
                 return 0.0
             else:
                 # Handlers exist but returned 0 — likely a new/unfunded account, MT5 not
                 # fully logged-in yet, or a transient connection hiccup.  Don't crash;
                 # fall back to the configured initial_capital so the bot can start and
                 # let the periodic balance refresh (every 5 min) pick up the real figure.
-                fallback = self.paper_capital  # set from portfolio_config["initial_capital"]
+                fallback = (
+                    self.paper_capital
+                )  # set from portfolio_config["initial_capital"]
                 logger.warning(
                     f"\n{'='*80}\n"
                     f"[BALANCE] ⚠️  Live balances unavailable at startup — using config fallback.\n"
@@ -1424,16 +1813,23 @@ class PortfolioManager:
                         account = self.binance_client.futures_account()
                     except Exception as _e1021:
                         if "-1021" in str(_e1021):
-                            logger.warning("[BINANCE] Clock drift detected (-1021), re-syncing time offset...")
+                            logger.warning(
+                                "[BINANCE] Clock drift detected (-1021), re-syncing time offset..."
+                            )
                             from src.data.data_manager import _sync_time_offset
+
                             _sync_time_offset(self.binance_client)
                             account = self.binance_client.futures_account()  # one retry
                         else:
                             raise
 
                     # Log raw keys for debugging (safely)
-                    available_keys = list(account.keys()) if isinstance(account, dict) else "None"
-                    logger.debug(f"[BINANCE] Futures account keys found: {available_keys}")
+                    available_keys = (
+                        list(account.keys()) if isinstance(account, dict) else "None"
+                    )
+                    logger.debug(
+                        f"[BINANCE] Futures account keys found: {available_keys}"
+                    )
 
                     total_balance = float(account.get("totalWalletBalance", 0))
                     available = float(account.get("availableBalance", 0))
@@ -1481,13 +1877,17 @@ class PortfolioManager:
                         elif asset == "BTC":
                             handler = self.execution_handlers.get("binance")
                             if not handler:
-                                logger.error("[BINANCE] Cannot get BTC price, handler not available.")
+                                logger.error(
+                                    "[BINANCE] Cannot get BTC price, handler not available."
+                                )
                                 continue
                             btc_price = handler.get_current_price("BTCUSDT")
                             if not btc_price:
-                                logger.error("[BINANCE] Failed to get BTC price from handler.")
+                                logger.error(
+                                    "[BINANCE] Failed to get BTC price from handler."
+                                )
                                 continue
-                            
+
                             usd_value = total * btc_price
                             total_balance += usd_value
                             asset_details.append(
@@ -1633,12 +2033,16 @@ class PortfolioManager:
                 try:
                     handler = self.execution_handlers.get("binance")
                     if not handler:
-                        logger.debug(f"Cannot update Binance profit for {asset}, handler not available.")
+                        logger.debug(
+                            f"Cannot update Binance profit for {asset}, handler not available."
+                        )
                         continue
-                    
+
                     current_price = handler.get_current_price(position.symbol)
                     if not current_price:
-                        logger.debug(f"Could not fetch price for {position.symbol} via handler.")
+                        logger.debug(
+                            f"Could not fetch price for {position.symbol} via handler."
+                        )
                         continue
 
                     # Calculate real-time P&L
@@ -1664,7 +2068,12 @@ class PortfolioManager:
             logger.error(f"Error updating Binance positions profit: {e}", exc_info=True)
 
     def calculate_position_size(
-        self, asset: str, entry_price: float, stop_loss: float, venue: str, confidence: float = 0.5
+        self,
+        asset: str,
+        entry_price: float,
+        stop_loss: float,
+        venue: str,
+        confidence: float = 0.5,
     ) -> float:
         """
         STEP 1 — Venue Isolation Dam
@@ -1680,8 +2089,11 @@ class PortfolioManager:
             try:
                 if venue.upper() == "MT5":
                     import MetaTrader5 as mt5
+
                     if not mt5.initialize():
-                        logger.error("[PORTFOLIO] Failed to initialize MT5 for margin check")
+                        logger.error(
+                            "[PORTFOLIO] Failed to initialize MT5 for margin check"
+                        )
                         return 0.0
                     account_info = mt5.account_info()
                     if account_info:
@@ -1694,44 +2106,59 @@ class PortfolioManager:
                     if not self.binance_client:
                         logger.error("[PORTFOLIO] Binance client not initialized")
                         return 0.0
-                    
+
                     # Check if futures enabled for this asset
-                    is_futures = self.config.get("assets", {}).get(asset, {}).get("enable_futures", False)
-                    
+                    is_futures = (
+                        self.config.get("assets", {})
+                        .get(asset, {})
+                        .get("enable_futures", False)
+                    )
+
                     if is_futures:
                         try:
                             account = self.binance_client.futures_account()
                         except Exception as _e1021:
                             if "-1021" in str(_e1021):
-                                logger.warning("[PORTFOLIO] Clock drift detected (-1021), re-syncing time offset...")
+                                logger.warning(
+                                    "[PORTFOLIO] Clock drift detected (-1021), re-syncing time offset..."
+                                )
                                 from src.data.data_manager import _sync_time_offset
+
                                 _sync_time_offset(self.binance_client)
-                                account = self.binance_client.futures_account()  # one retry
+                                account = (
+                                    self.binance_client.futures_account()
+                                )  # one retry
                             else:
                                 raise
                         local_free_margin = float(account.get("availableBalance", 0))
                     else:
                         # For spot, available USDT
-                        asset_balance = self.binance_client.get_asset_balance(asset="USDT")
+                        asset_balance = self.binance_client.get_asset_balance(
+                            asset="USDT"
+                        )
                         if asset_balance:
                             local_free_margin = float(asset_balance.get("free", 0))
-                
+
                 else:
                     logger.error(f"[PORTFOLIO] Unknown venue: {venue}")
                     return 0.0
 
             except Exception as e:
-                logger.error(f"[PORTFOLIO] Error fetching venue margin for {venue}: {e}")
+                logger.error(
+                    f"[PORTFOLIO] Error fetching venue margin for {venue}: {e}"
+                )
                 return 0.0
 
         if local_free_margin <= 0:
-            logger.error(f"[PORTFOLIO] Cannot calculate size for {asset}: {venue} free margin is 0!")
+            logger.error(
+                f"[PORTFOLIO] Cannot calculate size for {asset}: {venue} free margin is 0!"
+            )
             return 0.0
 
         # Risk calculation based on local free margin
         risk_percentage = self.portfolio_config.get("target_risk_per_trade", 0.015)
         risk_per_trade = risk_percentage * local_free_margin
-        
+
         # Stop loss distance
         sl_distance = abs(entry_price - stop_loss)
         if sl_distance == 0:
@@ -1747,22 +2174,29 @@ class PortfolioManager:
         scaling_factor = 1.0
         if confidence > 0.8:
             scaling_factor = 1.2
-            logger.info(f"[PORTFOLIO] High confidence ({confidence:.2f}): Scaling size by 1.2x")
+            logger.info(
+                f"[PORTFOLIO] High confidence ({confidence:.2f}): Scaling size by 1.2x"
+            )
         elif confidence < 0.6:
             scaling_factor = 0.7
-            logger.info(f"[PORTFOLIO] Low confidence ({confidence:.2f}): Scaling size by 0.7x")
-        
+            logger.info(
+                f"[PORTFOLIO] Low confidence ({confidence:.2f}): Scaling size by 0.7x"
+            )
+
         position_size_usd *= scaling_factor
 
         # Apply USD Correlation Shield
         asset_key = asset.upper()
         active_bucket_trades = sum(
-            1 for pos in self.positions.values()
+            1
+            for pos in self.positions.values()
             if pos.asset.upper() in USD_INVERSE_BUCKET
         )
 
         if asset_key in USD_INVERSE_BUCKET and active_bucket_trades >= 1:
-            logger.info(f"[PORTFOLIO] USD Correlation Shield Activated for {asset}. Reducing size.")
+            logger.info(
+                f"[PORTFOLIO] USD Correlation Shield Activated for {asset}. Reducing size."
+            )
             position_size_usd *= 0.5
 
         # Apply asset weight and limits from config
@@ -1814,24 +2248,29 @@ class PortfolioManager:
         """
         # Get limits
         max_exposure_pct = self.portfolio_config["max_portfolio_exposure"]
-        
+
         # ✅ SMALL ACCOUNT PROTOCOL: Increase allowed exposure for very small accounts
         # to prevent single positions from locking out the entire bot.
-        if self.current_capital < 200:
-            # Allow up to 10x leverage equivalent for small accounts
-            max_exposure_pct = max(max_exposure_pct, 10.0)
-            
+        _small_acct_threshold = self.portfolio_config.get(
+            "small_account_threshold_usd", 200
+        )
+        _small_acct_max_exposure = self.portfolio_config.get(
+            "small_account_max_exposure_pct", 10.0
+        )
+        if self.current_capital < _small_acct_threshold:
+            max_exposure_pct = max(max_exposure_pct, _small_acct_max_exposure)
+
         max_exposure_usd = self.current_capital * max_exposure_pct
-        
+
         # ✅ FIXED: Calculate current MARGIN exposure (not notional)
         long_margin = 0.0
         short_margin = 0.0
-        
+
         for pos in self.positions.values():
             notional = pos.quantity * pos.entry_price
             # Use config leverage as fallback when position was stored without
             # leverage (defaults to 1), which would inflate margin to full notional.
-            stored_lev = getattr(pos, 'leverage', 1)
+            stored_lev = getattr(pos, "leverage", 1)
             if stored_lev <= 1:
                 _acfg = self.config.get("assets", {}).get(pos.asset, {})
                 stored_lev = _acfg.get("leverage", 1)
@@ -1841,38 +2280,39 @@ class PortfolioManager:
                 long_margin += margin
             else:
                 short_margin += margin
-        
+
         current_gross_margin = long_margin + short_margin
         current_net_margin = abs(long_margin - short_margin)
-        
+
         # ✅ Check hedging configuration
         allow_hedging = self.config.get("trading", {}).get(
             "allow_simultaneous_long_short", False
         )
-        
+
         # Calculate new position margin
         # NOTE: new_position_usd should already be the NOTIONAL value
         # We need to get leverage for this asset to calculate margin
-        
+
         # Get leverage from config (or default to 1)
         if asset:
             asset_cfg = self.config.get("assets", {}).get(asset, {})
             leverage = asset_cfg.get("leverage", 1)
         else:
             leverage = 1
-        
+
         new_position_margin = new_position_usd / leverage
-        
+
         # Check if it's a hedge
         is_hedge = False
         if asset and new_side:
             opposite_side = "short" if new_side == "long" else "long"
             opposite_positions = [
-                p for p in self.positions.values()
+                p
+                for p in self.positions.values()
                 if p.asset == asset and p.side == opposite_side
             ]
             is_hedge = len(opposite_positions) > 0
-        
+
         # Use NET margin for hedged strategies, GROSS for directional
         if allow_hedging and (is_hedge or new_side):
             if new_side == "long":
@@ -1881,7 +2321,7 @@ class PortfolioManager:
                 new_net_margin = abs(long_margin - (short_margin + new_position_margin))
             else:
                 new_net_margin = current_net_margin + new_position_margin
-            
+
             if new_net_margin > max_exposure_usd:
                 logger.warning(
                     f"Portfolio NET margin limit exceeded:\n"
@@ -1893,29 +2333,29 @@ class PortfolioManager:
                     f"  Limit:                ${max_exposure_usd:,.2f}"
                 )
                 return False
-            
+
             logger.info(
                 f"[EXPOSURE] NET MARGIN: ${new_net_margin:,.2f} / ${max_exposure_usd:,.2f} "
                 f"({new_net_margin/max_exposure_usd*100:.1f}%)"
                 f"{' [HEDGE]' if is_hedge else ''}"
             )
-        
+
         else:
             # Use GROSS margin for directional strategies
             new_gross_margin = current_gross_margin + new_position_margin
-            
+
             if new_gross_margin > max_exposure_usd:
                 logger.warning(
                     f"Portfolio GROSS margin limit: "
                     f"${new_gross_margin:,.2f} > ${max_exposure_usd:,.2f}"
                 )
                 return False
-            
+
             logger.info(
                 f"[EXPOSURE] GROSS MARGIN: ${new_gross_margin:,.2f} / ${max_exposure_usd:,.2f} "
                 f"({new_gross_margin/max_exposure_usd*100:.1f}%)"
             )
-        
+
         # Check drawdown limit (unchanged)
         drawdown = (
             (self.peak_equity - self.equity) / self.peak_equity
@@ -1923,11 +2363,11 @@ class PortfolioManager:
             else 0
         )
         max_drawdown = self.portfolio_config["max_drawdown"]
-        
+
         if drawdown >= max_drawdown:
             logger.warning(f"Max drawdown: {drawdown:.2%} >= {max_drawdown:.2%}")
             return False
-        
+
         return True
 
     def get_asset_positions(self, asset: str, side: str = None) -> List[Position]:
@@ -1966,24 +2406,24 @@ class PortfolioManager:
     # Used by get_usd_directional_multiplier() to detect macro-exposure
     # clustering when multiple positions all express the same USD view.
     _USD_DIRECTION: dict = {
-        ("EURUSD",  "long"):  "usd_short",
-        ("EURUSD",  "short"): "usd_long",
-        ("GBPUSD",  "long"):  "usd_short",
-        ("GBPUSD",  "short"): "usd_long",
-        ("USDJPY",  "long"):  "usd_long",
-        ("USDJPY",  "short"): "usd_short",
-        ("EURJPY",  "long"):  "neutral",
-        ("EURJPY",  "short"): "neutral",
-        ("GBPAUD",  "long"):  "neutral",
-        ("GBPAUD",  "short"): "neutral",
-        ("GOLD",    "long"):  "usd_short",
-        ("GOLD",    "short"): "usd_long",
-        ("USOIL",   "long"):  "usd_short",
-        ("USOIL",   "short"): "usd_long",
-        ("USTEC",   "long"):  "neutral",
-        ("USTEC",   "short"): "neutral",
-        ("BTC",     "long"):  "neutral",
-        ("BTC",     "short"): "neutral",
+        ("EURUSD", "long"): "usd_short",
+        ("EURUSD", "short"): "usd_long",
+        ("GBPUSD", "long"): "usd_short",
+        ("GBPUSD", "short"): "usd_long",
+        ("USDJPY", "long"): "usd_long",
+        ("USDJPY", "short"): "usd_short",
+        ("EURJPY", "long"): "neutral",
+        ("EURJPY", "short"): "neutral",
+        ("GBPAUD", "long"): "neutral",
+        ("GBPAUD", "short"): "neutral",
+        ("GOLD", "long"): "usd_short",
+        ("GOLD", "short"): "usd_long",
+        ("USOIL", "long"): "usd_short",
+        ("USOIL", "short"): "usd_long",
+        ("USTEC", "long"): "neutral",
+        ("USTEC", "short"): "neutral",
+        ("BTC", "long"): "neutral",
+        ("BTC", "short"): "neutral",
     }
 
     def get_usd_directional_multiplier(self, asset: str, new_side: str) -> float:
@@ -1999,7 +2439,9 @@ class PortfolioManager:
           1 same-direction position already open  → 0.80  (2nd in cluster)
           2+ same-direction positions already open → 0.60  (3rd+ in cluster)
         """
-        new_direction = self._USD_DIRECTION.get((asset.upper(), new_side.lower()), "neutral")
+        new_direction = self._USD_DIRECTION.get(
+            (asset.upper(), new_side.lower()), "neutral"
+        )
         if new_direction == "neutral":
             return 1.0  # No USD clustering concern for cross/index/crypto
 
@@ -2066,19 +2508,19 @@ class PortfolioManager:
     def _get_asset_bucket(self, asset: str) -> Optional[str]:
         """Identify which exclusion bucket an asset belongs to"""
         asset_upper = asset.upper()
-        
+
         # BTC is explicitly excluded from bucket logic
         if "BTC" in asset_upper:
             return None
-            
+
         # Bucket A: Gold and NAS100
         if any(x in asset_upper for x in ["GOLD", "XAUUSD", "USTEC", "NAS100"]):
             return "A"
-            
+
         # Bucket B: EURJPY and EURUSD
         if any(x in asset_upper for x in ["EURJPY", "EURUSD"]):
             return "B"
-            
+
         return None
 
     def can_open_position(self, asset: str, side: str) -> Tuple[bool, str]:
@@ -2087,8 +2529,17 @@ class PortfolioManager:
         # Check current open positions for this asset against the cap.
         current_total = self.get_asset_position_count(asset)
 
+        _max_total = self.portfolio_config.get("max_total_open_positions", 10)
+        if len(self.positions) >= _max_total:
+            return (
+                False,
+                f"Portfolio-wide position cap reached ({len(self.positions)}/{_max_total})",
+            )
+
         if current_total >= self.max_positions_per_asset:
-            logger.info(f"[PORTFOLIO] Max positions reached for {asset}: {current_total}")
+            logger.info(
+                f"[PORTFOLIO] Max positions reached for {asset}: {current_total}"
+            )
             return False, f"Max positions reached for {asset}"
 
         current_count = self.get_asset_position_count(asset, side)
@@ -2135,8 +2586,8 @@ class PortfolioManager:
         margin_type: str = "CROSSED",
         is_futures: bool = True,
         disable_partials: bool = False,
-        min_lot: Optional[float] = None,      # ✨ NEW: Exness compatibility
-        lot_precision: Optional[int] = None   # ✨ NEW: Exness compatibility
+        min_lot: Optional[float] = None,  # ✨ NEW: Exness compatibility
+        lot_precision: Optional[int] = None,  # ✨ NEW: Exness compatibility
     ) -> bool:
         """
         Add a new position with hybrid aware VTM support
@@ -2159,13 +2610,21 @@ class PortfolioManager:
                 return False
 
         # ✅ NEW: Check if this is an import from sync
-        is_sync_import = signal_details and signal_details.get("source") == "sync_import"
+        is_sync_import = (
+            signal_details and signal_details.get("source") == "sync_import"
+        )
         # ✅ NEW: Check if this is a Small Account Protocol trade
-        is_small_account_protocol_trade = signal_details and signal_details.get("small_account_protocol_active", False)
+        is_small_account_protocol_trade = signal_details and signal_details.get(
+            "small_account_protocol_active", False
+        )
 
         # 2. Check portfolio exposure limits (SKIP IF IMPORTING OR SMALL ACCOUNT PROTOCOL TRADE)
-        if not is_sync_import and not is_small_account_protocol_trade and not self.check_portfolio_limits(
-            new_position_usd=position_size_usd, new_side=side, asset=asset
+        if (
+            not is_sync_import
+            and not is_small_account_protocol_trade
+            and not self.check_portfolio_limits(
+                new_position_usd=position_size_usd, new_side=side, asset=asset
+            )
         ):
             logger.warning(f"Portfolio limits exceeded for {asset} {side.upper()}")
             return False
@@ -2203,7 +2662,11 @@ class PortfolioManager:
         # ✅ VTM is initialized INSIDE Position.__init__() - don't do it here!
         # ============================================================================
         risk_config = self.config.get("assets", {}).get(asset, {}).get("risk", {})
-        
+        # Inject top-level phase_config so VTM gates (per_tick_livermore_enabled,
+        # structural_stops_enabled) can read it from self.risk_config.
+        risk_config = dict(risk_config)
+        risk_config["phase_config"] = self.config.get("phase_config", {})
+
         position = Position(
             asset=asset,
             symbol=symbol,
@@ -2227,7 +2690,7 @@ class PortfolioManager:
             is_futures=is_futures,
             disable_partials=disable_partials,
             min_lot=min_lot,
-            lot_precision=lot_precision
+            lot_precision=lot_precision,
         )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
@@ -2239,7 +2702,9 @@ class PortfolioManager:
                 # can be true almost immediately, causing a cascade of new positions.
                 if signal_details and signal_details.get("is_pyramid_scale_in"):
                     position.trade_manager.has_pyramided = True
-                    logger.info(f"[VTM] Pyramid scale-in — has_pyramided locked True for {asset}")
+                    logger.info(
+                        f"[VTM] Pyramid scale-in — has_pyramided locked True for {asset}"
+                    )
             else:
                 logger.warning(f"[VTM] Failed to initialize for {asset}")
 
@@ -2248,14 +2713,58 @@ class PortfolioManager:
         # ============================================================================
         self.positions[position.position_id] = position
 
+        # Item 2.14: VTM flags a just-opened position for emergency close when
+        # it has no structural stop reference AND wasn't strong enough to
+        # justify a plain distance-based stop. VTM can't prevent the entry
+        # itself (the order already filled) — this is the earliest point after
+        # registration where an actual close can be issued.
+        if position.trade_manager and getattr(
+            position.trade_manager, "emergency_close_requested", False
+        ):
+            logger.warning(
+                f"[VTM] {asset}: emergency-close flagged at open (no structural "
+                f"anchor, weak score) — closing immediately."
+            )
+            self.close_position(
+                position_id=position.position_id,
+                reason="no_structural_anchor_weak_signal",
+            )
+
         # 6. Database Logging
         if self.db_manager:
             try:
                 # ✅ TASK 25: Extract granular regime fields for trade record
-                regime = signal_details.get("regime", "UNKNOWN") if signal_details else "UNKNOWN"
-                quality = signal_details.get("signal_quality", 0.0) if signal_details else 0.0
-                confidence = signal_details.get("mode_confidence", 0.0) if signal_details else 0.0
+                regime = (
+                    signal_details.get("regime", "UNKNOWN")
+                    if signal_details
+                    else "UNKNOWN"
+                )
+                quality = (
+                    signal_details.get("signal_quality", 0.0) if signal_details else 0.0
+                )
+                confidence = (
+                    signal_details.get("mode_confidence", 0.0)
+                    if signal_details
+                    else 0.0
+                )
 
+                # L1: surface Livermore state as top-level DB columns (was
+                # only ever reachable inside unindexed metadata JSON before).
+                _cs_for_db = (signal_details or {}).get("composite_state", {}) or {}
+                # Code Fix 1 (C1): extract confluence telemetry snapshot for entry metadata.
+                # Reads from "composite_state" key (the dict main.py stores via _cs.to_dict()).
+                # "_composite_state_obj" was never set anywhere — correct key is "composite_state".
+                # Uses dict access, not getattr, because the stored value is a dict not an object.
+                _cs_obj = (signal_details or {}).get("composite_state")
+                _confluence_snapshot = None
+                if _cs_obj is not None:
+                    if isinstance(_cs_obj, dict):
+                        _confluence_snapshot = _cs_obj
+                    elif hasattr(_cs_obj, "to_dict"):
+                        try:
+                            _confluence_snapshot = _cs_obj.to_dict()
+                        except Exception:
+                            pass
                 trade_id, is_new = self.db_manager.insert_trade_entry(
                     asset=asset,
                     symbol=symbol,
@@ -2267,13 +2776,21 @@ class PortfolioManager:
                     take_profit=position.take_profit,
                     position_id=position.position_id,
                     exchange=self.config["assets"][asset].get("exchange", "binance"),
-                    strategy=signal_details.get("trade_type", "TREND") if signal_details else "TREND",
+                    strategy=(
+                        signal_details.get("trade_type", "TREND")
+                        if signal_details
+                        else "TREND"
+                    ),
                     regime=regime,
                     signal_quality=quality,
                     confidence_score=confidence,
                     mt5_ticket=mt5_ticket,
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
+                    livermore_state_4h=_cs_for_db.get("livermore_state_4h"),
+                    livermore_state_1h=_cs_for_db.get("livermore_state_1h"),
+                    livermore_state_age_4h=_cs_for_db.get("livermore_state_age_4h"),
+                    livermore_state_age_1h=_cs_for_db.get("livermore_state_age_1h"),
                     metadata={
                         "trailing_stop_pct": trailing_stop_pct,
                         "entry_time": position.entry_time.isoformat(),
@@ -2284,11 +2801,29 @@ class PortfolioManager:
                             if signal_details
                             else "manual"
                         ),
+                        "entry_type": _cs_for_db.get("entry_type"),
+                        "livermore_telemetry": (signal_details or {}).get(
+                            "livermore_telemetry"
+                        ),
+                        "confluence_telemetry": _confluence_snapshot,
                     },
                 )
 
                 position.db_trade_id = trade_id
                 position.db_manager = self.db_manager
+                # REMOVED (2026-06-23): used to also do
+                #   signal_details["db_manager_ref"] = self.db_manager
+                # but VeteranTradeManager.__init__ (veteran_trade_manager.py ~L481)
+                # reads that key BEFORE this DB-logging block ever runs, so it was
+                # always None there -- confirmed dead/inert, matching the VTM-side
+                # comment ("no call site does that yet"). Meanwhile the live,
+                # unpicklable supabase.Client it stored here (RLocks, SSL sockets,
+                # httpx connection pools) was exactly what tripped
+                # "cannot pickle '_thread.RLock' object" in save_portfolio_state()
+                # on every save cycle for any open position, every ~20-30s, caught
+                # only by the generic _sanitize_for_pickle() fallback. position.db_manager
+                # (line above) already covers the one legitimate use case and is
+                # already excluded from pickling via Position.__getstate__.
 
                 if is_new:
                     logger.debug(f"[DB] New trade created: {trade_id}")
@@ -2298,17 +2833,24 @@ class PortfolioManager:
 
         # 7. Final Logging
         current_count = self.get_asset_position_count(asset, side)
-        
+
         # Standardized Log (ENTRY)
-        log_trade_event("ENTRY", {
-            "symbol": symbol,
-            "asset": asset,
-            "side": side,
-            "price": entry_price,
-            "quantity": quantity,
-            "trade_type": signal_details.get("trade_type", "TREND") if signal_details else "TREND",
-            "position_id": position.position_id
-        })
+        log_trade_event(
+            "ENTRY",
+            {
+                "symbol": symbol,
+                "asset": asset,
+                "side": side,
+                "price": entry_price,
+                "quantity": quantity,
+                "trade_type": (
+                    signal_details.get("trade_type", "TREND")
+                    if signal_details
+                    else "TREND"
+                ),
+                "position_id": position.position_id,
+            },
+        )
 
         logger.info(
             f"✓ Position #{current_count} opened: {asset} {side.upper()} "
@@ -2331,7 +2873,7 @@ class PortfolioManager:
                 'GOLD': {'high': 2050, 'low': 2045, 'close': 2048}
             })
         """
-        positions_to_close = []   # (asset, exit_price, reason, size)
+        positions_to_close = []  # (asset, exit_price, reason, size)
 
         for asset, position in list(self.positions.items()):
             if asset not in ohlc_data_dict:
@@ -2348,18 +2890,23 @@ class PortfolioManager:
                 # If VTM signals exit or action, handle it
                 if exit_signal:
                     # ✅ T29: Handle Pyramid routing
-                    if isinstance(exit_signal, dict) and exit_signal.get('action') == 'pyramid':
-                        logger.info(f"[PYRAMID] 🗼 Triggered for {asset} {position.side}")
+                    if (
+                        isinstance(exit_signal, dict)
+                        and exit_signal.get("action") == "pyramid"
+                    ):
+                        logger.info(
+                            f"[PYRAMID] 🗼 Triggered for {asset} {position.side}"
+                        )
 
-                        entry_price = ohlc['close']
-                        position_size_usd = exit_signal['new_size'] * entry_price
+                        entry_price = ohlc["close"]
+                        position_size_usd = exit_signal["new_size"] * entry_price
 
                         # Inherit critical context from parent position
                         parent_ohlc = {
                             "high": position.trade_manager.high,
                             "low": position.trade_manager.low,
                             "close": position.trade_manager.close,
-                            "volume": position.trade_manager.volume
+                            "volume": position.trade_manager.volume,
                         }
 
                         self.add_position(
@@ -2370,33 +2917,35 @@ class PortfolioManager:
                             position_size_usd=position_size_usd,
                             ohlc_data=parent_ohlc,
                             signal_details={
-                                **(getattr(position, 'signal_details', {}) or {}),
+                                **(getattr(position, "signal_details", {}) or {}),
                                 "source": "pyramid_trigger",
                                 "parent_id": position.position_id,
-                                "trade_type": "TREND" # Pyramiding is a trend behavior
+                                "trade_type": "TREND",  # Pyramiding is a trend behavior
                             },
-                            leverage=getattr(position, 'leverage', 1),
-                            margin_type=getattr(position, 'margin_type', "CROSSED"),
-                            is_futures=getattr(position, 'is_futures', True)
+                            leverage=getattr(position, "leverage", 1),
+                            margin_type=getattr(position, "margin_type", "CROSSED"),
+                            is_futures=getattr(position, "is_futures", True),
                         )
-                        continue # Do NOT close the current position
+                        continue  # Do NOT close the current position
 
                     # ✅ Partial vs full exit routing
                     if isinstance(exit_signal, dict):
                         reason_str = exit_signal.get("reason", "unknown")
-                        exit_price  = exit_signal.get("price", ohlc["close"])
-                        exit_size   = exit_signal.get("size", 1.0)
+                        exit_price = exit_signal.get("price", ohlc["close"])
+                        exit_size = exit_signal.get("size", 1.0)
                     else:
                         # Legacy string signal (fallback) — treat as full exit
-                        reason_str  = str(exit_signal)
-                        exit_price  = ohlc["close"]
-                        exit_size   = 1.0
+                        reason_str = str(exit_signal)
+                        exit_price = ohlc["close"]
+                        exit_size = 1.0
 
                     logger.info(
                         f"[VTM] {asset} triggered {reason_str.upper()} "
                         f"@ ${exit_price:,.2f} (size={exit_size:.0%})"
                     )
-                    positions_to_close.append((asset, exit_price, reason_str, exit_size))
+                    positions_to_close.append(
+                        (asset, exit_price, reason_str, exit_size)
+                    )
 
             except Exception as e:
                 logger.error(f"[VTM] Error updating {asset}: {e}")
@@ -2406,8 +2955,10 @@ class PortfolioManager:
             if exit_size < 0.999:
                 # Partial exit — close fraction, keep position alive
                 self.partial_close_position(
-                    asset=asset, partial_fraction=exit_size,
-                    exit_price=exit_price, reason=f"VTM_{reason}"
+                    asset=asset,
+                    partial_fraction=exit_size,
+                    exit_price=exit_price,
+                    reason=f"VTM_{reason}",
                 )
             else:
                 self.close_position(
@@ -2437,13 +2988,13 @@ class PortfolioManager:
         # Live mode - fetch from specific exchange
         asset_cfg = self.config.get("assets", {}).get(asset, {})
         exchange = asset_cfg.get("exchange", "binance").lower()
-        
+
         if exchange == "mt5":
             balance = self._fetch_mt5_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (MT5)")
                 return balance
-        else: # binance
+        else:  # binance
             balance = self._fetch_binance_balance()
             if balance:
                 logger.debug(f"[ASSET BALANCE] {asset}: ${balance:,.2f} (Binance)")
@@ -2463,17 +3014,23 @@ class PortfolioManager:
         🚨 EMERGENCY: Close ALL open positions immediately.
         Used when system health is compromised.
         """
-        logger.critical("[EMERGENCY] Triggering global position exit due to system instability!")
-        
+        logger.critical(
+            "[EMERGENCY] Triggering global position exit due to system instability!"
+        )
+
         # We'll use the existing close_all_positions logic but with an emergency reason
         self.close_all_positions(reason="emergency_system_failure")
-        
+
         if self.telegram_bot:
             asyncio.create_task(
-                self.telegram_bot.notify_error("🚨 *EMERGENCY HALT*\nAll positions have been force-closed due to system instability!")
+                self.telegram_bot.notify_error(
+                    "🚨 *EMERGENCY HALT*\nAll positions have been force-closed due to system instability!"
+                )
             )
 
-    def close_all_positions(self, prices: Dict[str, float] = None, reason: str = "manual_close_all"):
+    def close_all_positions(
+        self, prices: Dict[str, float] = None, reason: str = "manual_close_all"
+    ):
         """
         ✅ FIXED: Close all open positions
         Fixes bug where exit_price was being interpreted as position_id
@@ -2543,6 +3100,7 @@ class PortfolioManager:
                 if hasattr(self, "mt5_handler") and pos.mt5_ticket:
                     try:
                         import MetaTrader5 as mt5
+
                         tick = mt5.symbol_info_tick(pos.symbol)
                         if tick:
                             current_exit_price = (tick.ask + tick.bid) / 2
@@ -2575,6 +3133,7 @@ class PortfolioManager:
         if exchange == "mt5" and symbol and self.mt5_handler and not self.is_paper_mode:
             try:
                 import MetaTrader5 as _mt5
+
                 live_positions = _mt5.positions_get(symbol=symbol)
                 if live_positions:
                     logger.info(
@@ -2583,8 +3142,14 @@ class PortfolioManager:
                     )
                     for mt5_pos in live_positions:
                         ticket = mt5_pos.ticket
-                        side = "long" if mt5_pos.type == _mt5.POSITION_TYPE_BUY else "short"
-                        close_result = self.mt5_handler._close_mt5_order(ticket, asset, side)
+                        side = (
+                            "long"
+                            if mt5_pos.type == _mt5.POSITION_TYPE_BUY
+                            else "short"
+                        )
+                        close_result = self.mt5_handler._close_mt5_order(
+                            ticket, asset, side
+                        )
                         if close_result:
                             pnl = float(getattr(mt5_pos, "profit", 0.0) or 0.0)
                             fill_price = (
@@ -2592,22 +3157,24 @@ class PortfolioManager:
                                 if isinstance(close_result, dict)
                                 else mt5_pos.price_current
                             )
-                            results.append({
-                                "asset": asset,
-                                "side": side,
-                                "entry_price": mt5_pos.price_open,
-                                "exit_price": fill_price or mt5_pos.price_current,
-                                "quantity": mt5_pos.volume,
-                                "pnl": (
-                                    close_result.get("profit", pnl)
-                                    if isinstance(close_result, dict)
-                                    else pnl
-                                ),
-                                "pnl_pct": 0.0,
-                                "mt5_ticket": ticket,
-                                "reason": reason,
-                                "orphan_close": True,
-                            })
+                            results.append(
+                                {
+                                    "asset": asset,
+                                    "side": side,
+                                    "entry_price": mt5_pos.price_open,
+                                    "exit_price": fill_price or mt5_pos.price_current,
+                                    "quantity": mt5_pos.volume,
+                                    "pnl": (
+                                        close_result.get("profit", pnl)
+                                        if isinstance(close_result, dict)
+                                        else pnl
+                                    ),
+                                    "pnl_pct": 0.0,
+                                    "mt5_ticket": ticket,
+                                    "reason": reason,
+                                    "orphan_close": True,
+                                }
+                            )
                             logger.info(
                                 f"[CLOSE-ALL] ✅ Orphan MT5 ticket #{ticket} closed "
                                 f"(side={side}, pnl=${pnl:,.2f})"
@@ -2631,11 +3198,15 @@ class PortfolioManager:
 
         # Nothing tracked, exchange scan not applicable or failed
         if not positions_to_close:
-            logger.warning(f"[CLOSE-ALL] No tracked positions for {asset}. "
-                           f"Position may already be closed.")
+            logger.warning(
+                f"[CLOSE-ALL] No tracked positions for {asset}. "
+                f"Position may already be closed."
+            )
             return [{"already_closed": True, "asset": asset}]
 
-        logger.warning(f"[CLOSE-ALL] {len(positions_to_close)} tracked but 0 successfully closed for {asset}")
+        logger.warning(
+            f"[CLOSE-ALL] {len(positions_to_close)} tracked but 0 successfully closed for {asset}"
+        )
         return []
 
     def partial_close_position(
@@ -2660,20 +3231,31 @@ class PortfolioManager:
         position = positions[0]
 
         if partial_fraction <= 0 or partial_fraction >= 1.0:
-            logger.warning(f"[PARTIAL] Invalid fraction {partial_fraction:.2%} for {asset} — doing full close")
-            return self.close_position(asset=asset, exit_price=exit_price, reason=reason)
+            logger.warning(
+                f"[PARTIAL] Invalid fraction {partial_fraction:.2%} for {asset} — doing full close"
+            )
+            return self.close_position(
+                asset=asset, exit_price=exit_price, reason=reason
+            )
 
-        partial_qty  = position.quantity * partial_fraction
-        partial_pnl  = (exit_price - position.entry_price) * partial_qty if position.side == "long" \
-                       else (position.entry_price - exit_price) * partial_qty
-        partial_pnl_pct = partial_pnl / (position.entry_price * position.quantity) if position.entry_price * position.quantity > 0 else 0
+        partial_qty = position.quantity * partial_fraction
+        partial_pnl = (
+            (exit_price - position.entry_price) * partial_qty
+            if position.side == "long"
+            else (position.entry_price - exit_price) * partial_qty
+        )
+        partial_pnl_pct = (
+            partial_pnl / (position.entry_price * position.quantity)
+            if position.entry_price * position.quantity > 0
+            else 0
+        )
 
         # ── Send partial close to exchange ──────────────────────────────────
         exchange_ok = False
         if not self.is_paper_mode:
-            asset_cfg  = self.config["assets"].get(position.asset, {})
-            exchange   = asset_cfg.get("exchange", "binance")
-            handler    = self.execution_handlers.get(exchange)
+            asset_cfg = self.config["assets"].get(position.asset, {})
+            exchange = asset_cfg.get("exchange", "binance")
+            handler = self.execution_handlers.get(exchange)
 
             if handler and hasattr(handler, "_partial_close_position"):
                 try:
@@ -2685,15 +3267,23 @@ class PortfolioManager:
                         reason=reason,
                     )
                 except Exception as e:
-                    logger.error(f"[PARTIAL] Handler error for {asset}: {e}", exc_info=True)
+                    logger.error(
+                        f"[PARTIAL] Handler error for {asset}: {e}", exc_info=True
+                    )
             else:
-                logger.warning(f"[PARTIAL] Handler for {exchange} has no _partial_close_position — falling back to full close")
-                return self.close_position(asset=asset, exit_price=exit_price, reason=reason)
+                logger.warning(
+                    f"[PARTIAL] Handler for {exchange} has no _partial_close_position — falling back to full close"
+                )
+                return self.close_position(
+                    asset=asset, exit_price=exit_price, reason=reason
+                )
         else:
             exchange_ok = True  # Paper mode always succeeds
 
         if not exchange_ok:
-            logger.error(f"[PARTIAL] Exchange rejected partial close for {asset} — position unchanged")
+            logger.error(
+                f"[PARTIAL] Exchange rejected partial close for {asset} — position unchanged"
+            )
             return None
 
         # ── Update portfolio position ────────────────────────��───────────────
@@ -2712,11 +3302,42 @@ class PortfolioManager:
             self.loss_streak = 0
             self._loss_streak_alerted = False
 
-        trade_type = getattr(position, 'trade_type', 'TREND')
+        trade_type = getattr(position, "trade_type", "TREND")
         self.performance_tracker.record_trade(trade_type, partial_pnl)
 
+        # ── EDGE z-score tracking ────────────────────────────────────────────
+        try:
+            if hasattr(self, "_trade_close_callback") and self._trade_close_callback:
+                _initial_risk = getattr(position, "initial_risk_usd", None)
+                if _initial_risk and _initial_risk > 0:
+                    _pnl_r = pnl / _initial_risk
+                else:
+                    _sl = getattr(position, "initial_stop_loss", None)
+                    if _sl and position.entry_price and position.quantity:
+                        _sl_dist = abs(position.entry_price - _sl)
+                        _risk_est = _sl_dist * position.quantity
+                        _pnl_r = pnl / _risk_est if _risk_est > 0 else None
+                    else:
+                        _pnl_r = None
+                if _pnl_r is not None:
+                    _side_int = 1 if getattr(position, "side", "long") == "long" else -1
+                    self._trade_close_callback(
+                        component="LIVERMORE_SIGNAL",
+                        signal=_side_int,
+                        entry_time=position.entry_time,
+                        pnl_r=_pnl_r,
+                    )
+        except Exception as _sv_cb_err:
+            logger.debug(
+                "[VALIDATOR] EDGE callback error (non-blocking): %s", _sv_cb_err
+            )
+
         # ── DB log ──────────────────────────────────────────���────────────────
-        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+        if (
+            self.db_manager
+            and hasattr(position, "db_trade_id")
+            and position.db_trade_id
+        ):
             try:
                 self.db_manager.update_trade_vtm_event(
                     trade_id=position.db_trade_id,
@@ -2732,23 +3353,27 @@ class PortfolioManager:
             except Exception as e:
                 logger.warning(f"[PARTIAL] DB log failed for {asset}: {e}")
 
-        log_trade_event("TP_HIT", {
-            "symbol": position.symbol,
-            "asset": position.asset,
-            "side": position.side,
-            "price": exit_price,
-            "quantity": partial_qty,
-            "trade_type": trade_type,
-            "reason": reason,
-            "pnl": partial_pnl,
-            "pnl_pct": partial_pnl_pct,
-            "partial_fraction": partial_fraction,
-            "position_id": position.position_id,
-        })
+        log_trade_event(
+            "TP_HIT",
+            {
+                "symbol": position.symbol,
+                "asset": position.asset,
+                "side": position.side,
+                "price": exit_price,
+                "quantity": partial_qty,
+                "trade_type": trade_type,
+                "reason": reason,
+                "pnl": partial_pnl,
+                "pnl_pct": partial_pnl_pct,
+                "partial_fraction": partial_fraction,
+                "position_id": position.position_id,
+            },
+        )
 
         if self.telegram_bot and self.telegram_bot._current_loop:
             try:
                 import asyncio
+
                 asyncio.run_coroutine_threadsafe(
                     self.telegram_bot.notify_trade_closed(
                         asset=asset,
@@ -2759,7 +3384,7 @@ class PortfolioManager:
                         partial=True,
                         partial_pct=partial_fraction * 100,
                     ),
-                    self.telegram_bot._current_loop
+                    self.telegram_bot._current_loop,
                 )
             except Exception:
                 pass
@@ -2819,19 +3444,31 @@ class PortfolioManager:
         now = datetime.now()
         if position.closing:
             # If it's been "closing" for more than 60 seconds, assume it's stuck and allow retry
-            if position.last_close_attempt and (now - position.last_close_attempt).total_seconds() > 60:
-                logger.warning(f"Position {position_id} stuck in 'closing' for >60s. Overriding to allow retry.")
+            if (
+                position.last_close_attempt
+                and (now - position.last_close_attempt).total_seconds() > 60
+            ):
+                logger.warning(
+                    f"Position {position_id} stuck in 'closing' for >60s. Overriding to allow retry."
+                )
             else:
-                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
+                logger.info(
+                    f"Position {position_id} is already in the process of being closed. Skipping."
+                )
                 return None
-        
+
         if position.last_close_attempt:
             # Add a 30-second cooldown to prevent hammer on failing close attempts
             # (Unless we just overrode the "stuck" status above)
-            if not position.closing and (now - position.last_close_attempt).total_seconds() < 30:
-                logger.debug(f"Position {position_id} close attempt on cooldown. Skipping.")
+            if (
+                not position.closing
+                and (now - position.last_close_attempt).total_seconds() < 30
+            ):
+                logger.debug(
+                    f"Position {position_id} close attempt on cooldown. Skipping."
+                )
                 return None
-            
+
         # Mark the position as closing and record attempt time
         position.closing = True
         position.last_close_attempt = now
@@ -2840,10 +3477,12 @@ class PortfolioManager:
         # ✅ STEP 1: CLOSE ON EXCHANGE FIRST (MT5 or Binance)
         # ================================================================
         exchange_closed = False
-        close_error_msg = "Unknown handler error" # Default error message
+        close_error_msg = "Unknown handler error"  # Default error message
         # Start with any broker data pre-fetched by the caller (e.g. MT5 sync
         # detecting an externally-closed position via _fetch_broker_close_data).
-        broker_close_data = preloaded_broker_data  # may be None; overridden below if not pre-closed
+        broker_close_data = (
+            preloaded_broker_data  # may be None; overridden below if not pre-closed
+        )
 
         if already_closed_on_exchange:
             # Position was already closed directly on the exchange (e.g. manually
@@ -2865,7 +3504,9 @@ class PortfolioManager:
                 close_error_msg = f"{exchange.upper()} handler not available"
             else:
                 try:
-                    logger.info(f"[{exchange.upper()}] Attempting to close position {position.position_id}...")
+                    logger.info(
+                        f"[{exchange.upper()}] Attempting to close position {position.position_id}..."
+                    )
                     handler_result = handler._close_position(
                         position=position,
                         current_price=exit_price,
@@ -2884,7 +3525,10 @@ class PortfolioManager:
 
                 except Exception as e:
                     close_error_msg = f"Handler exception: {str(e)}"
-                    logger.error(f"[{exchange.upper()}] Error closing position: {e}", exc_info=True)
+                    logger.error(
+                        f"[{exchange.upper()}] Error closing position: {e}",
+                        exc_info=True,
+                    )
         else:
             # Paper mode always succeeds
             exchange_closed = True
@@ -2924,7 +3568,11 @@ class PortfolioManager:
 
         # If broker reported an actual fill price, use it as the canonical exit_price.
         if broker_fill_price is not None and broker_fill_price > 0:
-            if exit_price and abs(broker_fill_price - exit_price) / max(abs(exit_price), 1e-9) > 0.0005:
+            if (
+                exit_price
+                and abs(broker_fill_price - exit_price) / max(abs(exit_price), 1e-9)
+                > 0.0005
+            ):
                 logger.warning(
                     f"[CLOSE] Stale-cache exit drift detected for {position.asset}: "
                     f"cached ${exit_price:,.5f} vs broker fill ${broker_fill_price:,.5f}. "
@@ -2935,7 +3583,11 @@ class PortfolioManager:
         if broker_profit is not None:
             pnl = float(broker_profit) + float(broker_swap) + float(broker_commission)
             # Derive % from broker profit against the entry notional we tracked
-            entry_notional = position.entry_price * position.quantity if position.entry_price else 0.0
+            entry_notional = (
+                position.entry_price * position.quantity
+                if position.entry_price
+                else 0.0
+            )
             pnl_pct = (pnl / entry_notional) if entry_notional > 0 else 0.0
             logger.info(
                 f"[CLOSE] Using BROKER P&L for {position.asset}: "
@@ -2953,7 +3605,7 @@ class PortfolioManager:
         self.realized_pnl_today += pnl
 
         # ✨ NEW: Record strategy performance
-        trade_type = getattr(position, 'trade_type', 'TREND')
+        trade_type = getattr(position, "trade_type", "TREND")
         self.performance_tracker.record_trade(trade_type, pnl)
 
         # ✨ NEW: Track consecutive losses
@@ -2991,7 +3643,8 @@ class PortfolioManager:
             "pnl_pct": pnl_pct,
             "entry_time": position.entry_time,
             "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
+            "holding_time": (datetime.now() - position.entry_time).total_seconds()
+            / 3600,
             "reason": reason,
             "mt5_ticket": position.mt5_ticket,
             "binance_order_id": position.binance_order_id,
@@ -3001,9 +3654,71 @@ class PortfolioManager:
         # ================================================================
         # ✅ STEP 5: LOG TO DATABASE
         # ================================================================
-        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
+        if (
+            self.db_manager
+            and hasattr(position, "db_trade_id")
+            and position.db_trade_id
+        ):
             try:
-                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
+                holding_time = (
+                    datetime.now() - position.entry_time
+                ).total_seconds() / 3600
+
+                # MFE/MAE: peak favourable/adverse excursion in R-multiples,
+                # read off the VTM's own running price extremes (same source
+                # VTM._log_mfe_mae uses for its CSV row) so "highest profit
+                # realised even on a losing trade" surfaces on the dashboard
+                # without touching exit/trading logic.
+                _exit_meta = {
+                    "exit_time": datetime.now().isoformat(),
+                    "exchange_closed": exchange_closed,
+                }
+                _vtm = getattr(position, "trade_manager", None)
+                if (
+                    _vtm is not None
+                    and getattr(_vtm, "highest_price_reached", None) is not None
+                ):
+                    try:
+                        _risk = abs(_vtm.entry_price - _vtm.initial_stop_loss) or 1e-9
+                        if _vtm.side == "long":
+                            _mfe_r = (
+                                _vtm.highest_price_reached - _vtm.entry_price
+                            ) / _risk
+                            _mae_r = (
+                                _vtm.entry_price - _vtm.lowest_price_reached
+                            ) / _risk
+                        else:
+                            _mfe_r = (
+                                _vtm.entry_price - _vtm.lowest_price_reached
+                            ) / _risk
+                            _mae_r = (
+                                _vtm.highest_price_reached - _vtm.entry_price
+                            ) / _risk
+                        _exit_meta["mfe_r"] = round(_mfe_r, 3)
+                        _exit_meta["mae_r"] = round(_mae_r, 3)
+                    except Exception as _mfe_e:
+                        logger.debug(f"[DB] MFE/MAE metadata calc skipped: {_mfe_e}")
+                    # entry_type: lets get_historical_mfe_r (and any future
+                    # analysis) segment realized MFE-R by VTM entry classification
+                    # (MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY / etc.) instead
+                    # of pooling every entry style into one asset-wide median.
+                    _exit_meta["entry_type"] = getattr(_vtm, "vtm_entry_type", None)
+                    # Code Fix 2 (O1): VTM O1b telemetry — which safety layers fired.
+                    # Attribute names corrected to match what veteran_trade_manager.py
+                    # actually sets: _rejection_trail_fired, _parabolic_trail_locked,
+                    # _absorption_warning_fired.
+                    _exit_meta["o1_vtm_telemetry"] = {
+                        "rejection_fired": getattr(
+                            _vtm, "_rejection_trail_fired", False
+                        ),
+                        "parabolic_locked": getattr(
+                            _vtm, "_parabolic_trail_locked", False
+                        ),
+                        "absorption_fired": getattr(
+                            _vtm, "_absorption_warning_fired", False
+                        ),
+                    }
+
                 self.db_manager.update_trade_exit(
                     trade_id=position.db_trade_id,
                     exit_price=exit_price,
@@ -3012,7 +3727,7 @@ class PortfolioManager:
                     pnl_pct=pnl_pct,
                     holding_time_hours=holding_time,
                     final_quantity=position.quantity,
-                    metadata={"exit_time": datetime.now().isoformat(), "exchange_closed": exchange_closed},
+                    metadata=_exit_meta,
                 )
                 logger.debug(f"[DB] Trade exit logged: {position.db_trade_id}")
             except Exception as e:
@@ -3039,7 +3754,9 @@ class PortfolioManager:
         # Track whether this close was manual (Telegram / force-close) so the
         # cooldown bypass in check_min_time_between_trades() works correctly.
         _reason_str = str(reason).lower()
-        _is_manual = any(k in _reason_str for k in ("manual", "telegram", "force", "user"))
+        _is_manual = any(
+            k in _reason_str for k in ("manual", "telegram", "force", "user")
+        )
         self.last_close_was_manual[position.asset] = _is_manual
 
         remaining_count = self.get_asset_position_count(position.asset, position.side)
@@ -3052,18 +3769,21 @@ class PortfolioManager:
             exit_event_type = "TP_HIT"
 
         # ✅ Standardized Log
-        log_trade_event(exit_event_type, {
-            "symbol": position.symbol,
-            "asset": position.asset,
-            "side": position.side,
-            "price": exit_price,
-            "quantity": position.quantity,
-            "trade_type": getattr(position, 'trade_type', 'UNKNOWN'),
-            "reason": reason,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "position_id": position_id
-        })
+        log_trade_event(
+            exit_event_type,
+            {
+                "symbol": position.symbol,
+                "asset": position.asset,
+                "side": position.side,
+                "price": exit_price,
+                "quantity": position.quantity,
+                "trade_type": getattr(position, "trade_type", "UNKNOWN"),
+                "reason": reason,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "position_id": position_id,
+            },
+        )
 
         logger.info(
             f"✓ Position closed successfully:\n"
@@ -3082,57 +3802,82 @@ class PortfolioManager:
                         asset=trade_result["asset"],
                         side=trade_result["side"],
                         pnl=trade_result["pnl"],
-                        pnl_pct=trade_result["pnl_pct"] * 100, # Convert to percentage points
+                        pnl_pct=trade_result["pnl_pct"]
+                        * 100,  # Convert to percentage points
                         reason=trade_result["reason"],
                     ),
-                    self.telegram_bot._current_loop
+                    self.telegram_bot._current_loop,
                 )
             except Exception as e:
-                logger.error(f"[TELEGRAM] Failed to send close notification from PM: {e}")
+                logger.error(
+                    f"[TELEGRAM] Failed to send close notification from PM: {e}"
+                )
 
         return trade_result
 
-    def reconcile_positions(self, asset: str, broker_positions: List[Dict]):
+    def reconcile_positions(self, asset: str, broker_positions: List[Dict]) -> List:
         """
-        ✅ RECONCILIATION: Ensure local positions match broker reality.
-        Syncs local state if mismatches are detected.
+        S2.1: Detect positions closed on the broker and return them for recording.
+        Returns a list of (position, reason) tuples — does NOT pop the positions.
+        The caller is responsible for calling the appropriate recorder and then
+        close_position(already_closed_on_exchange=True) for each entry.
+        Returns [] when broker_positions is None (caller's broker fetch failed).
         """
+        # None-guard — caller may pass None when broker fetch fails
+        if broker_positions is None:
+            logger.warning(
+                f"[RECONCILE] broker_positions is None for {asset} — skipping reconcile."
+            )
+            return []
+
         local_positions = self.get_asset_positions(asset)
-        
+        to_close = []
+
         # 1. Check for orphaned local positions (exist here but not on broker)
-        # We check by specific exchange ID if available
-        broker_ids = [str(p.get('id')) for p in broker_positions if p.get('id')]
-        
+        broker_ids = [str(p.get("id")) for p in broker_positions if p.get("id")]
+
         for pos in list(local_positions):
-            # A. If we have a specific exchange ID, use it for exact matching
-            local_exchange_id = str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
-            
+            # A. Exact ID match (MT5 ticket or Binance order id)
+            local_exchange_id = (
+                str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
+            )
+
             if local_exchange_id != "None" and broker_ids:
                 if local_exchange_id not in broker_ids:
-                    logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
-                    self.positions.pop(pos.position_id, None)
-                    # Flag as manual so the cooldown bypass does NOT fire on the
-                    # next cycle — the user closed this position outside the bot.
+                    logger.warning(
+                        f"[RECONCILE] Ticket {local_exchange_id} ({pos.position_id}) "
+                        f"missing from broker — queueing for recorder."
+                    )
                     self.last_close_was_manual[pos.asset] = True
+                    to_close.append((pos, "closed_on_exchange"))
+                else:
+                    # ID alive on broker — skip side-check
                     continue
 
-            # B. If no IDs (rare) or for Binance where positions are aggregated by side
-            # Check if at least one broker position exists for this side
-            broker_sides = [p.get('side').lower() for p in broker_positions if p.get('side')]
-            if pos.side.lower() not in broker_sides:
-                logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
-                self.positions.pop(pos.position_id, None)
-                # Flag as manual — broker-side close (SL/TP set in MT5 terminal,
-                # or manual close) must still respect the cooldown window.
-                self.last_close_was_manual[pos.asset] = True
+            else:
+                # B. Side-level check (Binance aggregated / no IDs)
+                broker_sides = [
+                    p.get("side", "").lower() for p in broker_positions if p.get("side")
+                ]
+                if pos.side.lower() not in broker_sides:
+                    logger.warning(
+                        f"[RECONCILE] Side {pos.side.upper()} ({pos.position_id}) "
+                        f"missing from broker — queueing for recorder."
+                    )
+                    self.last_close_was_manual[pos.asset] = True
+                    to_close.append((pos, "closed_on_exchange"))
 
-        # 2. Final check: If broker has 0 positions but we still have local ones, clear them
+        # 2. Broker reports 0 positions — queue everything
         if not broker_positions and local_positions:
-            logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
+            logger.warning(
+                f"[RECONCILE] Broker reports 0 positions for {asset} — queueing all for recorder."
+            )
             for pos in local_positions:
-                self.positions.pop(pos.position_id, None)
-                # All of these were closed outside the bot — treat as manual.
-                self.last_close_was_manual[pos.asset] = True
+                if not any(p is pos for p, _ in to_close):
+                    self.last_close_was_manual[pos.asset] = True
+                    to_close.append((pos, "closed_on_exchange"))
+
+        return to_close
 
     @handle_errors(
         component="portfolio_manager",
@@ -3237,647 +3982,27 @@ class PortfolioManager:
             try:
                 self.refresh_capital(force=True)
             except Exception as _e:
-                logger.warning(f"[SESSION] Could not refresh capital before session start: {_e}")
-        self.session_start_equity = self.equity
-        self.session_start_capital = self.current_capital
-        self.realized_pnl_today = 0.0
-        # Clear any manual /resume override at the start of a new trading day
-        if getattr(self, "_circuit_breaker_override", False):
-            self._circuit_breaker_override = False
-            logger.info("[SESSION] Circuit-breaker manual override cleared for new session.")
-        open_count = len(self.positions)
-        logger.info(
-            f"Trading session started at {self.session_start_time}\n"
-            f"  Session-start equity: ${self.session_start_equity:,.2f}"
-            + (f"  ({open_count} imported position(s) already priced in)" if open_count else "")
-        )
-
-    def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
-        """
-        ✅ FIX: Auto-refresh balances when getting status
-        """
-        # ✅ Refresh if stale (respects time interval)
-        self.refresh_capital(force=False)
-
-        if current_prices is None:
-            current_prices = {
-                pos.asset: pos.entry_price for pos in self.positions.values()
-            }
-
-        total_exposure = 0.0
-        total_unrealized_pnl = 0.0
-        
-        total_notional_value = 0.0
-        total_margin_used = 0.0
-
-        # ✅  Count positions per asset correctly
-        asset_position_counts = {}
-        asset_positions_detail = {}
-
-        # Get all enabled assets from config
-        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
-
-        for asset in enabled_assets:
-            # Get all positions for this asset
-            long_positions = [
-                p
-                for p in self.positions.values()
-                if p.asset == asset and p.side == "long"
-            ]
-            short_positions = [
-                p
-                for p in self.positions.values()
-                if p.asset == asset and p.side == "short"
-            ]
-
-            asset_position_counts[asset] = {
-                "long": len(long_positions),
-                "short": len(short_positions),
-                "total": len(long_positions) + len(short_positions),
-            }
-
-            # Detailed info for debugging
-            asset_positions_detail[asset] = {
-                "long_ids": [p.position_id for p in long_positions],
-                "short_ids": [p.position_id for p in short_positions],
-                "long_tickets": [p.mt5_ticket for p in long_positions if p.mt5_ticket],
-                "short_tickets": [
-                    p.mt5_ticket for p in short_positions if p.mt5_ticket
-                ],
-            }
-
-        # Calculate exposures and P&L
-        for pos in self.positions.values():
-            current_price = current_prices.get(pos.asset, pos.entry_price)
-            notional_value = pos.quantity * current_price
-
-            # Get leverage (defaults to 1 for spot trading)
-            leverage = getattr(pos, 'leverage', 1)
-
-            # ✅ Convert notional to USD before dividing by leverage.
-            # For USD-quoted symbols this is a no-op (factor = 1.0).
-            # For JPY-quoted symbols (EURJPY, USDJPY, …) this divides by
-            # the current USD/JPY rate so we get a true USD margin figure.
-            quote_to_usd = self._get_quote_to_usd_rate(pos.symbol)
-            notional_usd = notional_value * quote_to_usd
-            margin_used = notional_usd / leverage
-
-            # Accumulate
-            total_notional_value += notional_usd
-            total_margin_used += margin_used
-            total_exposure += margin_used  # ← Use USD margin, not raw notional
-
-            # Calculate P&L (unchanged)
-            if pos.mt5_ticket and pos.mt5_profit != 0.0:
-                total_unrealized_pnl += pos.mt5_profit
-            elif pos.binance_order_id and pos.binance_profit != 0.0:
-                total_unrealized_pnl += pos.binance_profit
-            else:
-                total_unrealized_pnl += pos.get_pnl(current_price)
-        
-        if self.is_paper_mode:
-            total_value = self.current_capital + total_unrealized_pnl
-        else:
-            total_value = self.current_capital
-
-        # Calculate daily P&L
-        if self.session_start_equity is not None:
-            current_equity = self.current_capital + total_unrealized_pnl
-            daily_pnl = current_equity - self.session_start_equity
-        else:
-            daily_pnl = self.realized_pnl_today + total_unrealized_pnl
-
-        return {
-        "mode": self.mode,
-        "total_value": total_value,
-        "capital": self.current_capital,
-        "equity": self.equity,
-        "cash": self.current_capital,
-        
-        # ✅ NEW: Separate notional vs actual exposure
-        "total_notional_value": total_notional_value,      # For information
-        "total_margin_used": total_margin_used,            # For risk limits
-        "total_exposure": total_exposure,                  # ← This is margin_used
-        
-        "open_positions": len(self.positions),
-        "daily_pnl": daily_pnl,
-        "realized_pnl_today": self.realized_pnl_today,
-        "total_unrealized_pnl": total_unrealized_pnl,
-        "asset_position_counts": asset_position_counts,
-        "asset_positions_detail": asset_positions_detail,
-        "max_positions_per_asset": self.max_positions_per_asset,
-        
-        # Individual positions...
-        "positions": {
-            pos.position_id: {
-                "asset": pos.asset,
-                "side": pos.side,
-                "entry_price": pos.entry_price,
-                "quantity": pos.quantity,
-                "current_price": current_prices.get(pos.asset, pos.entry_price),
-                "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
-                
-                # ✅ NEW: Add leverage info to position details
-                "leverage": getattr(pos, 'leverage', 1),
-                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol),
-                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol)) / getattr(pos, 'leverage', 1),
-                
-                "pnl": (
-                    pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
-                    else pos.binance_profit if (pos.binance_order_id and pos.binance_profit != 0.0)
-                    else pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
-                ),
-                "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
-                "stop_loss": pos.stop_loss,
-                "take_profit": pos.take_profit,
-                "mt5_ticket": pos.mt5_ticket,
-                "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
-                "binance_order_id": pos.binance_order_id,
-                "binance_profit": pos.binance_profit if pos.binance_order_id else None,
-                "leverage": getattr(pos, "leverage", 1),
-                "margin_type": getattr(pos, "margin_type", "SPOT"),
-                "is_futures": getattr(pos, "is_futures", False),
-            }
-            for pos in self.positions.values()
-        },
-        }
-
-    @handle_errors(
-        component="portfolio_manager",
-        severity=ErrorSeverity.ERROR,
-        notify=True,
-        reraise=False,
-        default_return=None,
-    )
-    def close_position(
-        self,
-        asset: str = None,
-        position_id: str = None,
-        exit_price: float = None,
-        reason: str = "manual",
-        already_closed_on_exchange: bool = False,
-        preloaded_broker_data: dict = None,
-    ) -> Optional[Dict]:
-        """
-        ✅ FIXED: Close position - Validates exchange close before removing from portfolio
-
-        already_closed_on_exchange=True skips the exchange-close step entirely (use
-        when the position was externally closed, e.g. detected by MT5 sync).
-        preloaded_broker_data passes authoritative fill/P&L fetched from the broker's
-        deal history so the local P&L calculation uses the real exit price.
-        """
-        # Find position to close
-        if position_id:
-            position = self.positions.get(position_id)
-            if not position:
-                logger.warning(f"Position {position_id} not found in portfolio")
-                return None
-        elif asset:
-            positions = self.get_asset_positions(asset)
-            if not positions:
-                logger.warning(f"No positions to close for {asset}")
-                return None
-            position = positions[0]
-            position_id = position.position_id
-        else:
-            logger.error("Must provide either asset or position_id")
-            return None
-
-        # Check if position is already being closed
-        now = datetime.now()
-        if position.closing:
-            # If it's been "closing" for more than 60 seconds, assume it's stuck and allow retry
-            if position.last_close_attempt and (now - position.last_close_attempt).total_seconds() > 60:
-                logger.warning(f"Position {position_id} stuck in 'closing' for >60s. Overriding to allow retry.")
-            else:
-                logger.info(f"Position {position_id} is already in the process of being closed. Skipping.")
-                return None
-        
-        if position.last_close_attempt:
-            # Add a 30-second cooldown to prevent hammer on failing close attempts
-            # (Unless we just overrode the "stuck" status above)
-            if not position.closing and (now - position.last_close_attempt).total_seconds() < 30:
-                logger.debug(f"Position {position_id} close attempt on cooldown. Skipping.")
-                return None
-            
-        # Mark the position as closing and record attempt time
-        position.closing = True
-        position.last_close_attempt = now
-
-        # ================================================================
-        # ✅ STEP 1: CLOSE ON EXCHANGE FIRST (MT5 or Binance)
-        # ================================================================
-        exchange_closed = False
-        close_error_msg = "Unknown handler error" # Default error message
-        # Start with any broker data pre-fetched by the caller (e.g. MT5 sync
-        # detecting an externally-closed position via _fetch_broker_close_data).
-        broker_close_data = preloaded_broker_data  # may be None; overridden below if not pre-closed
-
-        if already_closed_on_exchange:
-            # Position was already closed directly on the exchange (e.g. manually
-            # closed via the MT5/Binance terminal).  The sync loop detected the ticket
-            # is gone and fetched authoritative deal data via _fetch_broker_close_data.
-            # Skip the exchange-close attempt — trying to close a non-existent position
-            # would just error out and prevent the portfolio from being cleaned up.
-            exchange_closed = True
-            logger.info(
-                f"[CLOSE] Ticket #{getattr(position, 'mt5_ticket', 'N/A')} for "
-                f"{position.asset} was closed externally — skipping exchange-close step."
-            )
-        elif not self.is_paper_mode:
-            asset_cfg = self.config["assets"].get(position.asset, {})
-            exchange = asset_cfg.get("exchange", "binance")
-            handler = self.execution_handlers.get(exchange)
-
-            if not handler:
-                close_error_msg = f"{exchange.upper()} handler not available"
-            else:
-                try:
-                    logger.info(f"[{exchange.upper()}] Attempting to close position {position.position_id}...")
-                    handler_result = handler._close_position(
-                        position=position,
-                        current_price=exit_price,
-                        asset_name=position.asset,
-                        reason=reason,
-                    )
-                    # Handler may now return a dict with broker fill data, or a
-                    # bare True/False for legacy/paper paths.
-                    if isinstance(handler_result, dict):
-                        broker_close_data = handler_result
-                        exchange_closed = bool(handler_result.get("ok", True))
-                    else:
-                        exchange_closed = bool(handler_result)
-                    if not exchange_closed:
-                        close_error_msg = f"{exchange.upper()} order was rejected or failed. Check handler logs."
-
-                except Exception as e:
-                    close_error_msg = f"Handler exception: {str(e)}"
-                    logger.error(f"[{exchange.upper()}] Error closing position: {e}", exc_info=True)
-        else:
-            # Paper mode always succeeds
-            exchange_closed = True
-
-        # ================================================================
-        # ✅ STEP 2: ABORT OR PROCEED
-        # ================================================================
-        if not exchange_closed:
-            logger.error(
-                f"[CRITICAL] Position close failed on exchange!\n"
-                f"  Position ID: {position_id}\n"
-                f"  Asset:       {position.asset}\n"
-                f"  Error:       {close_error_msg}\n"
-                f"  ⚠️  Resetting 'closing' flag to allow future attempts."
-            )
-            # RESET THE FLAG so we can try again later
-            position.closing = False
-            return None
-
-        # ================================================================
-        # ✅ STEP 3: CALCULATE P&L (Only if exchange close succeeded)
-        # ────────────────────────────────────────────────────────────────
-        # Prefer the broker's authoritative numbers when we have them. The
-        # local Python calc uses a cached/stale `exit_price` that can diverge
-        # significantly from the actual fill (we've seen 50¢ on USOIL = $5+
-        # under-reported), and it ignores swap + commission entirely.
-        # ================================================================
-        broker_fill_price = None
-        broker_profit = None
-        broker_swap = 0.0
-        broker_commission = 0.0
-        if broker_close_data:
-            broker_fill_price = broker_close_data.get("fill_price")
-            broker_profit = broker_close_data.get("profit")
-            broker_swap = broker_close_data.get("swap", 0.0) or 0.0
-            broker_commission = broker_close_data.get("commission", 0.0) or 0.0
-
-        # If broker reported an actual fill price, use it as the canonical exit_price.
-        if broker_fill_price is not None and broker_fill_price > 0:
-            if exit_price and abs(broker_fill_price - exit_price) / max(abs(exit_price), 1e-9) > 0.0005:
                 logger.warning(
-                    f"[CLOSE] Stale-cache exit drift detected for {position.asset}: "
-                    f"cached ${exit_price:,.5f} vs broker fill ${broker_fill_price:,.5f}. "
-                    f"Using broker fill for P&L."
+                    f"[SESSION] Could not refresh capital before session start: {_e}"
                 )
-            exit_price = broker_fill_price
-
-        if broker_profit is not None:
-            pnl = float(broker_profit) + float(broker_swap) + float(broker_commission)
-            # Derive % from broker profit against the entry notional we tracked
-            entry_notional = position.entry_price * position.quantity if position.entry_price else 0.0
-            pnl_pct = (pnl / entry_notional) if entry_notional > 0 else 0.0
-            logger.info(
-                f"[CLOSE] Using BROKER P&L for {position.asset}: "
-                f"${pnl:,.2f} (profit ${broker_profit:,.2f}, swap ${broker_swap:,.2f}, "
-                f"commission ${broker_commission:,.2f})"
-            )
-        else:
-            pnl = position.get_pnl(exit_price)
-            pnl_pct = position.get_pnl_pct(exit_price)
-            logger.debug(
-                f"[CLOSE] Broker P&L unavailable for {position.asset}; "
-                f"falling back to local calc using exit ${exit_price:,.5f}"
-            )
-
-        self.realized_pnl_today += pnl
-
-        # ✨ NEW: Record strategy performance
-        trade_type = getattr(position, 'trade_type', 'TREND')
-        self.performance_tracker.record_trade(trade_type, pnl)
-
-        # ✨ NEW: Track consecutive losses
-        if pnl < 0:
-            self.loss_streak += 1
-            logger.warning(f"[STREAK] Loss streak incremented: {self.loss_streak}")
-        else:
-            if self.loss_streak > 0:
-                logger.info(f"[STREAK] Loss streak of {self.loss_streak} reset to 0.")
-            self.loss_streak = 0
-            self._loss_streak_alerted = False  # Reset alert guard when streak clears
-
-        # Update capital
-        if self.is_paper_mode:
-            self.current_capital += pnl
-            self.equity = self.current_capital
-        else:
-            self.refresh_capital()
-
-        if self.equity > self.peak_equity:
-            self.peak_equity = self.equity
-
-        # ================================================================
-        # ✅ STEP 4: CREATE TRADE RESULT
-        # ================================================================
-        trade_result = {
-            "asset": asset or position.asset,
-            "position_id": position_id,
-            "symbol": position.symbol,
-            "side": position.side,
-            "entry_price": position.entry_price,
-            "exit_price": exit_price,
-            "quantity": position.quantity,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "entry_time": position.entry_time,
-            "exit_time": datetime.now(),
-            "holding_time": (datetime.now() - position.entry_time).total_seconds() / 3600,
-            "reason": reason,
-            "mt5_ticket": position.mt5_ticket,
-            "binance_order_id": position.binance_order_id,
-            "exchange_closed": exchange_closed,
-        }
-
-        # ================================================================
-        # ✅ STEP 5: LOG TO DATABASE
-        # ================================================================
-        if self.db_manager and hasattr(position, "db_trade_id") and position.db_trade_id:
-            try:
-                holding_time = (datetime.now() - position.entry_time).total_seconds() / 3600
-                self.db_manager.update_trade_exit(
-                    trade_id=position.db_trade_id,
-                    exit_price=exit_price,
-                    exit_reason=reason,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    holding_time_hours=holding_time,
-                    final_quantity=position.quantity,
-                    metadata={"exit_time": datetime.now().isoformat(), "exchange_closed": exchange_closed},
-                )
-                logger.debug(f"[DB] Trade exit logged: {position.db_trade_id}")
-            except Exception as e:
-                logger.error(f"[DB] Error logging trade exit: {e}")
-
-        # ================================================================
-        # ✅ STEP 6: REMOVE FROM PORTFOLIO
-        # ================================================================
-        self.closed_positions.append(trade_result)
-        # ✨ MEMORY MANAGEMENT: Limit to 100 entries
-        if len(self.closed_positions) > 100:
-            self.closed_positions.pop(0)
-
-        # ✅ RACE-CONDITION GUARD: reconciliation loop may have already removed
-        # this key from self.positions (broker reported 0 positions before we
-        # reached this line).  Use pop() instead of del so a KeyError never
-        # fires after a successful exchange close.
-        if self.positions.pop(position_id, None) is None:
-            logger.debug(
-                f"[CLOSE] {position_id} already removed from portfolio by "
-                f"reconciliation — exchange close still completed successfully."
-            )
-
-        # Track whether this close was manual (Telegram / force-close) so the
-        # cooldown bypass in check_min_time_between_trades() works correctly.
-        _reason_str = str(reason).lower()
-        _is_manual = any(k in _reason_str for k in ("manual", "telegram", "force", "user"))
-        self.last_close_was_manual[position.asset] = _is_manual
-
-        remaining_count = self.get_asset_position_count(position.asset, position.side)
-
-        # Standardize exit reason for logger
-        exit_event_type = "EXIT"
-        if "stop_loss" in str(reason).lower():
-            exit_event_type = "SL_HIT"
-        elif "take_profit" in str(reason).lower():
-            exit_event_type = "TP_HIT"
-
-        # ✅ Standardized Log
-        log_trade_event(exit_event_type, {
-            "symbol": position.symbol,
-            "asset": position.asset,
-            "side": position.side,
-            "price": exit_price,
-            "quantity": position.quantity,
-            "trade_type": getattr(position, 'trade_type', 'UNKNOWN'),
-            "reason": reason,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "position_id": position_id
-        })
-
-        logger.info(
-            f"✓ Position closed successfully:\n"
-            f"  Asset:     {position.asset} {position.side.upper()}\n"
-            f"  Exit:      ${exit_price:,.2f}\n"
-            f"  P&L:       ${pnl:,.2f} ({pnl_pct:.2%})\n"
-            f"  Remaining: {remaining_count}/{self.max_positions_per_asset}"
-        )
-
-        # Send notification
-        if self.telegram_bot and self.telegram_bot._current_loop:
-            try:
-                # Use a thread-safe method to call the async notification
-                asyncio.run_coroutine_threadsafe(
-                    self.telegram_bot.notify_trade_closed(
-                        asset=trade_result["asset"],
-                        side=trade_result["side"],
-                        pnl=trade_result["pnl"],
-                        pnl_pct=trade_result["pnl_pct"] * 100, # Convert to percentage points
-                        reason=trade_result["reason"],
-                    ),
-                    self.telegram_bot._current_loop
-                )
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Failed to send close notification from PM: {e}")
-
-        return trade_result
-
-    def reconcile_positions(self, asset: str, broker_positions: List[Dict]):
-        """
-        ✅ RECONCILIATION: Ensure local positions match broker reality.
-        Syncs local state if mismatches are detected.
-        """
-        local_positions = self.get_asset_positions(asset)
-        
-        # 1. Check for orphaned local positions (exist here but not on broker)
-        # We check by specific exchange ID if available
-        broker_ids = [str(p.get('id')) for p in broker_positions if p.get('id')]
-        
-        for pos in list(local_positions):
-            # A. If we have a specific exchange ID, use it for exact matching
-            local_exchange_id = str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
-            
-            if local_exchange_id != "None" and broker_ids:
-                if local_exchange_id not in broker_ids:
-                    logger.error(f"[RECONCILE] Orphaned ID found: {pos.position_id} (ID: {local_exchange_id}). Removing.")
-                    self.positions.pop(pos.position_id, None)
-                    # Flag as manual so the cooldown bypass does NOT fire on the
-                    # next cycle — the user closed this position outside the bot.
-                    self.last_close_was_manual[pos.asset] = True
-                    continue
-
-            # B. If no IDs (rare) or for Binance where positions are aggregated by side
-            # Check if at least one broker position exists for this side
-            broker_sides = [p.get('side').lower() for p in broker_positions if p.get('side')]
-            if pos.side.lower() not in broker_sides:
-                logger.error(f"[RECONCILE] Orphaned SIDE found: {pos.position_id} ({pos.side.upper()}). No match on broker. Removing.")
-                self.positions.pop(pos.position_id, None)
-                # Flag as manual — broker-side close (SL/TP set in MT5 terminal,
-                # or manual close) must still respect the cooldown window.
-                self.last_close_was_manual[pos.asset] = True
-
-        # 2. Final check: If broker has 0 positions but we still have local ones, clear them
-        if not broker_positions and local_positions:
-            logger.warning(f"[RECONCILE] Broker reports 0 positions for {asset}. Clearing local state.")
-            for pos in local_positions:
-                self.positions.pop(pos.position_id, None)
-                # All of these were closed outside the bot — treat as manual.
-                self.last_close_was_manual[pos.asset] = True
-
-    @handle_errors(
-        component="portfolio_manager",
-        severity=ErrorSeverity.WARNING,
-        notify=False,  # Don't notify for update errors
-        reraise=False,
-        default_return=None,
-    )
-    def update_positions(self, prices: Dict[str, float] = None):
-        """Update all positions with current prices and exchange profit"""
-        # Update exchange positions with real-time profit
-        if not self.is_paper_mode:
-            self.update_mt5_positions_profit()
-            self.update_binance_positions_profit()
-
-        if prices:
-            for asset, price in prices.items():
-                if asset in self.price_history:
-                    self.price_history[asset].append(price)
-                    # ✨ MEMORY MANAGEMENT: Limit to 500 entries (Safe for 200 EMA + buffer)
-                    if len(self.price_history[asset]) > 500:
-                        self.price_history[asset].pop(0)
-
-        # Calculate unrealized P&L
-        total_unrealized_pnl = 0.0
-        for pos in self.positions.values():
-            # Prioritize exchange-reported profit
-            if pos.mt5_ticket and pos.mt5_profit != 0.0:
-                # Use MT5 profit for MT5 positions
-                total_unrealized_pnl += pos.mt5_profit
-            elif pos.binance_order_id and pos.binance_profit != 0.0:
-                # Use Binance profit for Binance positions
-                total_unrealized_pnl += pos.binance_profit
-            elif prices and pos.asset in prices:
-                # Calculate for positions without exchange tracking
-                total_unrealized_pnl += pos.get_pnl(prices[pos.asset])
-
-        if self.is_paper_mode:
-            # In paper mode: equity = cash + unrealized P&L
-            self.equity = self.current_capital + total_unrealized_pnl
-        else:
-            # In live mode: periodically refresh from exchanges
-            pass
-
-        if self.equity > self.peak_equity:
-            self.peak_equity = self.equity
-
-    def get_open_positions_count(self) -> int:
-        """Get number of open positions"""
-        return len(self.positions)
-
-    def get_position(self, asset: str, position_id: str = None) -> Optional[Position]:
-        """
-        Get position(s) for an asset
-
-        Args:
-            asset: Asset name
-            position_id: Optional specific position ID
-
-        Returns:
-            Position object if position_id provided, otherwise first position for asset
-        """
-        if position_id:
-            return self.positions.get(position_id)
-
-        # Return first position for asset (for backward compatibility)
-        positions = self.get_asset_positions(asset)
-        return positions[0] if positions else None
-
-    def has_position(self, asset: str, side: str = None) -> bool:
-        """
-        Check if we have any open positions for an asset
-
-        Args:
-            asset: Asset symbol
-            side: Optional side filter ('long' or 'short')
-        """
-        return self.get_asset_position_count(asset, side) > 0
-
-    def reset_daily_pnl(self):
-        """Reset realized P&L tracker (call this at start of each trading day)"""
-        self.realized_pnl_today = 0.0
-        logger.info("Daily P&L tracker reset")
-
-    def start_trading_session(self):
-        """Start trading session.
-
-        session_start_equity is intentionally set to the CURRENT margin balance
-        (wallet + unrealized PnL) so that positions imported from a prior session
-        don't create a phantom loss when they are closed: their unrealized P&L is
-        already baked into the baseline, and the circuit-breaker only fires on
-        NEW losses incurred during this session.
-
-        ✅ FIX: Force-refresh the real broker balance BEFORE locking in
-        session_start_equity.  Without this, switching from a large demo/Binance
-        account to a small live MT5 account causes the circuit-breaker to fire
-        immediately (99% phantom drawdown) because session_start_equity is set
-        from the previous session's stale in-memory equity value.
-        """
-        self.session_start_time = datetime.now()
-        if not self.is_paper_mode:
-            try:
-                self.refresh_capital(force=True)
-            except Exception as _e:
-                logger.warning(f"[SESSION] Could not refresh capital before session start: {_e}")
         self.session_start_equity = self.equity
         self.session_start_capital = self.current_capital
         self.realized_pnl_today = 0.0
         # Clear any manual /resume override at the start of a new trading day
         if getattr(self, "_circuit_breaker_override", False):
             self._circuit_breaker_override = False
-            logger.info("[SESSION] Circuit-breaker manual override cleared for new session.")
+            logger.info(
+                "[SESSION] Circuit-breaker manual override cleared for new session."
+            )
         open_count = len(self.positions)
         logger.info(
             f"Trading session started at {self.session_start_time}\n"
             f"  Session-start equity: ${self.session_start_equity:,.2f}"
-            + (f"  ({open_count} imported position(s) already priced in)" if open_count else "")
+            + (
+                f"  ({open_count} imported position(s) already priced in)"
+                if open_count
+                else ""
+            )
         )
 
     def get_portfolio_status(self, current_prices: Dict[str, float] = None) -> Dict:
@@ -3894,7 +4019,7 @@ class PortfolioManager:
 
         total_exposure = 0.0
         total_unrealized_pnl = 0.0
-        
+
         total_notional_value = 0.0
         total_margin_used = 0.0
 
@@ -3903,7 +4028,9 @@ class PortfolioManager:
         asset_positions_detail = {}
 
         # Get all enabled assets from config
-        enabled_assets = [a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)]
+        enabled_assets = [
+            a for a, cfg in self.config["assets"].items() if cfg.get("enabled", False)
+        ]
 
         for asset in enabled_assets:
             long_positions = [
@@ -3938,7 +4065,7 @@ class PortfolioManager:
             notional_value = pos.quantity * current_price
 
             # Get leverage (defaults to 1 for spot trading)
-            leverage = getattr(pos, 'leverage', 1)
+            leverage = getattr(pos, "leverage", 1)
 
             # ✅ Convert notional to USD before dividing by leverage.
             # For USD-quoted symbols this is a no-op (factor = 1.0).
@@ -3960,7 +4087,7 @@ class PortfolioManager:
                 total_unrealized_pnl += pos.binance_profit
             else:
                 total_unrealized_pnl += pos.get_pnl(current_price)
-        
+
         if self.is_paper_mode:
             total_value = self.current_capital + total_unrealized_pnl
         else:
@@ -3974,56 +4101,69 @@ class PortfolioManager:
             daily_pnl = self.realized_pnl_today + total_unrealized_pnl
 
         return {
-        "mode": self.mode,
-        "total_value": total_value,
-        "capital": self.current_capital,
-        "equity": self.equity,
-        "cash": self.current_capital,
-        
-        # ✅ NEW: Separate notional vs actual exposure
-        "total_notional_value": total_notional_value,      # For information
-        "total_margin_used": total_margin_used,            # For risk limits
-        "total_exposure": total_exposure,                  # ← This is margin_used
-        
-        "open_positions": len(self.positions),
-        "daily_pnl": daily_pnl,
-        "realized_pnl_today": self.realized_pnl_today,
-        "total_unrealized_pnl": total_unrealized_pnl,
-        "asset_position_counts": asset_position_counts,
-        "asset_positions_detail": asset_positions_detail,
-        "max_positions_per_asset": self.max_positions_per_asset,
-        
-        # Individual positions...
-        "positions": {
-            pos.position_id: {
-                "asset": pos.asset,
-                "side": pos.side,
-                "entry_price": pos.entry_price,
-                "quantity": pos.quantity,
-                "current_price": current_prices.get(pos.asset, pos.entry_price),
-                "current_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price),
-                
-                # ✅ NEW: Add leverage info to position details
-                "leverage": getattr(pos, 'leverage', 1),
-                "notional_value": pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol),
-                "margin_used": (pos.quantity * current_prices.get(pos.asset, pos.entry_price) * self._get_quote_to_usd_rate(pos.symbol)) / getattr(pos, 'leverage', 1),
-                
-                "pnl": (
-                    pos.mt5_profit if (pos.mt5_ticket and pos.mt5_profit != 0.0)
-                    else pos.binance_profit if (pos.binance_order_id and pos.binance_profit != 0.0)
-                    else pos.get_pnl(current_prices.get(pos.asset, pos.entry_price))
-                ),
-                "pnl_pct": pos.get_pnl_pct(current_prices.get(pos.asset, pos.entry_price)),
-                "stop_loss": pos.stop_loss,
-                "take_profit": pos.take_profit,
-                "mt5_ticket": pos.mt5_ticket,
-                "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
-                "binance_order_id": pos.binance_order_id,
-                "binance_profit": pos.binance_profit if pos.binance_order_id else None,
-                "leverage": getattr(pos, "leverage", 1),
-                "margin_type": getattr(pos, "margin_type", "SPOT"),
-                "is_futures": getattr(pos, "is_futures", False),
-            }
-            for pos in self.positions.values()
-        },
+            "mode": self.mode,
+            "total_value": total_value,
+            "capital": self.current_capital,
+            "equity": self.equity,
+            "cash": self.current_capital,
+            # ✅ NEW: Separate notional vs actual exposure
+            "total_notional_value": total_notional_value,  # For information
+            "total_margin_used": total_margin_used,  # For risk limits
+            "total_exposure": total_exposure,  # ← This is margin_used
+            "open_positions": len(self.positions),
+            "daily_pnl": daily_pnl,
+            "realized_pnl_today": self.realized_pnl_today,
+            "total_unrealized_pnl": total_unrealized_pnl,
+            "asset_position_counts": asset_position_counts,
+            "asset_positions_detail": asset_positions_detail,
+            "max_positions_per_asset": self.max_positions_per_asset,
+            # Individual positions...
+            "positions": {
+                pos.position_id: {
+                    "asset": pos.asset,
+                    "side": pos.side,
+                    "entry_price": pos.entry_price,
+                    "quantity": pos.quantity,
+                    "current_price": current_prices.get(pos.asset, pos.entry_price),
+                    "current_value": pos.quantity
+                    * current_prices.get(pos.asset, pos.entry_price),
+                    # ✅ NEW: Add leverage info to position details
+                    "leverage": getattr(pos, "leverage", 1),
+                    "notional_value": pos.quantity
+                    * current_prices.get(pos.asset, pos.entry_price)
+                    * self._get_quote_to_usd_rate(pos.symbol),
+                    "margin_used": (
+                        pos.quantity
+                        * current_prices.get(pos.asset, pos.entry_price)
+                        * self._get_quote_to_usd_rate(pos.symbol)
+                    )
+                    / getattr(pos, "leverage", 1),
+                    "pnl": (
+                        pos.mt5_profit
+                        if (pos.mt5_ticket and pos.mt5_profit != 0.0)
+                        else (
+                            pos.binance_profit
+                            if (pos.binance_order_id and pos.binance_profit != 0.0)
+                            else pos.get_pnl(
+                                current_prices.get(pos.asset, pos.entry_price)
+                            )
+                        )
+                    ),
+                    "pnl_pct": pos.get_pnl_pct(
+                        current_prices.get(pos.asset, pos.entry_price)
+                    ),
+                    "stop_loss": pos.stop_loss,
+                    "take_profit": pos.take_profit,
+                    "mt5_ticket": pos.mt5_ticket,
+                    "mt5_profit": pos.mt5_profit if pos.mt5_ticket else None,
+                    "binance_order_id": pos.binance_order_id,
+                    "binance_profit": (
+                        pos.binance_profit if pos.binance_order_id else None
+                    ),
+                    "leverage": getattr(pos, "leverage", 1),
+                    "margin_type": getattr(pos, "margin_type", "SPOT"),
+                    "is_futures": getattr(pos, "is_futures", False),
+                }
+                for pos in self.positions.values()
+            },
         }

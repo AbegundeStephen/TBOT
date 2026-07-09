@@ -76,6 +76,7 @@ from src.utils.trade_logger import log_trade_event
 from src.utils.calendar_updater import CalendarUpdater
 from src.audit_logger.audit_logger import log_trade
 from src.monitoring.health_monitor import HealthMonitor
+from src.execution.system_validator import SystemValidator
 from src.portfolio.hedging_support import (
     enable_hedging_for_portfolio,
     log_hedging_status,
@@ -89,6 +90,7 @@ from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
 from telegram_config import TELEGRAM_CONFIG
 from src.global_error_handler import GlobalErrorHandler, ErrorSeverity, handle_errors
 from src.execution.mtf_integration import MTFRegimeIntegration
+from src.execution.scalp_alert_engine import ScalpAlertEngine
 from src.training.autotrainer import ContinuousLearningPipeline
 from src.execution.cvd_consumer import CVDConsumer
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
@@ -139,6 +141,113 @@ class TradingBot:
 
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
+
+        # ── Startup quarantine: session-start timestamp (Change 1.1) ─────────
+        self._session_start_time = datetime.now()
+        self._quarantine_cleared_logged: Dict[str, bool] = {}
+
+        # ── Phase 0.1: Risk-cap sanity guard ───────────────────────────────
+        # max_total_open_risk is a FRACTION of equity (e.g. 0.25 = 25%). A
+        # value > 1.0 means a fat-fingered decimal (e.g. 45 instead of 0.45)
+        # and would silently disable the aggregate risk cap. Fail closed.
+        # The value actually consumed by the cap logic lives under
+        # risk_management.* (portfolio_manager reads config["risk_management"]);
+        # the portfolio.* copy is an unused/legacy mirror — we validate both so
+        # a future loader change can't reintroduce the footgun.
+        for _sec in ("risk_management", "portfolio"):
+            _cap = self.config.get(_sec, {}).get("max_total_open_risk")
+            if _cap is None:
+                continue
+            if not isinstance(_cap, (int, float)) or not (0 < _cap <= 1.0):
+                raise ValueError(
+                    f"[CONFIG] Invalid {_sec}.max_total_open_risk={_cap!r} — "
+                    f"must be a fraction in (0, 1.0]. Refusing to start. "
+                    f"(e.g. 0.25 = 25% aggregate risk, not 25 or 45)."
+                )
+        logger.info(
+            "[CONFIG] ✓ Risk cap validated: "
+            f"active(risk_management)={self.config.get('risk_management', {}).get('max_total_open_risk')}"
+        )
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Item 14: Pyramiding flag-consistency guard ──────────────────────
+        # trading.vtm_pyramiding_enabled and phase_config.pyramiding_enabled
+        # are two independent flags that both need to be true for pyramiding
+        # to actually run. They've drifted out of sync before — warn loudly
+        # rather than let one half silently no-op the other.
+        _trading_pyr = self.config.get("trading", {}).get("vtm_pyramiding_enabled", False)
+        _phase_pyr = self.config.get("phase_config", {}).get("pyramiding_enabled", False)
+        if _trading_pyr != _phase_pyr:
+            logger.warning(
+                "[CONFIG] Pyramiding flags disagree: trading.vtm_pyramiding_enabled=%s, "
+                "phase_config.pyramiding_enabled=%s — both need to be true for "
+                "pyramiding to actually work as intended.",
+                _trading_pyr, _phase_pyr,
+            )
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Phase 2.1/2.2: Signal funnel + AI-filter A/B observability ──────
+        # Purely observational — records how many opportunities each veto kills
+        # and which signals the AI filter rejected. Must exist before any alpha
+        # tuning so changes are data-driven, not guesses.
+        try:
+            from src.analytics.funnel_logger import FunnelLogger
+            self.funnel_logger = FunnelLogger(
+                summary_every=self.config.get("trading", {}).get("funnel_summary_every", 50)
+            )
+            logger.info("[CONFIG] ✓ Signal funnel logger active (logs/funnel/)")
+        except Exception as _fl_e:
+            self.funnel_logger = None
+            logger.warning(f"[CONFIG] Funnel logger unavailable: {_fl_e}")
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Phase 2.3: Model-freshness alert ────────────────────────────────
+        # The continuous-learning pipeline is enabled but models had not been
+        # refreshed in 5+ weeks (Audit §12.2). Warn loudly at startup if any
+        # model file is older than the configured max age so silent staleness
+        # is visible instead of quietly decaying the edge.
+        try:
+            import glob as _glob
+            _max_age_days = self.config.get("ml", {}).get("max_model_age_days", 10)
+            _now_ts = time.time()
+            _stale = []
+            for _mp in _glob.glob("models/*.pkl"):
+                _age_days = (_now_ts - os.path.getmtime(_mp)) / 86400.0
+                if _age_days > _max_age_days:
+                    _stale.append((os.path.basename(_mp), _age_days))
+            if _stale:
+                _stale.sort(key=lambda x: -x[1])
+                logger.warning(
+                    f"[MODEL AGE] ⚠️ {len(_stale)} model(s) older than {_max_age_days}d — "
+                    f"continuous-learning may not be promoting. Oldest: "
+                    + ", ".join(f"{n} ({a:.0f}d)" for n, a in _stale[:5])
+                )
+            else:
+                logger.info(f"[MODEL AGE] ✓ All models within {_max_age_days}d freshness window.")
+        except Exception as _ma_e:
+            logger.debug(f"[MODEL AGE] check skipped: {_ma_e}")
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Phase 6.4: Execution-vs-data mode banner ────────────────────────
+        # Data is always fetched from the LIVE feed; execution can run against
+        # testnet. The dangerous combo is trading.mode='live' while the Binance
+        # client is on testnet — orders fill on a fake venue while everything
+        # else behaves as if real. Surface it loudly at startup.
+        try:
+            _tmode = str(self.config.get("trading", {}).get("mode", "paper")).lower()
+            _btestnet = bool(self.config.get("api", {}).get("binance", {}).get("testnet", True))
+            logger.info(
+                f"[MODE] trading.mode={_tmode} | binance.testnet={_btestnet} | data=LIVE feed"
+            )
+            if _tmode == "live" and _btestnet:
+                logger.warning(
+                    "[MODE] ⚠️ trading.mode=live but binance.testnet=true — BTC orders "
+                    "will fill on the TESTNET venue (not real) while signals use live data. "
+                    "Set api.binance.testnet=false for real execution."
+                )
+        except Exception as _mode_e:
+            logger.debug(f"[MODE] banner skipped: {_mode_e}")
+        # ───────────────────────────────────────────────────────────────────
 
         # Override config with environment variables for security
         if os.getenv("SUPABASE_URL"):
@@ -247,7 +356,7 @@ class TradingBot:
             ai_sr_threshold=0.020,
             ai_pattern_confidence=0.50,
             ai_enable_adaptive=True,
-            ai_strong_signal_bypass=0.55,  # Lowered from 0.70 — high-conviction signals were still being blocked
+            ai_strong_signal_bypass=1.01,  # S10.1: bypass disabled — threshold unreachable (was 0.55, caused AI to be skipped too easily)
         )
         self.detailed_logging = True
 
@@ -272,6 +381,16 @@ class TradingBot:
         self.last_trade_date = None
         self.last_trade_times = {}
         self.last_market_status_log = {}  # Per-asset logging dictionary
+        # Startup warmup: block all new trade executions until the first complete
+        # trading cycle has finished. This prevents the startup race condition where
+        # rapid successive cycles fire before the cooldown clock is seeded from DB,
+        # Livermore LSM states are computed, and all components have settled.
+        # Signals are still EVALUATED on the first cycle (so the bot reads the
+        # market correctly); only actual order placement is held back.
+        self._startup_warmup_complete = False
+        # Livermore state at time of last trade — used for cooldown transition detection.
+        # Format: {asset_name: str}  e.g. {"GOLD": "MAIN_UP", "BTC": "SECONDARY_REBOUND"}
+        self._last_livermore_states: dict = {}
 
         # Session-open cooldown tracking (MT5 assets only)
         # Tracks when each asset's market was first seen as "open" after being
@@ -291,6 +410,14 @@ class TradingBot:
         # Market Watcher — real-time protective monitor
         self.market_watcher = None
 
+        # L3: last-known composite_state snapshot per asset, refreshed at each
+        # of the 3 composite_state injection points below. MarketWatcher polls
+        # every 15s in its own thread and cannot afford to recompute this (it
+        # would mean a second full df fetch + Livermore eval per asset); it
+        # reads this cache instead, accepting staleness up to one main-loop
+        # cycle (~5 min). Values are CompositeState.to_dict() dicts, not objects.
+        self._latest_composite_state: dict = {}
+
         # Main bot state
         self._shutdown_requested = False
         self._main_loop_running = False
@@ -307,6 +434,7 @@ class TradingBot:
         self._log_all_signals = _db_cfg.get("log_all_signals", True)
         self._log_system_events = _db_cfg.get("log_system_events", True)
         self._df_4h_cache = {}
+        self._df_1h_cache = {}
         # Tracks last bar timestamp seen per asset — prevents on_new_bar() being
         # called multiple times within the same 1H candle (5-min cycle cadence).
         self._last_vtm_bar_ts: dict = {}
@@ -328,6 +456,7 @@ class TradingBot:
         self._initialize_strategies()
         self.mtf_integration = None
         self._current_regime_data = {}
+        self.scalp_alert_engine = None  # personal scalp-alignment alerts; off by default
 
         # ✅ FIX: Dedup tracker for blocked-signal Telegram notifications.
         # Key: asset name. Value: (signal_direction, block_reason) tuple.
@@ -341,6 +470,17 @@ class TradingBot:
 
         # ✨ NEW: System Health Tracking
         self.health_monitor = HealthMonitor()
+
+        # PHASE 2: System Validator — silent immune-system monitor.
+        # Never blocks trading. Logs 6-hour summaries. Atomic persistence.
+        self.system_validator = SystemValidator(
+            state_path="data/system_validator_state.json",
+        )
+        # Wire EDGE z-score tracking: every closed position notifies the validator
+        if self.portfolio_manager and self.system_validator:
+            self.portfolio_manager._trade_close_callback = (
+                self.system_validator.record_trade_outcome
+            )
 
         self.error_handler = GlobalErrorHandler(
             telegram_bot=self.telegram_bot,
@@ -461,20 +601,29 @@ class TradingBot:
                 binance_client=self.data_manager.futures_client,  # ✅ FIXED: Use Futures Client
                 db_manager=self.db_manager,
                 telegram_bot=self.telegram_bot,
+                aggregators=getattr(self, "aggregators", None),  # O4c: wire aggregators
             )
+            # Item 2.2: let the shared-risk-budget cap record funnel visibility
+            # when it caps or blocks a trade.
+            self.portfolio_manager.funnel_logger = self.funnel_logger
 
-            # ✨ NEW: Enable hedging support
+            # Hedging status — must be OFF. Confirmed on every startup.
             hedging_enabled = self.config.get("trading", {}).get(
-                "allow_simultaneous_long_short", True
+                "allow_simultaneous_long_short", False
             )
             if hedging_enabled:
+                # This branch should never execute in production.
+                # allow_simultaneous_long_short must be false in config.
                 max_hedge_ratio = self.config.get("portfolio", {}).get(
-                    "max_hedge_ratio", 1.0
+                    "max_hedge_ratio", 0.0
                 )
                 enable_hedging_for_portfolio(self.portfolio_manager, max_hedge_ratio)
-                logger.info(
-                    f"[HEDGING] ✅ Enabled with max ratio {max_hedge_ratio:.0%}"
+                logger.warning(
+                    f"[HEDGING] ⚠️  ENABLED — max ratio {max_hedge_ratio:.0%}. "
+                    f"Set allow_simultaneous_long_short=false in config to disable."
                 )
+            else:
+                logger.info("[HEDGING] OFF confirmed — simultaneous long/short suppressed.")
 
             logger.info(
                 f"[OK] Portfolio Manager initialized (Mode: {self.portfolio_manager.mode.upper()})"
@@ -644,7 +793,7 @@ class TradingBot:
                 # Look back far enough to cover the longest possible cooldown
                 max_cooldown_h = max(
                     self.config.get("trading", {}).get(
-                        "min_time_between_trades_minutes", 480
+                        "min_time_between_trades_minutes", 240
                     ),
                     120,          # hard floor: never look back less than 2 hours
                 ) / 60.0 * 1.2   # 20 % buffer
@@ -722,6 +871,7 @@ class TradingBot:
                 try:
                     cfg = strategy_cfgs.get("mean_reversion", {}).get(asset_name, {})
                     cfg["asset"] = asset_name  # Fix #11: ensure MR knows which asset it trades
+                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["mean_reversion"] = MeanReversionStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Mean Reversion")
                 except Exception as e:
@@ -731,6 +881,8 @@ class TradingBot:
             if strategies_cfg.get("trend_following", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("trend_following", {}).get(asset_name, {})
+                    cfg["asset"] = asset_name
+                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["trend_following"] = TrendFollowingStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: Trend Following")
                 except Exception as e:
@@ -740,6 +892,8 @@ class TradingBot:
             if strategies_cfg.get("exponential_moving_averages", {}).get("enabled", False):
                 try:
                     cfg = strategy_cfgs.get("exponential_moving_averages", {}).get(asset_name, {})
+                    cfg["asset"] = asset_name
+                    cfg["phase_config"] = self.config.get("phase_config", {})  # L6: flag access
                     self.strategies[asset_name]["ema_strategy"] = EMAStrategy(cfg)
                     logger.info(f"[OK] {asset_name}: EMA Strategy")
                 except Exception as e:
@@ -825,32 +979,13 @@ class TradingBot:
                 logger.error(f"[AI] Analyst failed: {e}")
                 return False
 
-            # Initialize Sniper (15min)
-            try:
-                num_classes = config.get("num_classes", len(pattern_map))
-
-                self.sniper = OHLCSniper(
-                    input_shape=(15, 4), num_classes=num_classes, dropout_rate=0.3
-                )
-
-                logger.info(f"[AI] Sniper created ({num_classes} classes)")
-
-                # Load weights
-                self.sniper.load_model(str(model_path))
-                logger.info("[AI] ✓ Weights loaded")
-
-            except ValueError as e:
-                if "shape" in str(e).lower():
-                    logger.error(f"[AI] ✗ ARCHITECTURE MISMATCH!")
-                    logger.error(f"     {e}")
-                    logger.error("[AI] Solution: Retrain model")
-                    logger.error("     python train_dual_timeframe.py")
-                    return False
-                raise
-
-            except Exception as e:
-                logger.error(f"[AI] Sniper failed: {e}")
-                return False
+            # Sniper — DISCONNECTED (Phase 0B, MRS §6).
+            # CNN-LSTM trained on 15-min data was receiving 1H data (timeframe
+            # mismatch) and adds no edge over structural rules at ~0.70 accuracy.
+            # self.sniper remains None. The scoring pipeline no longer calls it.
+            # Re-enable only if a correctly-trained replacement is validated.
+            self.sniper = None
+            logger.info("[AI] Sniper: DISCONNECTED (Phase 0B — see MRS §6 Phase 0)")
 
             # Initialize Validator
             try:
@@ -863,6 +998,8 @@ class TradingBot:
                     enable_adaptive_thresholds=self.params.ai_enable_adaptive,
                     strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,
                     use_ai_validation=self.params.use_ai_validation,
+                    phase_config=self.config.get("phase_config", {}),
+                    db_manager=self.db_manager,
                 )
 
                 logger.info("[AI] ✓ Validator initialized")
@@ -995,6 +1132,11 @@ class TradingBot:
             logger.info("[MTF] ✅ Multi-Timeframe Regime Detection Ready")
             logger.info("=" * 70 + "\n")
 
+            # Personal scalp-alignment alert engine — config-gated, off by default.
+            self.scalp_alert_engine = ScalpAlertEngine(
+                config=self.config.get("scalp_alerts", {})
+            )
+
             return True
 
         except Exception as e:
@@ -1031,6 +1173,17 @@ class TradingBot:
         if mode not in valid_modes:
             logger.warning(f"Invalid mode '{mode}', defaulting to 'performance'")
             mode = "performance"
+
+        # Item 3: mode-drift tripwire. "hybrid" (and "performance") are still
+        # accepted by valid_modes above, so the existing check doesn't catch
+        # a config quietly drifting away from the intended production mode —
+        # only a fully invalid value. This applies to every asset (mode is
+        # read once, globally, before per-asset aggregator setup below), so
+        # a silent drift here silently affects all of them.
+        if mode != "council":
+            logger.warning(
+                f"[STARTUP] aggregator_settings.mode={mode!r}, expected 'council' — check config."
+            )
 
         # ================================================================
         # STEP 2: Define Preset Configurations
@@ -1200,6 +1353,8 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper
                     )
+                    # Fix 1: inject phase_config so CompositeState carries gate flags
+                    self.aggregators[asset_name].phase_config = self.config.get("phase_config", {})
 
                     logger.info(f"  Type:       Performance Aggregator")
                     logger.info(
@@ -1214,10 +1369,10 @@ class TradingBot:
 
             elif mode == "council":
                 # --------------------------------------------------------
-                # COUNCIL MODE (New institutional aggregator)
+                # COUNCIL MODE (Institutional aggregator + LSM companion)
                 # --------------------------------------------------------
                 try:
-                    self.aggregators[asset_name] = InstitutionalCouncilAggregator(
+                    _council_agg = InstitutionalCouncilAggregator(
                         mean_reversion_strategy=strategies.get("mean_reversion"),
                         trend_following_strategy=strategies.get("trend_following"),
                         ema_strategy=strategies.get("ema_strategy"),
@@ -1228,23 +1383,50 @@ class TradingBot:
                         enable_detailed_logging=getattr(
                             self, "detailed_logging", False
                         ),
-                        # Council-specific settings
-                        config=preset_config,  # ✅ CORRECT: Pass config for dynamic thresholds
+                        config=preset_config,
                         trend_aligned_threshold=trend_threshold,
                         counter_trend_threshold=counter_threshold,
                         weight_structure=1.0,
                         weight_momentum=1.5,
-                        mtf_integration=self.mtf_integration,  # ✅ FIX: Wire MTF so _check_macro_regime works
+                        mtf_integration=self.mtf_integration,
                         performance_tracker=self.portfolio_manager.performance_tracker,
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper
                     )
+                    # Lightweight companion for Livermore state machines + composite_state.
+                    # Council aggregator has no Livermore of its own — without this companion
+                    # all council-mode assets stay in LEGACY(warmup) forever.
+                    _lsm_companion = PerformanceWeightedAggregator(
+                        mean_reversion_strategy=strategies.get("mean_reversion"),
+                        trend_following_strategy=strategies.get("trend_following"),
+                        ema_strategy=strategies.get("ema_strategy"),
+                        volume_flow_strategy=strategies.get("volume_flow"),
+                        asset_type=asset_name,
+                        config=preset_config,
+                        ai_validator=None,
+                        mtf_integration=self.mtf_integration,
+                        enable_world_class_filters=False,
+                        enable_ai_circuit_breaker=False,
+                        enable_detailed_logging=False,
+                        use_macro_governor=False,
+                        use_gatekeeper=False,
+                    )
+                    self.aggregators[asset_name] = {
+                        "council":  _council_agg,
+                        "livermore": _lsm_companion,
+                        "mode": "council",
+                    }
+                    # Fix 1 (council path): inject phase_config so the LSM companion
+                    # propagates it into composite_state.phase_config when
+                    # _build_composite_state runs in the trading loop.
+                    _pc = self.config.get("phase_config", {})
+                    _council_agg.phase_config = _pc
+                    _lsm_companion.phase_config = _pc
 
-                    logger.info(f"  Type:       Council Aggregator")
+                    logger.info(f"  Type:       Council Aggregator + LSM companion")
                     logger.info(
                         f"  AI:         {'Enabled' if ai_validator else 'Disabled'}"
                     )
-                    # Log the actual active thresholds
                     thresh_trend = preset_config.get("council_trend_aligned", 3.5)
                     thresh_count = preset_config.get("council_counter_trend", 4.0)
                     logger.info(
@@ -1300,6 +1482,17 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper
                     )
+
+                    # Fix 1 (hybrid path): same gap as the council path above — without
+                    # this, both hybrid-mode aggregators read phase_config as {} via
+                    # their getattr(self, "phase_config", {}) fallback, silently
+                    # disabling every phase_config flag (including the new item 18c/18d
+                    # ones) for any asset running in hybrid mode. "hybrid" is the
+                    # global default (aggregator_settings.mode), so this affected
+                    # every asset without a per-asset mode override.
+                    _pc = self.config.get("phase_config", {})
+                    perf_agg.phase_config = _pc
+                    council_agg.phase_config = _pc
 
                     # Store both in a dict
                     self.aggregators[asset_name] = {
@@ -1391,55 +1584,16 @@ class TradingBot:
                 threshold=self.ai_validator.current_sr_threshold,
             )
 
-            # Get pattern detection
-            pattern_result = self.ai_validator._check_pattern(
-                df=df,
-                signal=signal,
-                min_confidence=self.ai_validator.current_pattern_threshold,
-            )
-
-            # ✅ FIX: Get top 3 patterns (was missing!)
-            top3_patterns = []
-            top3_confidences = []
-
-            if hasattr(self.ai_validator, "sniper") and self.ai_validator.sniper:
-                try:
-                    # Get last 15 candles for pattern detection
-                    snippet = df[["open", "high", "low", "close"]].iloc[-15:].values
-                    first_open = snippet[0, 0]
-
-                    if first_open > 0:
-                        snippet_norm = snippet / first_open - 1
-                        snippet_input = snippet_norm.reshape(1, 15, 4)
-
-                        # Get predictions
-                        predictions = self.ai_validator.sniper.model.predict(
-                            snippet_input, verbose=0
-                        )[0]
-
-                        # Get top 3
-                        top3_indices = predictions.argsort()[-3:][::-1]
-                        top3_confidences = predictions[top3_indices].tolist()
-
-                        # Map to pattern names
-                        for idx in top3_indices:
-                            pattern_name = self.ai_validator.reverse_pattern_map.get(
-                                idx, f"Pattern_{idx}"
-                            )
-                            top3_patterns.append(pattern_name)
-
-                except Exception as e:
-                    logger.debug(f"[AI DIRECT] Top3 patterns failed: {e}")
-
+            # PAT-7: pattern detection removed — static stubs
             # Build result
             return {
-                "pattern_detected": pattern_result.get("pattern_confirmed", False),
+                "pattern_detected": False,
                 "validation_passed": signal != 0,  # If signal survived, it passed
-                "pattern_name": pattern_result.get("pattern_name", "None"),
-                "pattern_id": pattern_result.get("pattern_id"),
-                "pattern_confidence": pattern_result.get("confidence", 0.0),
-                "top3_patterns": top3_patterns,
-                "top3_confidences": top3_confidences,
+                "pattern_name": None,
+                "pattern_id": None,
+                "pattern_confidence": 0.0,
+                "top3_patterns": [],
+                "top3_confidences": [],
                 "sr_analysis": {
                     "near_sr_level": sr_result.get("near_level", False),
                     "level_type": sr_result.get("level_type", "none"),
@@ -1490,7 +1644,15 @@ class TradingBot:
 
         required_fields = {
             "pattern_detected": bool,
-            "pattern_name": str,
+            # FIX (2026-06-24): was `str` only. Pattern detection was intentionally
+            # stubbed out across the codebase (PAT-1..PAT-7 — see main.py
+            # _format_ai_validation_direct, signal_aggregator.py STEP 2, and
+            # council_aggregator.py's PAT-3 block), all of which now set
+            # pattern_name=None to mean "no pattern". This validator was never
+            # updated to match, so it failed on every single trade — `pattern_id`
+            # right below already allows None for the same reason; pattern_name
+            # needs the same allowance.
+            "pattern_name": (str, type(None)),
             "pattern_confidence": (int, float),
             "pattern_id": (int, type(None)),
             "top3_patterns": list,
@@ -1779,7 +1941,15 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Binance btcusdt CVD/depth is only a valid evidence source when
+                # BTC is actually executed on Binance. This deployment runs BTC
+                # on exchange="mt5" (BTCUSDm) — a different instrument with a
+                # different tape — so injecting Binance CVD here would blend
+                # two unrelated markets into one asset's governor data.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
@@ -1792,16 +1962,63 @@ class TradingBot:
             # df_4h injection: CompositeState, TransitionDetector momentum, MR/TF strategies,
             # and 4H slope alignment all read governor_data.get('df_4h'). Without this the
             # cached 4H data was fetched but never reached the aggregator.
-            mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+            # Guard: _df_4h_cache is populated inside trade_asset() which runs AFTER
+            # this point — on the first cycle get() returns None and would overwrite
+            # the df_4h that get_regime_for_trading() already set, breaking Livermore
+            # 4H update, slope alignment, and composite_state on the first cycle.
+            _cached_4h = self._df_4h_cache.get(asset_name)
+            if _cached_4h is not None:
+                mtf_regime["df_4h"] = _cached_4h
 
-            # ✅ FIXED: Pass full market context to the Institutional Council
-            signal, details = aggregator.get_aggregated_signal(
-                df,
-                current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                is_bull_market=mtf_regime.get("is_bull", False),
-                governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
-                live_price=live_price      # ✨ NEW: For accurate staleness check
-            )
+            # ── Livermore composite_state injection ───────────────────────────
+            # The council aggregator has no Livermore state machine of its own.
+            # Run the performance aggregator's _build_composite_state so the council
+            # judges (rewired in Phase 3B to read governor_data["composite_state"])
+            # get Livermore state, hard-veto flags, and retest-engine entry_type.
+            # This is the fix for GOLD/USOIL/GBPAUD/GBPUSD always running in legacy mode.
+            _perf_agg = aggregators.get("performance")
+            _cs = None
+            if _perf_agg is not None and hasattr(_perf_agg, '_build_composite_state'):
+                try:
+                    _df4h_cs = mtf_regime.get("df_4h")
+                    _cs = _perf_agg._build_composite_state(df, _df4h_cs, mtf_regime)
+                    mtf_regime["composite_state"] = _cs
+                except Exception as _cs_err:
+                    logger.debug("[HYBRID/council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+            # Hold council signals until Livermore is warm — same rule
+            # performance mode already enforces internally.
+            if _perf_agg is not None and not getattr(_perf_agg, "_livermore_warmed", False):
+                logger.debug(
+                    "[HYBRID/council] %s Livermore not warmed — holding signal.",
+                    asset_name,
+                )
+                signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+            else:
+                # ✅ FIXED: Pass full market context to the Institutional Council
+                signal, details = aggregator.get_aggregated_signal(
+                    df,
+                    current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                    is_bull_market=mtf_regime.get("is_bull", False),
+                    governor_data=mtf_regime,  # This contains the trade_type needed for Asymmetry
+                    live_price=live_price      # ✨ NEW: For accurate staleness check
+                )
+
+            # Surface Livermore context so the trade manager doesn't open
+            # council trades blind.
+            if _cs is not None and hasattr(_cs, "to_dict"):
+                details["composite_state"] = _cs.to_dict()
+                # L2: VTM's pattern-aware exit management reads
+                # signal_details.get("institutional_pattern") as a flat key.
+                # Council mode never set it (only nested under composite_state).
+                details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
+                # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
+                self._latest_composite_state[asset_name] = details["composite_state"]
+                _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                    details["trade_type"] = "TREND"
+                elif _lsm1h is not None:
+                    details["trade_type"] = "REVERSION"
 
             logger.info(
                 f"[COUNCIL] Total Score: {details.get('total_score', 0):.2f}/5.0"
@@ -1822,7 +2039,15 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Binance btcusdt CVD/depth is only a valid evidence source when
+                # BTC is actually executed on Binance. This deployment runs BTC
+                # on exchange="mt5" (BTCUSDm) — a different instrument with a
+                # different tape — so injecting Binance CVD here would blend
+                # two unrelated markets into one asset's governor data.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
@@ -1835,7 +2060,10 @@ class TradingBot:
             # df_4h injection: CompositeState, TransitionDetector momentum, MR/TF strategies,
             # and 4H slope alignment all read governor_data.get('df_4h'). Without this the
             # cached 4H data was fetched but never reached the aggregator.
-            mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+            # Guard: same first-cycle None risk as the council path above.
+            _cached_4h = self._df_4h_cache.get(asset_name)
+            if _cached_4h is not None:
+                mtf_regime["df_4h"] = _cached_4h
 
             signal, details = aggregator.get_aggregated_signal(
                 df,
@@ -1851,44 +2079,31 @@ class TradingBot:
             logger.info(f"[PERFORMANCE] Reasoning: {details.get('reasoning', 'N/A')}")
 
         # ================================================================
-        # ✅ FIX: ALWAYS format AI validation (don't rely on aggregator)
+        # AI validation is now guaranteed by the aggregator contract:
+        # council_aggregator.get_aggregated_signal always injects
+        # ai_validation (real or stub) before returning.
+        # Keep a lightweight safety net for the performance-aggregator
+        # path and any future aggregator that doesn't follow the contract.
         # ================================================================
         ai_validation = details.get("ai_validation")
 
-        if ai_validation is None or not isinstance(ai_validation, dict):
-            logger.warning(
-                f"[HYBRID] ⚠️ No AI validation from {selected_mode} aggregator, "
-                f"generating manually..."
+        if not isinstance(ai_validation, dict):
+            # Aggregator didn't provide ai_validation — build a minimal stub
+            # rather than re-running _format_ai_validation_for_viz (which is
+            # expensive and was causing spurious warnings every veto cycle).
+            actual_aggregator = (
+                aggregators.get(selected_mode)
+                if isinstance(aggregators, dict) else aggregators
             )
-
-            # Get the actual aggregator instance
-            actual_aggregator = aggregators.get(selected_mode)
-
-            # Try aggregator's method first
-            if actual_aggregator and hasattr(
-                actual_aggregator, "_format_ai_validation_for_viz"
-            ):
-                try:
-                    ai_validation = actual_aggregator._format_ai_validation_for_viz(
-                        final_signal=signal, details=details.copy(), df=df
-                    )
-                    logger.info(
-                        f"[HYBRID] ✅ AI validation from {selected_mode} aggregator"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"[HYBRID] Aggregator method failed: {e}, using fallback"
-                    )
-                    ai_validation = None
-
-            # Fallback: Use direct AI validation
-            if ai_validation is None:
-                logger.info(f"[HYBRID] Using direct AI validation fallback")
+            if actual_aggregator and hasattr(actual_aggregator, "_build_ai_validation_stub"):
+                ai_validation = actual_aggregator._build_ai_validation_stub(signal, details)
+            else:
                 ai_validation = self._format_ai_validation_direct(asset_name, signal, df)
-
-            # Store in details
             details["ai_validation"] = ai_validation
-
+            logger.debug(
+                f"[HYBRID] ai_validation stub injected for {asset_name} "
+                f"({selected_mode} — veto/early-return path)"
+            )
         else:
             logger.info(
                 f"[HYBRID] ✅ AI validation present from {selected_mode} aggregator"
@@ -1986,6 +2201,44 @@ class TradingBot:
 
         merged_details.update(hybrid_metadata)
 
+        # 7.3 SHADOW→LIVE: pullback completion discount.
+        # Advisory, multiplicative, fail-open (errors never block a signal).
+        # Flag stays false until validation gate clears (see S7.3 spec).
+        if self.config.get("phase_config", {}).get("pullback_completion_enabled", False):
+            try:
+                from src.strategies.pullback_completion import pullback_completion_score
+                _sig = merged_details.get("signal", 0)
+                if _sig != 0:
+                    _tm   = self.config.get("trade_management", {})
+                    _agg  = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
+                    _cs   = {}
+                    if _agg and getattr(_agg, "_cached_composite", None) is not None:
+                        try:
+                            _cs = _agg._cached_composite.to_dict()
+                        except Exception:
+                            _cs = {}
+                    _side   = "long" if _sig == 1 else "short"
+                    _anchor = (_cs.get("livermore_anchor_main_up_max") if _side == "long"
+                            else _cs.get("livermore_anchor_main_down_min"))
+                    _cpb, _bd = pullback_completion_score(
+                        df, _side,
+                        _cs.get("livermore_state_4h"),
+                        _cs.get("livermore_state_age_4h"),
+                        _anchor,
+                        _tm.get("pullback_factor_weights", {}),
+                    )
+                    _k = _tm.get("pullback_integration_k", 0.5)
+                    _q = merged_details.get("signal_quality", 0)
+                    merged_details["signal_quality"]      = _q * (_k + (1 - _k) * _cpb)
+                    merged_details["pullback_completion"] = _bd
+                    logger.info(
+                        f"[7.3] C_pb={_cpb:.2f} {_bd} "
+                        f"-> quality {_q:.2f}->{merged_details['signal_quality']:.2f}"
+                    )
+            except Exception as _e73:
+                logger.debug(f"[7.3] pullback failed (non-blocking): {_e73}")
+
+
         # ================================================================
         # ✅ CRITICAL: Verify ai_validation is in merged_details
         # ================================================================
@@ -2054,19 +2307,100 @@ class TradingBot:
             # oversold/overbought or structural-level confirmation.
             # Raise the quality bar so only genuinely high-conviction TF signals
             # pass without MR backing.
+            #
+            # HOWEVER: with Livermore routing active, MR returning (0, 0.0) can
+            # mean very different things:
+            #   a) NATURAL_REBOUND → MR is in the SILENT ZONE.  MR will ALWAYS
+            #      return 0 here by design (hard veto).  Raising the gate would
+            #      permanently block signals in this state — wrong.
+            #   b) Other Livermore states where mode conditions weren't met —
+            #      MR had a structural context but conditions weren't right.
+            #      A modest raise is still appropriate.
+            #   c) Livermore warmup (lsm=None) / legacy fallback — MR has no
+            #      structural context at all.  Full raise to 0.60 is correct.
             _mr_signal = merged_details.get("mr_signal", None)
             _mr_conf   = merged_details.get("mr_confidence", None)
             _mr_neutral = (
                 _mr_signal is not None and _mr_conf is not None
                 and _mr_signal == 0 and _mr_conf == 0.0
             )
+
             if _mr_neutral and signal != 0:
-                min_quality = 0.60
-                logger.warning(
-                    f"[PERFORMANCE] ⚠️ {asset_name}: MR strategy has zero opinion "
-                    f"(0/5 both directions) — raising min quality gate: "
-                    f"0.28 → 0.60. Entry requires strong TF conviction alone."
-                )
+                # Determine Livermore context from the performance aggregator
+                _lsm_1h_state = None
+                try:
+                    _agg = self.aggregators.get(asset_name)
+                    if isinstance(_agg, dict):
+                        _pagg = _agg.get("performance") or _agg.get("livermore")
+                    else:
+                        _pagg = _agg
+                    if _pagg is not None and hasattr(_pagg, "_livermore_1h"):
+                        _snap = _pagg._livermore_1h.snapshot() if _pagg._livermore_1h else None
+                        if _snap:
+                            _lsm_1h_state = _snap.state
+                except Exception:
+                    pass
+
+                _MR_SILENT_STATES = {"NATURAL_REBOUND"}   # hard veto always zeroes MR
+                _MR_ACTIVE_STATES = {
+                    "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT", "SECONDARY_REBOUND",
+                    "MAIN_UP", "MAIN_DOWN",
+                }
+
+                if _lsm_1h_state in _MR_SILENT_STATES:
+                    # MR is intentionally forbidden in this state — no gate raise.
+                    # TF conviction at normal threshold is sufficient.
+                    logger.debug(
+                        f"[PERFORMANCE] {asset_name}: MR silent (Livermore={_lsm_1h_state}) "
+                        f"— gate raise suppressed"
+                    )
+                elif _lsm_1h_state in _MR_ACTIVE_STATES:
+                    # MR had a structural context but mode conditions weren't met.
+                    # Direction-aware raise, mirroring the council aggregator's MR
+                    # lean-conflict gate (council_aggregator.py, fixed 2026-06-16):
+                    #   • Opposite to MR's lean, secondary/natural state → 0.60
+                    #   • Opposite to MR's lean, MAIN_UP/MAIN_DOWN        → 0.70
+                    #     (MAIN states are a more extreme overextension — same
+                    #     rationale as the council gate's 1.5-vs-0.5 bump split.)
+                    #   • Same direction as MR's lean, or no clear lean  → 0.45
+                    #
+                    # FIX 2026-06-16: MAIN_UP/MAIN_DOWN used to be absent from both
+                    # lean sets below, so an opposite-lean MAIN conflict silently
+                    # fell into the generic "conditions unmet" branch and got the
+                    # SMALLER 0.45 raise — the same class of inversion bug just
+                    # fixed in council_aggregator.py's bump, but unfixed here until
+                    # now. Found via a live USOIL/USTEC comparison: council mode
+                    # now requires the bigger bump for MAIN states; performance
+                    # mode was requiring less than it asks for secondary states.
+                    _MR_LEAN_LONG_PERF  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT", "MAIN_DOWN"}
+                    _MR_LEAN_SHORT_PERF = {"SECONDARY_REBOUND", "MAIN_UP"}
+                    _is_main_state_perf = _lsm_1h_state in ("MAIN_UP", "MAIN_DOWN")
+                    _perf_lean_conflict = (
+                        (signal == -1 and _lsm_1h_state in _MR_LEAN_LONG_PERF)
+                        or (signal == +1 and _lsm_1h_state in _MR_LEAN_SHORT_PERF)
+                    )
+                    if _perf_lean_conflict:
+                        min_quality = 0.70 if _is_main_state_perf else 0.60
+                        logger.warning(
+                            f"[PERFORMANCE] {asset_name}: MR lean conflict "
+                            f"(LSM={_lsm_1h_state}, signal={'SELL' if signal == -1 else 'BUY'}) "
+                            f"— gate: 0.28 → {min_quality:.2f} "
+                            f"({'MAIN-state' if _is_main_state_perf else 'secondary'}-lean)"
+                        )
+                    else:
+                        min_quality = 0.45
+                        logger.info(
+                            f"[PERFORMANCE] {asset_name}: MR conditions unmet "
+                            f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
+                        )
+                else:
+                    # No Livermore state (warmup/legacy) — full raise, MR has no opinion.
+                    min_quality = 0.60
+                    logger.warning(
+                        f"[PERFORMANCE] ⚠️ {asset_name}: MR strategy has zero opinion "
+                        f"(no Livermore context) — raising min quality gate: "
+                        f"0.28 → 0.60. Entry requires strong TF conviction alone."
+                    )
 
             if signal != 0 and actual_quality < min_quality:
                 logger.info(
@@ -2080,6 +2414,36 @@ class TradingBot:
 
         # Update signal in details
         merged_details["signal"] = signal
+
+        # Phase 2.2+: AI-filter A/B via shadow engine. The AI veto zeroes the
+        # signal INSIDE the aggregator, so the normal downstream
+        # _shadow_open_blocked calls never see it (they no-op on signal==0).
+        # Reconstruct the intended direction (council stores `original_signal`;
+        # otherwise infer from the dominant raw strategy vote) and open a shadow
+        # position tagged 'ai_validation' so the forward P&L of AI-rejected
+        # signals becomes measurable — the true test of whether the ~80%-reject
+        # AI filter adds or destroys edge. Observational only.
+        try:
+            # Ground-truth AI rejection = the validator actively changed a real
+            # signal to a hold (`ai_modified` + final 0). We deliberately do NOT
+            # key off `validation_passed`, which several code paths define as
+            # simply `signal != 0` and would mislabel every hard-veto/score/hold
+            # as an AI reject.
+            _ai_rejected = bool(merged_details.get("ai_modified")) and signal == 0
+            if _ai_rejected:
+                _intended = merged_details.get("original_signal") or 0
+                if _intended != 0:
+                    try:
+                        _cp = float(df["close"].iloc[-1]) if df is not None and len(df) else 0.0
+                    except Exception:
+                        _cp = 0.0
+                    self._shadow_open_blocked(
+                        asset_name, int(_intended), merged_details, df, _cp,
+                        "ai_validation",
+                        self.config.get("assets", {}).get(asset_name, {}),
+                    )
+        except Exception as _aie:
+            logger.debug(f"[SHADOW] AI-reject shadow open failed: {_aie}")
 
         return signal, merged_details
 
@@ -2101,6 +2465,11 @@ class TradingBot:
         # Load strategy models
         for asset_name, strategies in self.strategies.items():
             for strategy_name, strategy in strategies.items():
+                # Skip rule-based strategies that don't use a trained .pkl model
+                if not getattr(strategy, "requires_trained_model", True):
+                    logger.info(f"[SKIP] {strategy_name}_{asset_name.lower()} — rule-based, no model needed")
+                    continue
+
                 expected += 1
 
                 model_filename = f"{strategy_name}_{asset_name.lower()}.pkl"
@@ -2173,7 +2542,9 @@ class TradingBot:
             except Exception as e:
                 logger.warning(f"[AI] Logging config failed: {e}")
 
-        if self.ai_validator and self.telegram_bot and self.analyst and self.sniper:
+        if self.ai_validator and self.telegram_bot and self.analyst:
+            # sniper may be None (disconnected in Phase 0B) — that's fine,
+            # visualization works without it.
             try:
                 logger.info("[VIZ] Initializing AI visualization system...")
                 self.chart_sender = create_visualization_system(
@@ -2197,6 +2568,17 @@ class TradingBot:
 
     def initialize_autotrainer(self):
         """Initializes and starts the continuous learning pipeline."""
+        # Phase gate: AutoTrainer must not calibrate thresholds until Gate 2 criteria
+        # are met (200+ validated shadow trades with win rate > 50%).
+        # During Phase 1 shadow we accumulate data silently — nothing is adjusted.
+        if not self.config.get("phase_config", {}).get("autotrainer_enabled", False):
+            logger.info(
+                "[PHASE GATE] AutoTrainer disabled by phase_config.autotrainer_enabled=false. "
+                "Shadow trades accumulate but no threshold calibration runs. "
+                "Enable after Gate 2 criteria confirmed."
+            )
+            self.autotrainer = None
+            return
         if self.config.get("ml", {}).get("enable_autotrain", False):
             logger.info("\n" + "=" * 70)
             logger.info("INITIALIZING AUTO-TRAINER")
@@ -2471,6 +2853,30 @@ class TradingBot:
                 and current_aggregator.get("mode") == "hybrid"
             )
 
+            # ── Capture warmed Livermore state before discarding old aggregator ──
+            # _reinitialize_aggregator creates fresh instances that start cold.
+            # If the old performance aggregator had a warmed Livermore state machine
+            # we transfer the LSM instances to the new aggregator so the warmup
+            # isn't wasted and state transitions don't reset mid-session.
+            _old_livermore_4h  = None
+            _old_livermore_1h  = None
+            _old_livermore_ts  = None
+            _old_lsm_warmed    = False
+            _old_perf_for_lsm  = None
+            if isinstance(current_aggregator, dict) and current_aggregator.get("mode") == "hybrid":
+                _old_perf_for_lsm = current_aggregator.get("performance")
+            elif isinstance(current_aggregator, dict) and current_aggregator.get("mode") == "council":
+                # Council mode stores a lightweight livermore companion alongside the council agg.
+                _old_perf_for_lsm = current_aggregator.get("livermore")
+            elif hasattr(current_aggregator, "_livermore_4h"):
+                _old_perf_for_lsm = current_aggregator
+
+            if _old_perf_for_lsm is not None and getattr(_old_perf_for_lsm, "_livermore_warmed", False):
+                _old_livermore_4h = _old_perf_for_lsm._livermore_4h
+                _old_livermore_1h = _old_perf_for_lsm._livermore_1h
+                _old_livermore_ts = getattr(_old_perf_for_lsm, "_livermore_last_4h_ts", None)
+                _old_lsm_warmed   = True
+
             # Force hybrid if config says so OR state says so
             if global_mode == "hybrid" or is_hybrid_state:
                 mode_to_init = "hybrid"
@@ -2527,6 +2933,22 @@ class TradingBot:
                     use_gatekeeper=use_gatekeeper
                 )
 
+                # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
+                if _old_lsm_warmed:
+                    perf_agg._livermore_4h         = _old_livermore_4h
+                    perf_agg._livermore_1h         = _old_livermore_1h
+                    perf_agg._livermore_last_4h_ts = _old_livermore_ts
+                    perf_agg._livermore_warmed     = True
+                    logger.info(
+                        f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
+                        f"for {asset_name}"
+                    )
+
+                # Fix 1 (hybrid auto-preset reinit): same as initial setup path.
+                _pc = self.config.get("phase_config", {})
+                perf_agg.phase_config = _pc
+                council_agg.phase_config = _pc
+
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
                     "council": council_agg,
@@ -2538,6 +2960,7 @@ class TradingBot:
 
             elif mode_to_init == "council":
                 # COUNCIL MODE
+                # Create the council aggregator for signal decisions.
                 new_aggregator = InstitutionalCouncilAggregator(
                     mean_reversion_strategy=strategies.get("mean_reversion"),
                     trend_following_strategy=strategies.get("trend_following"),
@@ -2548,14 +2971,52 @@ class TradingBot:
                     config=preset_config,
                     trend_aligned_threshold=trend_threshold,
                     counter_trend_threshold=counter_threshold,
-                    mtf_integration=self.mtf_integration,  # ✅ FIX: Wire MTF so _check_macro_regime works
+                    mtf_integration=self.mtf_integration,
                     performance_tracker=self.portfolio_manager.performance_tracker,
                     use_macro_governor=use_macro_gov,
                     use_gatekeeper=use_gatekeeper
                 )
-                self.aggregators[asset_name] = new_aggregator
+                # Create a lightweight PerformanceWeightedAggregator companion whose sole
+                # purpose is to own the Livermore state machines and build composite_state.
+                # The council aggregator has no Livermore of its own — without this companion,
+                # all council-mode assets stay in Livermore warmup forever (Phase 3A/3B gates
+                # never fire) because composite_state is never injected into governor_data.
+                lsm_companion = PerformanceWeightedAggregator(
+                    mean_reversion_strategy=strategies.get("mean_reversion"),
+                    trend_following_strategy=strategies.get("trend_following"),
+                    ema_strategy=strategies.get("ema_strategy"),
+                    volume_flow_strategy=strategies.get("volume_flow"),
+                    asset_type=asset_type,
+                    config=preset_config,
+                    ai_validator=ai_validator,
+                    mtf_integration=self.mtf_integration,
+                    enable_world_class_filters=False,
+                    enable_ai_circuit_breaker=False,
+                    enable_detailed_logging=False,
+                    use_macro_governor=False,
+                    use_gatekeeper=False,
+                )
+                # Transfer warmed Livermore state to the companion.
+                if _old_lsm_warmed:
+                    lsm_companion._livermore_4h         = _old_livermore_4h
+                    lsm_companion._livermore_1h         = _old_livermore_1h
+                    lsm_companion._livermore_last_4h_ts = _old_livermore_ts
+                    lsm_companion._livermore_warmed     = True
+                    logger.info(
+                        f"[AUTO PRESET] ✓ Livermore state transferred to council LSM companion "
+                        f"for {asset_name}"
+                    )
+                self.aggregators[asset_name] = {
+                    "council":  new_aggregator,
+                    "livermore": lsm_companion,
+                    "mode": "council",
+                }
+                # Fix 1 (council auto-preset reinit): same as initial setup path.
+                _pc = self.config.get("phase_config", {})
+                new_aggregator.phase_config = _pc
+                lsm_companion.phase_config = _pc
                 logger.info(
-                    f"[AUTO PRESET] ✓ Council aggregator refreshed for {asset_name}"
+                    f"[AUTO PRESET] ✓ Council aggregator + LSM companion refreshed for {asset_name}"
                 )
 
             else:
@@ -2578,6 +3039,20 @@ class TradingBot:
                     use_macro_governor=use_macro_gov,
                     use_gatekeeper=use_gatekeeper
                 )
+                # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
+                if _old_lsm_warmed:
+                    new_aggregator._livermore_4h         = _old_livermore_4h
+                    new_aggregator._livermore_1h         = _old_livermore_1h
+                    new_aggregator._livermore_last_4h_ts = _old_livermore_ts
+                    new_aggregator._livermore_warmed     = True
+                    logger.info(
+                        f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
+                        f"for {asset_name}"
+                    )
+                # Fix 1 (performance auto-preset reinit): same gap as hybrid/council
+                # reinit paths above — without this, the refreshed aggregator reads
+                # phase_config as {} via getattr(self, "phase_config", {}).
+                new_aggregator.phase_config = self.config.get("phase_config", {})
                 self.aggregators[asset_name] = new_aggregator
                 logger.info(
                     f"[AUTO PRESET] ✓ Performance aggregator refreshed for {asset_name}"
@@ -2602,6 +3077,13 @@ class TradingBot:
             preset_changed = False
             changes = []
             for asset_name in enabled_assets:
+                # Skip regime data fetch for MT5 assets when market is closed —
+                # the dynamic selector would fetch stale MT5 data unnecessarily.
+                _is_mt5 = self.config["assets"].get(asset_name, {}).get("exchange", "binance") != "binance"
+                if _is_mt5 and not self.check_market_hours(asset_name):
+                    logger.debug(f"[REGIME CHECK] Skipping {asset_name}: market closed")
+                    continue
+
                 # Get optimal preset for current market conditions
                 # Fetch the latest MTF regime data to pass to the selector for Asset-DNA Gating
                 regime_data = None
@@ -2683,6 +3165,16 @@ class TradingBot:
             if hasattr(self, 'health_monitor') and self.health_monitor:
                 logger.info("[HEARTBEAT] System running...")
                 self.health_monitor.heartbeat()
+
+            # Phase 2: System Validator — watchdog tick (SYSTEM_INTEGRITY checks).
+            # Per-asset LIVENESS/CALIBRATION updates happen inside trade_asset()
+            # where composite_state is available. This cycle-level call handles
+            # the 5-minute watchdog checks (Amnesia Monitor, VTM CB, API limits).
+            if hasattr(self, 'system_validator') and self.system_validator:
+                try:
+                    self.system_validator.update(asset="CYCLE_WATCHDOG")
+                except Exception as _sv_err:
+                    logger.debug("[VALIDATOR] cycle watchdog error: %s", _sv_err)
                 if not self.health_monitor.is_healthy():
                     logger.critical("[HEALTH] ⚠️ System is UNHEALTHY! Triggering emergency shutdown.")
                     
@@ -2756,7 +3248,7 @@ class TradingBot:
                         self.config["assets"].get(asset_name, {}).get("exchange", "binance") != "binance"
                     )
                     if _is_mt5_asset and not self.check_market_hours(asset_name):
-                        logger.debug(f"[SIGNALS] Skipping {asset_name}: market closed")
+                        logger.info(f"[SIGNALS] Skipping {asset_name}: market closed")
                         continue
                     self._update_asset_signal(asset_name)
                 except Exception as e:
@@ -2775,6 +3267,10 @@ class TradingBot:
                 try:
                     asset_cfg = self.config["assets"][asset_name]
                     exchange = asset_cfg.get("exchange", "binance")
+                    # Skip MT5 price fetch for closed assets — returns stale data and
+                    # generates error logs while adding nothing useful.
+                    if exchange != "binance" and not self.check_market_hours(asset_name):
+                        continue
                     handler = (
                         self.binance_handler
                         if exchange == "binance"
@@ -2901,6 +3397,17 @@ class TradingBot:
                 self.data_manager_telegram.update_snapshot(self)
                 self.data_manager_telegram.process_queued_commands(self)
 
+            # Item 2.3: strongest-score-first ordering — with the shared
+            # risk-budget cap (Item 2.2) able to trim or block a trade once
+            # the aggregate is spent, whichever asset gets evaluated first
+            # gets first claim on that budget. Order by last cycle's score
+            # (this cycle's own score isn't known until trade_asset() runs)
+            # so the highest-conviction asset claims the budget first instead
+            # of whichever happens to iterate first.
+            def _get_cached_score(asset_name):
+                return getattr(self, "_last_cycle_scores", {}).get(asset_name, 0)
+            enabled = sorted(enabled, key=_get_cached_score, reverse=True)
+
             # Trade each asset
             for asset_name in enabled:
                 try:
@@ -2960,6 +3467,16 @@ class TradingBot:
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
 
+                # Mark the first full cycle as complete — trade execution is now
+                # permitted. Set here so ALL assets have been evaluated at least
+                # once before any order can be placed.
+                if not self._startup_warmup_complete:
+                    self._startup_warmup_complete = True
+                    logger.info(
+                        "[STARTUP] ✅ First cycle complete — trade execution now enabled. "
+                        "Signals were evaluated but no orders were placed this cycle."
+                    )
+
         except Exception as e:
             logger.error(f"[ERROR] Cycle failed: {e}", exc_info=True)
             self._consecutive_errors += 1
@@ -2997,10 +3514,20 @@ class TradingBot:
         update_interval = self.config["trading"].get("vtm_update_interval_seconds", 5)
         # Periodic exchange reconciliation — detects positions closed directly on broker
         reconcile_interval = self.config["trading"].get("exchange_reconcile_interval_seconds", 60)
+        # Phase 1.2: periodic portfolio-state persistence. save_portfolio_state()
+        # previously ran ONLY on graceful shutdown, so a crash / kill -9 / power
+        # loss lost all in-trade VTM progress (partials taken, breakeven, runner,
+        # trailed stop) — on restart the VTM was rebuilt from scratch at the
+        # initial ATR stop. Pickling the positions dict here captures the live
+        # VTM state (it is an attribute of each position) so a crash loses at
+        # most state_save_interval seconds of progress.
+        state_save_interval = self.config["trading"].get("state_save_interval_seconds", 30)
         logger.info(f"[VTM LOOP] Update interval set to {update_interval} seconds.")
         logger.info(f"[VTM LOOP] Exchange reconcile interval: {reconcile_interval} seconds.")
+        logger.info(f"[VTM LOOP] Portfolio state-save interval: {state_save_interval} seconds.")
 
         _last_reconcile = 0.0
+        _last_state_save = 0.0
 
         while self.is_running:
             try:
@@ -3015,6 +3542,15 @@ class TradingBot:
                     if _now - _last_reconcile >= reconcile_interval:
                         _last_reconcile = _now
                         self._reconcile_exchange_positions()
+
+                    # Phase 1.2: persist VTM/position state after the management
+                    # pass so an unclean shutdown does not reset trade lifecycle.
+                    if _now - _last_state_save >= state_save_interval:
+                        _last_state_save = _now
+                        try:
+                            self.portfolio_manager.save_portfolio_state()
+                        except Exception as _se:
+                            logger.error(f"[VTM LOOP] Periodic state save failed: {_se}")
 
                 # Sleep until the next update
                 time.sleep(update_interval)
@@ -3032,25 +3568,39 @@ class TradingBot:
         Runs every ~60 seconds from the VTM loop to detect positions
         closed directly on the exchange (without going through the bot).
 
-        Previously this only ran at startup; any position closed on the
-        broker mid-session would remain stale in the portfolio tracker
-        until the next bot restart, corrupting risk calculations.
+        NOTE: Intentionally reconciles disabled assets that still have
+        tracked positions. `enabled:false` gates new signal generation only.
+        A position opened before an asset was disabled must still be tracked
+        until it is fully closed and removed from the portfolio tracker.
+        Without this, manually closing a position on the broker while the
+        asset is disabled leaves a stale position in the portfolio forever.
         """
         try:
-            if not self.mt5_handler:
-                return
             for asset_name, asset_cfg in self.config.get("assets", {}).items():
-                if not asset_cfg.get("enabled", False):
-                    continue
-                if asset_cfg.get("exchange", "mt5") != "mt5":
-                    continue
+                exchange = asset_cfg.get("exchange", "mt5")
+                # Always reconcile if we have tracked positions for this asset,
+                # even if it is currently disabled.
+                positions = self.portfolio_manager.get_asset_positions(asset_name)
+                is_enabled = asset_cfg.get("enabled", False)
+                if not is_enabled and not positions:
+                    continue  # Disabled with no positions — nothing to do
                 symbol = self._resolve_symbol(asset_name)
                 if not symbol:
                     continue
-                positions = self.portfolio_manager.get_asset_positions(asset_name)
                 if not positions:
                     continue
-                self.mt5_handler.sync_positions_with_mt5(asset_name, symbol)
+                if not is_enabled:
+                    logger.debug(
+                        f"[RECONCILE] {asset_name} is disabled but has "
+                        f"{len(positions)} tracked position(s) — reconciling"
+                    )
+                # S2.3: reconcile both MT5 and Binance assets
+                if exchange == "mt5":
+                    if self.mt5_handler:
+                        self.mt5_handler.sync_positions_with_mt5(asset_name, symbol)
+                elif exchange == "binance":
+                    if self.binance_handler:
+                        self.binance_handler.sync_positions_with_binance(asset_name, symbol)
         except Exception as e:
             logger.error(f"[RECONCILE] Periodic reconcile error: {e}")
 
@@ -3067,10 +3617,27 @@ class TradingBot:
                 if not self.config["assets"].get(asset_name, {}).get("enabled", False):
                     continue
 
+                # Skip positions with no real quantity (closed/ghost entries)
+                if not getattr(position, "quantity", None) or position.quantity <= 0:
+                    continue
+
                 # --------------------------------------------------------
-                # ✅ NEW: Attempt to re-initialize VTM if missing
+                # ✅ NEW: Attempt to re-initialize VTM if missing OR broken
                 # (Common for synced/imported positions or reloads)
+                # A VTM is "broken" if it exists but initial_stop_loss is None,
+                # meaning _calculate_initial_levels() never completed (e.g. S6.3 regression).
                 # --------------------------------------------------------
+                _vtm_broken = (
+                    position.trade_manager is not None
+                    and getattr(position.trade_manager, "initial_stop_loss", None) is None
+                )
+                if _vtm_broken:
+                    logger.warning(
+                        f"[VTM LOOP] ⚠️ Broken VTM detected for {position_id} "
+                        f"(initial_stop_loss=None) — forcing re-init."
+                    )
+                    position.trade_manager = None  # clear so re-init block fires
+
                 if not position.trade_manager:
                     # ✅ Re-initialize VTM using the CORRECT trading timeframe (1H),
                     # not 4H regime data.  Mixing timeframes corrupts ATR/ADX.
@@ -3136,6 +3703,10 @@ class TradingBot:
                                 # minimum (e.g. 0.0029 BTC after partial closes).
                                 # The min-lot guard is only meaningful for NEW orders.
                                 min_lot_override=position.quantity,
+                                # Item 5: no producer populates these keys yet — resolves
+                                # to None today, starts flowing once a future tier does.
+                                structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
+                                entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
                             )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
@@ -3151,19 +3722,46 @@ class TradingBot:
                 if not handler:
                     continue
 
-                # Get 4H data from the cache
+                # Get 4H data and current composite_state from cache
                 df_4h = self._df_4h_cache.get(asset_name)
+                _vtm_cs = None
+                if hasattr(self, "_current_regime_data"):
+                    _vtm_cs = self._current_regime_data.get(asset_name, {}).get("composite_state")
 
-                # Check VTM with real-time updates
+                # Check VTM with real-time updates — pass composite_state for live Livermore awareness
                 try:
                     vtm_result = None
                     if exchange == "binance":
-                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
+                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h, composite_state=_vtm_cs)
                     else:
-                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
+                        vtm_result = handler.check_and_update_positions_VTM(asset_name, df_4h=df_4h, composite_state=_vtm_cs)
+
+                    # VTM Circuit Breaker: lock open positions to breakeven on shock bar
+                    if (
+                        hasattr(self, "system_validator")
+                        and self.system_validator
+                        and self.system_validator.get_vtm_circuit_breaker_signal(asset_name)
+                    ):
+                        logger.critical(
+                            "[VTM CB] %s: Circuit breaker active — locking positions to breakeven.",
+                            asset_name,
+                        )
+                        _cb_positions = self.portfolio_manager.get_asset_positions(asset_name) \
+                            if hasattr(self.portfolio_manager, "get_asset_positions") else []
+                        for _cb_pos in _cb_positions:
+                            if _cb_pos.trade_manager and not getattr(
+                                _cb_pos.trade_manager, "_cb_breakeven_locked", False
+                            ):
+                                _cb_pos.trade_manager.current_stop_loss = _cb_pos.entry_price
+                                _cb_pos.trade_manager._cb_breakeven_locked = True
+                                logger.warning(
+                                    "[VTM CB] %s pos %s: stop locked to breakeven @ %.5g",
+                                    asset_name, _cb_pos.position_id, _cb_pos.entry_price,
+                                )
+                        self.system_validator.clear_vtm_cb_signal(asset_name)
 
                     # ✅ Handle Pyramid Requests (gated by config flag)
-                    _pyramiding_on = self.config.get("trading", {}).get("vtm_pyramiding_enabled", True)
+                    _pyramiding_on = self.config.get("trading", {}).get("vtm_pyramiding_enabled", False)
                     if _pyramiding_on and isinstance(vtm_result, dict) and "pyramid_requests" in vtm_result:
                         for req in vtm_result["pyramid_requests"]:
                             logger.info(f"[VTM LOOP] 🗼 Executing PYRAMID for {asset_name} ({req['side'].upper()})")
@@ -3199,6 +3797,12 @@ class TradingBot:
                             # trade fire as soon as all positions were manually closed.
                             if pyramid_ok:
                                 self.last_trade_times[asset_name] = datetime.now()
+                                # Snapshot Livermore state for pyramid entries too.
+                                _pyr_cs = self._current_regime_data.get(asset_name, {}).get("composite_state") if hasattr(self, "_current_regime_data") else None
+                                if _pyr_cs is not None:
+                                    _pyr_lsm = getattr(_pyr_cs, "livermore_state_1h", None) or getattr(_pyr_cs, "livermore_state_4h", None)
+                                    if _pyr_lsm is not None:
+                                        self._last_livermore_states[asset_name] = _pyr_lsm.value if hasattr(_pyr_lsm, "value") else _pyr_lsm
 
                 except Exception as e:
                     logger.error(f"[VTM LOOP] Error checking {asset_name} (Position: {position_id}): {e}")
@@ -3430,6 +4034,9 @@ class TradingBot:
             self.trade_count_today = 0
             self.daily_loss = 0.0
             self.last_trade_date = current_date
+            # Clear manual overrides set by /resume — new session = fresh slate
+            self._profit_lock_override = False
+            self._profit_soft_lock_active = False
             logger.info(f"[RESET] Daily counters reset for {current_date}")
             self.portfolio_manager.start_trading_session()
             logger.info(f"[SESSION] Trading session started")
@@ -3504,120 +4111,152 @@ class TradingBot:
                 f"Circuit breaker tripped: drawdown {loss_pct:.2%} ≥ {circuit_breaker:.2%}"
             )
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
-            if self.telegram_bot and self._telegram_ready.is_set():
-                try:
-                    self._send_telegram_notification(
-                        self.telegram_bot.notify_error(
-                            f"🚨 CIRCUIT BREAKER!\nLoss: {loss_pct:.2%}"
+            # Item 1.2: throttle to once per 5 min — with six assets live,
+            # every asset's cycle hits this same check, which could otherwise
+            # fire the same alert six times in the same couple of minutes.
+            _now = time.time()
+            _last_alert = getattr(self, "_last_breaker_alert_ts", 0)
+            if _now - _last_alert >= 300:
+                self._last_breaker_alert_ts = _now
+                if self.telegram_bot and self._telegram_ready.is_set():
+                    try:
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_error(
+                                f"🚨 Circuit breaker active — not trading.\n"
+                                f"Drawdown: {loss_pct:.2%} (limit {circuit_breaker:.2%})\n"
+                                f"Will keep checking every 5 min."
+                            )
                         )
-                    )
-                except:
-                    pass
+                    except Exception:
+                        pass
             return False
 
-        # ── DAILY PROFIT LOCK ─────────────────────────────────────────────────
-        # Two-tier system:
-        #   soft_lock  → scale position sizing to 50% (still trades, but smaller)
-        #   hard_lock  → block all new entries for the rest of the day
-        # Both are expressed as % of session_start_equity in config.
-        # Set either to 0 to disable that tier.
-        _profit_lock_cfg = risk_cfg.get("daily_profit_lock", {})
-        _soft_pct = _profit_lock_cfg.get("soft_lock_pct", 0.0)
-        _hard_pct = _profit_lock_cfg.get("hard_lock_pct", 0.0)
-        if _pm.session_start_equity and _pm.session_start_equity > 0:
-            _realized_gain = max(0.0, _pm.realized_pnl_today)
-            _daily_profit_pct = _realized_gain / _pm.session_start_equity
-        else:
-            _daily_profit_pct = 0.0
+        # Item 1.3: daily profit-lock system removed entirely — explicit
+        # decision: no scaling down or stopping trading because a profit
+        # target was hit. self._profit_soft_lock_active stays at its __init__
+        # default (False) and its one downstream reader (execute_signal's
+        # position-sizing halving) already treats that as "off", so removing
+        # this block cannot leave a half-configured state behind.
 
-        if _hard_pct > 0 and _daily_profit_pct >= _hard_pct:
-            self._last_limit_reason = (
-                f"Daily profit hard-lock: realized {_daily_profit_pct:.2%} ≥ {_hard_pct:.2%} target. "
-                f"No new entries until next session."
-            )
-            logger.warning(
-                f"[PROFIT LOCK] Hard lock active — realized {_daily_profit_pct:.2%} ≥ {_hard_pct:.2%}. "
-                f"Blocking new entries."
-            )
-            return False
-
-        if _soft_pct > 0 and _daily_profit_pct >= _soft_pct:
-            # Flag used downstream in execute_signal() to halve the position size
-            self._profit_soft_lock_active = True
-            logger.info(
-                f"[PROFIT LOCK] Soft lock active — realized {_daily_profit_pct:.2%} ≥ {_soft_pct:.2%}. "
-                f"Sizing reduced to 50%."
-            )
-        else:
-            self._profit_soft_lock_active = False
-        # ──────────────────────────────────────────────────────────────────────
-
-        trading_cfg = self.config.get("trading", {})
-        if trading_cfg.get("allow_simultaneous_positions", True):
-            max_positions = trading_cfg.get("max_simultaneous_positions", 2)
-            current = self.portfolio_manager.get_open_positions_count()
-            if current >= max_positions:
-                self._last_limit_reason = (
-                    f"Max simultaneous positions reached ({current}/{max_positions})"
-                )
-                logger.info(f"[LIMIT] Max positions ({current}/{max_positions})")
-                return False
+        # Item 1.1: cross-asset position cap removed — one asset having a
+        # position open should not block a different asset from trading.
+        # The 4-hour per-asset cooldown (check_min_time_between_trades) is
+        # untouched and still applies per-asset.
 
         return True
 
-    def check_min_time_between_trades(self, asset_name: str) -> bool:
+    def check_min_time_between_trades(
+        self, asset_name: str, current_lsm_state: str | None = None
+    ) -> bool:
         """Check minimum time between trades.
 
         Returns True  → OK to trade (no cooldown active).
         Returns False → blocked (cooldown still running).
 
-        Per-asset override wins if set in config (min_time_between_trades_minutes
-        under the asset key).  Falls back to the global trading setting (default 60).
-        In strongly-trending regimes (BEARISH/BULLISH) a 0.5× multiplier is applied
-        so the bot can re-enter faster when the move is still clearly intact.
+        Global default: 240 minutes (4 hours).  Per-asset config override still
+        respected when set explicitly.
+
+        Adaptive reduction: if the Livermore state has transitioned since the last
+        trade (genuine new structure), the effective cooldown drops to 180 min — the
+        structural guards (hard veto, RSM, ADX gate) are sufficient to prevent churn
+        in a legitimately different regime.  Same state = full cooldown applies.
         """
-        global_default = self.config["trading"].get("min_time_between_trades_minutes", 480)
+        global_default = self.config["trading"].get("min_time_between_trades_minutes", 240)
 
-        # Per-asset override (e.g. GOLD: min_time_between_trades_minutes: 30)
+        # Per-asset override permitted only via explicit config.
         asset_cfg = self.config.get("assets", {}).get(asset_name, {})
-        min_minutes = asset_cfg.get("min_time_between_trades_minutes", global_default)
-
-        # Regime-aware reduction: if the MTF regime is strongly directional,
-        # halve the cooldown so re-entries are faster after manual closes or TP hits.
-        regime_data = getattr(self, "_current_regime_data", {}).get(asset_name, {})
-        regime = regime_data.get("regime", "NEUTRAL")
-        regime_conf = regime_data.get("confidence", 0.0)
-        if regime in ("BULLISH", "BEARISH") and regime_conf >= 0.7:
-            min_minutes = max(15, min_minutes * 0.5)
+        base_minutes = asset_cfg.get("min_time_between_trades_minutes", global_default)
 
         # If the asset has never traded this session it cannot be in cooldown.
         if asset_name not in self.last_trade_times:
             return True
 
-        # Bypass cooldown when there are no open positions AND the last close was
-        # natural (VTM / SL / TP hit).  Do NOT bypass after a manual close — the user
-        # explicitly exited and the bot should respect the cooldown before re-entering.
-        open_positions = self.portfolio_manager.get_asset_positions(asset_name)
-        if not open_positions:
-            last_was_manual = self.portfolio_manager.last_close_was_manual.get(asset_name, False)
-            if last_was_manual:
-                logger.debug(
-                    f"[COOLDOWN] {asset_name}: no open positions but last close was MANUAL — "
-                    f"cooldown still applies"
+        # Adaptive cooldown: genuine Livermore state transition → shorter window.
+        # Exception: SECONDARY states indicate deep counter-trend pressure —
+        # the last stop was likely caused by that same pressure. Reducing the
+        # cooldown into a SECONDARY phase would invite a repeat loss.
+        _SECONDARY = {"SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"}
+        prev_state = self._last_livermore_states.get(asset_name)
+        _genuine_transition = (
+            current_lsm_state is not None
+            and prev_state is not None
+            and current_lsm_state != prev_state
+            and current_lsm_state not in _SECONDARY
+        )
+        if _genuine_transition:
+            min_minutes = min(base_minutes, 180)
+            logger.info(
+                f"[COOLDOWN] {asset_name}: Livermore transition {prev_state}→{current_lsm_state} "
+                f"— reduced cooldown to {min_minutes:.0f}min"
+            )
+        else:
+            min_minutes = base_minutes
+            if current_lsm_state in _SECONDARY and prev_state != current_lsm_state:
+                logger.info(
+                    f"[COOLDOWN] {asset_name}: Livermore→{current_lsm_state} "
+                    f"(SECONDARY phase) — full {min_minutes:.0f}min cooldown maintained"
                 )
-                # Fall through to the elapsed-time check below
-            else:
-                logger.debug(f"[COOLDOWN] {asset_name}: no open positions (natural close) — cooldown bypassed")
-                return True
 
         elapsed = datetime.now() - self.last_trade_times[asset_name]
         if elapsed.total_seconds() < min_minutes * 60:
             remaining = min_minutes - (elapsed.total_seconds() / 60)
-            logger.info(f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining (limit={min_minutes:.0f}min, regime={regime})")
+            logger.info(
+                f"[COOLDOWN] {asset_name}: {remaining:.0f}min remaining "
+                f"(limit={min_minutes:.0f}min, lsm={current_lsm_state or 'unknown'})"
+            )
             return False
 
         # Cooldown period has fully elapsed — allow trading.
         return True
+
+    def _check_natural_cycle_gate(
+        self,
+        asset_name: str,
+        current_lsm_state: str | None,
+        current_lsm_age: int,
+    ) -> bool:
+        """Natural cycle elapsed gate (Phase 4 second-position protection).
+
+        Returns True  → OK to proceed.
+        Returns False → blocked (same Livermore state as last entry, not yet aged).
+
+        Purpose: prevent immediately re-entering after a position closes while
+        the market is still in the same Livermore phase.  A "new" setup only
+        exists once the state has aged enough (≥ min_cycle_bars bars) — implying
+        the pullback/rebound has continued to develop rather than immediately
+        re-testing the failed entry level.
+
+        Only gates MR-type entries (NATURAL_RETRACEMENT / NATURAL_REBOUND states).
+        MAIN and SECONDARY states are not gated — trend continuation and counter-
+        trend entries have their own structural guards.
+        """
+        # Only applies to natural pullback/rebound phases
+        _natural_states = ("NATURAL_RETRACEMENT", "NATURAL_REBOUND")
+        if current_lsm_state not in _natural_states:
+            return True
+
+        # Only relevant if we have traded this asset before
+        if asset_name not in self._last_livermore_states:
+            return True
+
+        prev_state = self._last_livermore_states.get(asset_name)
+        if prev_state != current_lsm_state:
+            # State has changed since last entry — a genuine cycle has occurred.
+            return True
+
+        # Same state as last entry — require minimum age before allowing re-entry.
+        min_cycle_bars = self.config.get("trading", {}).get(
+            "natural_cycle_min_bars", 8
+        )  # default: 8 bars = ~8 hours on 1H timeframe
+        if current_lsm_age >= min_cycle_bars:
+            return True
+
+        logger.info(
+            f"[CYCLE_GATE] {asset_name}: re-entry in same Livermore state "
+            f"({current_lsm_state}) blocked — age={current_lsm_age} < "
+            f"min={min_cycle_bars} bars. Waiting for natural cycle to mature."
+        )
+        return False
 
     def _resolve_symbol(self, asset_name: str) -> str:
         """
@@ -3648,12 +4287,20 @@ class TradingBot:
         if asset_cfg.get("asset_type", "") == "crypto" or "BTC" in asset_name_upper:
             return True
 
-        # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex)
+        # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex, Indices)
         is_open = MarketHours.should_trade(asset_name)
         if not is_open:
-            status, message = MarketHours.get_market_status("forex")
+            # Use the correct market type so the log message matches the asset.
+            # USTEC is a US equity index; passing "forex" produced the misleading
+            # "[MARKET] USTEC: Forex/Gold market is OPEN" message even when the
+            # US market was closed and should_trade correctly returned False.
+            _mkt_log_type = (
+                "stocks" if asset_name_upper in ("USTEC", "US100", "NAS100", "SPX")
+                else "forex"
+            )
+            status, message = MarketHours.get_market_status(_mkt_log_type)
             current_hour = datetime.now().hour
-            
+
             # Use per-asset logging
             if self.last_market_status_log.get(asset_name) != current_hour:
                 logger.info(f"[MARKET] {asset_name}: {message}")
@@ -3684,6 +4331,68 @@ class TradingBot:
                 return False
 
         return True
+
+    def _startup_quarantine_active(self, asset_name: str) -> bool:
+        """
+        Suppress new entries for the first N minutes after bot start (Change 1.2).
+
+        During the quarantine window:
+          1. Time floor: block until startup_quarantine_minutes have elapsed.
+          2. Price sanity (MT5 assets only): block until mt5_handler actively
+             confirms a clean live price for this asset via
+             _get_verified_current_price. BTC's exchange is genuinely "mt5"
+             in config.json (routed as a broker CFD symbol, BTCUSDm) — not
+             Binance as the project overview might suggest — so BTC gets the
+             same live sanity coverage as Gold/FX/USTEC, not the time floor
+             alone. (Corrected 2026-07: an earlier pass here incorrectly
+             assumed BTC had no MT5 coverage.)
+
+        Returns True  → still in quarantine, caller should return early.
+        Returns False → quarantine cleared, normal trading allowed.
+
+        Cross-file constraint: reads self.mt5_handler._price_sanity_status, which
+        is initialised in MT5ExecutionHandler.__init__ (Change 2.1). Do not deploy
+        this method without that change in place.
+        """
+        quarantine_minutes = float(
+            self.config.get("trading", {}).get("startup_quarantine_minutes", 10)
+        )
+        elapsed = (datetime.now() - self._session_start_time).total_seconds() / 60.0
+
+        if elapsed < quarantine_minutes:
+            logger.debug(
+                f"[QUARANTINE] {asset_name}: {elapsed:.1f} min elapsed, "
+                f"need {quarantine_minutes:.0f} min — holding."
+            )
+            return True
+
+        # Time floor met. Also require a passed price-sanity check for MT5 assets.
+        asset_cfg = self.config.get("assets", {}).get(asset_name, {})
+        if self.mt5_handler is not None and asset_cfg.get("exchange") == "mt5":
+            symbol = asset_cfg.get("symbol", asset_name)
+            sanity = getattr(self.mt5_handler, "_price_sanity_status", {})
+            asset_status = sanity.get(asset_name, {})
+            if not asset_status.get("passed", False):
+                try:
+                    _, is_sane, _ = self.mt5_handler._get_verified_current_price(symbol, asset_name)
+                except Exception as _qc_err:
+                    logger.debug(f"[QUARANTINE] {asset_name}: sanity check errored ({_qc_err}) — holding.")
+                    return True
+                if not is_sane:
+                    logger.debug(
+                        f"[QUARANTINE] {asset_name}: time floor met but price sanity "
+                        f"not yet confirmed — holding."
+                    )
+                    return True
+
+        # Both conditions met — log once per asset then clear
+        if not self._quarantine_cleared_logged.get(asset_name, False):
+            self._quarantine_cleared_logged[asset_name] = True
+            logger.info(
+                f"[QUARANTINE] ✅ {asset_name}: startup quarantine lifted "
+                f"({elapsed:.1f} min elapsed, price sane)."
+            )
+        return False
 
     def _update_session_open_state(self, asset_name: str, is_open: bool) -> bool:
         """
@@ -3765,6 +4474,20 @@ class TradingBot:
         if not asset_cfg.get("enabled", False):
             return
 
+        # ── STARTUP WARMUP GUARD ──────────────────────────────────────────────
+        # Block all new trade executions until the first complete cycle has
+        # finished. Signals are still evaluated so the market state is known
+        # and logged, but no orders are placed. This prevents the startup race
+        # condition where rapid consecutive cycles fire before the cooldown
+        # clock is seeded, Livermore LSM states are computed, and DB sync is
+        # complete — which caused multiple simultaneous positions on restart.
+        if not self._startup_warmup_complete:
+            logger.info(
+                f"[STARTUP] ⏳ {asset_name}: startup warmup active — "
+                f"signals evaluated but trade execution blocked (first cycle)"
+            )
+            return
+
         # Check market hours BEFORE trading
         _market_is_open = self.check_market_hours(asset_name)
         if not _market_is_open:
@@ -3777,6 +4500,12 @@ class TradingBot:
         # Existing positions are not affected — only new entries are gated here.
         if self._update_session_open_state(asset_name, True):
             return  # logged inside the method
+
+        # Change 1.3: startup quarantine — holds ALL assets (including BTC,
+        # which _update_session_open_state deliberately exempts) for the first
+        # N minutes after bot start while prices stabilise and sanity checks run.
+        if self._startup_quarantine_active(asset_name):
+            return
 
         exchange = asset_cfg.get("exchange", "binance")
         symbol = self._resolve_symbol(asset_name)   # picks mt5_symbol when exchange=mt5
@@ -3838,6 +4567,9 @@ class TradingBot:
                 if df.index[-1] >= _now_floor:
                     df = df.iloc[:-1]
 
+            # Cache the closed 1H dataframe so the VTM circuit breaker can see it.
+            self._df_1h_cache[asset_name] = df
+
             # Fetch and cache 4H data for VTM loop
             self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
             # Propagate df_4h into the persistent regime dict so it's available
@@ -3846,8 +4578,18 @@ class TradingBot:
                 self._current_regime_data[asset_name]["df_4h"] = self._df_4h_cache.get(asset_name)
 
             if len(df) < 250:
+                _diag = ""
+                if len(df) == 0:
+                    # S10.7: 0-row diagnostic — log data source details
+                    _csv_path = self.config.get("assets", {}).get(asset_name, {}).get("data_file", "unknown")
+                    _ex = self.config.get("assets", {}).get(asset_name, {}).get("exchange", "unknown")
+                    _sym = symbol or "unknown"
+                    _diag = (
+                        f" | ZERO ROWS — symbol={_sym}, exchange={_ex}, "
+                        f"data_file={_csv_path}. Check data feed / symbol spelling."
+                    )
                 logger.warning(
-                    f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250)"
+                    f"[SKIP] {asset_name}: Insufficient data ({len(df)}/250){_diag}"
                 )
                 return
 
@@ -3883,6 +4625,21 @@ class TradingBot:
                         asset_name=asset_name, symbol=symbol, exchange=exchange
                     )
                     self._current_regime_data[asset_name] = mtf_regime
+
+                    # Personal scalp-alignment alert (off by default, see
+                    # config["scalp_alerts"]). Pure observer — never affects
+                    # signal, sizing, or execution below.
+                    if self.scalp_alert_engine and self.scalp_alert_engine.enabled:
+                        try:
+                            scalp_msg = self.scalp_alert_engine.process(asset_name, mtf_regime)
+                            if scalp_msg and self.telegram_bot:
+                                self._send_telegram_notification(
+                                    self.telegram_bot.send_notification(
+                                        scalp_msg, parse_mode="HTML"
+                                    )
+                                )
+                        except Exception as e:
+                            logger.error(f"[SCALP ALERT] Failed for {asset_name}: {e}")
                 except Exception as e:
                     logger.error(f"[MTF] Failed to update regime for {asset_name}: {e}")
                     mtf_regime = self._current_regime_data.get(asset_name, {})
@@ -3900,9 +4657,55 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                     live_price=current_price
                 )
+            elif isinstance(aggregator, dict) and aggregator.get("mode") == "council":
+                # COUNCIL MODE with LSM companion.
+                # Build composite_state from the companion PerformanceWeightedAggregator so
+                # MR/TF strategy routing and council judges receive Livermore context.
+                _lsm_comp = aggregator.get("livermore")
+                _cs = None
+                if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
+                    try:
+                        _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
+                        mtf_regime["composite_state"] = _cs
+                    except Exception as _cs_err:
+                        logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+                # Hold council signals until Livermore is warm — same rule
+                # performance mode already enforces internally.
+                if _lsm_comp is not None and not getattr(_lsm_comp, "_livermore_warmed", False):
+                    logger.debug(
+                        "[council] %s Livermore not warmed — holding signal (warmup in progress).",
+                        asset_name,
+                    )
+                    signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+                else:
+                    signal, details = aggregator["council"].get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime,
+                        live_price=current_price
+                    )
+                details["aggregator_mode"] = "council"
+                # Surface Livermore context so the trade manager doesn't open
+                # council trades blind (no entry_type, no state-aware stops,
+                # mislabeled trade_type).
+                if _cs is not None and hasattr(_cs, "to_dict"):
+                    details["composite_state"] = _cs.to_dict()
+                    # L2: VTM's pattern-aware exit management reads
+                    # signal_details.get("institutional_pattern") as a flat key.
+                    # Council mode never set it (only nested under composite_state).
+                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
+                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
+                    self._latest_composite_state[asset_name] = details["composite_state"]
+                    _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                    if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                        details["trade_type"] = "TREND"
+                    elif _lsm1h is not None:
+                        details["trade_type"] = "REVERSION"
+
             else:
-                # SINGLE AGGREGATOR MODE:
-                # Both Council and Performance aggregators now accept full context
+                # PERFORMANCE / plain council (non-dict) mode
                 signal, details = aggregator.get_aggregated_signal(
                     df,
                     current_regime=mtf_regime.get("regime", "NEUTRAL"),
@@ -3910,11 +4713,10 @@ class TradingBot:
                     governor_data=mtf_regime,
                     live_price=current_price
                 )
-                # ✅ FIX: Stamp engine label immediately after aggregator runs.
-                # Previously this stamp was absent from trade_asset (it existed only
-                # in _update_asset_signal), so when _notify_blocked fired for a blocked
-                # council signal it found aggregator_mode missing and the hybrid_selector
-                # fallback always wrote "performance" → Telegram always showed [PERF].
+                # Surface the composite_state the aggregator already built
+                # internally, so the validator, VTM tick loop, and council
+                # exemption logic can all see it on this and later cycles.
+                mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
                 details["aggregator_mode"] = (
                     "council"
                     if isinstance(aggregator, InstitutionalCouncilAggregator)
@@ -3922,6 +4724,313 @@ class TradingBot:
                 )
 
             details["price"] = current_price
+
+            # ── SYSTEM VALIDATOR — per-asset update ────────────────────────────
+            # Pass the composite_state and signal_details so the validator can
+            # compute LIVENESS (entropy of component outputs) and CALIBRATION
+            # (output distribution) for each active component. Called after
+            # signal generation so all composite_state fields are populated.
+            if hasattr(self, "system_validator") and self.system_validator:
+                try:
+                    _cs_for_validator = mtf_regime.get("composite_state")
+                    _df_1h_for_validator = (
+                        getattr(self, "_df_1h_cache", {}).get(asset_name)
+                    )
+                    _positions_for_validator = list(
+                        self.portfolio_manager.positions.values()
+                    ) if self.portfolio_manager else []
+                    self.system_validator.update(
+                        composite_state=_cs_for_validator,
+                        signal_details=details,
+                        open_positions=_positions_for_validator,
+                        df_1h=_df_1h_for_validator,
+                        asset=asset_name,
+                    )
+                except Exception as _sv_asset_err:
+                    logger.debug(
+                        "[VALIDATOR] per-asset update error for %s: %s",
+                        asset_name, _sv_asset_err,
+                    )
+            # ──────────────────────────────────────────────────────────────────
+
+            # ── POST-SIGNAL LIVERMORE COUNTER-TREND BLOCK ──────────────────────
+            # Extends Phase 2 Hard Veto Block C to ALL aggregator outputs, not just MR.
+            # In NATURAL_RETRACEMENT price is pulling back inside an uptrend — SHORTs
+            # are counter-trend and historically losing (USOIL June 2026 SHORT $90.28,
+            # USOIL June 2026 LONG $91.60 in wrong conditions both lost).
+            # In NATURAL_REBOUND price is bouncing inside a downtrend — LONGs are
+            # counter-trend. The council's TF judge can still generate these signals
+            # even though MR is correctly blocked — this gate closes that gap.
+            if signal != 0:
+                # Primary: read from details (signal_aggregator injects this directly
+                # from composite_state, proven reliable since MR reads the same object).
+                # Fallback: mtf_regime composite_state (may be None in some council paths).
+                _lsm_post = details.get("livermore_state_1h")
+                if _lsm_post is None:
+                    _cs_post = mtf_regime.get("composite_state")
+                    if _cs_post is not None:
+                        _lsm_post = getattr(_cs_post, "livermore_state_1h", None)
+                        if hasattr(_lsm_post, "value"):
+                            _lsm_post = _lsm_post.value
+
+                # 4H awareness (2026-06-30): livermore_state_4h was already being
+                # injected into `details` by signal_aggregator.py but never read
+                # here — this gate was 1H-only despite the 4H signal being one
+                # function call away. Same primary/fallback pattern as the 1H read.
+                _lsm_4h_post = details.get("livermore_state_4h")
+                if _lsm_4h_post is None:
+                    _cs_post = mtf_regime.get("composite_state")
+                    if _cs_post is not None:
+                        _lsm_4h_post = getattr(_cs_post, "livermore_state_4h", None)
+                        if hasattr(_lsm_4h_post, "value"):
+                            _lsm_4h_post = _lsm_4h_post.value
+
+                logger.debug(
+                    "[LIVERMORE BLOCK] %s: 1H state=%s 4H state=%s signal=%d",
+                    asset_name, _lsm_post, _lsm_4h_post, signal
+                )
+
+                # 4H confirmation: only an unambiguous MAIN_UP/MAIN_DOWN counts.
+                # NATURAL_*/SECONDARY_* 4H states are themselves not a clean trend
+                # read, so they don't get to override the 1H timing gate below.
+                # A missing 4H state (None — warmup, staleness) is NEVER treated
+                # as confirmation; always fail safe to the existing block.
+                _4h_confirms_long = _lsm_4h_post == "MAIN_UP"
+                _4h_confirms_short = _lsm_4h_post == "MAIN_DOWN"
+
+                if _lsm_post == "NATURAL_RETRACEMENT" and signal < 0:
+                    # Pure counter-trend short — 1H itself implies an uptrend
+                    # context. No 4H state makes this correct: 4H=MAIN_UP means
+                    # shorting against both timeframes; 4H=MAIN_DOWN means the
+                    # 1H "uptrend" read is fighting the 4H trend, which is a
+                    # no-trade case, not a short setup either. Always blocked.
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
+                        f"1H NATURAL_RETRACEMENT (pullback in uptrend) vs "
+                        f"4H={_lsm_4h_post} — not a SHORT setup at any 4H state"
+                    )
+                    # Record in shadow trader BEFORE zeroing — the shadow records
+                    # what would have happened if this signal had been allowed through.
+                    # This data is essential for Phase 3B learning on blocked setups.
+                    _original_signal = signal
+                    signal = 0
+                    details["reasoning"] = "livermore_counter_trend_block"
+                    self._shadow_open_blocked(
+                        asset_name, _original_signal, details, df, current_price,
+                        "livermore_counter_trend_block", asset_cfg,
+                    )
+                elif _lsm_post == "NATURAL_REBOUND" and signal > 0:
+                    # Mirror of above — pure counter-trend long, always blocked.
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
+                        f"1H NATURAL_REBOUND (bounce in downtrend) vs "
+                        f"4H={_lsm_4h_post} — not a LONG setup at any 4H state"
+                    )
+                    _original_signal = signal
+                    signal = 0
+                    details["reasoning"] = "livermore_counter_trend_block"
+                    self._shadow_open_blocked(
+                        asset_name, _original_signal, details, df, current_price,
+                        "livermore_counter_trend_block", asset_cfg,
+                    )
+                elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
+                    if _4h_confirms_short:
+                        # 4H=MAIN_DOWN backs this short: bounce-exhaustion entry
+                        # within a confirmed downtrend is the Livermore "ideal"
+                        # setup, not a timing risk — the higher timeframe is the
+                        # stronger signal here. Let it through.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
+                            f"4H=MAIN_DOWN confirms; 1H NATURAL_REBOUND is bounce "
+                            f"exhaustion within the dominant downtrend"
+                        )
+                    elif details.get("judge_scores", {}).get("structure", 0) > (
+                        0.6 * details.get("total_score", 1)
+                    ):
+                        # Item 2.12: Structure judge already independently drove
+                        # this signal — a defended level/BOS is itself exhaustion
+                        # evidence, not just riding 1H/4H Livermore timing. Treat
+                        # it as equivalent to 4H confirmation rather than
+                        # re-blocking on a question Structure already answered.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
+                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
+                            f"independently confirmed a defended level/BOS — treating "
+                            f"as exhaustion evidence."
+                        )
+                    else:
+                        # Shorting INTO a rebound sweeps the SL before price resumes
+                        # down. Gold June 4 2026: shorted at $4,463 during
+                        # NATURAL_REBOUND, price ran to $4,499 hitting SL before
+                        # reversing. Wait for exhaustion — no 4H backstop here.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
+                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_REBOUND "
+                            f"is an active bounce, shorting INTO it risks SL sweep. "
+                            f"Wait for exhaustion."
+                        )
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_rebound_sl_sweep_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "livermore_rebound_sl_sweep_block", asset_cfg,
+                        )
+                elif _lsm_post == "NATURAL_RETRACEMENT" and signal > 0:
+                    if _4h_confirms_long:
+                        # 4H=MAIN_UP backs this long: buying the pullback within a
+                        # confirmed uptrend is the Livermore "ideal" entry. The
+                        # higher timeframe is the stronger timing signal — let it
+                        # through without requiring a separate spring confirmation.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
+                            f"4H=MAIN_UP confirms; 1H NATURAL_RETRACEMENT is the "
+                            f"ideal pullback entry within the dominant uptrend"
+                        )
+                    elif details.get("judge_scores", {}).get("structure", 0) > (
+                        0.6 * details.get("total_score", 1)
+                    ):
+                        # Item 2.12: mirror of the NATURAL_REBOUND+SHORT case above.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
+                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
+                            f"independently confirmed a defended level/BOS — treating "
+                            f"as exhaustion evidence."
+                        )
+                    else:
+                        # Longing INTO a retracement risks SL sweep before trend
+                        # resumes up. No 4H backstop here — wait for spring/exhaustion.
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
+                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_RETRACEMENT "
+                            f"is an active pullback, longing INTO it risks SL sweep. "
+                            f"Wait for spring/exhaustion."
+                        )
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_retracement_sl_sweep_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "livermore_retracement_sl_sweep_block", asset_cfg,
+                        )
+
+            # ── SECONDARY STATE DIRECTIONAL BLOCK ─────────────────────────────
+            # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most
+            # dangerous counter-moves. Two distinct risks:
+            #
+            # 1. Chasing the secondary direction (SELL in SECONDARY_RETRACEMENT,
+            #    LONG in SECONDARY_REBOUND) — TF/EMA blindly sees momentum and
+            #    piles in. Livermore is explicit: do NOT chase secondary moves.
+            #
+            # 2. Fading the secondary (LONG in SECONDARY_RETRACEMENT, SHORT in
+            #    SECONDARY_REBOUND) — MR Mode 2 exhaustion play. This IS a
+            #    legitimate Livermore trade at the secondary extreme. Allow it.
+            #
+            # Solution: block signals in the SAME direction as the secondary
+            # move; allow signals opposing it. Direction-based, not provenance-
+            # based — avoids the untrackable "which strategy fired this" problem.
+            if signal != 0 and _lsm_post in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                _chasing_secondary = (
+                    (_lsm_post == "SECONDARY_RETRACEMENT" and signal < 0) or
+                    (_lsm_post == "SECONDARY_REBOUND"     and signal > 0)
+                )
+                if _chasing_secondary:
+                    _chase_dir = "SELL" if signal < 0 else "BUY"
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: {_chase_dir} zeroed — "
+                        f"{_lsm_post} (4H={_lsm_4h_post}): chasing the secondary "
+                        f"move is the highest-risk entry. Wait for exhaustion."
+                    )
+                    _original_signal = signal
+                    signal = 0
+                    details["reasoning"] = "livermore_secondary_chase_block"
+                    self._shadow_open_blocked(
+                        asset_name, _original_signal, details, df, current_price,
+                        "livermore_secondary_chase_block", asset_cfg,
+                    )
+                else:
+                    # Opposing the secondary = exhaustion fade. Allowed — but log
+                    # the elevated risk so the trade record is honest.
+                    _fade_dir = "LONG" if signal > 0 else "SHORT"
+                    logger.info(
+                        f"[LIVERMORE BLOCK] {asset_name}: {_fade_dir} allowed — "
+                        f"{_lsm_post}: fading secondary exhaustion (4H={_lsm_4h_post}). "
+                        f"Elevated risk — secondary can extend further."
+                    )
+
+            # ── MINIMUM REGIME CONFIDENCE GATE ────────────────────────────────
+            # Block any signal when MTF regime confidence is below 60%.
+            # NEUTRAL (0%), SLIGHTLY_BEARISH at 33-50% — all historically losing.
+            # BTC BEARISH 100%, USTEC BULLISH 100% pass easily.
+            # Configurable via config["trading"]["min_regime_confidence"] (default 0.60).
+            #
+            # BYPASS: If 1H Livermore state is MAIN_DOWN or MAIN_UP, the structural
+            # trend is confirmed regardless of 4H MTF regime confidence. The 4H
+            # detector often lags after major economic events (e.g. NFP) — MAIN_DOWN/UP
+            # on 1H IS the directional confirmation the gate is looking for.
+            # Also bypass if council score is very strong (>3.5/5.0) with high ADX.
+            if signal != 0:
+                _min_conf = self.config.get("trading", {}).get("min_regime_confidence", 0.60)
+                _regime_conf = mtf_regime.get("confidence", 0.0)
+                if _regime_conf < _min_conf:
+                    # Check for structural bypass conditions
+                    _lsm_main = _lsm_post in ("MAIN_DOWN", "MAIN_UP")
+                    _signal_aligned = (
+                        (_lsm_post == "MAIN_DOWN" and signal < 0) or
+                        (_lsm_post == "MAIN_UP"   and signal > 0)
+                    )
+                    _council_score  = details.get("total_score", 0) or details.get("sell_score" if signal < 0 else "buy_score", 0)
+                    # Council aggregator uses a 0–5 scale; performance aggregator uses 0–1.
+                    # Normalise to 0–1 so the threshold works in both modes.
+                    _score_normalised = _council_score / 5.0 if _council_score > 1.0 else _council_score
+                    _strong_council = _score_normalised >= 0.60  # ≥60% confidence in either scale
+
+                    if _lsm_main and _signal_aligned and _strong_council:
+                        # ── PATTERN-CONFLUENCE VETO (added 2026-06-16) ──────────
+                        # This bypass only checks LSM structural alignment + the
+                        # aggregator's own score — it never consults the
+                        # independent pattern-confluence engine in
+                        # signal_aggregator._score_confluence. That let the
+                        # 2026-06-16 GOLD trade pass with 0/5 institutional
+                        # patterns matched and net_conviction=-1.5 (unanimous
+                        # exhaustion read), because LSM+score alone qualified.
+                        # Veto the bypass when the pattern engine unanimously
+                        # disagrees, so one score variable can't override a
+                        # 5-template structural rejection.
+                        _composite = details.get("composite_state", {}) or {}
+                        _inst_pattern = _composite.get("institutional_pattern")
+                        _net_conviction = _composite.get("net_conviction", 0.0)
+                        _pattern_veto_threshold = self.config.get("trading", {}).get(
+                            "confidence_gate_pattern_veto", -1.0
+                        )
+                        _pattern_unanimous_reject = (
+                            _inst_pattern is None and _net_conviction <= _pattern_veto_threshold
+                        )
+
+                        if _pattern_unanimous_reject:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: Bypass VETOED — "
+                                f"LSM={_lsm_post} aligned, score norm={_score_normalised:.0%} "
+                                f"qualified, but pattern-confluence engine unanimously rejected "
+                                f"(no institutional pattern matched, net_conviction="
+                                f"{_net_conviction:.1f} <= {_pattern_veto_threshold:.1f})."
+                            )
+                            signal = 0
+                            details["reasoning"] = "low_regime_confidence_pattern_veto"
+                        else:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: NEUTRAL 4H regime bypassed — "
+                                f"1H LSM={_lsm_post} aligned with signal, "
+                                f"score={_council_score:.2f} (norm={_score_normalised:.0%}). "
+                                f"4H detector likely lagging post-event."
+                            )
+                    else:
+                        logger.info(
+                            f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
+                            f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
+                        )
+                        signal = 0
+                        details["reasoning"] = "low_regime_confidence"
 
             # Log Signal Quality
             logger.info(
@@ -3958,7 +5067,16 @@ class TradingBot:
                     _new_side = "long" if signal == 1 else "short"
                     _opposite = "short" if _new_side == "long" else "long"
 
-                    if _opposite in _active_sides:
+                    # S10.3 same-side guard: suppress if same-direction already open
+                    if _new_side in _active_sides:
+                        logger.info(
+                            f"[SUPPRESS] {asset_name}: {_new_side.upper()} signal suppressed — "
+                            f"same-side {_new_side.upper()} position already active (no pyramiding)."
+                        )
+                        signal = 0
+                        details["same_side_suppressed"] = True
+
+                    elif _opposite in _active_sides:
                         # Determine if regime is confirmed directional
                         _regime_data = getattr(self, "_current_regime_data", {}).get(asset_name, {})
                         _regime_confirmed = _regime_data.get("is_bullish") or _regime_data.get("is_bearish")
@@ -4012,10 +5130,68 @@ class TradingBot:
                 # Filter 1: Counter-trend blocking
                 # --------------------------------------------------------
                 if not mtf_regime.get("allow_counter_trend", True):
-                    is_counter_trend = (signal == 1 and not mtf_regime.get("is_bullish")) or \
-                                     (signal == -1 and mtf_regime.get("is_bullish"))
+                    # Item 19b: 4H Livermore / macro-regime disagreement gate.
+                    # Flag-gated (phase_config.lsm_regime_disagreement_gate_enabled,
+                    # default False — same switch as signal_aggregator.py and
+                    # council_aggregator.py). When enabled and the live 4H
+                    # Livermore lean disagrees with mtf_regime's EMA-derived
+                    # is_bullish/is_bearish, this filter treats that lean as
+                    # stripped for THIS counter-trend check only — it does not
+                    # mutate the shared self._current_regime_data[asset_name]
+                    # dict (mtf_regime), since that same cached dict is read by
+                    # other consumers later in this cycle (e.g. the hedging
+                    # _regime_confirmed checks above and the supplementary
+                    # regime check further below).
+                    _mtf_is_bullish = mtf_regime.get("is_bullish")
+                    _mtf_is_bearish = mtf_regime.get("is_bearish")
+                    _agg_m = self.aggregators.get(asset_name) if hasattr(self, "aggregators") else None
+                    _cs_m = {}
+                    if _agg_m and getattr(_agg_m, "_cached_composite", None) is not None:
+                        try:
+                            _cs_m = _agg_m._cached_composite.to_dict()
+                        except Exception:
+                            _cs_m = {}
+                    _lsm_gate_enabled_m = bool(
+                        (_cs_m.get("phase_config", {}) or {}).get("lsm_regime_disagreement_gate_enabled", False)
+                    )
+                    if _lsm_gate_enabled_m:
+                        _lsm_4h_m = _cs_m.get("livermore_state_4h")
+                        _lsm_lean_m = (
+                            "bullish" if _lsm_4h_m in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+                            else "bearish" if _lsm_4h_m in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+                            else None
+                        )
+                        if _lsm_lean_m is not None:
+                            if _mtf_is_bullish and _lsm_lean_m != "bullish":
+                                logger.info(
+                                    f"[MTF FILTER] {asset_name} 4H Livermore lean ({_lsm_lean_m}) disagrees "
+                                    f"with bullish regime — stripping bullish lean for counter-trend check "
+                                    f"(lsm_regime_disagreement_gate_enabled)"
+                                )
+                                _mtf_is_bullish = False
+                            if _mtf_is_bearish and _lsm_lean_m != "bearish":
+                                logger.info(
+                                    f"[MTF FILTER] {asset_name} 4H Livermore lean ({_lsm_lean_m}) disagrees "
+                                    f"with bearish regime — stripping bearish lean for counter-trend check "
+                                    f"(lsm_regime_disagreement_gate_enabled)"
+                                )
+                                _mtf_is_bearish = False
 
-                    if is_counter_trend:
+                    is_counter_trend = (signal == 1 and not _mtf_is_bullish) or \
+                                     (signal == -1 and _mtf_is_bullish)
+
+                    # Item 2.15: council's macro governor already granted an
+                    # explicit V-Shape exception (explosive momentum overruling
+                    # its own 1D counter-trend veto) — this MTF-regime-based
+                    # gate is a separate, later check that doesn't know about
+                    # that exception and would silently re-block the same
+                    # signal it was just deliberately allowed through.
+                    if details.get("trade_type") == "V_SHAPE":
+                        logger.info(
+                            f"[MTF FILTER] {asset_name}: counter-trend check skipped — "
+                            f"V_SHAPE exception already granted by macro governor."
+                        )
+                    elif is_counter_trend:
                         logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
                         logger.info(
                             f"  Signal Direction: {'LONG' if signal == 1 else 'SHORT'}"
@@ -4112,6 +5288,31 @@ class TradingBot:
                     "[MTF FILTER] No MTF data available, skipping regime filters"
                 )
 
+            # ── FUNNEL LOGGING ────────────────────────────────────────────────
+            # Record the FINAL signal state — after every post-aggregator gate
+            # (Livermore blocks, regime confidence, position suppression, MTF
+            # filter). Previously this was called inside
+            # get_aggregated_signal_hybrid_dynamic(), which only covered hybrid
+            # mode AND ran before the post-processing gates, making the
+            # "passed_to_execution" count meaningless. Now logged here once,
+            # covering council, performance, and hybrid modes uniformly.
+            # Item 2.3: cache this cycle's score per asset so the NEXT cycle can
+            # order execution strongest-conviction-first. total_score doesn't
+            # exist on CompositeState/_cached_composite (verified — the doc's
+            # own snippet flagged this field name as unconfirmed), it's an
+            # ephemeral local in this method's `details` dict — so it has to
+            # be persisted somewhere to survive to the next cycle's ordering
+            # decision.
+            if not hasattr(self, "_last_cycle_scores"):
+                self._last_cycle_scores = {}
+            self._last_cycle_scores[asset_name] = abs(details.get("total_score", 0) or 0)
+
+            if getattr(self, "funnel_logger", None) is not None:
+                try:
+                    self.funnel_logger.record(asset_name, signal, details)
+                except Exception as _fe:
+                    logger.debug(f"[FUNNEL] record hook failed: {_fe}")
+
             # ============================================================
             # 3. Check HOLD Signal
             # ============================================================
@@ -4123,6 +5324,11 @@ class TradingBot:
                     logger.debug(
                         f"[SUPPRESS] {asset_name}: counter-direction signal silently dropped."
                     )
+                    if getattr(self, "funnel_logger", None) is not None:
+                        try:
+                            self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_same_direction"})
+                        except Exception:
+                            pass
                     return
 
                 # Distinguish aggregator/AI rejection from a natural HOLD
@@ -4162,20 +5368,34 @@ class TradingBot:
                 is_blocked = (original_sig != 0) or (reasoning and "hold" not in reasoning.lower())
 
                 if is_blocked:
-                    # Determine block source and reason
+                    # Determine block source and reason.
+                    # Priority: council decision_type (most specific) → AI rejection
+                    # → general reasoning string.  AI stub must NOT win when an
+                    # explicit council veto (CMR, MR lean, governor, etc.) fired.
                     block_source = "Signal Aggregator"
-                    
-                    # If it was specifically an AI validation rejection
-                    if ai_details.get("action") == "rejected" and ai_details.get("rejection_reasons"):
+                    _dt = details.get("decision_type", "")
+                    raw_reason = reasoning or "Signal blocked by aggregator filters"
+
+                    if "Candle Momentum Reversal" in _dt:
+                        block_source = "Candle Momentum Reversal"
+                        block_reason = "Recent candles opposing signal direction"
+                    elif "Opposite Trend" in _dt:
+                        block_source = "Opposite Trend Veto"
+                        block_reason = "TF signal strongly opposes council direction"
+                    elif "MR lean conflict" in _dt:
+                        block_source = "MR Lean Conflict"
+                        block_reason = _dt.replace("HOLD (", "").rstrip(")")
+                    elif "BLOCKED" in _dt and "(" in _dt:
+                        # Generic council early-return block — extract label from parens
+                        block_source = _dt.split("(", 1)[-1].rstrip(")")
+                        block_reason = block_source
+                    elif ai_details.get("action") == "rejected" and ai_details.get("rejection_reasons"):
+                        # Only attribute to AI when it genuinely rejected (not a stub)
                         block_source = "AI Validation"
                         block_reason = ", ".join(ai_details.get("rejection_reasons"))
                     else:
-                        # General aggregator block (volatility, governor, etc)
-                        # Clean up technical reasoning strings for humans
-                        raw_reason = reasoning or "Signal blocked by aggregator filters"
+                        # General aggregator block — clean up technical strings
                         block_reason = raw_reason.replace("_", " ").title()
-                        
-                        # Special handling for common technical reasons
                         if "low_volatility" in raw_reason:
                             block_reason = "Market volatility below minimum threshold"
                         elif "no_sniper_confirmation" in raw_reason:
@@ -4226,6 +5446,16 @@ class TradingBot:
             # ============================================================
             # 4. Check Trading Limits & Cooldowns
             # ============================================================
+            # Extract current Livermore state for adaptive cooldown comparison.
+            # Prefer 1H state (entry timeframe); fall back to 4H if absent.
+            _regime_now = self._current_regime_data.get(asset_name, {}) if hasattr(self, "_current_regime_data") else {}
+            _cs_now = _regime_now.get("composite_state")
+            _current_lsm = None
+            if _cs_now is not None:
+                _current_lsm = getattr(_cs_now, "livermore_state_1h", None) or getattr(_cs_now, "livermore_state_4h", None)
+                if _current_lsm is not None and hasattr(_current_lsm, "value"):
+                    _current_lsm = _current_lsm.value  # unwrap Enum → str
+
             if not self.check_trading_limits():
                 logger.info(f"[LIMIT] Trading limits reached")
                 self._notify_blocked(
@@ -4243,9 +5473,17 @@ class TradingBot:
                     asset_name, signal, details, df, current_price,
                     "trading_limits", asset_cfg,
                 )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(
+                            asset_name, 0,
+                            {"reasoning": self._last_limit_reason or "blocked_trading_limits"},
+                        )
+                    except Exception:
+                        pass
                 return
 
-            if not self.check_min_time_between_trades(asset_name):
+            if not self.check_min_time_between_trades(asset_name, current_lsm_state=_current_lsm):
                 logger.info(f"[COOLDOWN] {asset_name} is in cooldown")
                 self._notify_blocked(
                     asset=asset_name,
@@ -4285,6 +5523,46 @@ class TradingBot:
                     asset_name, signal, details, df, current_price,
                     "cooldown_block", asset_cfg,
                 )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_cooldown"})
+                    except Exception:
+                        pass
+                return
+
+            # ── Natural cycle elapsed gate ────────────────────────────────────
+            # Block MR re-entries in the same Livermore NATURAL phase until
+            # the state has aged sufficiently (≥ natural_cycle_min_bars, default 8).
+            _current_lsm_age = 0
+            try:
+                if hasattr(self, "_current_regime_data"):
+                    _cs_for_age = self._current_regime_data.get(asset_name, {}).get("composite_state")
+                    if _cs_for_age is not None:
+                        _current_lsm_age = getattr(_cs_for_age, "livermore_state_age_1h", 0) or 0
+            except Exception:
+                pass
+
+            if not self._check_natural_cycle_gate(asset_name, _current_lsm, _current_lsm_age):
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Natural Cycle Gate",
+                    block_reason=(
+                        f"Same Livermore state ({_current_lsm}) as last entry — "
+                        f"waiting for cycle to mature (age={_current_lsm_age})"
+                    ),
+                    details=details,
+                    price=details.get("price"),
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "natural_cycle_gate", asset_cfg,
+                )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_natural_cycle"})
+                    except Exception:
+                        pass
                 return
 
             # Store BEFORE state
@@ -4404,23 +5682,64 @@ class TradingBot:
                         ),
                         signal_details=details,
                     )
+                    # Snapshot positions BEFORE check_and_update runs — the VTM
+                    # runs on a background thread and can emergency-close a position
+                    # within milliseconds of it opening (e.g. SL placement failure).
+                    # If we only read positions AFTER check_and_update, the position
+                    # may already be gone and new_position_ids comes back empty,
+                    # silently skipping the trade-opened notification. This snapshot
+                    # captures what was actually opened before any VTM action.
+                    _positions_just_opened = self.portfolio_manager.get_asset_positions(asset_name)
+                    _ids_just_opened = {p.position_id for p in _positions_just_opened}
+
                     self.mt5_handler.check_and_update_positions(asset_name)
             except Exception as e:
                 logger.error(f"[ERROR] Failed to execute signal for {asset_name}: {e}")
                 return
 
+            # Change 1.4: drain any deferred alerts queued by mt5_handler during
+            # this cycle (e.g. price sanity failures, SL-push streak escalations).
+            if self.mt5_handler is not None:
+                for _alert in list(getattr(self.mt5_handler, "_pending_alerts", [])):
+                    try:
+                        self._send_telegram_notification(
+                            self.telegram_bot.notify_error(
+                                f"⚠️ {_alert['asset']}: {_alert['message']}"
+                            )
+                        )
+                    except Exception:
+                        pass
+                try:
+                    self.mt5_handler._pending_alerts.clear()
+                except Exception:
+                    pass
+
             # ============================================================
             # 7. Handle Success & DB Logging
             # ============================================
             if success:
+                # Phase 2.1: close the funnel — this evaluation became a trade.
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.mark_executed(asset_name)
+                    except Exception:
+                        pass
+
                 positions_after = self.portfolio_manager.get_asset_positions(asset_name)
                 position_ids_after = {p.position_id for p in positions_after}
-                new_position_ids = position_ids_after - position_ids_before
+                # Use the pre-VTM-close snapshot for new_position_ids so the
+                # trade-opened notification fires even when VTM emergency-closes
+                # the position in under one second (e.g. SL placement failure).
+                _ids_just_opened = _ids_just_opened if '_ids_just_opened' in dir() else position_ids_after
+                new_position_ids = _ids_just_opened - position_ids_before
                 closed_position_ids = position_ids_before - position_ids_after
 
                 # Update internal counters
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
+                # Record Livermore state at entry — used by adaptive cooldown on next signal.
+                if _current_lsm is not None:
+                    self._last_livermore_states[asset_name] = _current_lsm
 
                 logger.info(
                     f"[SUCCESS] {asset_name} Trade Executed "
@@ -4430,12 +5749,13 @@ class TradingBot:
                 # Send Telegram Notifications (New Positions)
                 if new_position_ids:
                     for position_id in new_position_ids:
+                        # Search current positions first; fall back to the
+                        # pre-VTM snapshot when VTM already emergency-closed.
                         new_pos = next(
-                            (
-                                p
-                                for p in positions_after
-                                if p.position_id == position_id
-                            ),
+                            (p for p in positions_after if p.position_id == position_id),
+                            None,
+                        ) or next(
+                            (p for p in _positions_just_opened if p.position_id == position_id),
                             None,
                         )
                         if (
@@ -4461,6 +5781,9 @@ class TradingBot:
                                 )
 
                                 vtm_is_active = new_pos.trade_manager is not None
+                                _vtm = new_pos.trade_manager
+                                vtm_entry_type = getattr(_vtm, "vtm_entry_type", None)
+                                vtm_stop_type = getattr(_vtm, "stop_type", "atr")
 
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
@@ -4474,6 +5797,8 @@ class TradingBot:
                                         margin_type=margin_type,
                                         is_futures=is_futures,
                                         vtm_is_active=vtm_is_active,
+                                        entry_type=vtm_entry_type,
+                                        stop_type=vtm_stop_type,
                                     )
                                 )
 
@@ -4740,6 +6065,10 @@ class TradingBot:
         ✅ FIXED: Now handles hybrid mode correctly
         """
         try:
+            logger.info(f"\n{'=' * 70}")
+            logger.info(f"[PROCESSING ASSET] {asset_name}")
+            logger.info(f"{'=' * 70}")
+
             asset_cfg = self.config["assets"][asset_name]
             exchange = asset_cfg.get("exchange", "binance")
             symbol = self._resolve_symbol(asset_name)
@@ -4796,7 +6125,7 @@ class TradingBot:
                 return
 
             try:
-                current_price = handler.get_current_price(symbol)
+                current_price = handler.get_current_price(symbol, force_live=True)
             except:
                 current_price = df["close"].iloc[-1]
 
@@ -4843,7 +6172,12 @@ class TradingBot:
             if asset_name in ("BTC", "BTCUSDT"):
                 mtf_regime["funding_rate_zscore"] = getattr(self, "funding_rate_zscore", 0.0)
                 # F.4: Inject BTC CVD order flow + F.6: L2 order book
-                if self.cvd_consumer:
+                # Same MT5/Binance instrument-mismatch guard as the other two
+                # injection sites — see comment there for rationale.
+                _btc_is_binance = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("exchange", "binance") == "binance"
+                )
+                if self.cvd_consumer and _btc_is_binance:
                     mtf_regime["cvd_trend"] = self.cvd_consumer.get_trend()
                     mtf_regime["cvd_stale"] = self.cvd_consumer.is_stale()
                     mtf_regime["order_book_imbalance"] = self.cvd_consumer.get_order_book_imbalance()
@@ -4894,8 +6228,52 @@ class TradingBot:
                     hybrid_selector=self.hybrid_selector,
                     live_price=current_price
                 )
+            elif isinstance(aggregator, dict) and aggregator.get("mode") == "council":
+                # COUNCIL MODE with LSM companion — build composite_state first.
+                _lsm_comp = aggregator.get("livermore")
+                _cs = None
+                if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
+                    try:
+                        _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
+                        mtf_regime["composite_state"] = _cs
+                    except Exception as _cs_err:
+                        logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+                # Hold council signals until Livermore is warm — same rule
+                # performance mode already enforces internally.
+                if _lsm_comp is not None and not getattr(_lsm_comp, "_livermore_warmed", False):
+                    logger.debug(
+                        "[council] %s Livermore not warmed — holding signal (warmup in progress).",
+                        asset_name,
+                    )
+                    signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
+                else:
+                    signal, details = aggregator["council"].get_aggregated_signal(
+                        df,
+                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                        is_bull_market=mtf_regime.get("is_bull", False),
+                        governor_data=mtf_regime,
+                        live_price=current_price
+                    )
+                details["aggregator_mode"] = "council"
+                # Surface Livermore context so the trade manager doesn't open
+                # council trades blind (no entry_type, no state-aware stops,
+                # mislabeled trade_type).
+                if _cs is not None and hasattr(_cs, "to_dict"):
+                    details["composite_state"] = _cs.to_dict()
+                    # L2: VTM's pattern-aware exit management reads
+                    # signal_details.get("institutional_pattern") as a flat key.
+                    # Council mode never set it (only nested under composite_state).
+                    details["institutional_pattern"] = getattr(_cs, "institutional_pattern", None)
+                    # L3: refresh the cache MarketWatcher reads for silent-zone/CHoCH awareness.
+                    self._latest_composite_state[asset_name] = details["composite_state"]
+                    _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                    if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                        details["trade_type"] = "TREND"
+                    elif _lsm1h is not None:
+                        details["trade_type"] = "REVERSION"
             else:
-                # SINGLE AGGREGATOR MODE:
+                # PERFORMANCE or plain council (non-dict) mode
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
                     signal, details = aggregator.get_aggregated_signal(
                         df,
@@ -4904,7 +6282,6 @@ class TradingBot:
                         governor_data=mtf_regime,
                         live_price=current_price
                     )
-                    # Stamp the engine label so charts + Telegram always know the source
                     details["aggregator_mode"] = "council"
                 else:
                     # Performance mode — pass full MTF regime context so regime/confidence
@@ -4916,7 +6293,9 @@ class TradingBot:
                         governor_data=mtf_regime,
                         live_price=current_price
                     )
-                    # Stamp the engine label so charts + Telegram always know the source
+                    # Surface the composite_state the aggregator already built
+                    # internally (mirrors the injection done for Location A/B).
+                    mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
                     details["aggregator_mode"] = "performance"
             # T3.1: Shadow trade — open virtual position for every blocked signal
             # so we can measure what gates are costing us in real P&L terms.
@@ -4929,8 +6308,17 @@ class TradingBot:
                     _intended = _raw_tf or _raw_ema or _raw_mr
                     if _intended != 0 and _reasoning and "hold (no strategy" not in _reasoning:
                         _side = "long" if _intended > 0 else "short"
-                        _src = ("TF" if _raw_tf != 0 else
-                                "EMA" if _raw_ema != 0 else "MR")
+                        # Item 2.17: check aggregator_mode first — a council-driven
+                        # decision isn't really "TF"/"EMA"/"MR" even if one of those
+                        # raw sub-signals happened to be nonzero; it was the judge
+                        # system that made the call. Matches the other shadow-open
+                        # call site (details.get("aggregator_mode", "PERF").upper()).
+                        _agg_mode = (details.get("aggregator_mode") or "").lower()
+                        if _agg_mode == "council":
+                            _src = "COUNCIL"
+                        else:
+                            _src = ("TF" if _raw_tf != 0 else
+                                    "EMA" if _raw_ema != 0 else "MR")
                         # Compute VTM-style regime-adaptive ATR from df.
                         # Mirrors VTM._calculate_atr(): ATR7/14/28 ratio decides which to use.
                         _atr = None
@@ -4960,13 +6348,23 @@ class TradingBot:
                         _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
                         _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
 
-                        # J2.1: Pass CompositeState snapshot at entry
+                        # J2.1: Pass CompositeState snapshot at entry.
+                        # Unwrap hybrid/council dict wrappers the same way
+                        # _shadow_open_blocked already does, so whichever of the
+                        # two shadow-open call sites runs first this cycle
+                        # produces a correctly-populated composite_state.
                         _aggregator2 = self.aggregators.get(asset_name)
                         _comp_state_dict2 = {}
-                        if _aggregator2 and hasattr(_aggregator2, '_cached_composite') and \
-                           _aggregator2._cached_composite is not None:
+                        _target_agg2 = _aggregator2
+                        if isinstance(_aggregator2, dict):
+                            _target_agg2 = (
+                                _aggregator2.get("performance")
+                                or _aggregator2.get("livermore")
+                            )
+                        if _target_agg2 is not None and hasattr(_target_agg2, '_cached_composite') and \
+                        _target_agg2._cached_composite is not None:
                             try:
-                                _comp_state_dict2 = _aggregator2._cached_composite.to_dict()
+                                _comp_state_dict2 = _target_agg2._cached_composite.to_dict()
                             except Exception:
                                 pass
                         self.shadow_trader.open_position(
@@ -5234,8 +6632,307 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error generating P&L report: {e}", exc_info=True)
 
+    # ── Phase 2: System Validator watchdog ───────────────────────────────────
 
-    
+    def _run_validator_watchdog(self) -> None:
+        """
+        SYSTEM_INTEGRITY watchdogs — called every 5 minutes by scheduler.
+        Checks: Amnesia Monitor, VTM Circuit Breaker signal, API Rate Limit.
+        Never blocks trading. Non-fatal on any exception.
+        """
+        if not hasattr(self, "system_validator") or self.system_validator is None:
+            return
+        try:
+            # Collect Binance API weight from handler if available
+            _binance_weight = None
+            if self.binance_handler and hasattr(self.binance_handler, '_api_weight'):
+                _binance_weight = self.binance_handler._api_weight
+
+            # Get open positions for VTM CB check
+            _open_positions = []
+            if self.portfolio_manager:
+                try:
+                    _open_positions = list(self.portfolio_manager.positions.values())
+                except Exception:
+                    pass
+
+            # Run watchdog per-asset so VTM CB gets the correct 1H data for each instrument.
+            # A single global call without df_1h means the 3×ATR shock detection
+            # silently skips every cycle — that's what was happening before this fix.
+            _first = True
+            for _wd_asset, _wd_agg in (self.aggregators or {}).items():
+                _wd_df1h = getattr(self, "_df_1h_cache", {}).get(_wd_asset)
+                _wd_cs   = (
+                    self._current_regime_data.get(_wd_asset, {}).get("composite_state")
+                    if hasattr(self, "_current_regime_data") else None
+                )
+                _wd_lsm = None
+                if _wd_cs is not None:
+                    _wd_lsm = getattr(_wd_cs, "livermore_state_1h", None)
+                    if hasattr(_wd_lsm, "value"):
+                        _wd_lsm = _wd_lsm.value
+                results = self.system_validator.watchdog_tick(
+                    dynamic_thresholds=(
+                        getattr(_wd_agg, "dynamic_thresholds", None) if _first else None
+                    ),
+                    open_positions=_open_positions,
+                    df_1h=_wd_df1h,
+                    asset=_wd_asset,
+                    livermore_state=_wd_lsm,
+                    binance_api_weight=_binance_weight if _first else None,
+                    binance_api_weight_limit=6000,
+                )
+                _first = False
+
+                # If API throttle signal fires, flag historical updater to skip next fetch
+                if results.get("api_throttle"):
+                    if hasattr(self, 'historical_updater') and self.historical_updater:
+                        self.historical_updater._skip_next_fetch = True
+
+        except Exception as _wdog_err:
+            logger.debug("[VALIDATOR] watchdog_tick error: %s", _wdog_err)
+
+    # ── Fix 7: Connection watchdog ────────────────────────────────────────────
+
+    def _run_connection_watchdog(self) -> None:
+        """
+        Fix 7: Periodic connection health check — runs every 5 minutes via scheduler.
+        Pings MT5 and Binance; logs a warning and attempts reconnect if either is down.
+        Non-fatal: never raises, never blocks trading.
+        """
+        import time as _time
+        try:
+            # ── MT5 ──────────────────────────────────────────────────────────
+            if self.mt5_handler:
+                try:
+                    ok = self.mt5_handler._check_connection()
+                    if not ok:
+                        logger.warning("[WATCHDOG] MT5 connection lost — attempting reconnect.")
+                        if not hasattr(self, "_mt5_down_since"):
+                            self._mt5_down_since = None
+                        if not hasattr(self, "_mt5_last_alert_time"):
+                            self._mt5_last_alert_time = None
+                        if self._mt5_down_since is None:
+                            self._mt5_down_since = datetime.now()
+
+                        try:
+                            self.data_manager.initialize_mt5()
+                        except Exception as _rc_err:
+                            logger.warning("[WATCHDOG] MT5 reconnect failed: %s", _rc_err)
+
+                        _down_seconds = (datetime.now() - self._mt5_down_since).total_seconds()
+                        _should_alert = (
+                            _down_seconds >= 180
+                            and (
+                                self._mt5_last_alert_time is None
+                                or (datetime.now() - self._mt5_last_alert_time).total_seconds() >= 600
+                            )
+                        )
+                        if _should_alert and self.telegram_bot:
+                            self._mt5_last_alert_time = datetime.now()
+                            _alert_msg = (
+                                f"🔴 *CRITICAL: MT5 DISCONNECTED*\n\n"
+                                f"Down for {int(_down_seconds // 60)} minutes.\n"
+                                f"Reconnect attempts are failing. Manual check required."
+                            )
+                            try:
+                                self._send_telegram_notification(
+                                    self.telegram_bot.notify_error(_alert_msg)
+                                )
+                            except Exception as _tg_err:
+                                logger.error("[WATCHDOG] Failed to send MT5 outage alert: %s", _tg_err)
+                    else:
+                        if getattr(self, "_mt5_down_since", None) is not None:
+                            logger.info("[WATCHDOG] MT5 connection restored.")
+                        self._mt5_down_since = None
+                        self._mt5_last_alert_time = None
+                except Exception as _mt5_err:
+                    logger.warning("[WATCHDOG] MT5 ping failed: %s", _mt5_err)
+
+            # ── Binance ───────────────────────────────────────────────────────
+            if self.binance_handler:
+                try:
+                    fh = getattr(self.binance_handler, "futures_handler", None)
+                    if fh and hasattr(fh, "client") and fh.client:
+                        # Use futures server time — avoids 403 on spot endpoint
+                        fh.client.futures_time()
+                    elif hasattr(self.binance_handler, 'client') and self.binance_handler.client:
+                        self.binance_handler.client.get_server_time()
+                except Exception as _bn_err:
+                    logger.warning("[WATCHDOG] Binance ping failed: %s", _bn_err)
+                    # Attempt handler reconnect if method exists
+                    if hasattr(self.binance_handler, 'reconnect'):
+                        try:
+                            self.binance_handler.reconnect()
+                        except Exception:
+                            pass
+
+        except Exception as _wdog_err:
+            logger.debug("[WATCHDOG] connection_watchdog error: %s", _wdog_err)
+
+    # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
+
+    def _load_lsm_csv(self, asset_name: str, symbol: str, tf_suffix: str, expected_hours: int):
+        """
+        Load a local CSV for Livermore warm-start, trying both the MT5 symbol name
+        and the plain asset name. Validates actual bar spacing so mislabeled files
+        (e.g. 1H bars saved under a _4h.csv filename) are silently rejected.
+
+        Returns a cleaned DataFrame ready for LSM replay, or None if no valid file found.
+        """
+        import pandas as _pd
+        from pathlib import Path as _Path
+
+        raw_dir = _Path("data/raw")
+        candidates = [
+            raw_dir / f"{symbol}_{tf_suffix}.csv",    # e.g. GBPAUDm_4h.csv
+            raw_dir / f"{asset_name}_{tf_suffix}.csv", # e.g. GBPAUD_4h.csv
+        ]
+        best_df = None
+        for _path in candidates:
+            if not _path.exists():
+                continue
+            try:
+                _df = _pd.read_csv(_path, index_col=0, parse_dates=True)
+                _df.columns = [c.lower() for c in _df.columns]
+                if len(_df) < 20:
+                    continue
+                # Validate bar spacing — reject mislabeled files.
+                # Allow 50%–200% of the expected interval so daylight-saving
+                # gaps and weekend gaps don't disqualify good files.
+                if len(_df) >= 2:
+                    _spacing = (_df.index[-1] - _df.index[-2]).total_seconds()
+                    _expected = expected_hours * 3600
+                    if not (_expected * 0.5 <= _spacing <= _expected * 2.0):
+                        logger.debug(
+                            "[Livermore CSV] %s skipped — spacing %.0fs != %dH",
+                            _path.name, _spacing, expected_hours,
+                        )
+                        continue
+                # Keep the file with the most bars (deepest history)
+                if best_df is None or len(_df) > len(best_df):
+                    best_df = _df
+                    logger.info(
+                        "[Livermore CSV] ✓ %s — %d bars  %s → %s",
+                        _path.name, len(_df),
+                        str(_df.index[0])[:10], str(_df.index[-1])[:10],
+                    )
+            except Exception as _csv_err:
+                logger.debug("[Livermore CSV] %s load failed: %s", _path.name, _csv_err)
+
+        return best_df
+
+    def _merge_lsm_data(self, csv_df, api_df):
+        """
+        Merge CSV history with API data. CSV provides depth; API provides recency.
+        Drops duplicates, sorts chronologically, returns combined DataFrame.
+        """
+        import pandas as _pd
+        if csv_df is None and api_df is None:
+            return None
+        if csv_df is None:
+            return api_df
+        if api_df is None:
+            return csv_df
+        try:
+            combined = _pd.concat([csv_df, api_df])
+            combined = combined[~combined.index.duplicated(keep="last")]
+            combined = combined.sort_index()
+            return combined
+        except Exception:
+            return api_df  # fall back to API data if merge fails
+
+    def _warm_start_price_sanity_all_assets(self) -> None:
+        """Populate price-sanity status for every MT5-routed asset before the
+        trading loop starts."""
+        if self.mt5_handler is None:
+            return
+        for asset_name, asset_cfg in self.config.get("assets", {}).items():
+            if not asset_cfg.get("enabled", False) or asset_cfg.get("exchange") != "mt5":
+                continue
+            symbol = asset_cfg.get("symbol", asset_name)
+            try:
+                self.mt5_handler._get_verified_current_price(symbol, asset_name)
+            except Exception as e:
+                logger.warning(f"[STARTUP] Price-sanity warm-start failed for {asset_name}: {e}")
+
+    def _warm_start_livermore_all_assets(self) -> None:
+        """
+        Replay historical bars through each aggregator's Livermore state machines
+        so they begin from the correct structural state on bot startup.
+
+        Data priority (most → least preferred):
+          1. Local CSV (data/raw/) — continuously updated by the historical updater,
+             provides months/years of history for reliable anchor prices.
+          2. Live API fetch — supplements the CSV with bars newer than the last CSV row.
+
+        Bar spacing validation rejects mislabeled files (e.g. 1H bars saved under
+        a _4h.csv filename) so only properly structured data reaches the LSM.
+
+        Failures are non-fatal — the state machines will converge over time
+        even starting cold from MAIN_UP.
+        """
+        logger.info("[Livermore] Starting warm-up for all assets (CSV-first)...")
+        warmed = 0
+        for asset_name, aggregator in self.aggregators.items():
+            # Unwrap the PerformanceWeightedAggregator that owns warm_start_livermore.
+            target_agg = aggregator
+            if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
+                target_agg = aggregator.get("performance")
+            elif isinstance(aggregator, dict) and aggregator.get("mode") == "council":
+                target_agg = aggregator.get("livermore")
+            if target_agg is None or not hasattr(target_agg, 'warm_start_livermore'):
+                continue
+            try:
+                asset_cfg = self.config["assets"].get(asset_name, {})
+                if not asset_cfg.get("enabled", False):
+                    continue
+
+                exchange = asset_cfg.get("exchange", "binance")
+                symbol   = self._resolve_symbol(asset_name)
+                end_time   = datetime.now(timezone.utc)
+                end_str    = end_time.strftime("%Y-%m-%d %H:%M:%S")
+
+                # ── 4H: CSV first, then API to fill the gap to today ─────────
+                csv_4h = self._load_lsm_csv(asset_name, symbol, "4h", 4)
+                api_4h = self._fetch_4h_data(asset_name)
+                df_4h  = self._merge_lsm_data(csv_4h, api_4h)
+
+                # ── 1H: CSV first, then API to fill the gap to today ─────────
+                csv_1h = self._load_lsm_csv(asset_name, symbol, "1h", 1)
+                df_1h_api = None
+                try:
+                    start_1h = (end_time - timedelta(days=30)).strftime("%Y-%m-%d")
+                    if exchange == "binance":
+                        _raw = self.data_manager.fetch_binance_data(
+                            symbol=symbol, interval="1h",
+                            start_date=start_1h, end_date=end_str,
+                        )
+                    else:
+                        _raw = self.data_manager.fetch_mt5_data(
+                            symbol=symbol, timeframe="H1",
+                            start_date=start_1h, end_date=end_str,
+                        )
+                    df_1h_api = self.data_manager.clean_data(_raw) if _raw is not None and len(_raw) > 0 else None
+                except Exception as _e1:
+                    logger.debug("[Livermore] %s 1H API fetch failed: %s", asset_name, _e1)
+                df_1h = self._merge_lsm_data(csv_1h, df_1h_api)
+
+                bars_4h = len(df_4h) if df_4h is not None else 0
+                bars_1h = len(df_1h) if df_1h is not None else 0
+                logger.info(
+                    "[Livermore] %s warm-start data: 4H=%d bars, 1H=%d bars",
+                    asset_name, bars_4h, bars_1h,
+                )
+
+                target_agg.warm_start_livermore(df_4h, df_1h)
+                warmed += 1
+
+            except Exception as _e:
+                logger.warning("[Livermore] warm-start failed for %s: %s", asset_name, _e)
+
+        logger.info("[Livermore] Warm-up complete — %d/%d assets", warmed, len(self.aggregators))
+
     def start(self):
         """
         ✨  Start bot with proper Telegram thread management
@@ -5262,26 +6959,82 @@ class TradingBot:
 
             # T3.1: Initialise shadow trading engine after exchanges are ready
             self.shadow_trader = ShadowTradingEngine()  # defaults: max_positions=500, max_closed=10000
-            logger.info("[SHADOW] Shadow trading engine started")
-
-            # F.4: Start CVD WebSocket for BTC real-time order flow
-            # THREADING FIX: main.py's start() is synchronous and enters a blocking while-loop.
-            # asyncio.get_event_loop().create_task() creates a coroutine but the event loop is
-            # never driven, so the WebSocket task starves and the CVD feed stays permanently stale.
-            # Running asyncio.run() inside a daemon thread gives the coroutine its own event loop.
+            # Phase 2.4: restore prior closed-trade history so the gate scorecard
+            # accumulates across restarts (previously wiped on every restart).
             try:
-                self.cvd_consumer = CVDConsumer()
-                self.cvd_thread = threading.Thread(
-                    target=lambda: asyncio.run(self.cvd_consumer.start()),
-                    daemon=True,
-                    name="cvd-websocket",
+                _restored = self.shadow_trader.load_state(
+                    lookback_days=self.config.get("trading", {}).get("shadow_archive_lookback_days", 30)
                 )
-                self.cvd_thread.start()
-                logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread")
-            except Exception as _cvd_err:
-                logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
+                logger.info(f"[SHADOW] Shadow trading engine started (restored {_restored} closed trades)")
+            except Exception as _se:
+                logger.warning(f"[SHADOW] load_state at startup failed: {_se}")
+                logger.info("[SHADOW] Shadow trading engine started (fresh)")
+
+            # Item 4: let real fill slippage correct the shadow engine's
+            # static FRICTION_PENALTIES estimate. Handlers are constructed
+            # before shadow_trader exists, so wire the reference here instead
+            # of at handler-construction time.
+            if self.mt5_handler is not None:
+                self.mt5_handler.shadow_trader = self.shadow_trader
+            if self.binance_handler is not None:
+                self.binance_handler.shadow_trader = self.shadow_trader
+
+            # F.4: Start CVD WebSocket for BTC real-time order flow — only when
+            # BTC is actually on Binance. When BTC uses MT5, the _btc_is_binance
+            # gate in the aggregator already prevents CVD data from being injected,
+            # but the WebSocket was still connecting to Binance, streaming tick data
+            # into a queue nobody reads, and generating BinanceWebsocketQueueOverflow
+            # ERRORs from the library's own reconnecting_websocket logger every time
+            # the queue hit 100 messages. Starting the socket conditionally eliminates
+            # the connection, the errors, and the wasted bandwidth in one step.
+            _btc_on_binance = (
+                self.config.get("assets", {}).get("BTC", {}).get("exchange", "binance")
+                == "binance"
+            )
+            if not _btc_on_binance:
+                logger.info("[CVD] BTC exchange is MT5 — Binance WebSocket skipped.")
                 self.cvd_consumer = None
                 self.cvd_thread = None
+            else:
+                # THREADING FIX: main.py's start() is synchronous and enters a blocking
+                # while-loop. asyncio.get_event_loop().create_task() creates a coroutine
+                # but the event loop is never driven, so the WebSocket task starves and
+                # the CVD feed stays permanently stale. Running asyncio.run() inside a
+                # daemon thread gives the coroutine its own event loop.
+                try:
+                    self.cvd_consumer = CVDConsumer()
+
+                    def _cvd_supervisor():
+                        # RECONNECT FIX: CVDConsumer.start() returns (rather than raising)
+                        # whenever the websocket drops — without a supervisor the daemon
+                        # thread exits silently and FLOW/cvd_trend stay stale at 0 for
+                        # the rest of the process lifetime. Loop forever with capped
+                        # exponential backoff so a transient network blip doesn't
+                        # permanently kill the order-flow feed.
+                        backoff = 5
+                        max_backoff = 60
+                        while True:
+                            try:
+                                asyncio.run(self.cvd_consumer.start())
+                            except Exception as _loop_err:
+                                logger.warning(f"[CVD] Supervisor caught exception: {_loop_err}")
+                            logger.warning(
+                                f"[CVD] WebSocket disconnected — reconnecting in {backoff}s"
+                            )
+                            time.sleep(backoff)
+                            backoff = min(backoff * 2, max_backoff)
+
+                    self.cvd_thread = threading.Thread(
+                        target=_cvd_supervisor,
+                        daemon=True,
+                        name="cvd-websocket",
+                    )
+                    self.cvd_thread.start()
+                    logger.info("[CVD] ✅ BTC order flow WebSocket started in daemon thread (auto-reconnect enabled)")
+                except Exception as _cvd_err:
+                    logger.warning(f"[CVD] Failed to start: {_cvd_err}. BTC order flow disabled.")
+                    self.cvd_consumer = None
+                    self.cvd_thread = None
 
             # ✅ FIXED: Initialize selectors AFTER exchanges are connected
             self.dynamic_selector = DynamicPresetSelector(
@@ -5354,6 +7107,11 @@ class TradingBot:
             schedule.every(check_interval).seconds.do(self.run_trading_cycle)
             schedule.every(1).hours.do(self.log_detailed_pnl_report)
 
+            # Phase 2: System Validator watchdog — runs every 5 minutes
+            schedule.every(5).minutes.do(self._run_validator_watchdog)
+            # Fix 7: Connection watchdog — pings MT5/Binance, attempts reconnect on failure
+            schedule.every(5).minutes.do(self._run_connection_watchdog)
+
             self.is_running = True
             self._main_loop_running = True
 
@@ -5375,6 +7133,12 @@ class TradingBot:
                     binance_handler=self.binance_handler,
                     telegram_bot=self.telegram_bot,
                     send_telegram_fn=self._send_telegram_notification,
+                    # L3: read-only snapshot cache, refreshed at each
+                    # composite_state injection point in the main loop. Lets
+                    # the watcher soften its naive ATR-based SL tightening
+                    # during silent zones / right after a CHoCH instead of
+                    # fighting a structural move the main loop already saw.
+                    composite_state_cache=self._latest_composite_state,
                 )
                 self.market_watcher.start()
                 logger.info("[WATCHER] ✅ MarketWatcher thread started.")
@@ -5387,6 +7151,10 @@ class TradingBot:
             )
             logger.info(f"[MTF] Regime updates: Every cycle (~{check_interval}s), 5-min detector cache")
             logger.info(f"Press Ctrl+C to stop\n")
+
+            # Phase 1: Warm-start Livermore state machines before first cycle
+            self._warm_start_price_sanity_all_assets()
+            self._warm_start_livermore_all_assets()
 
             # Run initial cycle
             self.run_trading_cycle()
@@ -5521,6 +7289,20 @@ class TradingBot:
                 self.portfolio_manager.save_portfolio_state()
         except Exception as e:
             logger.error(f"Error saving portfolio state on exit: {e}")
+
+        # Persist DynamicThresholds rolling history so adaptive behaviour
+        # resumes immediately on next start rather than rebuilding from scratch.
+        try:
+            for _dt_asset, _dt_agg in (self.aggregators or {}).items():
+                _dt_target = _dt_agg
+                if isinstance(_dt_agg, dict):
+                    _dt_target = _dt_agg.get("performance") or _dt_agg.get("livermore")
+                _dt = getattr(_dt_target, "dynamic_thresholds", None)
+                if _dt and hasattr(_dt, "save_cache"):
+                    _dt.save_cache()
+                    logger.info("[STOP] DynamicThresholds cache saved for %s", _dt_asset)
+        except Exception as _dt_err:
+            logger.warning("[STOP] DynamicThresholds save error: %s", _dt_err)
 
         # Stop the autotrainer
         if self.autotrainer:
@@ -5738,9 +7520,32 @@ def main():
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
 
-    # Write PID so the dashboard Control Center can check bot liveness
+    # Single-instance lock: refuse to start if another instance's PID file
+    # points at a still-running process. Two live instances trading the same
+    # account was the suspected root cause of a prior phantom-position incident.
     import os as _os
     _pid_path = Path("logs") / "bot.pid"
+    if _pid_path.exists():
+        try:
+            _old_pid = int(_pid_path.read_text().strip())
+        except (ValueError, OSError):
+            _old_pid = None
+        if _old_pid is not None:
+            try:
+                import psutil
+                _still_running = psutil.pid_exists(_old_pid)
+            except ImportError:
+                _still_running = None
+            if _still_running:
+                print(f"[STARTUP] Another instance (PID {_old_pid}) is already running. Exiting.")
+                sys.exit(1)
+            elif _still_running is None:
+                logger.warning(
+                    f"[STARTUP] Could not verify whether PID {_old_pid} from {_pid_path} is "
+                    "still running (psutil not installed) — proceeding anyway."
+                )
+
+    # Write PID so the dashboard Control Center can check bot liveness
     _pid_path.write_text(str(_os.getpid()))
     logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
 
@@ -5769,6 +7574,7 @@ def main():
 
             if strategies.get("exponential_moving_averages", {}).get("enabled", False):
                 required_models.append(f"models/ema_strategy_{asset_name.lower()}.pkl")
+
 
     missing = [m for m in required_models if not Path(m).exists()]
     if missing:

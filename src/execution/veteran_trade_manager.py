@@ -225,13 +225,14 @@ class VeteranTradeManager:
                 atr_fast = entry_price * 0.01
 
             # ATR-based adaptive cap (Replacing static max_stop_pct)
-            max_stop_dist = atr_fast * 5.0
-            min_rr = 1.5
+            max_stop_atr_mult = risk_config.get("max_stop_atr_mult", 5.0) if risk_config else 5.0
+            max_stop_dist = atr_fast * max_stop_atr_mult
+            min_rr = risk_config.get("min_rr", 1.5) if risk_config else 1.5
 
             stop_distance = abs(entry_price - stop_loss)
 
             if stop_distance > max_stop_dist:
-                return False, f"Stop too wide: ${stop_distance:,.2f} > 5.0 * ATR (${max_stop_dist:,.2f})"
+                return False, f"Stop too wide: ${stop_distance:,.2f} > {max_stop_atr_mult}x ATR (${max_stop_dist:,.2f})"
 
             risk_multiples = risk_config.get("partial_targets", [1.0, 1.8, 3.0])
             partial_sizes  = risk_config.get("partial_sizes",   [0.45, 0.30, 0.25])
@@ -281,6 +282,32 @@ class VeteranTradeManager:
             logger.error(f"[VTM PRE-FLIGHT] Error: {e}", exc_info=True)
             return False, f"Validation error: {str(e)}"
 
+    @staticmethod
+    def compute_effective_atr_multiplier(
+        trade_type: str,
+        config_base: float,
+        regime: str = "NEUTRAL",
+        volatility_regime: str = "normal",
+    ) -> float:
+        """
+        Phase 1.1: the regime-adaptive ATR multiplier the VTM uses for its
+        initial stop. Extracted so the order handlers can size against the
+        EXACT stop distance the VTM will place (single source of truth).
+
+        REVERSION              → max(config_base, 2.0)
+        TREND (bear/high-vol)  → max(config_base + 0.5, 2.5)
+        TREND (normal/bull)    → max(config_base + 0.3, 2.0)
+        other                  → config_base
+        """
+        tt = (trade_type or "TREND").upper()
+        if tt == "REVERSION":
+            return max(config_base, 2.0)
+        if tt == "TREND":
+            if "BEAR" in (regime or "").upper() or volatility_regime == "high":
+                return max(config_base + 0.5, 2.5)
+            return max(config_base + 0.3, 2.0)
+        return config_base
+
     def __init__(
         self,
         entry_price: float,
@@ -300,7 +327,9 @@ class VeteranTradeManager:
         current_ask: float = 0.0,       # ✨ NEW: For spread floor
         current_bid: float = 0.0,       # ✨ NEW: For spread floor
         min_lot_override: Optional[float] = None,      # ✨ NEW: Exness compatibility
-        lot_precision_override: Optional[int] = None   # ✨ NEW: Exness compatibility
+        lot_precision_override: Optional[int] = None,  # ✨ NEW: Exness compatibility
+        structure_levels_ref: Optional[list] = None,   # Item 5: level traded against
+        entry_retest_type: Optional[str] = None,       # Item 5: RetestEngine tier at entry
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -320,7 +349,14 @@ class VeteranTradeManager:
         self.current_bid = current_bid
         self.min_lot_override = min_lot_override
         self.lot_precision_override = lot_precision_override
-        
+
+        # Item 5: structure-aware plumbing — shared prerequisite for this
+        # batch and the brain rebuild's later tiers. Nothing reads these yet;
+        # this just makes sure they exist so later work isn't blocked on it.
+        self.structure_levels_ref = structure_levels_ref
+        self.entry_retest_type = entry_retest_type
+        self.atr_at_entry = self._calculate_atr()
+
         # Determine asset type for leverage ceiling
         self.asset_category = "FOREX"
         crypto_keywords = ["BTC", "ETH", "SOL", "BNB", "XRP", "USDT"]
@@ -339,22 +375,17 @@ class VeteranTradeManager:
         # in config.json actually widens the SL rather than being silently ignored.
         config_base = self.risk_config.get("atr_multiplier", 1.8)
 
-        if self.trade_type == "REVERSION":
-            # Reversion trades need at least as much room as a trend trade: mean-reversion
-            # entries sit inside a range where a single wick routinely exceeds 1×ATR.
-            # Hard floor of 2.0 prevents the 1.5× tight-stop chop problem.
-            self.atr_multiplier = max(config_base, 2.0)
-        elif self.trade_type == "TREND":
-            regime = self.signal_details.get("regime", "NEUTRAL")
-            volatility = self.signal_details.get("volatility_regime", "normal")
-            if "BEAR" in regime or volatility == "high":
-                # Adverse conditions: add 0.5 on top of config, minimum floor 2.5
-                self.atr_multiplier = max(config_base + 0.5, 2.5)
-            else:
-                # Normal/bull: add 0.3 on top of config, minimum floor 2.0
-                self.atr_multiplier = max(config_base + 0.3, 2.0)
-        else:
-            self.atr_multiplier = config_base
+        # Phase 1.1: single source of truth for the effective ATR multiplier so
+        # position sizing (in the handlers) uses the SAME stop distance the VTM
+        # actually applies here. Previously sizing used config_base directly
+        # while the VTM widened it via the regime floors below, so realized risk
+        # ran 30–60% over the intended risk_pct.
+        self.atr_multiplier = self.compute_effective_atr_multiplier(
+            trade_type=self.trade_type,
+            config_base=config_base,
+            regime=self.signal_details.get("regime", "NEUTRAL"),
+            volatility_regime=self.signal_details.get("volatility_regime", "normal"),
+        )
 
         logger.info(
             f"[VTM] ATR Multiplier: config={config_base}× → effective={self.atr_multiplier}× "
@@ -431,7 +462,101 @@ class VeteranTradeManager:
         self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
         self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
 
+        # ── Phase 4: Livermore Awareness + Structural Stop Routing ────────────
+        # All fields sourced from composite_state written by signal_aggregator.
+        # entry_type was set by the Phase 3B retest_engine.
+        _cs = (signal_details or {}).get("composite_state", {})
+        self.livermore_state_4h         = _cs.get("livermore_state_4h")
+        self.livermore_state_age_4h     = int(_cs.get("livermore_state_age_4h",  0))
+        self.livermore_anchor_main_up   = _cs.get("livermore_anchor_main_up_max")
+        self.livermore_anchor_main_down = _cs.get("livermore_anchor_main_down_min")
+        self.livermore_anchor_nat_high  = _cs.get("livermore_anchor_natural_high")
+        self.livermore_anchor_nat_low   = _cs.get("livermore_anchor_natural_low")
+        self.nearby_4h_level            = _cs.get("nearby_4h_level")
+        self.level_defended             = bool(_cs.get("level_defended",  False))
+        self.sweep_level                = _cs.get("sweep_level")
+        # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
+        #             RANGE_BOUNDARY / CONTINUATION / REJECT / None (no classification)
+        self.vtm_entry_type             = _cs.get("entry_type")
+
+        # 7.4: Populate _mfe_target_r from real trade history once enough
+        # exists. Stays None (safely skipped by _blend_single_tp, see the
+        # getattr fallback at its call site) until then. NOTE: this is inert
+        # until something populates signal_details["db_manager_ref"] — no
+        # call site does that yet (Position has no db_manager reference of
+        # its own; only PortfolioManager does). Wiring that through is the
+        # deferred "Fix L1" work, intentionally not done here.
+        self._mfe_target_r = None
+        _db = self.signal_details.get("db_manager_ref")
+        if _db is not None:
+            try:
+                self._mfe_target_r = _db.get_historical_mfe_r(self.asset, min_samples=30)
+            except Exception:
+                pass
+        # Target-ladder box (Phase 4 ext, gated by phase_config.continuation_targets_enabled).
+        # Populated only for RANGE_BOUNDARY/SPRING_ENTRY — None otherwise.
+        self.vtm_range_high             = _cs.get("range_high")
+        self.vtm_range_low              = _cs.get("range_low")
+        # Squeeze flag — drives wider ATR selection in _calculate_atr()
+        self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
+        # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
+        _cs_phase_cfg = _cs.get("phase_config", {})
+        if _cs_phase_cfg:
+            self.risk_config = {**self.risk_config, "phase_config": {
+                **self.risk_config.get("phase_config", {}), **_cs_phase_cfg
+            }}
+
+        # Livermore-aware ATR multiplier overlay — all values from config
+        _lv4h   = self.livermore_state_4h
+        _lv_adj = self.risk_config.get("livermore_atr_adjustments", {})
+        _main_stop_add    = _lv_adj.get("main_stop_add",         0.3)
+        _sec_stop_sub     = _lv_adj.get("secondary_stop_sub",    0.2)
+        _main_trail_mult  = _lv_adj.get("main_trail_mult",       1.3)
+        _sec_trail_mult   = _lv_adj.get("secondary_trail_mult",  0.7)
+        _be_young         = _lv_adj.get("breakeven_atr_young_state", 1.8)
+        _be_mid           = _lv_adj.get("breakeven_atr_mid_state",   1.5)
+        _be_old           = _lv_adj.get("breakeven_atr_old_state",   1.2)
+        _young_max_age    = _lv_adj.get("young_state_max_age",   5)
+        _old_min_age      = _lv_adj.get("old_state_min_age",    20)
+
+        if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
+            self.atr_multiplier += _main_stop_add
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: ATR mult +{_main_stop_add} → {self.atr_multiplier:.2f}×"
+            )
+        elif _lv4h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+            self.atr_multiplier = max(1.5, self.atr_multiplier - _sec_stop_sub)
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: ATR mult −{_sec_stop_sub} → {self.atr_multiplier:.2f}×"
+            )
+
+        if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
+            self.runner_trail_atr_multiplier *= _main_trail_mult
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: trail mult ×{_main_trail_mult} → "
+                f"{self.runner_trail_atr_multiplier:.2f}×"
+            )
+        elif _lv4h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+            self.runner_trail_atr_multiplier *= _sec_trail_mult
+            logger.info(
+                f"[VTM] Livermore={_lv4h}: trail mult ×{_sec_trail_mult} → "
+                f"{self.runner_trail_atr_multiplier:.2f}×"
+            )
+
+        # Livermore-aware break-even ATR trigger — values from config
+        _age4h = self.livermore_state_age_4h
+        if _age4h < _young_max_age:
+            self.breakeven_atr_trigger = _be_young
+        elif _age4h > _old_min_age:
+            self.breakeven_atr_trigger = _be_old
+        else:
+            self.breakeven_atr_trigger = _be_mid
+        # ─────────────────────────────────────────────────────────────────────
+
         # Early Scale: lock in a small partial exit within the first N bars
+        # S6.3: phase-level locks (triple-lock with _can_partial / _can_add_position)
+        self.partials_enabled   = self.risk_config.get("phase_config", {}).get("partials_enabled",   False)
+        self.pyramiding_enabled = self.risk_config.get("phase_config", {}).get("pyramiding_enabled", False)
         self.early_scale_enabled = self.risk_config.get("early_scale_enabled", False)
         self.early_scale_threshold = self.risk_config.get("early_scale_threshold", 0.02)
         self.early_scale_bars = self.risk_config.get("early_scale_bars", 4)
@@ -450,24 +575,38 @@ class VeteranTradeManager:
         self.highest_price_reached = entry_price
         self.lowest_price_reached = entry_price
         self.runner_activated = False
+        self.stop_type = "atr"
         self.has_pyramided = False # ✨ NEW: Trend Pyramiding Flag
         self.entry_time = datetime.now()
-        
-        # Calculate levels
+        # Item 2.14: set by _compute_structural_stop when the trade has no
+        # structural stop reference AND wasn't strong enough to justify a
+        # plain distance-based stop. The caller (PortfolioManager, right
+        # after registering this position) checks this flag and immediately
+        # closes the position — VTM manages already-open positions, it can't
+        # prevent the entry itself at this point.
+        self.emergency_close_requested = False
+
+        # Calculate initial SL/TP levels (must be last step of __init__)
         try:
             self._calculate_initial_levels()
         except Exception as e:
             logger.error(f"[VTM] Initialization error: {e}")
             raise
 
-        # Log initialization
+        # Item 5: captured here rather than earlier alongside
+        # structure_levels_ref/entry_retest_type above — self.current_stop_loss
+        # is only a None placeholder until _calculate_initial_levels() runs;
+        # capturing it before that would always store None instead of the
+        # real level this trade was actually stopped against.
+        self.structural_stop_level = self.current_stop_loss
+
+        # Log initialization summary
         logger.info("=" * 80)
         logger.info(f"🎯 VTM - {self.asset} {side.upper()} [{self.trade_type}]")
         logger.info("=" * 80)
         logger.info(f"Entry:    ${entry_price:,.2f}")
         logger.info(f"Stop:     ${self.initial_stop_loss:,.2f} (-{self._calc_pct_distance(entry_price, self.initial_stop_loss):.2f}%)")
         logger.info(f"Quantity: {self.position_size:.6f} units")
-
         logger.info(f"\n📊 TARGETS:")
         if not self.take_profit_levels or not self.partial_sizes:
             logger.info("  No take profit targets calculated or partial sizes defined.")
@@ -481,6 +620,93 @@ class VeteranTradeManager:
                 pct_str = ""
             logger.info(f"  {i}. {target_str} {pct_str} → Exit {size_str}")
         logger.info("=" * 80)
+
+    # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
+    def _lot_geom(self):
+        """Return (precision, min_lot) for this asset — single source of truth."""
+        precision = self.lot_precision_override if self.lot_precision_override is not None \
+            else {'BTC': 4, 'GOLD': 2, 'USTEC': 2, 'EURJPY': 2, 'EURUSD': 2,
+                  'GBPUSD': 2, 'USDJPY': 2, 'USOIL': 2, 'GBPAUD': 2}.get(self.asset.upper(), 2)
+        raw_min = self.min_lot_override if (self.min_lot_override is not None and self.min_lot_override > 0) \
+            else {'BTC': 0.003, 'GOLD': 0.01, 'USTEC': 0.02, 'EURJPY': 0.02, 'EURUSD': 0.01,
+                  'GBPUSD': 0.01, 'USDJPY': 0.01, 'USOIL': 0.01, 'GBPAUD': 0.01}.get(self.asset.upper(), 0.01)
+        return precision, raw_min
+
+    def _can_partial(self, fraction: float) -> bool:
+        """True only if peeling `fraction` of position rounds to >= min_lot AND leaves
+        a legal remainder. On min-lot accounts no fraction < 1.0 passes → partials
+        no-op until the account can subdivide. Full closes never call this.
+        Fails closed on any doubt."""
+        try:
+            precision, min_lot = self._lot_geom()
+            total = round(self.position_size, precision)
+            if total <= 0:
+                return False
+            peel = round(total * fraction, precision)
+            rem  = round(total - peel, precision)
+            return peel >= min_lot - 1e-9 and rem >= min_lot - 1e-9
+        except Exception:
+            return False
+
+    def _can_add_position(self) -> bool:
+        """True only when pyramiding is enabled AND half the current position is still
+        a legal lot AND (if the Livermore maturity gate is enabled) the live 4H
+        Livermore state isn't in a late/exhaustion-prone phase. All conditions must
+        hold — the flag alone is not enough.
+
+        L11: phase_config.pyramid_livermore_maturity_gate_enabled defaults to True
+        (unlike most new phase_config flags in this project, which default False).
+        Reason: pyramiding itself is already live (phase_config.pyramiding_enabled
+        =true in the running config) — this gate only *tightens* an already-active
+        behavior by blocking the worst-timed adds; it never loosens anything, so
+        there is no new risk to gate OFF by default. It can still be set false
+        independently if it misbehaves.
+        """
+        if not getattr(self, "pyramiding_enabled", False):
+            return False
+        try:
+            precision, min_lot = self._lot_geom()
+            if round(self.position_size * 0.5, precision) < min_lot - 1e-9:
+                return False
+        except Exception:
+            return False
+
+        try:
+            _phase_cfg = self.risk_config.get("phase_config", {}) or {}
+            if not _phase_cfg.get("pyramid_livermore_maturity_gate_enabled", True):
+                return True
+
+            lv_state = getattr(self, "livermore_state_4h", None)
+            if not lv_state:
+                # No live Livermore read available yet (per_tick_livermore_enabled
+                # off, or composite_state never supplied at entry) — fail open so
+                # this new gate can't silently disable pyramiding everywhere.
+                return True
+
+            # Block adds during the late/violent corrective phases — this is the
+            # single riskiest moment to be scaling exposure into a trend.
+            if lv_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                logger.info(
+                    f"[VTM] 🚫 Pyramid maturity gate: blocked — Livermore state "
+                    f"{lv_state} is a late-cycle corrective phase."
+                )
+                return False
+
+            # Block adds into a trend that's already very old — most of the
+            # statistically expected move is likely behind it by this point.
+            max_age = _phase_cfg.get("pyramid_max_state_age_4h", 20)
+            age = int(getattr(self, "livermore_state_age_4h", 0) or 0)
+            if age > max_age:
+                logger.info(
+                    f"[VTM] 🚫 Pyramid maturity gate: blocked — Livermore state "
+                    f"{lv_state} age={age} bars exceeds max {max_age}."
+                )
+                return False
+
+            return True
+        except Exception as e:
+            logger.debug(f"[VTM] L11 pyramid maturity gate error, failing open: {e}")
+            return True
 
     @property
     def profit_locked(self) -> bool:
@@ -503,33 +729,49 @@ class VeteranTradeManager:
 
     def _calculate_atr(self) -> float:
         """
-        ✅ TASK 18: Regime-adaptive ATR: fast in expanding vol, slow in compressed vol.
+        Regime-adaptive ATR: fast in expanding vol, slow in compressed vol.
+        Squeeze-aware: when BB/KC squeeze is active, use ATR(50) so the stop
+        reflects pre-squeeze volatility rather than the compressed current range.
+        This prevents stops being placed inside the squeeze range and getting
+        hit on the first bar of the expected expansion.
         """
         try:
-            atr_fast = talib.ATR(self.high, self.low, self.close, timeperiod=7)[-1]
-            atr_mid  = talib.ATR(self.high, self.low, self.close, timeperiod=14)[-1]
-            atr_slow = talib.ATR(self.high, self.low, self.close, timeperiod=28)[-1]
-            
+            atr_fast  = talib.ATR(self.high, self.low, self.close, timeperiod=7)[-1]
+            atr_mid   = talib.ATR(self.high, self.low, self.close, timeperiod=14)[-1]
+            atr_slow  = talib.ATR(self.high, self.low, self.close, timeperiod=28)[-1]
+
             if np.isnan(atr_mid) or atr_slow == 0:
                 return self.entry_price * 0.015
-                
+
+            # Squeeze-aware path: ATR(50) captures pre-squeeze range
+            if getattr(self, "bb_kc_squeeze_active", False):
+                if len(self.close) >= 55:
+                    atr_squeeze = talib.ATR(
+                        self.high, self.low, self.close, timeperiod=50
+                    )[-1]
+                    if not np.isnan(atr_squeeze) and atr_squeeze > atr_mid:
+                        logger.info(
+                            f"[VTM] Squeeze-aware ATR: ATR(50)={atr_squeeze:.5f} "
+                            f"replaces ATR(14)={atr_mid:.5f} "
+                            f"(ratio {atr_squeeze/atr_mid:.2f}×)"
+                        )
+                        return atr_squeeze
+
             ratio = atr_fast / atr_slow
-            
+
             if ratio > 1.30:
-                # Expanding vol — tighten fast
                 selected_atr = atr_fast
                 reason = "Expanding Vol (Tighten)"
             elif ratio < 0.70:
-                # Compressed vol — breathe wide
                 selected_atr = atr_slow
                 reason = "Compressed Vol (Wide)"
             else:
                 selected_atr = atr_mid
                 reason = "Normal Vol"
-                
-            logger.debug(f"[VTM] Dynamic ATR Selection: {selected_atr:.4f} ({reason}, Ratio: {ratio:.2f})")
+
+            logger.debug(f"[VTM] Dynamic ATR Selection: {selected_atr:.5f} ({reason}, Ratio: {ratio:.2f})")
             return selected_atr
-            
+
         except Exception as e:
             logger.error(f"[VTM] ATR error: {e}")
             return self.entry_price * 0.02
@@ -601,17 +843,40 @@ class VeteranTradeManager:
                 wick_buffer = 0.5 * atr
 
                 if self.side == "long":
-                    # Long reversion: price bouncing up from below — exit just *below* the
-                    # EMA so we don't overshoot into the resistance zone above it.
+                    # Long reversion: price bouncing up from below — SL below entry,
+                    # TP near EMA above.
                     self.initial_stop_loss = self.low[-1] - wick_buffer
                     tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
+                    # Guard: if bar data is stale/misaligned, SL might be above the
+                    # actual fill price — MT5 would reject it (retcode 10016).
+                    if self.initial_stop_loss >= self.entry_price:
+                        self.initial_stop_loss = self.entry_price - (1.5 * atr)
+                        logger.warning(
+                            f"[VTM] REVERSION LONG: bar-derived SL ({self.initial_stop_loss:.5f}) "
+                            f"was >= entry — clamped to entry - 1.5×ATR"
+                        )
+                    if tp_target <= self.entry_price:
+                        tp_target = self.entry_price + (2.0 * atr)
+                        logger.warning("[VTM] REVERSION LONG: TP was <= entry — clamped to entry + 2×ATR")
 
                 else:
-                    # Short reversion: price falling from above — exit just *above* the
-                    # EMA (mean-convergence point). The original code used ema_4h_50 + 0.2*atr
-                    # which placed TP *above* the EMA — wrong direction for a short.
+                    # Short reversion: price falling from above — SL above entry,
+                    # TP below (toward the EMA mean-convergence point).
                     self.initial_stop_loss = self.high[-1] + wick_buffer
                     tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
+                    # Guard: if bar data is stale (e.g. 1H bars are at a different
+                    # price level than the actual MT5 fill), high[-1] + buffer can
+                    # land BELOW the fill price — MT5 rejects the SL as invalid
+                    # (retcode 10016). Same guard for TP above entry for a SHORT.
+                    if self.initial_stop_loss <= self.entry_price:
+                        self.initial_stop_loss = self.entry_price + (1.5 * atr)
+                        logger.warning(
+                            f"[VTM] REVERSION SHORT: bar-derived SL ({self.initial_stop_loss:.5f}) "
+                            f"was <= entry — clamped to entry + 1.5×ATR"
+                        )
+                    if tp_target >= self.entry_price:
+                        tp_target = self.entry_price - (2.0 * atr)
+                        logger.warning("[VTM] REVERSION SHORT: TP was >= entry — clamped to entry - 2×ATR")
 
                 self.current_stop_loss = self.initial_stop_loss
                 self.take_profit_levels = [tp_target]
@@ -620,8 +885,12 @@ class VeteranTradeManager:
                 logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
 
             else:
-                # ATR-based adaptive floors and caps
-                min_stop_dist = atr * 0.5
+                # ATR-based adaptive floors and caps.
+                # min_stop_atr_mult is configurable per asset (default 0.8 for
+                # FX/commodities, 0.5 for crypto). Prevents structural stops that
+                # land within noise distance in quiet-hour low-ATR conditions.
+                _min_mult = self.risk_config.get("min_stop_atr_mult", 0.8)
+                min_stop_dist = atr * _min_mult
                 max_stop_dist = atr * 5.0
 
                 if self.side == "long":
@@ -664,7 +933,71 @@ class VeteranTradeManager:
                         self.entry_price + max_stop_dist,
                         max(self.entry_price + min_stop_dist, final_sl)
                     )
-                
+
+                # STEP 2.5 — Structural Stop Override (Phase 4)
+                # Routes stop placement by entry_type from the retest engine.
+                # Overrides the ATR baseline with a level-anchored stop when
+                # the entry context provides a structural invalidation reference.
+                # Global clamps (min/max ATR) applied again after to ensure safety.
+                try:
+                    _struct_sl = self._compute_structural_stop(atr)
+                    if _struct_sl is not None:
+                        # Validate the structural stop is on the correct side of entry
+                        _valid = (
+                            (self.side == "long"  and _struct_sl < self.entry_price) or
+                            (self.side == "short" and _struct_sl > self.entry_price)
+                        )
+                        # MR_PULLBACK special rule: only override ATR if the structural
+                        # stop is MORE conservative (wider) than the ATR baseline.
+                        # The intent is to ensure the stop clears the nearby level —
+                        # if ATR already clears it, no override is needed and tightening
+                        # the stop would put it inside the active zone.
+                        if _valid and self.vtm_entry_type == "MR_PULLBACK":
+                            _more_conservative = (
+                                (self.side == "long"  and _struct_sl < final_sl) or
+                                (self.side == "short" and _struct_sl > final_sl)
+                            )
+                            _valid = _more_conservative
+                        if _valid:
+                            final_sl = _struct_sl
+                            # Re-apply clamps to the structural stop
+                            if self.side == "long":
+                                final_sl = max(
+                                    self.entry_price - max_stop_dist,
+                                    min(self.entry_price - min_stop_dist, final_sl),
+                                )
+                            else:
+                                final_sl = min(
+                                    self.entry_price + max_stop_dist,
+                                    max(self.entry_price + min_stop_dist, final_sl),
+                                )
+                            # Detect whether the clamp discarded the structural
+                            # reference. If it did, the stop is the ATR cap in
+                            # disguise — log it honestly so it can't be mistaken
+                            # for a level-anchored stop in the trade record.
+                            _anchor_discarded = abs(final_sl - _struct_sl) > (atr * 0.05)
+                            if _anchor_discarded:
+                                self.stop_type = "atr_capped"
+                                logger.info(
+                                    f"[VTM] ⚠️ Structural anchor too far "
+                                    f"({self.vtm_entry_type} raw={_struct_sl:.5f}): "
+                                    f"ATR cap applied → {final_sl:.5f}"
+                                )
+                            else:
+                                self.stop_type = "structural"
+                                logger.info(
+                                    f"[VTM] 🎯 Structural stop "
+                                    f"({self.vtm_entry_type}): {final_sl:.5f} "
+                                    f"(raw anchor={_struct_sl:.5f})"
+                                )
+                        else:
+                            logger.debug(
+                                f"[VTM] Structural stop {_struct_sl:.5f} invalid "
+                                f"side — keeping ATR stop {final_sl:.5f}"
+                            )
+                except Exception as _ss_err:
+                    logger.debug(f"[VTM] Structural stop error (non-blocking): {_ss_err}")
+
                 # STEP 2 — Spread-Aware SL Floor
                 # Reason: Prevents stops from being too tight relative to broker spread.
                 if self.current_ask > 0 and self.current_bid > 0:
@@ -679,8 +1012,156 @@ class VeteranTradeManager:
                 # Global clamped final_sl assignment
                 self.initial_stop_loss = final_sl
 
-                # Structure-based targets (only when use_structure_targets=true)
-                if self.use_structure_targets:
+                # ── min_sl_pct floor ─────────────────────────────────────────────
+                # Hard minimum SL distance as a percentage of entry price.
+                # Prevents ATR-derived stops from being dangerously tight during
+                # volatility squeezes or low-spread exotic sessions.
+                # Sourced from risk_config["min_sl_pct"] per asset in config.json.
+                _min_sl_pct = self.risk_config.get("min_sl_pct", 0.0)
+                if _min_sl_pct > 0 and self.entry_price > 0:
+                    _min_sl_dist = self.entry_price * _min_sl_pct
+                    if self.side == "long":
+                        _floor_sl = self.entry_price - _min_sl_dist
+                        if self.initial_stop_loss > _floor_sl:
+                            logger.info(
+                                f"[VTM] min_sl_pct floor: SL {self.initial_stop_loss:.5f} → {_floor_sl:.5f} "
+                                f"({_min_sl_pct * 100:.2f}% of entry {self.entry_price:.5f})"
+                            )
+                            self.initial_stop_loss = _floor_sl
+                    else:
+                        _floor_sl = self.entry_price + _min_sl_dist
+                        if self.initial_stop_loss < _floor_sl:
+                            logger.info(
+                                f"[VTM] min_sl_pct floor: SL {self.initial_stop_loss:.5f} → {_floor_sl:.5f} "
+                                f"({_min_sl_pct * 100:.2f}% of entry {self.entry_price:.5f})"
+                            )
+                            self.initial_stop_loss = _floor_sl
+
+                # ── PHASE 4: Flagpole TP ladder (NATURAL_RETRACEMENT / REBOUND) ──
+                # When a trade is entered after a confirmed pullback within a MAIN
+                # Livermore leg, static ATR multiples under-estimate the available
+                # move.  The flagpole (distance from entry to the pre-retracement
+                # MAIN pivot) gives a market-derived target ladder:
+                #   TP1 = entry ± 0.5 × flagpole  (half-flag: midway to prev pivot)
+                #   TP2 = prev MAIN pivot          (full-flag: re-test prior extreme)
+                #   TP3 = prev pivot ± 0.5 × flagpole  (extension beyond pivot)
+                # Only fires when the anchor is available and flagpole > 1.0 × ATR
+                # (prevents firing on noise / anchor data lag).
+                _flagpole_used = False
+                try:
+                    _lsm4 = self.livermore_state_4h
+                    _is_nat_long  = (_lsm4 == "NATURAL_RETRACEMENT" and self.side == "long")
+                    _is_nat_short = (_lsm4 == "NATURAL_REBOUND"     and self.side == "short")
+
+                    if _is_nat_long and self.livermore_anchor_main_up is not None:
+                        _anchor   = float(self.livermore_anchor_main_up)
+                        _flagpole = _anchor - self.entry_price
+                        if _flagpole > atr:  # sanity: anchor must be meaningfully above entry
+                            _tp1 = self.entry_price + 0.5 * _flagpole
+                            _tp2 = _anchor
+                            _tp3 = _anchor + 0.5 * _flagpole
+                            self.take_profit_levels = [_tp1, _tp2, _tp3]
+                            self.partial_sizes      = [0.45, 0.30, 0.25]
+                            _flagpole_used = True
+                            logger.info(
+                                f"[VTM] 🎯 Flagpole ladder (LONG): anchor={_anchor:.5f} "
+                                f"flagpole={_flagpole:.5f} "
+                                f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                            )
+
+                    elif _is_nat_short and self.livermore_anchor_main_down is not None:
+                        _anchor   = float(self.livermore_anchor_main_down)
+                        _flagpole = self.entry_price - _anchor
+                        if _flagpole > atr:  # sanity: anchor must be meaningfully below entry
+                            _tp1 = self.entry_price - 0.5 * _flagpole
+                            _tp2 = _anchor
+                            _tp3 = _anchor - 0.5 * _flagpole
+                            self.take_profit_levels = [_tp1, _tp2, _tp3]
+                            self.partial_sizes      = [0.45, 0.30, 0.25]
+                            _flagpole_used = True
+                            logger.info(
+                                f"[VTM] 🎯 Flagpole ladder (SHORT): anchor={_anchor:.5f} "
+                                f"flagpole={_flagpole:.5f} "
+                                f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                            )
+                except Exception as _fp_err:
+                    logger.debug(f"[VTM] Flagpole ladder error (non-blocking): {_fp_err}")
+
+                # ── PHASE 4 ext: CONTINUATION + RANGE target ladders ──────────────
+                # Gated by phase_config.continuation_targets_enabled (default OFF).
+                # Does nothing while the flag is off — vtm_entry_type can only be
+                # CONTINUATION when retest_engine's matching tier was itself gated
+                # by the same flag, and vtm_range_high/low are only ever populated
+                # under the same gate, so this block is a no-op until both the
+                # flag is on AND the corresponding tier actually fired.
+                if not _flagpole_used and self.risk_config.get("phase_config", {}).get(
+                    "continuation_targets_enabled", False
+                ):
+                    try:
+                        _cl_cfg = self.risk_config.get("continuation_ladder", {})
+
+                        if self.vtm_entry_type == "CONTINUATION":
+                            # Flagpole = distance from the leg-origin pivot (the
+                            # NATURAL anchor that started the current MAIN leg) to
+                            # the entry price (near the top of the leg, at the
+                            # consolidation breakout). T1 = half flagpole (50%),
+                            # T2 = full flagpole (remaining 50%).
+                            _base_anchor = (
+                                self.livermore_anchor_nat_low if self.side == "long"
+                                else self.livermore_anchor_nat_high
+                            )
+                            if _base_anchor is not None:
+                                _base_anchor = float(_base_anchor)
+                                _flagpole = (
+                                    self.entry_price - _base_anchor if self.side == "long"
+                                    else _base_anchor - self.entry_price
+                                )
+                                _min_fp_mult = float(_cl_cfg.get("continuation_min_flagpole_atr_mult", 1.0))
+                                if _flagpole > _min_fp_mult * atr:
+                                    _sign = 1 if self.side == "long" else -1
+                                    _tp1 = self.entry_price + _sign * 0.5 * _flagpole
+                                    _tp2 = self.entry_price + _sign * 1.0 * _flagpole
+                                    self.take_profit_levels = [_tp1, _tp2]
+                                    self.partial_sizes = list(
+                                        _cl_cfg.get("continuation_partial_sizes", [0.50, 0.50])
+                                    )
+                                    _flagpole_used = True
+                                    logger.info(
+                                        f"[VTM] 🎯 CONTINUATION ladder ({self.side.upper()}): "
+                                        f"flagpole={_flagpole:.5f} TPs=[{_tp1:.5f}, {_tp2:.5f}]"
+                                    )
+
+                        elif (
+                            self.vtm_entry_type in ("RANGE_BOUNDARY", "SPRING_ENTRY")
+                            and self.vtm_range_high is not None
+                            and self.vtm_range_low is not None
+                        ):
+                            # Range midpoint (60%), range top/bottom, and the
+                            # height-measured-move extension beyond it.
+                            _rh, _rl = float(self.vtm_range_high), float(self.vtm_range_low)
+                            _range_height = _rh - _rl
+                            if _range_height > 0.25 * atr:  # sanity floor — avoid degenerate boxes
+                                _mid = (_rh + _rl) / 2.0
+                                if self.side == "long":
+                                    _tp1, _tp2, _tp3 = _mid, _rh, _rh + _range_height
+                                else:
+                                    _tp1, _tp2, _tp3 = _mid, _rl, _rl - _range_height
+                                self.take_profit_levels = [_tp1, _tp2, _tp3]
+                                self.partial_sizes = list(
+                                    _cl_cfg.get("range_partial_sizes", [0.60, 0.25, 0.15])
+                                )
+                                _flagpole_used = True
+                                logger.info(
+                                    f"[VTM] 🎯 RANGE ladder ({self.side.upper()}): "
+                                    f"box=[{_rl:.5f}, {_rh:.5f}] "
+                                    f"TPs=[{_tp1:.5f}, {_tp2:.5f}, {_tp3:.5f}]"
+                                )
+                    except Exception as _cl_err:
+                        logger.debug(f"[VTM] Continuation/range ladder error (non-blocking): {_cl_err}")
+
+                # Structure-based targets (only when use_structure_targets=true
+                # and flagpole ladder was not used)
+                if not _flagpole_used and self.use_structure_targets:
                     tolerance = 0.5 * atr
                     structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
                     raw_targets, self.partial_sizes = calculate_hybrid_targets(
@@ -698,8 +1179,10 @@ class VeteranTradeManager:
                     logger.debug("[VTM] Structure targets disabled — using ATR multiples only")
 
                 # ✅ PHASE 5: MA FRONT-RUN (Take Profit — only when use_ema_structure=true)
-                self.take_profit_levels = []
-                if self.use_ema_structure:
+                # Skip when flagpole ladder was used — those TPs are already optimised.
+                if not _flagpole_used:
+                    self.take_profit_levels = []
+                if not _flagpole_used and self.use_ema_structure:
                     for tp in raw_targets:
                         adjusted_tp = tp
                         for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
@@ -715,14 +1198,45 @@ class VeteranTradeManager:
                                         if candidate_tp < self.entry_price - (0.5 * atr):
                                             adjusted_tp = min(adjusted_tp, candidate_tp)
                         self.take_profit_levels.append(adjusted_tp)
-                else:
+                elif not _flagpole_used:
                     # No EMA adjustment — use raw targets directly
                     self.take_profit_levels = list(raw_targets)
 
-                # Fallback targets
+                # Fallback targets (only when no flagpole and no other TPs set)
                 if not self.take_profit_levels:
                     self.take_profit_levels = [self.entry_price + (atr * m) if self.side == "long" else self.entry_price - (atr * m) for m in self.partial_targets]
                     self.partial_sizes = [0.45, 0.30, 0.25]  # fallback only
+
+                # ── 7.1 LIVE: expectancy-weighted single-TP blend ─────────────
+                # Runs before min_rr so the floor can raise the blend if needed.
+                if self.risk_config.get("phase_config", {}).get("single_tp_blend_enabled", False):
+                    _b = self._blend_single_tp()
+                    if _b is not None and self.take_profit_levels:
+                        self.take_profit_levels[0] = _b
+
+                # ── min_rr enforcement on TP1 ─────────────────────────────────
+                # When min_sl_pct widens the SL, the ATR-derived TP1 may produce
+                # a sub-1R trade. Enforce minimum R:R on TP1 only; TP2/TP3 are
+                # structure/flagpole targets and are left untouched.
+                # Sourced from risk_config["min_rr"] per asset in config.json.
+                _min_rr = self.risk_config.get("min_rr", 1.5)
+                if _min_rr > 0 and self.take_profit_levels and self.entry_price > 0:
+                    _sl_dist = abs(self.entry_price - self.initial_stop_loss)
+                    if _sl_dist > 0:
+                        _tp1_current      = self.take_profit_levels[0]
+                        _tp1_current_dist = abs(_tp1_current - self.entry_price)
+                        _tp1_floor_dist   = _sl_dist * _min_rr
+                        if _tp1_current_dist < _tp1_floor_dist:
+                            _tp1_floor = (
+                                self.entry_price + _tp1_floor_dist if self.side == "long"
+                                else self.entry_price - _tp1_floor_dist
+                            )
+                            logger.info(
+                                f"[VTM] min_rr floor: TP1 {_tp1_current:.5f} → {_tp1_floor:.5f} "
+                                f"(R:R {_tp1_current_dist / _sl_dist:.2f} → {_min_rr:.1f}, "
+                                f"SL dist={_sl_dist:.5f})"
+                            )
+                            self.take_profit_levels[0] = _tp1_floor
 
             # STEP 3 — Lot Sanitizer
             # Reason: Ensures position size is valid for broker submission.
@@ -786,35 +1300,366 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Update error: {e}")
             return None
 
-    def update_with_current_price(self, current_price: float, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
+    def update_with_current_price(
+        self,
+        current_price: float,
+        df_4h: Optional[pd.DataFrame] = None,
+        composite_state=None,
+    ) -> Optional[Dict]:
         try:
-            atr = self._calculate_atr() # Calculate ATR here
-            
+            atr = self._calculate_atr()
+
+            # ── Structural prerequisite: store live composite_state on VTM ──────
+            # Enables check_exit to read live structural signals (BOS, CHoCH,
+            # Livermore state) without requiring a signature change to check_exit.
+            # If composite_state is None, all structural checks in check_exit
+            # gracefully skip and ATR behaviour is preserved.
+            self._live_cs = composite_state
+
+
+            # ── PHASE 4: Live Livermore State Refresh ──────────────────────────
+            # Refresh 4H Livermore state every cycle so VTM responds to structural
+            # transitions that occur AFTER trade entry, not just at entry time.
+            # Gated by phase_config.per_tick_livermore_enabled.
+            # Only activate after Gate 3B criteria confirmed (21-day live observation
+            # with structural stops enabled, no increase in premature stop-outs).
+            _phase_cfg = self.risk_config.get("phase_config", {})
+            _per_tick_enabled = _phase_cfg.get("per_tick_livermore_enabled", False)
+            if composite_state is not None and _per_tick_enabled:
+                _new_lv4h = getattr(composite_state, "livermore_state_4h", None)
+                _new_age   = int(getattr(composite_state, "livermore_state_age_4h", 0) or 0)
+                if _new_lv4h and _new_lv4h != self.livermore_state_4h:
+                    _prev = self.livermore_state_4h
+                    self.livermore_state_4h     = _new_lv4h
+                    self.livermore_state_age_4h = _new_age
+                    logger.info(
+                        "[VTM LIVE LSM] %s: 4H state %s → %s (age=%d bars)",
+                        self.asset, _prev, _new_lv4h, _new_age,
+                    )
+                    self._apply_livermore_transition(
+                        prev_state=_prev,
+                        new_state=_new_lv4h,
+                        current_price=current_price,
+                        atr=atr,
+                    )
+
+            # ── L4: VTM structural exit awareness ──────────────────────────────
+            # CHoCH/BOS detection is finer-grained and faster than a discrete
+            # livermore_state_4h transition (which only updates on a 4H close).
+            # When a structural break shows up against the position's direction,
+            # lock in a one-time protective tighten — same mechanism as the
+            # MAIN→SECONDARY case above, but triggered by the structural-break
+            # flags directly instead of waiting for the state machine to catch up.
+            # _structural_warning_fired ensures this fires once per trade, not
+            # every tick the flags happen to still read true.
+            if (
+                composite_state is not None
+                and atr > 0
+                and self.risk_config.get("phase_config", {}).get(
+                    "vtm_structural_exit_awareness_enabled", False
+                )
+                and not getattr(self, "_structural_warning_fired", False)
+            ):
+                _choch = bool(getattr(composite_state, "choch_detected", False))
+                _bos = bool(getattr(composite_state, "bos_detected", False))
+                _sweep_dir = getattr(composite_state, "sweep_direction", 0) or 0
+                if _choch or _bos:
+                    is_long = self.side == "long"
+                    # against_position: sweep_direction < 0 means a bearish
+                    # break/sweep — adverse for a long, favorable for a short.
+                    _against_position = (
+                        (is_long and _sweep_dir < 0) or
+                        (not is_long and _sweep_dir > 0)
+                    )
+                    if _against_position:
+                        self._structural_warning_fired = True
+                        _in_profit = (
+                            (is_long and current_price > self.entry_price) or
+                            (not is_long and current_price < self.entry_price)
+                        )
+                        if _in_profit and not getattr(self, "_lv_breakeven_locked", False):
+                            self.current_stop_loss = self.entry_price
+                            self._lv_breakeven_locked = True
+                        self.runner_trail_atr_multiplier *= 0.5
+                        logger.warning(
+                            "[VTM STRUCTURAL] %s: %s detected against %s position — "
+                            "trail tightened to %.2f× ATR%s",
+                            self.asset,
+                            "CHoCH" if _choch else "BOS",
+                            self.side,
+                            self.runner_trail_atr_multiplier,
+                            " + SL locked to breakeven" if getattr(self, "_lv_breakeven_locked", False) else "",
+                        )
+
+                # ── O1b: Orphan signal awareness ──────────────────────────
+                # Three additional signals that wave L4's structural-flag
+                # check doesn't capture. Each fires once per position via
+                # a dedicated flag — no per-tick re-triggering.
+
+                # 1. Rejection strength — price hard-rejected at a key level.
+                # Scale trail tighten proportionally to the rejection magnitude.
+                _rejection_str = float(getattr(composite_state, "rejection_strength", 0.0))
+                _rejection_at  = bool(getattr(composite_state, "rejection_at_level", False))
+                if _rejection_at and _rejection_str >= 0.60 and not getattr(self, "_rejection_trail_fired", False):
+                    _sweep_dir = getattr(composite_state, "sweep_direction", 0)
+                    # Use strict comparison: sweep_direction=0 means no sweep
+                    # occurred. <= 0 / >= 0 would fire on BOTH sides when
+                    # sweep_direction is neutral, tightening every open
+                    # position on ordinary rejections. Only tighten when a
+                    # directional sweep actually occurred against the position.
+                    _rejection_against = (
+                        (self.side == "long" and _sweep_dir < 0) or
+                        (self.side == "short" and _sweep_dir > 0)
+                    )
+                    if _rejection_against:
+                        self._rejection_trail_fired = True
+                        # 0.60 strength → 0.76× multiplier, 0.90 strength → 0.64×.
+                        # Calibrate via O1 telemetry after 30+ samples.
+                        _rejection_mult = max(0.64, 1.0 - (_rejection_str * 0.40))
+                        _new_mult = self.runner_trail_atr_multiplier * _rejection_mult
+                        logger.info(
+                            f"[VTM] {self.asset}: level rejection (strength={_rejection_str:.2f}) "
+                            f"against {self.side} — trail mult "
+                            f"{self.runner_trail_atr_multiplier:.2f}× → {_new_mult:.2f}×"
+                        )
+                        self.runner_trail_atr_multiplier = _new_mult
+
+                # 2. is_parabolic in position's favor — lock in gains.
+                # Parabolic extension is a take-profit-opportunity signal
+                # on the winning side. Tighten trail so gains don't evaporate
+                # when the extension inevitably reverses.
+                _is_parabolic = bool(getattr(composite_state, "is_parabolic", False))
+                if _is_parabolic and not getattr(self, "_parabolic_trail_locked", False):
+                    _entry = self.entry_price
+                    _min_profit_pct = 0.002  # 0.2% minimum profit to trigger
+                    _in_profit = (
+                        (self.side == "long" and
+                         self.highest_price_reached is not None and
+                         self.highest_price_reached > _entry * (1 + _min_profit_pct)) or
+                        (self.side == "short" and
+                         self.lowest_price_reached is not None and
+                         self.lowest_price_reached < _entry * (1 - _min_profit_pct))
+                    )
+                    if _in_profit:
+                        self._parabolic_trail_locked = True
+                        _locked_mult = min(self.runner_trail_atr_multiplier, 0.80)
+                        logger.info(
+                            f"[VTM] {self.asset}: parabolic extension in {self.side}'s "
+                            f"favor — locking trail "
+                            f"({self.runner_trail_atr_multiplier:.2f}× → {_locked_mult:.2f}×)"
+                        )
+                        self.runner_trail_atr_multiplier = _locked_mult
+
+                # 3. absorption_detected — institutional orders absorbing at price.
+                # Only act outside silent zones (normal retracements expect this).
+                _absorption = bool(getattr(composite_state, "absorption_detected", False))
+                _silent_now = bool(getattr(composite_state, "is_silent_zone", False))
+                if _absorption and not _silent_now and not getattr(self, "_absorption_warning_fired", False):
+                    self._absorption_warning_fired = True
+                    _abs_mult = min(self.runner_trail_atr_multiplier, 1.10)
+                    logger.info(
+                        f"[VTM] {self.asset}: absorption_detected against "
+                        f"{self.side} (outside silent zone) — mild trail tighten "
+                        f"({self.runner_trail_atr_multiplier:.2f}× → {_abs_mult:.2f}×)"
+                    )
+                    self.runner_trail_atr_multiplier = _abs_mult
+
             if self.side == "long":
+                # Guard: highest_price_reached may be None if entry_price was None at construction
+                if self.highest_price_reached is None:
+                    self.highest_price_reached = current_price
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
-                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL (multiplier from runner_trail_atr_multiplier config)
                     new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
-
                     if new_trail > self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
+
+                # ── STRUCTURAL SWING LOW TRAIL (Option 1 + Option B) ──────────
+                # Fires for BOTH REVERSION and TREND types when in profit.
+                # ATR runner trail (above) remains the floor for TREND type.
+                # Structural trail takes over when it produces a higher stop.
+                # Only active when structural_trailing_enabled = true in config.
+                _current_profit_long = self.close[-1] - self.entry_price
+                if _current_profit_long > 1.0 * atr:
+                    _struct_sl = self._compute_swing_low_trail(atr)
+                    if _struct_sl is not None and _struct_sl > self.current_stop_loss:
+                        logger.info(
+                            "[VTM] 🏗️ Structural trail: %s SL → %.5g "
+                            "(swing low − 0.3×ATR, was %.5g)",
+                            self.asset, _struct_sl, self.current_stop_loss,
+                        )
+                        self.current_stop_loss = _struct_sl
+                # ───────────────────────────────────────────────
             else:
+                # Guard: lowest_price_reached may be None if entry_price was None at construction
+                if self.lowest_price_reached is None:
+                    self.lowest_price_reached = current_price
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
-                    # ✅ PHASE 5: ATR-BASED RUNNER TRAIL - SHORT (multiplier from runner_trail_atr_multiplier config)
                     new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
-                    
-                    if new_trail < self.current_stop_loss: 
+                    if new_trail < self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
                         self.current_stop_loss = new_trail
-            
-            return self.check_exit(current_price, atr, df_4h=df_4h) # Pass ATR and df_4h to check_exit
+
+                # ── STRUCTURAL SWING HIGH TRAIL (Option 1 + Option B, shorts) ─
+                _current_profit_short = self.entry_price - self.close[-1]
+                if _current_profit_short > 1.0 * atr:
+                    _struct_sl = self._compute_swing_low_trail(atr)
+                    if _struct_sl is not None and _struct_sl < self.current_stop_loss:
+                        logger.info(
+                            "[VTM] 🏗️ Structural trail: %s SL → %.5g "
+                            "(swing high + 0.3×ATR, was %.5g)",
+                            self.asset, _struct_sl, self.current_stop_loss,
+                        )
+                        self.current_stop_loss = _struct_sl
+                # ──────────────────────────────────────────────────────────────
+
+            return self.check_exit(current_price, atr, df_4h=df_4h)
         except Exception as e:
             logger.error(f"[VTM] Price update error: {e}")
             return None
+
+    def _apply_livermore_transition(
+        self,
+        prev_state: str,
+        new_state: str,
+        current_price: float,
+        atr: float,
+    ) -> None:
+        """
+        Respond to a live 4H Livermore state transition during an open trade.
+
+        Rules (MRS Phase 4):
+        - MAIN → NATURAL: price starting a counter-move. Tighten trail to protect
+          profits. Do NOT exit — natural moves are expected within trends.
+        - MAIN → SECONDARY: deeper counter-move, structural warning. Move SL to
+          breakeven if profitable; tighten trail aggressively.
+        - NATURAL/SECONDARY → MAIN (same direction): trend resumed. Restore trail
+          multiplier so runner can breathe again.
+        - Any → MAIN (opposite direction): trend has reversed. Tighten to near
+          breakeven — the original thesis is now invalidated.
+        """
+        if atr <= 0:
+            return
+
+        _lv_adj        = self.risk_config.get("livermore_atr_adjustments", {})
+        _main_trail    = _lv_adj.get("main_trail_mult",      1.3)
+        _sec_trail     = _lv_adj.get("secondary_trail_mult", 0.7)
+        _config_trail  = self.risk_config.get("runner_trail_atr_multiplier", 1.0)
+
+        _MAIN    = {"MAIN_UP", "MAIN_DOWN"}
+        _NATURAL = {"NATURAL_RETRACEMENT", "NATURAL_REBOUND"}
+        _SEC     = {"SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"}
+
+        is_long  = self.side == "long"
+        in_profit = (
+            (is_long  and current_price > self.entry_price) or
+            (not is_long and current_price < self.entry_price)
+        )
+
+        # ── MAIN → NATURAL: counter-move starting ────────────────────────
+        if prev_state in _MAIN and new_state in _NATURAL:
+            _same_dir = (
+                (is_long  and new_state == "NATURAL_RETRACEMENT") or
+                (not is_long and new_state == "NATURAL_REBOUND")
+            )
+            # Item 2.16: a counter-trend/REVERSION position (possible now that
+            # trade_type actually reflects live regime — Item 2.11) held AGAINST
+            # the prevailing MAIN leg has its own thesis confirmed by the
+            # opposite transition: a LONG bet against MAIN_DOWN is confirmed by
+            # NATURAL_REBOUND; a SHORT bet against MAIN_UP is confirmed by
+            # NATURAL_RETRACEMENT. VTM previously had no branch for this at
+            # all — it silently did nothing while a working reversion thesis
+            # played out.
+            _thesis_confirming = (
+                (is_long and new_state == "NATURAL_REBOUND") or
+                (not is_long and new_state == "NATURAL_RETRACEMENT")
+            )
+            if _same_dir:
+                # Normal pullback against position — tighten trail
+                self.runner_trail_atr_multiplier = _config_trail * _sec_trail
+                logger.info(
+                    "[VTM LIVE LSM] %s: MAIN→NATURAL — tightening trail to %.2f× ATR",
+                    self.asset, self.runner_trail_atr_multiplier,
+                )
+            elif _thesis_confirming:
+                self.runner_trail_atr_multiplier = _config_trail * 1.1
+                logger.info(
+                    "[VTM LIVE LSM] %s: counter-trend thesis confirming — trail eased",
+                    self.asset,
+                )
+
+        # ── MAIN → SECONDARY: deep counter-move, structural warning ──────
+        elif prev_state in _MAIN and new_state in _SEC:
+            self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+            if in_profit and not getattr(self, "_lv_breakeven_locked", False):
+                self.current_stop_loss = self.entry_price
+                self._lv_breakeven_locked = True
+                logger.warning(
+                    "[VTM LIVE LSM] %s: MAIN→SECONDARY — SL moved to breakeven $%.2f",
+                    self.asset, self.entry_price,
+                )
+            logger.info(
+                "[VTM LIVE LSM] %s: MAIN→SECONDARY — trail tightened to %.2f× ATR",
+                self.asset, self.runner_trail_atr_multiplier,
+            )
+
+        # ── NATURAL → SECONDARY: counter-move escalating ─────────────────
+        elif prev_state in _NATURAL and new_state in _SEC:
+            self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+            if in_profit and not getattr(self, "_lv_breakeven_locked", False):
+                self.current_stop_loss = self.entry_price
+                self._lv_breakeven_locked = True
+                logger.warning(
+                    "[VTM LIVE LSM] %s: NATURAL→SECONDARY — SL moved to breakeven $%.2f",
+                    self.asset, self.entry_price,
+                )
+            logger.info(
+                "[VTM LIVE LSM] %s: NATURAL→SECONDARY — trail tightened to %.2f× ATR",
+                self.asset, self.runner_trail_atr_multiplier,
+            )
+
+        # ── NATURAL/SECONDARY → MAIN: trend resuming or reversing ────────
+        elif prev_state in (_NATURAL | _SEC) and new_state in _MAIN:
+            _same_dir = (
+                (is_long  and new_state == "MAIN_UP") or
+                (not is_long and new_state == "MAIN_DOWN")
+            )
+            if _same_dir:
+                self.runner_trail_atr_multiplier = _config_trail * _main_trail
+                self._lv_breakeven_locked = False
+                logger.info(
+                    "[VTM LIVE LSM] %s: →MAIN_%s (trend resumed) — trail restored to %.2f× ATR",
+                    self.asset, "UP" if is_long else "DOWN",
+                    self.runner_trail_atr_multiplier,
+                )
+            else:
+                # Opposite MAIN — full reversal
+                self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
+                if not getattr(self, "_lv_breakeven_locked", False):
+                    self.current_stop_loss = self.entry_price
+                    self._lv_breakeven_locked = True
+                logger.warning(
+                    "[VTM LIVE LSM] %s: →MAIN_%s (REVERSAL) — SL at breakeven, trail %.2f× ATR",
+                    self.asset, "UP" if not is_long else "DOWN",
+                    self.runner_trail_atr_multiplier,
+                )
+
+        # ── MAIN → opposite MAIN: direct structural reversal ─────────────
+        elif prev_state in _MAIN and new_state in _MAIN and prev_state != new_state:
+            # e.g. MAIN_DOWN → MAIN_UP while holding SHORT — thesis invalidated
+            self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
+            if not getattr(self, "_lv_breakeven_locked", False):
+                self.current_stop_loss = self.entry_price
+                self._lv_breakeven_locked = True
+            logger.warning(
+                "[VTM LIVE LSM] %s: %s→%s (DIRECT REVERSAL) — SL at breakeven $%.2f, trail %.2f× ATR",
+                self.asset, prev_state, new_state,
+                self.entry_price, self.runner_trail_atr_multiplier,
+            )
 
     def _calculate_adx(self) -> float:
         try:
@@ -832,6 +1677,52 @@ class VeteranTradeManager:
             logger.error(f"[VTM] ATR Slow error: {e}")
             return self.entry_price * 0.02
 
+
+    def _blend_single_tp(self):
+        """7.1 LIVE. Collapse the target candidates already computed into ONE
+        expectancy-weighted TP, conservative-biased for fill probability.
+        Forward-compatible: this candidate dict seeds a real [TP1,TP2,TP3] ladder
+        when partials turn on. Returns None if candidates cannot be built."""
+        try:
+            _tm   = self.risk_config.get("trade_management", {})
+            w     = _tm.get("single_tp_weights",
+                            {"struct": 0.30, "mm": 0.25, "fib": 0.15, "rmult": 0.15, "mfe": 0.15})
+            risk  = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss else 0.0
+            if risk <= 0:
+                return None
+            sign  = 1.0 if self.side == "long" else -1.0
+            cands = {}
+            if self.take_profit_levels:
+                cands["struct"] = self.take_profit_levels[0]
+            _anchor = (getattr(self, "livermore_anchor_main_up",   None) if self.side == "long"
+                       else getattr(self, "livermore_anchor_main_down", None))
+            if _anchor:
+                cands["mm"]  = float(_anchor)
+                cands["fib"] = self.entry_price + sign * 1.272 * abs(self.entry_price - float(_anchor))
+            _rm = (self.partial_targets or [1.5])[0]
+            cands["rmult"] = self.entry_price + sign * _rm * risk
+            _mfe_r = getattr(self, "_mfe_target_r", None)   # absent until 7.4 has >=30 rows; skipped safely
+            if _mfe_r:
+                cands["mfe"] = self.entry_price + sign * _mfe_r * risk
+            if not cands:
+                return None
+            tot     = sum(w.get(k, 0.0) for k in cands) or 1.0
+            blended = sum(w.get(k, 0.0) * v for k, v in cands.items()) / tot
+            lo, hi  = min(cands.values()), max(cands.values())
+            blended = max(lo, min(hi, blended))
+            if _tm.get("single_tp_conservative_clamp", True):
+                mid     = (lo + hi) / 2.0
+                blended = min(blended, mid) if self.side == "long" else max(blended, mid)
+            logger.info(
+                f"[7.1] single-TP blend "
+                f"{{ {', '.join(f'{k}:{round(v, 5)}' for k, v in cands.items())} }} "
+                f"-> {blended:.5f}"
+            )
+            return blended
+        except Exception as _e71:
+            logger.debug(f"[7.1] _blend_single_tp failed (non-blocking): {_e71}")
+            return None
+
     def cancel_take_profit(self):
         """Cancel all remaining take profit targets."""
         self.take_profit_levels = []
@@ -842,6 +1733,49 @@ class VeteranTradeManager:
         """Activate the trailing stop mechanism (Runner Mode)."""
         self.runner_activated = True
         logger.debug(f"[VTM] Trailing stop (Greed Mode) enabled for {self.asset}.")
+
+    def _log_mfe_mae(self, exit_reason: str) -> None:
+        """
+        Phase 7.4 ext: records the Maximum Favorable/Adverse Excursion (peak
+        unrealized profit/loss in R-multiples) reached during a trade's
+        lifetime, alongside the reason it actually closed. Records only —
+        never changes trading behaviour. Call sites only invoke this on a
+        full close (remaining_position == 0 after the exit), so partial
+        scale-outs do not produce a premature/incomplete MFE record.
+        Gated by phase_config.mfe_logging_enabled.
+        """
+        if not self.risk_config.get("phase_config", {}).get("mfe_logging_enabled", False):
+            return
+        try:
+            _risk = abs(self.entry_price - self.initial_stop_loss) or 1e-9
+            if self.side == "long":
+                _mfe_r = (self.highest_price_reached - self.entry_price) / _risk
+                _mae_r = (self.entry_price - self.lowest_price_reached) / _risk
+            else:
+                _mfe_r = (self.entry_price - self.lowest_price_reached) / _risk
+                _mae_r = (self.highest_price_reached - self.entry_price) / _risk
+            import csv as _csv, os as _os, datetime as _dt
+            _path = "logs/mfe_mae_log.csv"
+            _os.makedirs("logs", exist_ok=True)
+            _new_file = not _os.path.exists(_path)
+            with open(_path, "a", newline="") as _f:
+                _w = _csv.writer(_f)
+                if _new_file:
+                    _w.writerow(["ts", "asset", "setup", "side", "exit_reason",
+                                 "mfe_r", "mae_r", "result_r"])
+                _w.writerow([
+                    _dt.datetime.now().isoformat(),
+                    getattr(self, "asset", ""),
+                    getattr(self, "trade_type", ""),
+                    self.side,
+                    exit_reason,
+                    round(_mfe_r, 3),
+                    round(_mae_r, 3),
+                    getattr(self, "_realized_pnl_r", ""),
+                ])
+            logger.info(f"[7.4] MFE={_mfe_r:.2f}R MAE={_mae_r:.2f}R exit={exit_reason} -> {_path}")
+        except Exception as _e74:
+            logger.debug(f"[7.4] MFE log failed (non-blocking): {_e74}")
 
     def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
@@ -869,14 +1803,35 @@ class VeteranTradeManager:
         else:
             current_profit = self.entry_price - current_price
 
-        # --- STEP 0.5: Intermediate Trail (Early Protection) ---
-        # Fires when profit exceeds 1.0×ATR — the trade has proven itself with a full
-        # ATR of room, not just 0.75×.  Firing earlier (0.75×) caused chop-outs: a
-        # normal intrabar pullback after a modest push would stop the trade before it
-        # could play out.  At 1.0× the trade has real momentum before we tighten.
-        # SL moves to entry - (initial_risk - 0.5×ATR), reducing risk by ~half while
-        # still leaving 1.5× ATR of breathing room from current price.
+        # --- STEP 0.25: Soft Risk Reduction (first profit confirmation) ---
+        # Fires at 0.75×ATR profit — trade has moved meaningfully in our favour but
+        # hasn't proven full momentum yet. SL shifts to entry − 0.75×initial_risk,
+        # cutting risk by 25% while leaving ample room to breathe.
+        # Fills the gap between entry and the 1.0×ATR intermediate trail so a
+        # reversal after an early push exits at a reduced loss, not full risk.
         _initial_risk = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss is not None else atr_value
+        if current_profit > 0.75 * atr_value:
+            if self.side == "long":
+                _soft_sl = self.entry_price - 0.75 * _initial_risk
+                if _soft_sl > self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
+                    )
+                    self.current_stop_loss = _soft_sl
+            else:
+                _soft_sl = self.entry_price + 0.75 * _initial_risk
+                if _soft_sl < self.current_stop_loss:
+                    logger.info(
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
+                    )
+                    self.current_stop_loss = _soft_sl
+
+        # --- STEP 0.5: Intermediate Trail (Early Protection) ---
+        # Fires when profit exceeds 1.0×ATR — trade has proven itself with a full
+        # ATR of room. SL moves to entry − (initial_risk − 0.5×ATR), reducing risk
+        # by ~half while leaving 1.5×ATR of breathing room from current price.
         if current_profit > 1.0 * atr_value:
             if self.side == "long":
                 _intermediate_sl = self.entry_price - max(0.0, _initial_risk - 0.5 * atr_value)
@@ -895,15 +1850,26 @@ class VeteranTradeManager:
                     )
                     self.current_stop_loss = _intermediate_sl
 
-        if current_profit > 1.5 * atr_value:
+        # Phase 4: break-even trigger is Livermore-aware (set in __init__).
+        # Young state (age < 5) = 1.8×ATR; aged state (>20) = 1.2×ATR; default 1.5×.
+        _be_trigger = getattr(self, "breakeven_atr_trigger", 1.5)
+        if current_profit > _be_trigger * atr_value:
             # T1.4 fix: only move SL TO entry if it hasn't already passed entry.
             # Original code fired every tick with no side check, pulling a trailing
             # stop BACKWARDS to entry even after it had advanced beyond it.
             if self.side == "long" and self.current_stop_loss < self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
+                logger.info(
+                    f"[VTM] 🛡️ Break-even lock: {self.asset} "
+                    f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
+                    f"${_be_trigger*atr_value:.2f})"
+                )
                 self.current_stop_loss = self.entry_price
             elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                logger.info(f"[VTM] 🛡️ Break-even lock: {self.asset} (Profit: ${current_profit:.2f} > 1.5×ATR: ${1.5*atr_value:.2f})")
+                logger.info(
+                    f"[VTM] 🛡️ Break-even lock: {self.asset} "
+                    f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
+                    f"${_be_trigger*atr_value:.2f})"
+                )
                 self.current_stop_loss = self.entry_price
 
         # --- STEP 1.5: Time-Based Break-Even Lock ---
@@ -942,7 +1908,13 @@ class VeteranTradeManager:
         # which closes below the SL and also happens to meet pyramid conditions is
         # always treated as a stop-loss, never as a scale-in signal.
         try:
-            if (self.side == "long" and current_price <= self.current_stop_loss) or \
+            # current_stop_loss is None on freshly-imported positions (set to initial on first trail tick).
+            # Fall back to initial_stop_loss so the SL check is never skipped.
+            if self.current_stop_loss is None:
+                self.current_stop_loss = self.initial_stop_loss
+            if self.current_stop_loss is None:
+                logger.warning("[VTM] SL check skipped — both current and initial stop_loss are None")
+            elif (self.side == "long" and current_price <= self.current_stop_loss) or \
                (self.side == "short" and current_price >= self.current_stop_loss):
                 reason = ExitReason.STOP_LOSS
                 offset = 0.125 * atr_value
@@ -956,6 +1928,7 @@ class VeteranTradeManager:
                         reason = ExitReason.TRAILING_STOP
                     elif self.runner_activated:
                         reason = ExitReason.BREAK_EVEN
+                self._log_mfe_mae(reason.value)
                 return {"reason": reason, "price": current_price, "size": self.remaining_position}
         except Exception as e:
             logger.error(f"[VTM] SL check error: {e}")
@@ -981,15 +1954,20 @@ class VeteranTradeManager:
                     (self.side == "short" and current_price < self.entry_price - 2 * atr_value)
                 )
                 if atr_value > 2.0 * atr_slow and not is_winning:
-                    self._vol_spike_exited = True
-                    vol_exit_size = min(0.75, self.remaining_position)
-                    if vol_exit_size > 0:
-                        self.remaining_position = max(0.0, self.remaining_position - vol_exit_size)
+                    if not (self.partials_enabled and self._can_partial(0.75)):
+                        logger.debug(f"[VTM] Vol Spike partial suppressed — letting trade run.")
+                    else:
+                        self._vol_spike_exited = True
+                        vol_exit_size = min(0.75, self.remaining_position)
+                        if vol_exit_size > 0:
+                            self.remaining_position = max(0.0, self.remaining_position - vol_exit_size)
                         logger.warning(
                             f"[VTM] ⚡ VOLATILITY SPIKE: {self.asset} — "
                             f"ATR {atr_value:.5f} > 2× slow-ATR {atr_slow:.5f}. "
                             f"Reducing {vol_exit_size:.0%}, keeping runner."
                         )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("VOLATILITY_SPIKE")
                         return {"reason": ExitReason.VOLATILITY_SPIKE, "price": current_price, "size": vol_exit_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Vol-spike check skipped: {_e}")
@@ -1020,8 +1998,11 @@ class VeteranTradeManager:
                 )
 
                 if bearish_reversal or bullish_reversal:
-                    self._reversal_candle_exited = True
-                    rev_size = min(0.50, self.remaining_position)
+                    if not (self.partials_enabled and self._can_partial(0.50)):
+                        logger.debug(f"[VTM] Reversal Candle partial suppressed — letting trade run.")
+                    else:
+                        self._reversal_candle_exited = True
+                        rev_size = min(0.50, self.remaining_position)
                     if rev_size > 0:
                         self.remaining_position = max(0.0, self.remaining_position - rev_size)
                         # Tighten SL on the runner to 0.8×ATR inside break-even
@@ -1040,6 +2021,8 @@ class VeteranTradeManager:
                             f"close={current_price:.5f} vs mid={bar_mid:.5f}. "
                             f"Closing {rev_size:.0%}, SL tightened to ${self.current_stop_loss:,.5f}."
                         )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("REVERSAL_CANDLE")
                         return {"reason": ExitReason.REVERSAL_CANDLE, "price": current_price, "size": rev_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Reversal-candle check skipped: {_e}")
@@ -1056,19 +2039,46 @@ class VeteranTradeManager:
                 bars_against = sum(
                     1 for k in range(-3, 0)
                     if (self.side == "long"  and self.close[k] < self.close[k - 1]) or
-                       (self.side == "short" and self.close[k] > self.close[k - 1])
+                    (self.side == "short" and self.close[k] > self.close[k - 1])
                 )
                 if bars_against >= 3 and adx_value < 20:
-                    self._trend_invalidated = True
-                    ti_size = self.remaining_position
-                    if ti_size > 0:
-                        self.remaining_position = 0.0
-                        logger.warning(
-                            f"[VTM] ❌ TREND INVALIDATION: {self.asset} {self.side.upper()} — "
-                            f"3 consecutive bars against + ADX={adx_value:.1f} < 20. "
-                            f"Full close ({ti_size:.0%})."
+                    # STRUCTURAL GATE: require the Livermore state to also confirm
+                    # structural weakness, not just statistical weakness.
+                    # For longs: SECONDARY_RETRACEMENT or MAIN_DOWN = structural
+                    #            warning against the position (more than normal pullback).
+                    # For shorts: SECONDARY_REBOUND or MAIN_UP = structural warning.
+                    # If Livermore state is NATURAL_RETRACEMENT / MAIN_UP (for longs),
+                    # the three lower closes are normal breathing and should not close.
+                    _lv4h = getattr(self, "livermore_state_4h", None)
+                    _struct_against = (
+                        (self.side == "long"  and _lv4h in ("SECONDARY_RETRACEMENT", "MAIN_DOWN")) or
+                        (self.side == "short" and _lv4h in ("SECONDARY_REBOUND",      "MAIN_UP"))
+                    )
+                    if not _struct_against:
+                        logger.debug(
+                            "[VTM] Trend invalidation: 3 bars against + ADX<20 "
+                            "but Livermore state %s does not confirm — holding. "
+                            "Structural stop is the protection.",
+                            _lv4h,
                         )
-                        return {"reason": ExitReason.TREND_INVALIDATION, "price": current_price, "size": ti_size}
+                    else:
+                        self._trend_invalidated = True
+                        ti_size = self.remaining_position
+                        if ti_size > 0:
+                            self.remaining_position = 0.0
+                            logger.warning(
+                                "[VTM] ❌ TREND INVALIDATION: %s %s — "
+                                "3 bars against + ADX=%.1f < 20 + Livermore=%s. "
+                                "Full close (%.0f%%).",
+                                self.asset, self.side.upper(),
+                                adx_value, _lv4h, ti_size * 100,
+                            )
+                            self._log_mfe_mae("TREND_INVALIDATION")
+                            return {
+                                "reason": ExitReason.TREND_INVALIDATION,
+                                "price":  current_price,
+                                "size":   ti_size,
+                            }
             except Exception as _e:
                 logger.debug(f"[VTM] Trend-invalidation check skipped: {_e}")
 
@@ -1121,10 +2131,30 @@ class VeteranTradeManager:
                         _macd_counter  = _h1 < _h2 < 0      # histogram falling into negative = bearish
 
                     if _rsi_counter and _macd_counter:
-                        self._counter_momentum_cut = True
-                        cut_size = min(0.60, self.remaining_position)
-                        if cut_size > 0:
-                            self.remaining_position = max(0.0, self.remaining_position - cut_size)
+                        # STRUCTURAL GATE: same Livermore state check as Trend Invalidation.
+                        # Statistical momentum signals alone should not override the
+                        # structural stop on a position entered at a proven structural
+                        # level. Both statistical AND structural must confirm before cutting.
+                        _lv4h_cm = getattr(self, "livermore_state_4h", None)
+                        _struct_against_cm = (
+                            (self.side == "long"  and _lv4h_cm in ("SECONDARY_RETRACEMENT", "MAIN_DOWN")) or
+                            (self.side == "short" and _lv4h_cm in ("SECONDARY_REBOUND",      "MAIN_UP"))
+                        )
+                        if not _struct_against_cm:
+                            logger.debug(
+                                "[VTM] Counter-momentum signals present but Livermore=%s "
+                                "does not structurally confirm — letting structural stop "
+                                "manage this trade.",
+                                _lv4h_cm,
+                            )
+                        else:
+                            if not (self.partials_enabled and self._can_partial(0.60)):
+                                logger.debug(f"[VTM] Counter-momentum partial suppressed — letting trade run.")
+                            else:
+                                self._counter_momentum_cut = True
+                                cut_size = min(0.60, self.remaining_position)
+                                if cut_size > 0:
+                                    self.remaining_position = max(0.0, self.remaining_position - cut_size)
                             # Tighten remaining SL to entry ± 0.5×ATR so runner risk is minimal
                             if self.side == "short":
                                 _tight_sl = self.entry_price + 0.5 * atr_value
@@ -1140,6 +2170,8 @@ class VeteranTradeManager:
                                 f"RSI={_rsi:.1f}, MACD hist {_h1:+.4f}. "
                                 f"Closing {cut_size:.0%} early. SL tightened to ${self.current_stop_loss:,.5f}."
                             )
+                            if self.remaining_position <= 1e-9:
+                                self._log_mfe_mae("COUNTER_MOMENTUM_CUT")
                             return {"reason": ExitReason.TREND_INVALIDATION,
                                     "price": current_price, "size": cut_size}
             except Exception as _e:
@@ -1191,21 +2223,41 @@ class VeteranTradeManager:
                     )
 
                     if _macd_flipped and _rsi_confirms:
+                        # STRUCTURAL ACTION: tighten the structural trail aggressively
+                        # rather than closing the full position on a statistical signal.
+                        # MACD zero-cross + RSI < 50 is a warning, not a structural
+                        # confirmation that the thesis has broken. The trade continues
+                        # with a tighter stop. If structure subsequently breaks (swing
+                        # low is hit), the structural trail will exit it correctly.
                         self._profit_reversal_exited = True
-                        _pg_size = self.remaining_position
-                        if _pg_size > 0:
-                            self.remaining_position = 0.0
+                        _pg_struct = self._compute_swing_low_trail(atr_value)
+                        if _pg_struct is not None:
+                            if self.side == "long" and _pg_struct > self.current_stop_loss:
+                                self.current_stop_loss = _pg_struct
+                                logger.warning(
+                                    "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                    "Statistical warning: tightening SL to structural "
+                                    "swing low %.5g (not closing — structure not yet broken).",
+                                    self.asset, self.side.upper(), _rsi_now, _pg_struct,
+                                )
+                            elif self.side == "short" and _pg_struct < self.current_stop_loss:
+                                self.current_stop_loss = _pg_struct
+                                logger.warning(
+                                    "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                    "Statistical warning: tightening SL to structural "
+                                    "swing high %.5g (not closing — structure not yet broken).",
+                                    self.asset, self.side.upper(), _rsi_now, _pg_struct,
+                                )
+                        else:
+                            # No structural swing to trail behind — keep current stop,
+                            # log the warning, let structural stop or trail handle exit.
                             logger.warning(
-                                f"[VTM] 💰 PROFIT GUARD: {self.asset} {self.side.upper()} — "
-                                f"profit=${_profit_guard:.2f} ({_profit_guard/atr_value:.1f}×ATR), "
-                                f"MACD flipped ({_h2_pg:+.4f}→{_h1_pg:+.4f}), "
-                                f"RSI={_rsi_now:.1f}. Full close at ${current_price:,.5f}."
+                                "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
+                                "No structural swing trail available — holding current SL %.5g. "
+                                "Structural stop is the protection.",
+                                self.asset, self.side.upper(), _rsi_now,
+                                self.current_stop_loss,
                             )
-                            return {
-                                "reason": ExitReason.TREND_INVALIDATION,
-                                "price": current_price,
-                                "size": _pg_size,
-                            }
             except Exception as _e:
                 logger.debug(f"[VTM] Profit-guard check skipped: {_e}")
 
@@ -1237,61 +2289,101 @@ class VeteranTradeManager:
                     else (self.entry_price - current_price) / self.entry_price
                 )
                 if early_pnl_pct >= self.early_scale_threshold:
-                    self._early_scaled = True
-                    early_size = 0.20  # Fixed 20% early exit
-                    self.remaining_position = max(0.0, self.remaining_position - early_size)
-
-                    # Tighten SL to lock in partial profit
-                    lock_offset = self.early_lock_atr_multiplier * atr_value
-                    if self.side == "long":
-                        lock_sl = self.entry_price + lock_offset
-                        if lock_sl > self.current_stop_loss:
-                            logger.info(
-                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
-                                f"(entry + {self.early_lock_atr_multiplier}x ATR)"
-                            )
-                            self.current_stop_loss = lock_sl
+                    if not (self.partials_enabled and self._can_partial(0.20)):
+                        # Suppressed — cannot subdivide this lot.
+                        # Do NOT set _early_scaled, do NOT touch remaining_position,
+                        # do NOT tighten SL here. Trade continues to real full-close exits.
+                        logger.debug(
+                            f"[VTM] Early Scale suppressed — "
+                            f"partials_enabled={self.partials_enabled}, "
+                            f"_can_partial(0.20)={self._can_partial(0.20)} — letting trade run."
+                        )
                     else:
-                        lock_sl = self.entry_price - lock_offset
-                        if lock_sl < self.current_stop_loss:
-                            logger.info(
-                                f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
-                                f"(entry - {self.early_lock_atr_multiplier}x ATR)"
-                            )
-                            self.current_stop_loss = lock_sl
+                        # Can subdivide — execute the partial and lock the stop.
+                        self._early_scaled = True
+                        early_size = 0.20
 
-                    logger.info(
-                        f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
-                        f"exiting {early_size:.0%} at ${current_price:,.2f} "
-                        f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
-                    )
-                    return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
+                        self.remaining_position = max(0.0, self.remaining_position - early_size)
+
+                        # Tighten SL to lock in partial profit
+                        lock_offset = self.early_lock_atr_multiplier * atr_value
+                        if self.side == "long":
+                            lock_sl = self.entry_price + lock_offset
+                            if lock_sl > self.current_stop_loss:
+                                logger.info(
+                                    f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                    f"(entry + {self.early_lock_atr_multiplier}x ATR)"
+                                )
+                                self.current_stop_loss = lock_sl
+                        else:
+                            lock_sl = self.entry_price - lock_offset
+                            if lock_sl < self.current_stop_loss:
+                                logger.info(
+                                    f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
+                                    f"(entry - {self.early_lock_atr_multiplier}x ATR)"
+                                )
+                                self.current_stop_loss = lock_sl
+
+                        logger.info(
+                            f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
+                            f"exiting {early_size:.0%} at ${current_price:,.2f} "
+                            f"(bar {self.bars_in_trade}, pnl={early_pnl_pct:.2%})"
+                        )
+                        if self.remaining_position <= 1e-9:
+                            self._log_mfe_mae("EARLY_SCALE")
+                        return {"reason": ExitReason.EARLY_SCALE, "price": current_price, "size": early_size}
 
         # --- STEP 4: Trend Pyramiding ---
         # Objective: Scale into strong breakout trends. Fires only after SL is confirmed
         # safe (Step 2 above) so a fast reversal bar cannot be misclassified as a pyramid.
         if self.trade_type == "TREND" and not self.has_pyramided:
             if current_profit >= (1.0 * atr_value) and adx_value > 25:
-                logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
-                # Move SL of position 1 to entry before adding exposure
-                self.current_stop_loss = self.entry_price
-                self.has_pyramided = True
-                return {
-                    "action": "pyramid",
-                    "asset": self.asset,
-                    "side": self.side,
-                    "new_size": self.position_size * 0.5,
-                    "reason": "Trend Pyramiding Triggered"
-                }
+                if not self._can_add_position():
+                    # L11 fix: this branch previously only controlled which log
+                    # line printed — the pyramid block below ran unconditionally
+                    # regardless of _can_add_position()'s result. Now it actually
+                    # gates the action, so the lot-size check and the new
+                    # Livermore maturity gate inside _can_add_position() are
+                    # finally binding instead of cosmetic.
+                    logger.debug(f"[VTM] Pyramiding suppressed — pyramiding_enabled={self.pyramiding_enabled} "
+                                 f"or position too small to add legal lot, or Livermore maturity gate blocked it.")
+                else:
+                    logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
+                    # Move SL of position 1 to entry before adding exposure
+                    self.current_stop_loss = self.entry_price
+                    self.has_pyramided = True
+                    return {
+                        "action": "pyramid",
+                        "asset": self.asset,
+                        "side": self.side,
+                        "new_size": self.position_size * 0.5,
+                        "reason": "Trend Pyramiding Triggered"
+                    }
 
         # --- STEP 5: Trade State Mutation ---
         # Objective: Allow profitable Mean Reversion trades to convert into trend trades.
+        # Original trigger: ADX > 30 (statistical momentum confirmation).
+        # Additional trigger: BOS detected on live composite_state (structural proof).
+        # In NATURAL_RETRACEMENT — where Mode 1 spring entries happen — ADX is
+        # typically below 30 because the pullback itself is not strong momentum.
+        # Mutation was silently failing for most Mode 1 trades.
+        # BOS = the market just made a higher high, breaking the local retracement
+        # structure. That is Livermore's proof the pullback is over and the trend
+        # is resuming. Either ADX OR BOS can now trigger mutation.
         if self.trade_type == "REVERSION":
-            if adx_value > 30 and current_profit > 0:
-                is_actually_profitable = (self.side == "long" and current_price > self.entry_price) or \
-                                         (self.side == "short" and current_price < self.entry_price)
+            _bos_live = getattr(getattr(self, "_live_cs", None), "bos_detected", False)
+            if (adx_value > 30 or _bos_live) and current_profit > 0:
+                is_actually_profitable = (
+                    (self.side == "long"  and current_price > self.entry_price) or
+                    (self.side == "short" and current_price < self.entry_price)
+                )
                 if is_actually_profitable:
-                    logger.info("[VTM] 🧬 Trade mutated from REVERSION to TREND. Ride the move.")
+                    _trigger = "BOS structural break" if _bos_live else f"ADX={adx_value:.1f}"
+                    logger.info(
+                        "[VTM] 🧬 %s: Trade mutated REVERSION → TREND (%s). "
+                        "Runner + structural trail now both active.",
+                        self.asset, _trigger,
+                    )
                     self.cancel_take_profit()
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
@@ -1333,20 +2425,47 @@ class VeteranTradeManager:
                     )
 
                     if rsi_exhausted and macd_dying and adx_weakening:
-                        self._momentum_exhausted = True
-                        exhaust_size = min(0.50, self.remaining_position)
-                        if exhaust_size > 0:
-                            self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
-                            # Lock SL to break-even so runner can only win or scratch
-                            if self.side == "long" and self.current_stop_loss < self.entry_price:
-                                self.current_stop_loss = self.entry_price
-                            elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                                self.current_stop_loss = self.entry_price
+                        if not (self.partials_enabled and self._can_partial(0.50)):
+                            logger.debug(f"[VTM] Momentum Exhaustion partial suppressed — letting trade run.")
+                        else:
+                            self._momentum_exhausted = True
+                            exhaust_size = min(0.50, self.remaining_position)
+                            if exhaust_size > 0:
+                                self.remaining_position = max(0.0, self.remaining_position - exhaust_size)
+                            # Structural trail on remainder instead of ATR breakeven lock.
+                            # If a swing low/high has formed above/below the current stop,
+                            # place the stop there — it is structurally more meaningful
+                            # than locking to entry price regardless of market context.
+                            # Fall back to entry price lock only if no structural level found.
+                            _exhaust_struct = self._compute_swing_low_trail(atr)
+                            if _exhaust_struct is not None:
+                                if self.side == "long" and _exhaust_struct > self.current_stop_loss:
+                                    self.current_stop_loss = _exhaust_struct
+                                    logger.info(
+                                        "[VTM] 📉 Momentum exhaustion remainder: "
+                                        "SL → structural swing low %.5g",
+                                        _exhaust_struct,
+                                    )
+                                elif self.side == "short" and _exhaust_struct < self.current_stop_loss:
+                                    self.current_stop_loss = _exhaust_struct
+                                    logger.info(
+                                        "[VTM] 📉 Momentum exhaustion remainder: "
+                                        "SL → structural swing high %.5g",
+                                        _exhaust_struct,
+                                    )
+                            else:
+                                # No structural swing formed yet — safety net
+                                if self.side == "long" and self.current_stop_loss < self.entry_price:
+                                    self.current_stop_loss = self.entry_price
+                                elif self.side == "short" and self.current_stop_loss > self.entry_price:
+                                    self.current_stop_loss = self.entry_price
                             logger.warning(
                                 f"[VTM] 📉 MOMENTUM EXHAUSTION: {self.asset} {self.side.upper()} — "
                                 f"RSI={rsi_val:.1f}, MACD hist declining, ADX={adx_arr[-1]:.1f}↓. "
                                 f"Closing {exhaust_size:.0%}, SL locked to break-even ${self.entry_price:,.5f}."
                             )
+                            if self.remaining_position <= 1e-9:
+                                self._log_mfe_mae("MOMENTUM_EXHAUSTION")
                             return {"reason": ExitReason.MOMENTUM_EXHAUSTION, "price": current_price, "size": exhaust_size}
             except Exception as _e:
                 logger.debug(f"[VTM] Momentum-exhaustion check skipped: {_e}")
@@ -1380,15 +2499,28 @@ class VeteranTradeManager:
                     f"{self.time_stop_bars + (24 if _extended else 0)}, "
                     f"pnl={_pnl_now * 100:+.2f}%)"
                 )
+                self._log_mfe_mae("TIME_STOP")
                 return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         # --- STEP 7: TP Partial Exits ---
         try:
+            _is_last_rung = lambda idx: idx == len(self.take_profit_levels) - 1
             for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):
                 if i in self.partials_hit: continue
                 if (self.side == "long" and current_price >= target) or (self.side == "short" and current_price <= target):
                     self.partials_hit.append(i)
-                    self.remaining_position -= size
+
+                    # S10.2: Last rung — signal size=1.0 so handlers treat it as a
+                    # full close regardless of the fractional partial_sizes value.
+                    # This matters for Binance which has no partial-close path and
+                    # gates on size < 1.0 to skip partials; the last rung must
+                    # always pass that gate to exit cleanly.
+                    # Also prevents floating-point dust on MT5 partial ladders.
+                    if _is_last_rung(i):
+                        size = 1.0   # full close — consume entire remaining position
+                        self.remaining_position = 0.0
+                    else:
+                        self.remaining_position = max(0.0, self.remaining_position - size)
 
                     # After TP1 (first partial), attempt early runner promotion based on
                     # volume strength and candle conviction. Falls back to mechanical
@@ -1405,6 +2537,8 @@ class VeteranTradeManager:
 
                     tp_reasons = [ExitReason.TAKE_PROFIT_1, ExitReason.TAKE_PROFIT_2, ExitReason.TAKE_PROFIT_3]
                     reason = tp_reasons[i] if i < len(tp_reasons) else ExitReason.TAKE_PROFIT_3
+                    if _is_last_rung(i):
+                        self._log_mfe_mae(reason.value)
                     return {"reason": reason, "price": current_price, "size": size}
 
             return None
@@ -1684,6 +2818,222 @@ class VeteranTradeManager:
             "trade_type":     getattr(self, "trade_type", "UNKNOWN"),
             "runner_active":  getattr(self, "runner_activated", False),
         }
+
+    def _compute_structural_stop(self, atr: float) -> "Optional[float]":
+        """
+        Phase 4 — Structural Stop Router.
+        Returns a level-anchored stop loss price, or None if entry_type does
+        not provide a structural reference (falls back to ATR baseline).
+
+        Stop placement by entry_type:
+          SPRING_ENTRY     — Below/above the sweep_level (liquidity grab reversal).
+                             Invalidation = price returning through the swept level.
+          RANGE_BOUNDARY   — Behind the defended nearby_4h_level.
+                             Invalidation = level giving way.
+          TREND_FOLLOWING  — Behind the Livermore anchor just broken.
+                             Invalidation = price returning back below/above the breakout.
+          MR_PULLBACK      — Ensure stop clears the nearby_4h_level (level must sit
+                             between stop and entry; don't place stop inside the level).
+          CONTINUATION     — Behind the 1H consolidation box that was broken
+                             (vtm_range_low/high — Phase 4 ext, gated by
+                             phase_config.continuation_targets_enabled).
+          REJECT / None    — Return None → caller keeps ATR baseline.
+        """
+        _phase_cfg = self.risk_config.get("phase_config", {})
+        if not _phase_cfg.get("structural_stops_enabled", False):
+            return None
+
+        entry_type = getattr(self, "vtm_entry_type", None)
+        side       = self.side          # "long" or "short"
+        entry      = self.entry_price
+
+        if entry_type is None or entry_type == "REJECT":
+            return None
+
+        if entry_type == "SPRING_ENTRY":
+            # Stop just beyond the sweep level (the wick tip defines invalidation).
+            sweep = getattr(self, "sweep_level", None)
+            if sweep is not None and atr > 0:
+                buf = 0.3 * atr
+                return (sweep - buf) if side == "long" else (sweep + buf)
+            return None
+
+        if entry_type == "RANGE_BOUNDARY":
+            # Stop behind the defended 4H level.
+            level = getattr(self, "nearby_4h_level", None)
+            if level is not None and atr > 0:
+                buf = 0.5 * atr
+                return (level - buf) if side == "long" else (level + buf)
+            return None
+
+        if entry_type == "TREND_FOLLOWING":
+            # Stop behind the Livermore anchor that price just broke through.
+            # Reject the anchor if it is more than max_stop_atr_mult ATRs from
+            # entry — at that distance the clamp would discard it anyway and the
+            # stop would be the ATR cap wearing a structural label.
+            _max_atr = float(self.risk_config.get("max_stop_atr_mult", 5.0))
+            if side == "long":
+                anchor = getattr(self, "livermore_anchor_main_up", None)
+                if anchor is None:
+                    anchor = getattr(self, "livermore_anchor_nat_low", None)
+            else:
+                anchor = getattr(self, "livermore_anchor_main_down", None)
+                if anchor is None:
+                    anchor = getattr(self, "livermore_anchor_nat_high", None)
+            if anchor is not None and atr > 0:
+                dist_atr = abs(entry - anchor) / atr
+                if dist_atr > _max_atr:
+                    logger.debug(
+                        f"[VTM] TREND_FOLLOWING anchor {anchor:.5f} is "
+                        f"{dist_atr:.1f}× ATR from entry — too far, "
+                        f"falling back to ATR baseline"
+                    )
+                    return None
+                buf = 0.5 * atr
+                return (anchor - buf) if side == "long" else (anchor + buf)
+            return None
+
+        if entry_type == "MR_PULLBACK":
+            # Ensure the stop is BEYOND the nearby_4h_level (level stays between stop
+            # and entry — otherwise the stop is sitting inside the "active zone").
+            level = getattr(self, "nearby_4h_level", None)
+            if level is not None and atr > 0:
+                buf = 0.5 * atr
+                return (level - buf) if side == "long" else (level + buf)
+            return None
+
+        if entry_type == "CONTINUATION":
+            # Stop behind the 1H consolidation box that was broken (the box
+            # is populated on RetestResult only for the CONTINUATION tier;
+            # NOT the same box used by the RANGE target ladder).
+            level = self.vtm_range_low if side == "long" else self.vtm_range_high
+            if level is not None and atr > 0:
+                buf = 0.3 * atr
+                return (level - buf) if side == "long" else (level + buf)
+            return None
+
+        # Item 2.14: no entry_type matched any structural reference above —
+        # this trade has no real level to place a stop behind. A plain
+        # distance-based (ATR) stop only protects a trade that was strong
+        # enough to justify it; a weak, unanchored trade gets flagged for
+        # immediate close instead of quietly falling back to a weak stop.
+        # A stop must still be returned (None → caller keeps the ATR
+        # baseline) since the position needs SOME protection while the
+        # emergency close executes.
+        # Independently flag-gated (default False) rather than piggybacking on
+        # structural_stops_enabled (already True live) — auto-closing a
+        # just-filled position is new, unvalidated, real-money behavior and
+        # deserves its own soak period like every other Phase 4 feature here.
+        if _phase_cfg.get("emergency_close_unanchored_weak_signal_enabled", False):
+            _total_score = self.signal_details.get("total_score")
+            _required_score = self.signal_details.get("required_score")
+            if _total_score is not None and _required_score is not None:
+                if _total_score < (_required_score + 1.0):
+                    self.emergency_close_requested = True
+                    logger.warning(
+                        f"[VTM] {self.asset}: no structural stop reference and score "
+                        f"{_total_score:.2f} < {_required_score + 1.0:.2f} — flagging "
+                        f"for emergency close instead of a weak distance-based stop."
+                    )
+        return None
+
+    def _compute_swing_low_trail(self, atr: float) -> Optional[float]:
+        """
+        Structural swing low trail — Option 1 (Pure Livermore).
+
+        Scans accumulated OHLC bars for the most recent confirmed structural
+        swing low (long) or swing high (short) that sits above the current
+        stop loss. Returns a candidate stop just below that level.
+
+        Pivot quality: 4 bars committed on the left (proves the level was
+        real), 2 bars rejection on the right (catches the turn early).
+        ATR depth filter: the swing must travel at least 0.3×ATR from prior
+        closes — same standard as the entry pivot quality fix.
+
+        Fires for both REVERSION and TREND trade types when profit > 1.0×ATR
+        (Option B decision). The ATR runner trail stays as the floor —
+        this trail takes over when it produces a higher stop level.
+
+        Gates:
+        - structural_trailing_enabled must be true in phase_config
+        - Trade must be in profit (no trailing on losers)
+        - Minimum 10 bars in trade (enough data for meaningful pivots)
+        - Candidate must be ABOVE current_stop_loss (one-way ratchet)
+        - Candidate must be BELOW current price (stop behind price)
+        """
+        _phase_cfg = self.risk_config.get("phase_config", {})
+        if not _phase_cfg.get("structural_trailing_enabled", False):
+            return None
+
+        if atr <= 0 or self.bars_in_trade < 10:
+            return None
+
+        _in_profit = (
+            (self.side == "long"  and self.close[-1] > self.entry_price) or
+            (self.side == "short" and self.close[-1] < self.entry_price)
+        )
+        if not _in_profit:
+            return None
+
+        try:
+            highs_arr  = self.high
+            lows_arr   = self.low
+            closes_arr = self.close
+            _min_depth = 0.3 * atr
+
+            if self.side == "long":
+                # Find the highest confirmed swing LOW above current stop
+                best_candidate = None
+                for i in range(len(lows_arr) - 3, 6, -1):
+                    if (
+                        lows_arr[i] < lows_arr[i - 1]
+                        and lows_arr[i] < lows_arr[i - 2]
+                        and lows_arr[i] < lows_arr[i - 3]
+                        and lows_arr[i] < lows_arr[i - 4]
+                        and lows_arr[i] < lows_arr[i + 1]
+                        and lows_arr[i] < lows_arr[i + 2]
+                        and (min(closes_arr[i - 4:i]) - lows_arr[i] >= _min_depth)
+                    ):
+                        # Stop goes just below this swing low
+                        _candidate = lows_arr[i] - (0.3 * atr)
+                        # Valid only if it advances the stop (never pulls back)
+                        # and stays behind current price
+                        if (
+                            _candidate > self.current_stop_loss
+                            and _candidate < self.close[-1]
+                        ):
+                            if best_candidate is None or _candidate > best_candidate:
+                                best_candidate = _candidate
+                return best_candidate
+
+            else:  # short
+                # Find the lowest confirmed swing HIGH below current stop
+                best_candidate = None
+                for i in range(len(highs_arr) - 3, 6, -1):
+                    if (
+                        highs_arr[i] > highs_arr[i - 1]
+                        and highs_arr[i] > highs_arr[i - 2]
+                        and highs_arr[i] > highs_arr[i - 3]
+                        and highs_arr[i] > highs_arr[i - 4]
+                        and highs_arr[i] > highs_arr[i + 1]
+                        and highs_arr[i] > highs_arr[i + 2]
+                        and (highs_arr[i] - max(closes_arr[i - 4:i]) >= _min_depth)
+                    ):
+                        _candidate = highs_arr[i] + (0.3 * atr)
+                        if (
+                            _candidate < self.current_stop_loss
+                            and _candidate > self.close[-1]
+                        ):
+                            if best_candidate is None or _candidate < best_candidate:
+                                best_candidate = _candidate
+                return best_candidate
+
+        except Exception as _e:
+            logger.debug(
+                "[VTM STRUCT TRAIL] Swing pivot scan failed (non-blocking): %s", _e
+            )
+            return None
+
 
     def __repr__(self):
         levels = self.get_current_levels()

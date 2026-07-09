@@ -43,15 +43,24 @@ tail -f logs/trading_bot.log          # Live log stream
 ```
 DataManager (1H + 4H OHLCV)
     → MTFRegimeDetector (4H trend/range context)
-    → PerformanceWeightedAggregator
-        ├── MeanReversionStrategy  (Bollinger + RSI + Stochastic)
-        ├── TrendFollowingStrategy (EMA + MACD + ADX)
+    → Aggregator (hybrid: picks PerformanceWeighted or InstitutionalCouncil per asset)
+        ├── MeanReversionStrategy  (Livermore-state-routed 3-mode: pullback / counter-trend / climax fade)
+        ├── TrendFollowingStrategy (EMA + MACD + slope-aware ADX)
         └── EMAStrategy            (Fast/Slow EMA crossovers)
-    → HybridSignalValidator (AI filtering: OHLCSniper + PatternMiner)
+    → HybridSignalValidator (S/R proximity + candlestick patterns; see AI note below)
     → Risk gating (circuit breakers, position sizing, portfolio correlation)
     → BinanceHandler (BTC) | MT5Handler (Gold/FX/Indices)
     → TradingDatabaseManager (Supabase) + TradingTelegramBot (alerts)
 ```
+
+> **AI validation note (2026-06 audit):** the CNN-LSTM `OHLCSniper` ML model is
+> **disconnected** — `PerformanceWeightedAggregator._check_sniper_filter` returns
+> `True` unconditionally and the model is not in the scoring pipeline.
+> `HybridSignalValidator` today is **S/R-proximity + candlestick-pattern heuristics**,
+> not an ML edge model. The Council's `_check_sniper_filter` is a *different* thing —
+> a live price-action displacement/momentum gate that merely shares the "sniper"
+> name. `signal_aggregator.py::_check_sniper_filter_LEGACY` is dead code (unreferenced;
+> remove when the file can be compile-verified).
 
 ### Key Source Modules
 
@@ -63,7 +72,7 @@ DataManager (1H + 4H OHLCV)
 | `src/execution/council_aggregator.py` | `InstitutionalCouncilAggregator` — advanced alternative aggregator |
 | `src/strategies/` | Three concrete strategies inheriting `BaseStrategy` |
 | `src/ai/hybrid_validator.py` | `HybridSignalValidator` — AI-based signal accept/reject |
-| `src/ai/sniper.py` | `OHLCSniper` — price action entry pattern detection |
+| `src/ai/sniper.py` | `OHLCSniper` (CNN-LSTM) — **disconnected**, not in the live scoring pipeline |
 | `src/execution/mt5_handler.py` | All MetaTrader 5 order execution |
 | `src/execution/binance_handler.py` | Binance Spot & Futures execution |
 | `src/data/data_manager.py` | Hybrid live/testnet OHLCV fetching |
@@ -83,12 +92,20 @@ All runtime behaviour lives in `config/config.json` (generated from `config.temp
 
 Per-asset strategy parameters (leverage, stop-loss tiers, signal thresholds) are nested under each asset key in `config.json`.
 
-### Risk Management Rules (hardcoded behaviour to be aware of)
-- **Circuit breaker**: stops all trading if daily loss ≥ 3% or drawdown ≥ 15%
-- **Position sizing**: 1–2% risk per trade of account balance
-- **Partial exits**: three TP tiers at 45% / 30% / 25% of position
-- **Trailing stop**: activates after 2% unrealised profit
-- **MTF gate**: 1H entry signals rejected when 4H regime is counter-trend
+### Risk Management Rules (behaviour to be aware of)
+- **Circuit breaker**: stops all trading if daily loss ≥ 3% or drawdown ≥ 15% (`risk_management.*`)
+- **Aggregate risk cap**: `risk_management.max_total_open_risk` (currently `0.25` = 25% of equity at risk across all open positions). A load-time guard in `main.py` refuses to start if any `max_total_open_risk` is outside `(0, 1.0]`. (Note: `portfolio.max_total_open_risk` is an unused legacy mirror — keep it ≤ 1.0 too.)
+- **Position sizing**: 1–2% risk per trade; sized against the VTM's *effective* regime-adaptive ATR stop (`VeteranTradeManager.compute_effective_atr_multiplier`), not the raw config base.
+- **Partial exits / targets**: per-asset in `config.json` (`risk.partial_targets` / `risk.partial_sizes`), e.g. BTC `[1.5,2.5,4.0]` @ `[0.45,0.30,0.25]`; ADX-conditioned at runtime. Not a fixed 45/30/25.
+- **Runner trail**: `risk.runner_trail_atr_multiplier` (currently 1×ATR — flagged as too tight in the audit; Phase 4 candidate).
+- **Trailing/breakeven**: regime- and Livermore-aware; early-lock + breakeven managed by the VTM.
+- **MTF gate**: 1H entry signals rejected when 4H regime is counter-trend; plus Livermore hard-veto and 4H silent-zone holds.
+
+### Audit & remediation (2026-06)
+A full audit and phased fix plan live in the repo root:
+- `AUDIT_2026-06-19.md` — findings (strategy netting, MRS-silent, over-veto, execution bugs).
+- `REMEDIATION_PLAN.md` — phased plan with implementation-status block. Phases 0–2 done & deployed; Phase 3 (alpha) is gated on a ~1-week funnel/shadow soak.
+- Observability: `logs/funnel/` (signal funnel + AI rejects), `logs/shadow/` (durable shadow gate scorecard). Analyze with `python scripts/analyze_observability.py --days 7`.
 
 ### Adding a New Strategy
 1. Inherit from `src/strategies/base_strategy.py::BaseStrategy`

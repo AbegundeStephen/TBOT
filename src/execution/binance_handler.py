@@ -427,6 +427,47 @@ class BinanceExecutionHandler:
             logger.info("[INIT] Auto-syncing positions with Binance...")
             self.sync_positions_with_binance("BTC")
 
+    def reconnect(self) -> bool:
+        """
+        Rebuild the Binance client connection after a ping failure.
+        Only refreshes the HTTP client objects — does not touch open
+        positions, orders, or portfolio state.
+        """
+        if not self.data_manager:
+            logger.warning("[BINANCE] Cannot reconnect — no data_manager reference.")
+            return False
+        try:
+            ok = self.data_manager.initialize_binance()
+            if not ok:
+                logger.warning("[BINANCE] reconnect: initialize_binance() reported failure.")
+                return False
+
+            fresh_client = self.data_manager.get_futures_client()
+            if fresh_client is None:
+                logger.warning("[BINANCE] reconnect: no futures client available after re-init.")
+                return False
+
+            self.client = fresh_client
+            self.client.session.headers.update(CLOUDFRONT_HEADERS)
+            if self.futures_handler is not None:
+                self.futures_handler.client = fresh_client
+
+            logger.info("[BINANCE] ✅ Reconnected — client refreshed.")
+            return True
+        except Exception as e:
+            logger.error(f"[BINANCE] reconnect failed: {e}", exc_info=True)
+            return False
+
+    def _resolve_symbol(self, asset_name: str) -> str:
+        """Return the Binance symbol for the given asset name.
+        Reads from config["assets"][asset_name]["symbol"]; falls back to self.symbol (BTCUSDT).
+        BinanceHandler only manages BTC, so this almost always returns 'BTCUSDT'."""
+        return (
+            self.config.get("assets", {})
+            .get(asset_name, {})
+            .get("symbol", self.symbol)
+        )
+
     def can_open_position_side(self, asset_name: str, side: str) -> Tuple[bool, str]:
         """Check if we can open a position on a specific SIDE"""
         if side == "short":
@@ -508,7 +549,7 @@ class BinanceExecutionHandler:
             live_price = self._fetch_live_futures_price(symbol)
             if live_price is not None:
                 # Update cache and return the fresh price.
-                price_cache.set(symbol, live_price)
+                price_cache.set(symbol, live_price, timeframe="tick")  # Live tick = highest priority
                 return live_price
             else:
                 if self.is_paper_mode:
@@ -879,6 +920,20 @@ class BinanceExecutionHandler:
         try:
             side = "long" if signal == 1 else "short"
 
+            # Fix 15: guard against opening a second Binance position for the same side.
+            # Binance aggregates same-symbol same-side positions into one broker position,
+            # so a duplicate open would inflate exposure silently.
+            _existing = [
+                p for p in self.portfolio_manager.get_asset_positions(asset_name)
+                if p.side == side
+            ]
+            if _existing:
+                logger.warning(
+                    f"[OPEN] Skipping {asset_name} {side.upper()} — "
+                    f"position {_existing[0].position_id} already open on this side."
+                )
+                return False
+
             # Extract trade type from signal details
             trade_type = "TREND"  # Default
             if signal_details:
@@ -927,16 +982,33 @@ class BinanceExecutionHandler:
             risk_config = self.asset_config.get("risk", {})
             
             # ATR-based adaptive stop loss distance
+            # Phase 1.1: size against the SAME effective ATR multiplier the VTM
+            # will actually place (regime floors included), not the raw config
+            # base. Sizing on the narrower config base over-risked every trade.
             atr_fast = signal_details.get("atr_fast") if signal_details else None
-            atr_multiplier = risk_config.get("atr_multiplier", 1.8)
-            
+            _config_base = risk_config.get("atr_multiplier", 1.8)
+            atr_multiplier = VeteranTradeManager.compute_effective_atr_multiplier(
+                trade_type=trade_type,
+                config_base=_config_base,
+                regime=(signal_details.get("regime", "NEUTRAL") if signal_details else "NEUTRAL"),
+                volatility_regime=(signal_details.get("volatility_regime", "normal") if signal_details else "normal"),
+            )
+
             if atr_fast:
                 initial_sl_dist = atr_fast * atr_multiplier
-                logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+                logger.info(
+                    f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR "
+                    f"(config base {_config_base}x → effective {atr_multiplier}x) "
+                    f"({initial_sl_dist:.2f})"
+                )
             else:
                 sl_pct = risk_config.get("stop_loss_pct", 0.02)
                 initial_sl_dist = current_price * sl_pct
-                logger.info(f"[TACTICAL] ⚠️ ATR not found, using static SL: {sl_pct:.2%}")
+                # Fix 14d: static SL fallback is noteworthy — warn so it stands out in logs
+                logger.warning(
+                    f"[TACTICAL] ATR unavailable for {asset_name} — falling back to static "
+                    f"SL {sl_pct:.2%} (${initial_sl_dist:.4g}). Check OHLC data freshness."
+                )
 
             if side == "long":
                 initial_stop = current_price - initial_sl_dist
@@ -1080,6 +1152,35 @@ class BinanceExecutionHandler:
 
             for attempt in range(MAX_RETRIES):
                 try:
+                    # Phase 1.3: idempotency guard. A market order that raised on
+                    # the previous attempt may actually have FILLED before the
+                    # response failed — blindly re-sending would open a DOUBLE
+                    # (leveraged) position. We only reach this function after the
+                    # Fix-15 guard confirmed no same-side position existed, so if
+                    # one exists now the prior attempt went through: recover it
+                    # instead of sending again.
+                    if attempt > 0 and is_futures and not self.is_paper_mode:
+                        try:
+                            _landed = self.futures_handler.get_position_info(side)
+                        except Exception:
+                            _landed = None
+                        if _landed:
+                            _amt = abs(float(_landed.get("positionAmt", quantity)))
+                            _entry = float(_landed.get("entryPrice", current_price))
+                            logger.warning(
+                                f"[RETRY] Prior attempt actually filled — {side} position "
+                                f"exists on {self.symbol} (amt={_amt}, entry={_entry}). "
+                                f"Recovering instead of re-sending (no double fill)."
+                            )
+                            order = {
+                                "orderId": _landed.get("orderId", f"RECOVERED_{int(time.time())}"),
+                                "status": "FILLED",
+                                "avgPrice": _entry,
+                            }
+                            if _amt > 0:
+                                quantity = _amt
+                            break
+
                     if is_futures:
                         if side == "long":
                             order = self.futures_handler.open_long_position(
@@ -1170,6 +1271,13 @@ class BinanceExecutionHandler:
                 f"Req: ${requested_price:,.2f}, Fill: ${executed_price:,.2f}, "
                 f"Diff: ${slippage:,.2f} ({slippage_pct:.4f}%)"
             )
+            # Item 4: feed this real, observed slippage back into the shadow
+            # engine's friction-cost estimate instead of letting it sit unused.
+            if getattr(self, "shadow_trader", None) is not None:
+                try:
+                    self.shadow_trader.update_friction_penalty(asset_name, slippage_pct)
+                except Exception as _fp_err:
+                    logger.debug(f"[SLIPPAGE] Friction penalty update failed: {_fp_err}")
 
             logger.info(
                 f"[EXECUTION] ✓ {side.upper()} opened & filled\n"
@@ -1218,11 +1326,17 @@ class BinanceExecutionHandler:
                 }
             )
 
+            # Phase 0.2: anchor the position to the ACTUAL fill price, not the
+            # pre-trade requested price. executed_price is resolved above from
+            # the order response (avgPrice / cumQuote / fetched fill) and only
+            # falls back to current_price when the exchange returned nothing.
+            # Using current_price here mis-anchored every BTC trade's SL
+            # distance, R:R and P&L by the slippage amount.
             success = self.portfolio_manager.add_position(
                 asset=asset_name,
                 symbol=self.symbol,
                 side=side,
-                entry_price=current_price,
+                entry_price=executed_price,
                 position_size_usd=position_size_usd,
                 stop_loss=None,  # VTM will calculate precise levels
                 take_profit=None,
@@ -1242,7 +1356,7 @@ class BinanceExecutionHandler:
                     "symbol": self.symbol,
                     "asset": asset_name,
                     "side": side,
-                    "price": current_price,
+                    "price": executed_price,
                     "size": quantity,
                     "trade_type": trade_type,
                     "position_id": order_id
@@ -1251,7 +1365,29 @@ class BinanceExecutionHandler:
                 # ✅ Update last trade time for cooldown
                 self.last_trade_time[asset_name] = time.time()
                 self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
-                
+
+                # Fix 13: push initial TP1 to exchange immediately after add_position
+                _place_tp = self.trading_config.get("place_vtm_tp_on_exchange", False)
+                if _place_tp and is_futures:
+                    try:
+                        # Find the newly-added position by binance_order_id
+                        _new_pos = next(
+                            (p for p in self.portfolio_manager.get_asset_positions(asset_name)
+                             if str(getattr(p, "binance_order_id", "")) == str(order_id)),
+                            self.portfolio_manager.get_position(asset_name),
+                        )
+                        if _new_pos and _new_pos.trade_manager:
+                            _tp_levels = getattr(_new_pos.trade_manager, "take_profit_levels", None)
+                            if _tp_levels:
+                                self._push_tp_to_exchange(_new_pos, self.symbol, _tp_levels[0])
+                    except Exception as _tp_err:
+                        logger.debug(f"[OPEN] Initial TP push failed (non-fatal): {_tp_err}")
+
+                # Fix 14c: SL/TP placement status banner (replaces "VTM Only" placeholder)
+                _place_sl = self.trading_config.get("place_vtm_sl_on_exchange", False)
+                _sl_status = "Exchange STOP_MARKET" if _place_sl else "VTM software only"
+                _tp_status = "Exchange LIMIT (TP1)" if _place_tp else "VTM software only"
+
                 logger.info(
                     f"\n{'='*80}\n"
                     f"✅ {asset_name} {side.upper()} POSITION OPENED\n"
@@ -1260,7 +1396,8 @@ class BinanceExecutionHandler:
                     f"Trade Type:     {trade_type}\n"
                     f"Position Size:  ${position_size_usd:,.2f}\n"
                     f"VTM Active:     {'Yes' if ohlc_data else 'No'}\n"
-                    f"⚠ SL Management:  VTM Only (No Exchange SL)\n"
+                    f"SL Management:  {_sl_status}\n"
+                    f"TP Management:  {_tp_status}\n"
                     f"{'='*80}"
                 )
                 return True
@@ -1417,7 +1554,7 @@ class BinanceExecutionHandler:
                 "stopPrice":    rounded_sl,
                 "closePosition": False,
             }
-            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", True)
+            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", False)
             if hedge_mode:
                 order_params["positionSide"] = position_side
 
@@ -1450,16 +1587,34 @@ class BinanceExecutionHandler:
         try:
             pid = position.position_id
 
+            # Last-TP-only guard: only place a TP order on exchange once all
+            # intermediate partials have been notionally fired by VTM.
+            # Placing TP1/TP2 as LIMIT orders would cause partial broker fills
+            # that the Binance handler can't reconcile (no partial-close path).
+            # Once all but the last rung are done, push the final target so the
+            # exchange acts as a safety net for the full close.
+            tm = getattr(position, "trade_manager", None)
+            if tm is not None:
+                _n_levels = len(getattr(tm, "take_profit_levels", []))
+                _n_hit    = len(getattr(tm, "partials_hit", []))
+                _is_last  = _n_levels > 0 and _n_hit >= _n_levels - 1
+                if not _is_last:
+                    logger.debug(
+                        f"[VTM-TP] {pid}: deferring TP push — "
+                        f"only {_n_hit}/{_n_levels} rungs notionally hit, "
+                        f"waiting for last rung before placing on exchange"
+                    )
+                    return False
+
             # Guard: skip micro-movements
             last = self._last_pushed_tp.get(pid)
             if last is not None and abs(last - new_tp) < 0.01:
                 return False
 
-            # Remaining quantity
-            remaining_qty = position.quantity
-            if position.trade_manager:
-                remaining_qty = position.quantity * position.trade_manager.remaining_position
-            remaining_qty = self.futures_handler._round_quantity(remaining_qty)
+            # Use full position quantity — all intermediate partials were skipped
+            # on exchange, so the broker still holds the entire original lot.
+            # VTM's remaining_position tracks notional state only on Binance.
+            remaining_qty = self.futures_handler._round_quantity(position.quantity)
             if remaining_qty <= 0:
                 return False
 
@@ -1495,7 +1650,7 @@ class BinanceExecutionHandler:
                 "timeInForce": "GTC",
                 "reduceOnly":  True,
             }
-            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", True)
+            hedge_mode = getattr(self.futures_handler, "_actual_hedge_mode_enabled", False)
             if hedge_mode:
                 order_params["positionSide"] = position_side
                 # reduceOnly is incompatible with positionSide in hedge mode
@@ -1517,8 +1672,18 @@ class BinanceExecutionHandler:
             logger.error(f"[VTM-TP] Binance TP push error for {position.position_id}: {e}")
             return False
 
-    def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None):
-        """Check and update ALL positions with VTM"""
+    def check_and_update_positions_VTM(self, asset_name: str = "BTC", df_4h: Optional[pd.DataFrame] = None, composite_state=None):
+        """
+        Check and update ALL positions with VTM.
+
+        L4 bugfix: main.py's VTM loop calls this with composite_state=_vtm_cs
+        for BOTH exchanges (binance and mt5), but this signature never accepted
+        the kwarg — every call raised TypeError, silently swallowed by the
+        broad try/except in main.py's VTM loop. Net effect: per-tick Livermore
+        refresh AND the new L4 structural-exit-awareness block were both
+        permanently dead for every Binance-handled asset (BTC), while working
+        for MT5 assets. Adding the param and threading it through below.
+        """
         try:
             positions = self.portfolio_manager.get_asset_positions(asset_name)
             if not positions:
@@ -1539,10 +1704,19 @@ class BinanceExecutionHandler:
             if is_futures and self.futures_handler:
                 try:
                     active_positions = self.futures_handler.get_all_positions_info()
-                    # Convert to simple format for PortfolioManager reconciliation
-                    # Note: We match by 'side' for Binance as it aggregates positions
-                    broker_data = [{'side': p['side'], 'quantity': abs(float(p['positionAmt']))} for p in active_positions]
-                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    # Fix 4/5: get_all_positions_info now returns None on error (not [])
+                    # Pass None straight through — reconcile_positions has its own None-guard
+                    if active_positions is not None:
+                        broker_data = [
+                            {'side': p['side'], 'id': None,
+                             'quantity': abs(float(p['positionAmt']))}
+                            for p in active_positions
+                        ]
+                    else:
+                        broker_data = None
+                    _to_close = self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    for _pos, _reason in _to_close:
+                        self._handle_binance_exchange_close(_pos, asset_name, symbol, _reason)
                 except Exception as e:
                     logger.debug(f"[RECONCILE] Binance fetch failed: {e}")
 
@@ -1556,7 +1730,7 @@ class BinanceExecutionHandler:
                     _tp_before = position.trade_manager.current_take_profit
 
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h
+                        current_price, df_4h=df_4h, composite_state=composite_state
                     )
 
                     _sl_after = position.trade_manager.current_stop_loss
@@ -1604,13 +1778,28 @@ class BinanceExecutionHandler:
                         else:
                             exit_reason_str = str(exit_reason)
 
+                        # S6 guard: partial exit (size < 1.0) — Binance has no
+                        # partial-close path so skip the broker close.  VTM already
+                        # decremented remaining_position internally; we just log and
+                        # let the position continue until full exit.
+                        _exit_size = exit_signal.get("size", 1.0) if isinstance(exit_signal, dict) else 1.0
+                        if _exit_size < 1.0:
+                            logger.info(
+                                f"[VTM] {position.position_id} partial {exit_reason_str.upper()} "
+                                f"({_exit_size:.0%}) — skipping broker close (Binance no partial path)"
+                            )
+                            continue
+
                         logger.info(
                             f"[VTM] {position.position_id} triggered {exit_reason_str.upper()}"
                         )
-                        self.portfolio_manager.close_position(
-                            position_id=position.position_id, # Pass the string position_id
-                            exit_price=current_price,
-                            reason=f"VTM_{exit_reason_str}",
+                        # Fix 4: use _record_exchange_close so we place the broker
+                        # close order AND fetch the authoritative fill price.
+                        self._record_exchange_close(
+                            position     = position,
+                            current_price= current_price,
+                            reason       = f"VTM_{exit_reason_str}",
+                            asset_name   = asset_name,
                         )
                         positions_closed = True
                         continue
@@ -1619,10 +1808,12 @@ class BinanceExecutionHandler:
                     position, current_price
                 )
                 if should_close:
-                    self.portfolio_manager.close_position(
-                        position_id=position.position_id, # Pass the string position_id
-                        exit_price=current_price,
-                        reason=reason,
+                    # Fix 4: same — complete broker close + authoritative fill
+                    self._record_exchange_close(
+                        position     = position,
+                        current_price= current_price,
+                        reason       = reason,
+                        asset_name   = asset_name,
                     )
                     positions_closed = True
 
@@ -1708,6 +1899,153 @@ class BinanceExecutionHandler:
             f"after {max_attempts} attempts"
         )
         return None
+
+    def _handle_binance_exchange_close(
+        self, pos, asset: str, symbol: str, reason: str
+    ) -> None:
+        """
+        S2.2 Binance: Called when reconcile_positions detects a position
+        closed externally on Binance (SL/TP hit, manual close, liquidation).
+        Fetches authoritative fill price, records via portfolio_manager,
+        and logs the event.  Mirrors _handle_mt5_exchange_close.
+        """
+        try:
+            logger.warning(
+                f"[RECONCILE] {asset} {getattr(pos, 'side', '?').upper()} position "
+                f"(id={pos.position_id}) closed externally on Binance — recording."
+            )
+
+            # 1. Fetch authoritative fill price from Binance trade history
+            broker_data = self._fetch_broker_close_data(
+                symbol=symbol,
+                position_side=getattr(pos, "side", "long"),
+                opened_at=getattr(pos, "entry_time", None),
+            )
+
+            fill_price = None
+            if broker_data:
+                fill_price = broker_data.get("fill_price")
+                logger.info(
+                    f"[RECONCILE] Binance fill for {asset}: "
+                    f"price=${fill_price}, pnl=${broker_data.get('profit', 'n/a')}, "
+                    f"commission=${broker_data.get('commission', 0)}"
+                )
+
+            if not fill_price or fill_price <= 0:
+                fill_price = self.get_current_price(symbol=symbol, force_live=True) or 0.0
+                logger.debug(
+                    f"[RECONCILE] No fill from trade history — using market price ${fill_price:.4g}"
+                )
+
+            # 1.5. Cancel the orphaned sibling order(s) — the SL/TP that did NOT fire
+            # is still live on the exchange and can fill later, opening a reverse
+            # position. Cancel everything remaining for this symbol immediately.
+            try:
+                open_orders = self.futures_handler.client.futures_get_open_orders(symbol=symbol)
+                for o in (open_orders or []):
+                    try:
+                        self.futures_handler.client.futures_cancel_order(
+                            symbol=symbol, orderId=o["orderId"]
+                        )
+                        logger.warning(
+                            f"[RECONCILE] Cancelled orphaned sibling order "
+                            f"{o.get('type')} id={o['orderId']} for {asset} after exchange close"
+                        )
+                    except Exception as _cancel_err:
+                        logger.warning(
+                            f"[RECONCILE] Failed to cancel orphaned order {o.get('orderId')} "
+                            f"for {asset}: {_cancel_err}"
+                        )
+            except Exception as _oo_err:
+                logger.warning(
+                    f"[RECONCILE] Could not fetch open orders to clean up siblings for {asset}: {_oo_err}"
+                )
+
+            # 2. Record in portfolio (already closed on exchange)
+            self.portfolio_manager.close_position(
+                position_id=pos.position_id,
+                exit_price=fill_price,
+                reason=reason,
+                already_closed_on_exchange=True,
+                preloaded_broker_data=broker_data,
+            )
+            logger.info(
+                f"[RECONCILE] ✅ {asset} {getattr(pos, 'side', '?').upper()} recorded "
+                f"closed @ ${fill_price:.4g} (reason={reason})"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[RECONCILE] _handle_binance_exchange_close failed for {asset}: {e}",
+                exc_info=True,
+            )
+
+    def _record_exchange_close(
+        self,
+        position,
+        current_price: float,
+        reason: str,
+        asset_name: str,
+    ) -> bool:
+        """
+        Fix 4: End-to-end VTM-triggered close for Binance Futures.
+        1. Places market-close order on exchange.
+        2. Fetches authoritative fill price from Binance trade history.
+        3. Records in portfolio_manager with preloaded_broker_data.
+        Returns True on success, False if the exchange close order failed.
+        """
+        symbol   = self._resolve_symbol(asset_name)
+        side     = position.side          # "long" or "short"
+        quantity = position.quantity
+
+        # ── Step 1: Execute close on exchange ──────────────────────────────
+        close_ok = False
+        if self.futures_handler:
+            try:
+                if side == "long":
+                    close_ok = self.futures_handler.close_long_position(
+                        quantity=quantity, order_id=getattr(position, "binance_order_id", None)
+                    )
+                else:
+                    close_ok = self.futures_handler.close_short_position(
+                        quantity=quantity, order_id=getattr(position, "binance_order_id", None)
+                    )
+            except Exception as _e:
+                logger.error(f"[CLOSE] Exchange close failed for {position.position_id}: {_e}")
+
+        if not close_ok:
+            logger.warning(
+                f"[CLOSE] Broker close failed for {position.position_id} — "
+                "recording at market price without exchange confirmation."
+            )
+
+        # ── Step 2: Fetch authoritative fill from trade history ────────────
+        broker_data = None
+        fill_price  = current_price
+        if self.futures_handler and symbol:
+            broker_data = self._fetch_broker_close_data(
+                symbol        = symbol,
+                position_side = side,
+                opened_at     = getattr(position, "open_time", None),
+            )
+            if broker_data:
+                _fp = broker_data.get("fill_price")
+                if _fp and _fp > 0:
+                    fill_price = _fp
+                    logger.info(
+                        f"[CLOSE] Authoritative fill for {position.position_id}: "
+                        f"${fill_price:.4g}, pnl=${broker_data.get('profit', 'n/a')}"
+                    )
+
+        # ── Step 3: Record in portfolio ────────────────────────────────────
+        self.portfolio_manager.close_position(
+            position_id              = position.position_id,
+            exit_price               = fill_price,
+            reason                   = reason,
+            already_closed_on_exchange = close_ok,
+            preloaded_broker_data    = broker_data,
+        )
+        return close_ok
 
     @handle_errors(
         component="binance_handler",
@@ -1893,24 +2231,6 @@ class BinanceExecutionHandler:
                 )
                 if not import_enabled:
                     return True
-
-                for fut_pos in active_futures:
-                    success = self.portfolio_manager.add_position(
-                        asset=asset_name,
-                        symbol=symbol,
-                        side=fut_pos["side"],
-                        entry_price=fut_pos["entry_price"],
-                        position_size_usd=fut_pos["quantity"] * fut_pos["entry_price"],
-                        stop_loss=None,
-                        take_profit=None,
-                        trailing_stop_pct=None,
-                        binance_order_id=None,
-                        ohlc_data=None,
-                        use_dynamic_management=True,
-                        entry_time=datetime.now(),
-                        signal_details={"imported": True},
-                    )
-                return True
 
             return True
 

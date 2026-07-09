@@ -257,6 +257,12 @@ def train_asset_strategies(
     tf_config = config["strategy_configs"]["trend_following"][asset_key]
     ema_config = config["strategy_configs"]["exponential_moving_averages"][asset_key]
 
+    # L6: give strategies access to phase_config so a deliberate retrain with
+    # ml_livermore_features_enabled=true actually picks up the new features.
+    for _sc in (mr_config, tf_config, ema_config):
+        _sc["phase_config"] = config.get("phase_config", {})
+        _sc["asset"] = asset_key
+
     # Log the actual config being used
     logger.info(f"\n📋 Configuration for {asset_key}:")
     logger.info(f"  Mean Reversion:")

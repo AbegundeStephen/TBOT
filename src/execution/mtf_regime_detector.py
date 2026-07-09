@@ -40,6 +40,16 @@ class GovernorStatus:
     reasoning: str
     ema_200: Optional[float] = None
     trade_type: TradeType = TradeType.TREND
+    # 1D ADX/RSI, captured here since _analyze_governor is the only place
+    # that runs _calculate_indicators() on the daily dataframe.
+    adx: Optional[float] = None
+    rsi: Optional[float] = None
+    # Item 19a: graduated EMA-200 burn-in. daily_bars_available lets downstream
+    # code (e.g. the 19b Livermore-disagreement gate) know how immature a
+    # non-neutral read is; regime_maturity is the 0.0-1.0 scaled version
+    # (1.0 once 400+ daily bars are available).
+    daily_bars_available: Optional[int] = None
+    regime_maturity: float = 0.0
 
 
 @dataclass
@@ -61,6 +71,21 @@ class RegimeStatus:
     # Granular Timeframe Data
     timeframe_data: Dict[str, Dict] = field(default_factory=dict)
     df_4h: Optional[pd.DataFrame] = None
+
+    # Item 19a: propagated from GovernorStatus — neither dataclass is ever
+    # serialized via dataclasses.asdict()/vars() anywhere in the codebase
+    # (mtf_integration.py builds regime_data as a hand-written dict), so new
+    # fields here are invisible downstream unless threaded through explicitly
+    # at both this constructor call (mtf_regime_detector.py) and the regime_data
+    # dict build (mtf_integration.py). Observability-only — not read by any
+    # gating logic today.
+    daily_bars_available: Optional[int] = None
+    regime_maturity: float = 0.0
+
+    # Fraction of {1h, 4h, 1d} whose own trend_direction matches the
+    # consensus direction (BULLISH/BEARISH/NEUTRAL). Distinct from `score`:
+    # this is a real cross-timeframe comparison, not abs(score) reused.
+    timeframe_agreement: float = 0.0
 
 
 class MultiTimeFrameRegimeDetector:
@@ -161,12 +186,21 @@ class MultiTimeFrameRegimeDetector:
                 now = pd.Timestamp.now(tz='UTC')
                 hours_old = (now - latest_date).total_seconds() / 3600
 
-                # ✅ FIX: 1H threshold raised from 1.0h → 2.0h.
+                # ✅ FIX: 1H threshold raised from 1.0h → 2.0h → 2.25h → 3.5h.
                 # The MTF detector drops the in-progress candle, so the last closed
                 # 1H bar is legitimately 60-119 min old near each hour boundary.
-                # A 1.0h limit triggered an API refetch on every 5-min bot cycle
-                # (CSV "Data is 1.2h old") — wasteful and added latency each loop.
-                stale_threshold = {"1h": 2.0, "4h": 4.0, "1d": 24.0}.get(timeframe_str, 4.0)
+                # Additionally, the historical updater saves only completed bars, so
+                # the CSV's last-bar timestamp is the open of the last closed bar —
+                # not the write time. Live logs showed: updater ran at 10:19, saved
+                # the 09:00 bar as newest; at 11:18 the bar was 2h18m old (2.3h),
+                # crossing the 2.25h limit by 5 min and triggering unnecessary API
+                # fallback every ~65 min. The pattern repeats once per updater cycle.
+                # 3.5h catches real staleness (updater missed 1+ full cycle =
+                # worst-case legitimate age ~2.2h + 65-min cycle = ~3.3h) without
+                # false-positives during normal operation.
+                # 4h: kept at 6.0h — live logs showed 5.3h actual staleness on
+                #      multiple cycles due to fixed UTC bar boundaries + fetch latency.
+                stale_threshold = {"1h": 3.5, "4h": 6.0, "1d": 24.0}.get(timeframe_str, 4.0)
                 if hours_old > stale_threshold or pd.isna(hours_old):
                     logger.warning(f"[CSV] Data is {hours_old:.1f}h old (limit={stale_threshold}h) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)
@@ -234,9 +268,15 @@ class MultiTimeFrameRegimeDetector:
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
         else:  # mt5
+            # Convert '1h'→'H1', '4h'→'H4', '1d'→'D1'
+            # The original .upper().replace('H','H') was a no-op producing '4H'
+            # not 'H4', causing the MT5 API to fall back to H1 silently and
+            # write 1H bars into the 4H CSV file for ~19 hours.
+            _tf_map = {"1h": "H1", "4h": "H4", "1d": "D1"}
+            _mt5_tf = _tf_map.get(timeframe_str.lower(), timeframe_str.upper())
             df = self.data_manager.fetch_mt5_data(
                 symbol=symbol,
-                timeframe=timeframe_str.upper().replace('H', 'H'), # e.g., '1h' -> 'H1'
+                timeframe=_mt5_tf,
                 start_date=start_time.strftime("%Y-%m-%d"),
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
@@ -281,18 +321,47 @@ class MultiTimeFrameRegimeDetector:
         """
         try:
             df_daily = self._fetch_data_from_csv(symbol, "1d", exchange)
+            # Item 19a: graduated EMA-200 burn-in (was a strict 400-bar minimum
+            # that always returned neutral below that, with no signal of how far
+            # off it was). 100-400 now produces a real-but-immature read instead
+            # of a hard block; the 19b Livermore-disagreement gate is the safety
+            # net for that immature window. Verified against current data/raw/*
+            # CSVs: every live-configured asset (BTCUSDm, XAUUSDm, USTECm,
+            # EURJPYm, EURUSDm, USOILm) already has 8000+ daily bars, so this is
+            # a no-op for current live trading — it only changes behavior for a
+            # newly onboarded asset or a daily-data gap/corruption scenario.
+            _daily_bars = len(df_daily)
+            _maturity = min(1.0, _daily_bars / 400.0)
 
-            # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
-            if len(df_daily) < 400:
+            if _daily_bars < 100:
                 logger.warning(
-                    f"[CONSTITUTION] CRITICAL: Insufficient daily data: {len(df_daily)} bars (need 400+). "
-                    "Cannot establish reliable macro trend. Defaulting to neutral."
+                    f"[CONSTITUTION] Insufficient daily data: {_daily_bars} bars (need 100+ to start, "
+                    f"400 for full maturity). Defaulting to neutral."
                 )
                 return GovernorStatus(
-                    is_bullish=False, is_bearish=False, reasoning="Insufficient 1D data (<400 bars)", ema_200=None
+                    is_bullish=False, is_bearish=False,
+                    reasoning=f"Insufficient 1D data ({_daily_bars}/100 minimum)", ema_200=None,
+                    daily_bars_available=_daily_bars, regime_maturity=_maturity,
+                )
+            if _daily_bars < 400:
+                logger.info(
+                    f"[CONSTITUTION] Producing a real read at {_daily_bars}/400 days "
+                    f"({_maturity:.0%} mature). Gated by Livermore agreement downstream."
                 )
 
             df_daily = self._calculate_indicators(df_daily)
+            # _calculate_indicators returns an empty DataFrame when bars < 400
+            # (EMA-200 burn-in not complete). This happens in the 100-399 range
+            # that the logging block above announces as "Producing a real read" —
+            # the log was correct in intent but the empty-df crash made it a lie.
+            if df_daily.empty:
+                return GovernorStatus(
+                    is_bullish=False, is_bearish=False,
+                    reasoning=f"EMA-200 burn-in incomplete ({_daily_bars}/400 bars)",
+                    ema_200=None,
+                    daily_bars_available=_daily_bars,
+                    regime_maturity=_maturity,
+                )
             latest = df_daily.iloc[-1]
             current_price = latest["close"]
             ema_200 = latest[f"ema_{BASELINE_EMA}"]
@@ -324,8 +393,16 @@ class MultiTimeFrameRegimeDetector:
                 f"with {'positive' if ema_slope > 0 else 'negative' if ema_slope < 0 else 'flat'} slope."
             )
 
+            daily_adx = (
+                float(latest["adx"]) if "adx" in latest and pd.notna(latest["adx"]) else None
+            )
+            daily_rsi = (
+                float(latest["rsi"]) if "rsi" in latest and pd.notna(latest["rsi"]) else None
+            )
+
             return GovernorStatus(
-                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200, trade_type=trade_type
+                is_bullish=is_bullish, is_bearish=is_bearish, reasoning=reasoning, ema_200=ema_200,
+                trade_type=trade_type, adx=daily_adx, rsi=daily_rsi
             )
 
         except Exception as e:
@@ -373,6 +450,22 @@ class MultiTimeFrameRegimeDetector:
 
         latest_1h = df_1h_with_ema.iloc[-1]
         latest_4h = df_4h_with_ema.iloc[-1]
+
+        # [ADX-DEBUG] Downgraded INFO → DEBUG: the CSV race condition this was
+        # investigating (does talib ADX/RSI drift between cycles when the updater
+        # rewrites mid-read?) is now resolved by the updater writing atomically.
+        # Keep at DEBUG so it's still accessible when needed without polluting
+        # the production log with one line per asset per 5-min cycle.
+        try:
+            logger.debug(
+                f"[ADX-DEBUG] {asset_type} "
+                f"1H: bars={len(df_1h_with_ema)} last_bar={df_1h_with_ema.index[-1]} "
+                f"adx={latest_1h['adx']:.2f} rsi={latest_1h['rsi']:.2f} | "
+                f"4H: bars={len(df_4h_with_ema)} last_bar={df_4h_with_ema.index[-1]} "
+                f"adx={latest_4h['adx']:.2f} rsi={latest_4h['rsi']:.2f}"
+            )
+        except Exception as _dbg_err:
+            logger.debug(f"[ADX-DEBUG] logging failed: {_dbg_err}")
 
         price_1h = latest_1h["close"]
         price_4h = latest_4h["close"]
@@ -559,33 +652,68 @@ class MultiTimeFrameRegimeDetector:
             h1_higher_lows = False
 
         # ✨ NEW: Populate granular timeframe data for database/dashboard
+        # Derive per-timeframe regime labels from each timeframe's own ADX
+        # trend direction (plus_di vs minus_di). Previously these used a
+        # bool-equality test (above_Xh_50 == is_bullish) which produced "NEUTRAL"
+        # whenever the EMA and macro bias disagreed — masking the real 1H/4H
+        # directional state in the DB and dashboard. "NEUTRAL" now means the
+        # timeframe's own DMI is flat, not "contradicts macro".
+        _h1_td = latest_1h.get("trend_dir") if hasattr(latest_1h, "get") else (
+            latest_1h["trend_dir"] if "trend_dir" in latest_1h else None
+        )
+        _h4_td = latest_4h.get("trend_dir") if hasattr(latest_4h, "get") else (
+            latest_4h["trend_dir"] if "trend_dir" in latest_4h else None
+        )
         timeframe_data = {
             "1h": {
-                "regime": consensus_regime if above_1h_50 == is_bullish else "NEUTRAL",
+                "regime": "BULLISH" if _h1_td == "UP" else "BEARISH" if _h1_td == "DOWN" else "NEUTRAL",
                 "confidence": abs(score),
                 "adx": float(latest_1h["adx"]) if "adx" in latest_1h else None,
                 "rsi": float(latest_1h["rsi"]) if "rsi" in latest_1h else None,
-                "trend_direction": latest_1h["trend_dir"] if "trend_dir" in latest_1h else "N/A",
+                "trend_direction": _h1_td if _h1_td else "N/A",
                 "momentum_dir": h1_momentum_dir,
                 "momentum_pct": round(h1_momentum_pct * 100, 3),
                 "lower_highs": h1_lower_highs,
                 "higher_lows": h1_higher_lows,
             },
             "4h": {
-                "regime": consensus_regime if above_4h_200 == is_bullish else "NEUTRAL",
+                "regime": "BULLISH" if _h4_td == "UP" else "BEARISH" if _h4_td == "DOWN" else "NEUTRAL",
                 "confidence": abs(score),
                 "adx": float(latest_4h["adx"]) if "adx" in latest_4h else None,
                 "rsi": float(latest_4h["rsi"]) if "rsi" in latest_4h else None,
-                "trend_direction": latest_4h["trend_dir"] if "trend_dir" in latest_4h else "N/A"
+                "trend_direction": _h4_td if _h4_td else "N/A"
             },
             "1d": {
                 "regime": "BULLISH" if macro_bullish else "BEARISH" if macro_bearish else "NEUTRAL",
                 "confidence": 1.0 if (macro_bullish or macro_bearish) else 0.0,
-                "adx": None, # Will be filled if we calculate 1D indicators
-                "rsi": None,
+                "adx": governor_status.adx,
+                "rsi": governor_status.rsi,
                 "trend_direction": "UP" if macro_bullish else "DOWN" if macro_bearish else "SIDEWAYS"
             }
         }
+
+        # ── Real cross-timeframe agreement ──────────────────────────────────
+        # Previously this slot was filled with abs(score), which only reflects
+        # how far the *consensus* leans, not whether 1H/4H/1D actually agree
+        # with each other. That made it possible to show e.g. "1H DOWN, 4H
+        # DOWN, Agreement: 0%" whenever the macro consensus landed on NEUTRAL
+        # — technically consistent with the old formula, but misleading on
+        # the dashboard. This instead counts how many of the three
+        # timeframes' own trend_direction matches the consensus direction.
+        def _dir_of(trend_direction: str) -> str:
+            if trend_direction == "UP":
+                return "BULLISH"
+            if trend_direction == "DOWN":
+                return "BEARISH"
+            return "NEUTRAL"  # SIDEWAYS / N/A
+
+        consensus_dir = "BULLISH" if is_bullish else "BEARISH" if is_bearish else "NEUTRAL"
+        _tf_dirs = [
+            _dir_of(timeframe_data["1h"]["trend_direction"]),
+            _dir_of(timeframe_data["4h"]["trend_direction"]),
+            _dir_of(timeframe_data["1d"]["trend_direction"]),
+        ]
+        timeframe_agreement = sum(1 for d in _tf_dirs if d == consensus_dir) / len(_tf_dirs)
 
         return RegimeStatus(
             asset=asset_type,
@@ -600,7 +728,10 @@ class MultiTimeFrameRegimeDetector:
             ema_4h_50=ema_4h_slow,
             trade_type=trade_type,
             timeframe_data=timeframe_data,
-            df_4h=df_4h_with_ema # ✨ Pass 4H data with features
+            df_4h=df_4h_with_ema, # ✨ Pass 4H data with features
+            timeframe_agreement=timeframe_agreement,
+            daily_bars_available=governor_status.daily_bars_available,
+            regime_maturity=governor_status.regime_maturity,
         )
 
     def analyze_regime(

@@ -62,6 +62,36 @@ class TransitionDetector:
         "candle": 0.15,
     }
 
+    # FLOW REWEIGHT FIX: order_flow is only ever populated for BTC, via the
+    # Binance CVD/L2 consumer in main.py (asset_name in ("BTC","BTCUSDT")).
+    # Confirmed empirically via scripts/diagnostics/check_mt5_dom.py that this
+    # broker (Exness) doesn't expose market_book_get() DOM for ANY symbol,
+    # including BTCUSDm — so order_flow_score is structurally guaranteed to be
+    # exactly 0.0 for every asset that isn't routed through that Binance feed.
+    # Leaving its 0.25 weight in WEIGHTS doesn't bias direction (0 * 0.25 = 0),
+    # but it does cap total_score's usable range at 0.75 instead of 1.0 for
+    # those assets, understating real evidence from the 3 sources that DO work.
+    # Redistribute proportionally (0.30/0.30/0.15 -> 0.40/0.40/0.20) whenever
+    # order flow has no real source for the asset being evaluated.
+    WEIGHTS_NO_FLOW = {
+        "momentum": 0.40,
+        "structure": 0.40,
+        "order_flow": 0.0,
+        "candle": 0.20,
+    }
+
+    # Assets with a real, wired order-flow source (Binance CVD/L2 via
+    # main.py's cvd_consumer). Keep in sync with the gating condition there.
+    #
+    # "BTC" is intentionally excluded even though the CVD consumer always
+    # subscribes to Binance btcusdt: every BTC asset config in this deployment
+    # has exchange="mt5" (BTCUSDm) — a different instrument with a different
+    # tape. Feeding MT5-priced BTC with Binance order-flow evidence blends two
+    # unrelated markets. Only "BTCUSDT" (literal Binance-routed asset name)
+    # gets FLOW credit. If BTC is ever moved back to Binance execution, the
+    # asset_name used throughout the pipeline must become "BTCUSDT" to match.
+    FLOW_CAPABLE_ASSETS = ("BTC", "BTCUSDT",)
+
     MIN_CONDITIONS = 2
 
     def __init__(self):
@@ -90,6 +120,10 @@ class TransitionDetector:
         """
         evidence = TransitionEvidence()
         details = []
+
+        has_flow = asset in self.FLOW_CAPABLE_ASSETS
+        weights = self.WEIGHTS if has_flow else self.WEIGHTS_NO_FLOW
+        max_conditions = 4 if has_flow else 3
 
         if regime in ("BEARISH", "SLIGHTLY_BEARISH"):
             # In full BEARISH we look for bullish reversal evidence exactly as
@@ -130,16 +164,21 @@ class TransitionDetector:
         else:
             details.append(f"S/R=⚪ {struct_score:+.2f}")
 
-        # ── SIGNAL 3: Order Flow ─────────────────────────────────────
-        flow_score = self._check_order_flow(
-            cvd_trend, order_book_imbalance, depth_data, looking_for
-        )
-        evidence.order_flow_score = flow_score
-        if abs(flow_score) > 0.3:
-            evidence.conditions_met += 1
-            details.append(f"FLOW={'✅' if flow_score > 0 else '❌'} {flow_score:+.2f}")
+        # ── SIGNAL 3: Order Flow (BTC only — no broker DOM for any MT5 asset) ──
+        if has_flow:
+            flow_score = self._check_order_flow(
+                cvd_trend, order_book_imbalance, depth_data, looking_for
+            )
+            evidence.order_flow_score = flow_score
+            if abs(flow_score) > 0.3:
+                evidence.conditions_met += 1
+                details.append(f"FLOW={'✅' if flow_score > 0 else '❌'} {flow_score:+.2f}")
+            else:
+                details.append(f"FLOW=⚪ {flow_score:+.2f}")
         else:
-            details.append(f"FLOW=⚪ {flow_score:+.2f}")
+            flow_score = 0.0
+            evidence.order_flow_score = 0.0
+            details.append("FLOW=N/A (no broker DOM)")
 
         # ── SIGNAL 4: Candle Structure ───────────────────────────────
         candle_score = self._check_candles(df_1h, looking_for)
@@ -152,10 +191,10 @@ class TransitionDetector:
 
         # ── COMPOSITE ────────────────────────────────────────────────
         evidence.total_score = (
-            mom_score * self.WEIGHTS["momentum"]
-            + struct_score * self.WEIGHTS["structure"]
-            + flow_score * self.WEIGHTS["order_flow"]
-            + candle_score * self.WEIGHTS["candle"]
+            mom_score * weights["momentum"]
+            + struct_score * weights["structure"]
+            + flow_score * weights["order_flow"]
+            + candle_score * weights["candle"]
         )
 
         if evidence.conditions_met >= self.MIN_CONDITIONS:
@@ -176,25 +215,39 @@ class TransitionDetector:
         logger.info(
             f"[TRANSITION] {asset} ({regime}): "
             f"score={evidence.total_score:+.3f} "
-            f"conditions={evidence.conditions_met}/4 "
+            f"conditions={evidence.conditions_met}/{max_conditions} "
             f"dir={evidence.direction} | {evidence.details}"
         )
 
         return evidence
 
     def _check_momentum(self, df_4h, looking_for: str) -> float:
-        """4H EMA20 momentum direction and strength. Returns -1.0 to +1.0."""
+        """4H EMA20 momentum direction and strength. Returns -1.0 to +1.0.
+
+        ROC THRESHOLD FIX: the raw roc thresholds (0.002/0.001) were calibrated
+        against BTC's volatility. A smoothed 20-period MA on Gold/EURUSD/EURJPY/
+        USTEC routinely won't move 0.1-0.2% in a 5-bar (20H) window even during a
+        real drift, which silently starved MOM evidence for every non-crypto
+        asset. Normalizing roc by 4H ATR% makes the same thresholds meaningful
+        across assets of different volatility instead of one flat magic number.
+        """
         try:
             if df_4h is None or len(df_4h) < 25:
                 return 0.0
 
             closes = df_4h['close'].values.astype(float)
+            highs = df_4h['high'].values.astype(float)
+            lows = df_4h['low'].values.astype(float)
+
             # Simple moving average as EMA proxy (avoids talib dependency)
             ema20 = np.convolve(closes, np.ones(20) / 20, mode='valid')
             if len(ema20) < 6:
                 return 0.0
 
             roc = (ema20[-1] - ema20[-6]) / max(abs(ema20[-6]), 1e-9)
+
+            atr_pct = self._atr_pct(highs, lows, closes, period=14)
+            roc_norm = roc / atr_pct if atr_pct > 1e-9 else 0.0
 
             # Price vs 50-period average
             price_above_50 = None
@@ -205,16 +258,16 @@ class TransitionDetector:
 
             score = 0.0
             if looking_for == "bullish":
-                if roc > 0.002:
+                if roc_norm > 0.50:
                     score += 0.6
-                elif roc > 0.001:
+                elif roc_norm > 0.25:
                     score += 0.3
                 if price_above_50 is True:
                     score += 0.4
             else:
-                if roc < -0.002:
+                if roc_norm < -0.50:
                     score -= 0.6
-                elif roc < -0.001:
+                elif roc_norm < -0.25:
                     score -= 0.3
                 if price_above_50 is False:
                     score -= 0.4
@@ -223,6 +276,24 @@ class TransitionDetector:
         except Exception as e:
             logger.debug(f"[TRANSITION] Momentum check error: {e}")
             return 0.0
+
+    @staticmethod
+    def _atr_pct(highs, lows, closes, period: int = 14) -> float:
+        """Average True Range as a fraction of the latest close (e.g. 0.015 = 1.5%).
+        Used to normalize momentum thresholds across assets of different volatility."""
+        if len(closes) < period + 1:
+            return 0.0
+        prev_close = closes[:-1]
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(
+                np.abs(highs[1:] - prev_close),
+                np.abs(lows[1:] - prev_close),
+            ),
+        )
+        atr = np.mean(tr[-period:])
+        last_close = closes[-1]
+        return atr / last_close if last_close > 1e-9 else 0.0
 
     def _check_structure(
         self, asset, df_4h, df_1h, state, looking_for: str

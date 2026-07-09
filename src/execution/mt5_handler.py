@@ -15,6 +15,7 @@ from src.global_error_handler import handle_errors, ErrorSeverity
 from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.utils.trade_logger import log_trade_event
 from src.market.price_cache import price_cache
+from src.utils.market_hours import MarketHours
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,11 @@ class MT5ExecutionHandler:
         self._last_pushed_sl: Dict[int, float] = {}
         self._last_pushed_tp: Dict[int, float] = {}
 
+        # Price sanity + deferred alert infrastructure (Changes 2.1–2.3)
+        self._price_sanity_status: Dict[str, Dict] = {}
+        self._pending_alerts: list = []
+        self._alert_occurrence_counts: Dict[str, int] = {}
+
         logger.info("MT5ExecutionHandler with Multi-Asset support initialized")
 
         # Auto-sync enabled assets on startup
@@ -310,23 +316,88 @@ class MT5ExecutionHandler:
                 )
                 return mock_price
 
+            _tick_was_stale = False
+            _tick_age_s = 0.0
+            max_tick_age = float(self.trading_config.get("mt5_tick_max_age_seconds", 30))
+
             tick = mt5.symbol_info_tick(symbol)
             if tick:
-                live_price = (tick.ask + tick.bid) / 2
-                price_cache.set(symbol, live_price)  # Update cache
-                # F.7: Capture spread for spread velocity (stored per symbol)
-                _spread = tick.ask - tick.bid
+                try:
+                    _tick_age_s = (datetime.now() - datetime.fromtimestamp(tick.time)).total_seconds()
+                    if _tick_age_s < 0:
+                        _tick_age_s = 0.0
+                except Exception:
+                    _tick_age_s = 0.0
+
+                if _tick_age_s <= max_tick_age:
+                    live_price = (tick.ask + tick.bid) / 2
+                    price_cache.set(symbol, live_price, timeframe="tick")  # Tick = highest priority (0)
+                    # F.7: Capture spread for spread velocity (stored per symbol)
+                    _spread = tick.ask - tick.bid
+                    if _spread > 0:
+                        if not hasattr(self, '_last_spread'):
+                            self._last_spread = {}
+                        self._last_spread[symbol] = _spread
+                    return live_price
+
+                _tick_was_stale = True
+                logger.debug(
+                    f"[MT5] {symbol}: symbol_info_tick is {_tick_age_s:.0f}s old — "
+                    f"re-subscribing and pulling tick history"
+                )
+            else:
+                logger.debug(f"[MT5] {symbol}: symbol_info_tick returned None — re-subscribing")
+
+            # Re-subscribe the data feed so fresh ticks resume on the next cycle
+            mt5.symbol_select(symbol, True)
+
+            # Pull last 10 seconds of tick history directly from the broker's server.
+            # copy_ticks_range bypasses the terminal's internal cache and reads from
+            # the broker's stored tick history, giving exchange-accurate prices even
+            # when the terminal feed has a gap.
+            from_dt = datetime.now() - timedelta(seconds=10)
+            recent = mt5.copy_ticks_range(symbol, from_dt, datetime.now(), mt5.COPY_TICKS_ALL)
+            if recent is not None and len(recent) > 0:
+                t = recent[-1]
+                live_price = (float(t['ask']) + float(t['bid'])) / 2
+                price_cache.set(symbol, live_price, timeframe="tick")
+                _spread = float(t['ask']) - float(t['bid'])
                 if _spread > 0:
                     if not hasattr(self, '_last_spread'):
                         self._last_spread = {}
                     self._last_spread[symbol] = _spread
+                if _tick_was_stale:
+                    logger.info(
+                        f"[MT5] {symbol}: Recovered live price {live_price:.5g} via tick history "
+                        f"(symbol_info_tick was {_tick_age_s:.0f}s stale)"
+                    )
                 return live_price
+
+            # Downgrade to DEBUG when the market is expected to be closed —
+            # stale ticks outside trading hours are normal, not actionable.
+            # USTEC uses equity hours; crypto is 24/7 (always warn); everything
+            # else (FX, Gold, Oil) uses forex session hours.
+            _sym_key = symbol.lower().rstrip("m")
+            if "btc" in _sym_key or "eth" in _sym_key:
+                _mkt_open = True          # crypto never sleeps; stale tick is always unexpected
+            elif _sym_key in ("ustec", "us100", "nas100", "spx"):
+                _mkt_open = MarketHours.is_us_stock_market_open()
             else:
-                # Fallback to last known price if tick fails
-                logger.warning(
-                    f"Failed to get live tick for {symbol}, using last known price."
-                )
-                return price_cache.get_last_known(symbol)
+                _mkt_open = MarketHours.is_forex_market_open()
+
+            _log_tick = logger.warning if _mkt_open else logger.debug
+            _tick_ctx = "" if _mkt_open else " (market closed — expected)"
+            if mt5.last_error()[0] != 0:
+                logger.warning(f"[MT5] {symbol}: last_error={mt5.last_error()}")
+            _sym_info = mt5.symbol_info(symbol)
+            if _sym_info is not None and not _sym_info.visible:
+                logger.warning(f"[MT5] {symbol}: not visible in Market Watch — re-selecting")
+                mt5.symbol_select(symbol, True)
+            _log_tick(
+                f"[MT5] {symbol}: No fresh tick data from terminal or history"
+                f" — returning last known{_tick_ctx}"
+            )
+            return price_cache.get_last_known(symbol)
         except Exception as e:
             logger.error(f"Error fetching MT5 price for {symbol}: {e}")
             # Fallback to last known price on error
@@ -518,12 +589,25 @@ class MT5ExecutionHandler:
                 risk_config = asset_cfg.get("risk", {})
                 
                 # ATR-based adaptive stop loss distance
+                # Phase 1.1: size against the SAME effective ATR multiplier the
+                # VTM will actually place (regime floors included), not the raw
+                # config base — otherwise realized risk exceeds the budget.
                 atr_fast = signal_details.get("atr_fast") if signal_details else None
-                atr_multiplier = risk_config.get("atr_multiplier", 1.5)
-                
+                _config_base = risk_config.get("atr_multiplier", 1.5)
+                atr_multiplier = VeteranTradeManager.compute_effective_atr_multiplier(
+                    trade_type=trade_type,
+                    config_base=_config_base,
+                    regime=(signal_details.get("regime", "NEUTRAL") if signal_details else "NEUTRAL"),
+                    volatility_regime=(signal_details.get("volatility_regime", "normal") if signal_details else "normal"),
+                )
+
                 if atr_fast:
                     initial_sl_dist = atr_fast * atr_multiplier
-                    logger.info(f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR ({initial_sl_dist:.2f})")
+                    logger.info(
+                        f"[TACTICAL] Using ATR-based SL: {atr_multiplier}x ATR "
+                        f"(config base {_config_base}x → effective {atr_multiplier}x) "
+                        f"({initial_sl_dist:.2f})"
+                    )
                 else:
                     sl_pct = risk_config.get("stop_loss_pct", 0.01)
                     initial_sl_dist = current_price * sl_pct
@@ -562,11 +646,16 @@ class MT5ExecutionHandler:
                 logger.info(f"[SIZING] Calculating position size for {asset}")
                 logger.info(f"{'='*80}")
 
-                # ── VENUE-SCOPED BALANCE ─────────────────────────────────────────
-                # MT5 trades must be sized against the MT5/Exness account balance,
-                # NOT the combined portfolio capital. Otherwise a $50 Exness account
-                # can be told to open $11k notional because Binance has $14.9k —
-                # which blows the free-margin budget on the first adverse tick.
+                # ── BALANCE SOURCE FOR SIZING ────────────────────────────────────
+                # Default: use MT5 venue balance so position size never exceeds
+                # what Exness margin can actually fund.
+                # When `use_portfolio_balance_for_sizing: true` in trading config,
+                # use the combined portfolio capital instead — appropriate when a
+                # single funded MT5 account does NOT hold all capital (e.g. funds
+                # split across Binance + Exness). The MT5 margin check at line ~809
+                # (via _validate_margin → mt5.order_check) still enforces that the
+                # resulting notional fits within actual Exness free margin, so this
+                # is safe even when portfolio_balance >> mt5_balance.
                 portfolio_balance = self.portfolio_manager.current_capital
                 mt5_balance = portfolio_balance  # safe fallback
                 try:
@@ -579,14 +668,23 @@ class MT5ExecutionHandler:
                 except Exception as _e:
                     logger.debug(f"[SIZING] MT5 account_info fetch failed: {_e}")
 
-                # Always size MT5 orders against MT5 equity. Cross-venue capital
-                # cannot back an Exness margin call.
-                account_balance = mt5_balance
-                if abs(mt5_balance - portfolio_balance) > 1.0:
-                    logger.info(
-                        f"[SIZING] Using MT5 venue balance ${mt5_balance:,.2f} "
-                        f"(portfolio combined: ${portfolio_balance:,.2f})"
-                    )
+                _use_portfolio_bal = self.trading_config.get(
+                    "use_portfolio_balance_for_sizing", False
+                )
+                if _use_portfolio_bal:
+                    account_balance = portfolio_balance
+                    if abs(mt5_balance - portfolio_balance) > 1.0:
+                        logger.info(
+                            f"[SIZING] Using portfolio balance ${portfolio_balance:,.2f} "
+                            f"for sizing (MT5 venue: ${mt5_balance:,.2f})"
+                        )
+                else:
+                    account_balance = mt5_balance
+                    if abs(mt5_balance - portfolio_balance) > 1.0:
+                        logger.info(
+                            f"[SIZING] Using MT5 venue balance ${mt5_balance:,.2f} "
+                            f"(portfolio combined: ${portfolio_balance:,.2f})"
+                        )
 
                 # ── SMALL-ACCOUNT GUARD (sub-$200 MT5 balance) ───────────────────
                 # On a tiny Exness account, force min lot regardless of what the
@@ -710,34 +808,31 @@ class MT5ExecutionHandler:
                     symbol_info.volume_min * current_price * contract_size
                 )
                 if not force_small_account and position_size_usd < min_lot_notional_value:
-                    # ── Small-account fallback: use min lot instead of aborting ──
-                    # Risk-based sizing produced a notional too small for the broker's
-                    # minimum lot.  Rather than blocking the trade entirely, fall back
-                    # to volume_min (the smallest tradeable unit) and let the margin
-                    # check below decide whether the account can actually afford it.
-                    logger.warning(
-                        f"[SIZING] {asset}: Risk-based size (${position_size_usd:,.2f}) "
-                        f"below min lot notional (${min_lot_notional_value:,.2f}). "
-                        f"Falling back to min lot ({symbol_info.volume_min}) — "
-                        f"Small Account Protocol activated."
+                    # Risk calc produced notional below broker minimum lot.
+                    # Check whether the actual dollar risk at min lot is still
+                    # within the risk budget before proceeding.
+                    min_lot_risk_usd = (
+                        symbol_info.volume_min * contract_size * current_price * stop_distance_pct
+                    )
+                    max_acceptable_risk = risk_amount_usd * 2.0
+                    if risk_amount_usd > 0 and min_lot_risk_usd > max_acceptable_risk:
+                        logger.error(
+                            f"[SIZING] {asset}: Risk-calc notional (${position_size_usd:,.2f}) "
+                            f"< broker min lot (${min_lot_notional_value:,.2f}). "
+                            f"Risk at min lot (${min_lot_risk_usd:.2f}) would exceed "
+                            f"2× budget (${max_acceptable_risk:.2f}). Trade blocked."
+                        )
+                        return False
+                    logger.info(
+                        f"[SIZING] {asset}: Risk-calc notional (${position_size_usd:,.2f}) "
+                        f"< broker min lot (${min_lot_notional_value:,.2f}). "
+                        f"Using min lot — actual risk ${min_lot_risk_usd:.2f} "
+                        f"vs budget ${risk_amount_usd:.2f}."
                     )
                     volume_lots = symbol_info.volume_min
-                    if signal_details is None:
-                        signal_details = {}
-                    signal_details["small_account_protocol_active"] = True
                 else:
                     if volume_lots < symbol_info.volume_min:
                         volume_lots = symbol_info.volume_min
-
-                    # Activate small-account protocol whenever we land at min lot
-                    if volume_lots <= symbol_info.volume_min:
-                        if signal_details is None:
-                            signal_details = {}
-                        signal_details["small_account_protocol_active"] = True
-                        logger.info(
-                            f"[MARGIN] 🛡️ Small Account Protocol: {asset} sized to min lot "
-                            f"({symbol_info.volume_min}), enabling margin bypass."
-                        )
 
                 # Config-level per-asset max lot ceiling (harder than broker's volume_max)
                 config_max_lots = asset_cfg.get("max_lots")
@@ -753,6 +848,43 @@ class MT5ExecutionHandler:
 
             # Fetch OHLC for VTM initialization
             ohlc_data, df = self._fetch_ohlc_for_vtm(symbol, asset)
+
+            # ── STRUCTURE TARGET DIAGNOSTIC (log-only, no blocking) ─────────────
+            # Logs how many TP tiers have structural anchors for post-trade analysis.
+            # Previously this was a blocking check but it produced too many false
+            # rejections in strong trending markets where price breaks fresh lows/highs
+            # and no prior pivot levels exist in the short VTM data window.
+            # The dynamic weight sample-size guard (10-trade minimum) already prevents
+            # the weak-signal cases (NEUTRAL regime, inflated scores) this was targeting.
+            if risk_config.get("use_structure_targets", True) and ohlc_data is not None:
+                try:
+                    from src.execution.veteran_trade_manager import find_resistance_levels
+                    _atr_val = (
+                        signal_details.get("atr_fast") if signal_details else None
+                    ) or current_price * 0.01
+                    _pf_lookback = min(len(ohlc_data["high"]), 100)
+                    _struct_levels = find_resistance_levels(
+                        ohlc_data["high"], ohlc_data["low"], ohlc_data["close"],
+                        current_price, side,
+                        lookback=_pf_lookback,
+                        tolerance=0.5 * _atr_val,
+                    )
+                    _risk = abs(current_price - initial_stop)
+                    _r_mults = risk_config.get("partial_targets", [0.8, 1.6, 3.0])
+                    _anchored = 0
+                    for _r in _r_mults:
+                        _tp = current_price + _risk * _r if side == "long" else current_price - _risk * _r
+                        if _struct_levels:
+                            _cl = min(_struct_levels, key=lambda x: abs(x - _tp))
+                            _srr = (_cl - current_price) / _risk if side == "long" else (current_price - _cl) / _risk
+                            if _srr >= _r * 0.5 and abs(_cl - _tp) / max(abs(_tp), 1e-9) < 0.25:
+                                _anchored += 1
+                    logger.info(
+                        f"[STRUCTURE DIAG] {asset} {side.upper()}: {_anchored}/{len(_r_mults)} "
+                        f"TP tiers structurally anchored ({len(_struct_levels)} levels found)."
+                    )
+                except Exception as _sp_err:
+                    logger.debug(f"[STRUCTURE DIAG] Check skipped ({_sp_err})")
 
             # Margin validation
             small_account_active = signal_details.get("small_account_protocol_active", False) if signal_details else False
@@ -802,6 +934,13 @@ class MT5ExecutionHandler:
                 f"Req: ${requested_price:,.2f}, Fill: ${execution_price:,.2f}, "
                 f"Diff: ${slippage:,.2f} ({slippage_pct:.4f}%)"
             )
+            # Item 4: feed this real, observed slippage back into the shadow
+            # engine's friction-cost estimate instead of letting it sit unused.
+            if getattr(self, "shadow_trader", None) is not None:
+                try:
+                    self.shadow_trader.update_friction_penalty(asset, slippage_pct)
+                except Exception as _fp_err:
+                    logger.debug(f"[SLIPPAGE] Friction penalty update failed: {_fp_err}")
 
             # Add to Portfolio
             if signal_details is None:
@@ -868,39 +1007,203 @@ class MT5ExecutionHandler:
                 _asset_cfg_exchange = self.config.get("assets", {}).get(
                     asset, {}
                 ).get("exchange", "mt5")
-                
+
                 _push_sl = self.trading_config.get("place_vtm_sl_on_exchange", False)
                 _push_tp = self.trading_config.get("place_vtm_tp_on_exchange", False)
 
-                if _asset_cfg_exchange == "mt5" and (_push_sl or _push_tp):
-                    try:
-                        _new_pos = next(
-                            (p for p in self.portfolio_manager.positions.values()
-                             if p.mt5_ticket == mt5_ticket
-                             and getattr(p, "trade_manager", None) is not None),
-                            None
-                        )
-                        if _new_pos:
-                            if _push_sl:
-                                _initial_sl = _new_pos.trade_manager.current_stop_loss
-                                if _initial_sl:
-                                    self._push_sl_to_exchange(mt5_ticket, symbol, _initial_sl)
-                            
-                            if _push_tp:
-                                _initial_tp = _new_pos.trade_manager.current_take_profit
-                                if _initial_tp:
-                                    self._push_tp_to_exchange(mt5_ticket, symbol, _initial_tp)
-                    except Exception as _e:
-                        logger.warning(f"[VTM-EXCHANGE] Initial SL/TP push failed: {_e}")
+                # Phase 0.3: a live MT5 position is opened with sl=0.0, so the
+                # broker-side protective stop is placed HERE, after the fill. If
+                # that placement fails the position is running NAKED — a gap or
+                # news spike on leveraged FX/Gold can blow the account. When SL
+                # placement is required we now retry, and if it still cannot be
+                # placed (push failed, or no VTM/stop was produced) we
+                # EMERGENCY-CLOSE the position rather than leave it unprotected.
+                # Paper mode has no real broker stop, so the guarantee is skipped.
+                if (
+                    _asset_cfg_exchange == "mt5"
+                    and (_push_sl or _push_tp)
+                    and self.mode.lower() != "paper"
+                ):
+                    _pos_any = next(
+                        (p for p in self.portfolio_manager.positions.values()
+                         if p.mt5_ticket == mt5_ticket),
+                        None
+                    )
+                    _tm = getattr(_pos_any, "trade_manager", None) if _pos_any else None
+                    _initial_sl = _tm.current_stop_loss if _tm else None
+
+                    if _push_sl:
+                        _sl_placed = False
+                        _pos_already_gone = False
+                        if _initial_sl:
+                            for _att in range(3):
+                                # Bug 4 fix: confirm position still exists at broker before
+                                # each attempt. The VTM runs on a background thread and can
+                                # close the position (e.g. structural SL already hit) in the
+                                # milliseconds between fill and SL placement. Without this
+                                # check the retry loop fires an emergency close on a position
+                                # that's already gone, which on a hedging account opens a
+                                # phantom position instead of closing anything.
+                                if not mt5.positions_get(ticket=mt5_ticket):
+                                    logger.warning(
+                                        f"[VTM-SL] #{mt5_ticket}: position no longer exists "
+                                        f"at broker (VTM/market closed it). SL push skipped."
+                                    )
+                                    _pos_already_gone = True
+                                    break
+                                try:
+                                    if self._push_sl_to_exchange(mt5_ticket, symbol, _initial_sl):
+                                        _sl_placed = True
+                                        break
+                                except Exception as _e:
+                                    logger.warning(f"[VTM-SL] push attempt {_att+1} raised: {_e}")
+                                time.sleep(0.5)
+                        else:
+                            logger.warning(
+                                f"[VTM-SL] #{mt5_ticket}: no initial SL available — "
+                                f"check VTM initialization."
+                            )
+
+                        if _pos_already_gone:
+                            # Position was already closed by VTM or market — deregister
+                            # from portfolio (VTM loop may have handled this already).
+                            try:
+                                if _pos_any is not None:
+                                    self.portfolio_manager.close_position(
+                                        position_id=_pos_any.position_id,
+                                        reason="vtm_preemptive_close",
+                                        already_closed_on_exchange=True,
+                                    )
+                            except Exception:
+                                pass
+                            # Bug 6 fix (partial): notify user that trade opened and was
+                            # immediately closed by the risk manager.
+                            try:
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    _sfn(_tg.send_message(
+                                        text=(
+                                            f"⚠️ <b>FAST EXIT</b> — {asset} #{mt5_ticket}\n"
+                                            f"{'SHORT' if side == 'short' else 'LONG'} opened "
+                                            f"but risk manager closed it before SL could be "
+                                            f"pushed. No phantom position created."
+                                        ),
+                                        parse_mode="HTML",
+                                    ))
+                            except Exception:
+                                pass
+                            return False
+
+                        elif not _sl_placed:
+                            # Final existence check before firing emergency close — position
+                            # may have been closed between last retry and this line.
+                            if not mt5.positions_get(ticket=mt5_ticket):
+                                logger.warning(
+                                    f"[VTM-SL] #{mt5_ticket}: position gone just before "
+                                    f"emergency close — skipping."
+                                )
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    try:
+                                        _sfn(_tg.send_message(
+                                            text=(
+                                                f"⚠️ {asset} #{mt5_ticket}: protective stop failed "
+                                                f"to place, but the position closed on its own just "
+                                                f"before emergency action was needed. "
+                                                f"No action taken — worth a quick check."
+                                            ),
+                                            parse_mode="HTML",
+                                        ))
+                                    except Exception as _te:
+                                        logger.error(f"[VTM-SL] Failed to send self-resolved alert: {_te}")
+                                try:
+                                    if _pos_any is not None:
+                                        self.portfolio_manager.close_position(
+                                            position_id=_pos_any.position_id,
+                                            reason="vtm_preemptive_close",
+                                            already_closed_on_exchange=True,
+                                        )
+                                except Exception:
+                                    pass
+                                return False
+
+                            logger.critical(
+                                f"[VTM-SL] ❌ Could not place protective stop for {asset} "
+                                f"#{mt5_ticket} (sl={_initial_sl}). Position is NAKED — "
+                                f"emergency-closing to avoid unbounded risk."
+                            )
+                            # Bug 5 fix: pass ticket so hedging accounts close the
+                            # specific position rather than opening a phantom long/short.
+                            self._emergency_close_mt5_position(
+                                symbol,
+                                volume_lots,
+                                mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL,
+                                ticket=mt5_ticket,
+                            )
+                            # Deregister the now-closed position.
+                            try:
+                                if _pos_any is not None:
+                                    self.portfolio_manager.close_position(
+                                        position_id=_pos_any.position_id,
+                                        reason="naked_stop_emergency_close",
+                                        already_closed_on_exchange=True,
+                                    )
+                            except Exception as _ce:
+                                logger.error(
+                                    f"[VTM-SL] Failed to deregister emergency-closed "
+                                    f"position #{mt5_ticket}: {_ce}"
+                                )
+                            # Bug 6 fix: notify so the user knows a real position opened
+                            # and was immediately emergency-closed.
+                            try:
+                                _bot_ref = getattr(self, 'trading_bot', None)
+                                _tg = getattr(_bot_ref, 'telegram_bot', None)
+                                _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
+                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                    _sfn(_tg.send_message(
+                                        text=(
+                                            f"🚨 <b>EMERGENCY CLOSE</b> — {asset} #{mt5_ticket}\n"
+                                            f"Opened {'SHORT' if side == 'short' else 'LONG'} "
+                                            f"but SL placement failed after 3 retries "
+                                            f"(sl={_initial_sl}).\n"
+                                            f"Position emergency-closed to protect account."
+                                        ),
+                                        parse_mode="HTML",
+                                    ))
+                            except Exception:
+                                pass
+                            return False
+                    else:
+                        # SL placed successfully — clear any partial escalation streak
+                        self._clear_alert_streak(asset, "protective stop failed to place")
+
+                    # TP placement stays best-effort — a missing profit target is
+                    # not a risk event and must never trigger an emergency close.
+                    if _push_tp and _tm is not None:
+                        try:
+                            _initial_tp = _tm.current_take_profit
+                            if _initial_tp:
+                                self._push_tp_to_exchange(mt5_ticket, symbol, _initial_tp)
+                        except Exception as _e:
+                            logger.warning(f"[VTM-TP] Initial TP push failed (non-fatal): {_e}")
                 # ─────────────────────────────────────────────────────────────────
                 return True
             else:
                 if self.mode.lower() != "paper" and mt5_ticket:
                     logger.warning(f"[EMERGENCY] Closing orphaned MT5 #{mt5_ticket}")
+                    # Bug 2.7 fix: pass original_order_type (what opened the position)
+                    # not the already-flipped close direction. _emergency_close_mt5_position
+                    # flips internally; the previous call passed the flipped value so
+                    # a LONG position ended up sending a BUY (added to it instead of closing).
                     self._emergency_close_mt5_position(
                         symbol,
                         volume_lots,
-                        mt5.ORDER_TYPE_SELL if side == "long" else mt5.ORDER_TYPE_BUY,
+                        mt5.ORDER_TYPE_BUY if side == "long" else mt5.ORDER_TYPE_SELL,
+                        ticket=mt5_ticket,
                     )
                 return False
         except Exception as e:
@@ -1143,13 +1446,45 @@ class MT5ExecutionHandler:
         }
         MAX_RETRIES = 2
         result = None
-        
+
+        # Phase 1.3: idempotency. Snapshot our existing tickets (by magic) so a
+        # retry triggered by a failed RESPONSE on an order that actually filled
+        # can detect the landed position instead of sending a DUPLICATE.
+        _MAGIC = 234000
+        try:
+            _pre = mt5.positions_get(symbol=symbol) or []
+            _pre_tickets = {p.ticket for p in _pre if getattr(p, "magic", None) == _MAGIC}
+        except Exception:
+            _pre_tickets = set()
+
         for attempt in range(MAX_RETRIES):
+            # Before any RE-send, check whether the previous attempt actually
+            # opened a position despite reporting failure — adopt it if so.
+            if attempt > 0:
+                try:
+                    _cur = mt5.positions_get(symbol=symbol) or []
+                    _new = [
+                        p for p in _cur
+                        if getattr(p, "magic", None) == _MAGIC
+                        and p.ticket not in _pre_tickets
+                        and ((side == "long" and p.type == mt5.POSITION_TYPE_BUY)
+                             or (side == "short" and p.type == mt5.POSITION_TYPE_SELL))
+                    ]
+                    if _new:
+                        _p = _new[0]
+                        logger.warning(
+                            f"[RETRY] MT5 prior attempt actually filled — adopting "
+                            f"ticket #{_p.ticket} @ {_p.price_open} (no double fill)."
+                        )
+                        return _p.ticket, _p.price_open
+                except Exception as _ie:
+                    logger.warning(f"[RETRY] MT5 idempotency check failed: {_ie}")
+
             result = mt5.order_send(request)
-            
+
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 break
-                
+
             if attempt < MAX_RETRIES - 1:
                 logger.warning(
                     f"[RETRY] MT5 Order failed (Attempt {attempt+1}/{MAX_RETRIES}): "
@@ -1274,9 +1609,28 @@ class MT5ExecutionHandler:
                 logger.error(f"[MT5 HANDLER] ❌ Could not find symbol for asset: {asset_name}")
                 return False
 
-            current_price = self.get_current_price(symbol)
-            if current_price == 0 or current_price is None:
+            # Change 2.4: verified live price — catches stale-cache entries like
+            # the 2026-07-01 BTC crash where a 4H bar-close was used as fill price.
+            current_price, _price_sane, _dev_pct = self._get_verified_current_price(
+                symbol, asset_name
+            )
+            if current_price is None or current_price <= 0:
+                self._flag_alert(
+                    asset_name, f"Price unavailable for {symbol}", escalate_after=1
+                )
                 logger.error(f"{asset_name} ({symbol}): Failed to get current price")
+                return False
+            if not _price_sane:
+                self._flag_alert(
+                    asset_name,
+                    f"Price check failed: live deviates {_dev_pct:.2%} from cache",
+                    escalate_after=3,
+                )
+                logger.warning(
+                    f"[SANITY] {asset_name}: Live price {current_price:.5g} deviates "
+                    f"{_dev_pct:.2%} from cached bar-close — holding cycle "
+                    f"(Telegram fires after 3 consecutive)"
+                )
                 return False
 
             # ============================================================
@@ -1595,6 +1949,16 @@ class MT5ExecutionHandler:
             # Cap to remaining broker volume to avoid INVALID_VOLUME errors
             partial_lots = min(partial_lots, mt5_pos.volume)
 
+            # S6 guard: if partial_lots == full position volume this is a fake-partial
+            # that would close the entire position.  Skip it so VTM doesn't
+            # accidentally wipe a position on a min-lot account.
+            if partial_lots >= mt5_pos.volume:
+                logger.warning(
+                    f"[PARTIAL-MT5] SKIP: partial_lots ({partial_lots:.4f}) >= full position "
+                    f"({mt5_pos.volume:.4f}) — would full-close; aborting partial for {asset_name}"
+                )
+                return False
+
             request = {
                 "action":      mt5.TRADE_ACTION_DEAL,
                 "symbol":      symbol,
@@ -1889,7 +2253,7 @@ class MT5ExecutionHandler:
         """Actively check and update all positions using VTM"""
         return self.check_and_update_positions_VTM(asset_name, df_4h=df_4h)
 
-    def check_and_update_positions_VTM(self, asset_name: str, df_4h: Optional[pd.DataFrame] = None):
+    def check_and_update_positions_VTM(self, asset_name: str, df_4h: Optional[pd.DataFrame] = None, composite_state=None):
         """High-frequency VTM update loop for MT5 positions."""
         try:
             positions = self.portfolio_manager.get_asset_positions(asset_name)
@@ -1912,7 +2276,9 @@ class MT5ExecutionHandler:
                     # Convert to simple dicts for PortfolioManager
                     # Match by ticket ID for MT5
                     broker_data = [{'id': str(p.ticket), 'side': 'long' if p.type == mt5.POSITION_TYPE_BUY else 'short', 'quantity': p.volume} for p in broker_positions]
-                    self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    _to_close = self.portfolio_manager.reconcile_positions(asset_name, broker_data)
+                    for _pos, _reason in _to_close:
+                        self._handle_mt5_exchange_close(_pos, asset_name, symbol, _reason)
             except Exception as e:
                 logger.debug(f"[RECONCILE] MT5 fetch failed: {e}")
 
@@ -1937,7 +2303,7 @@ class MT5ExecutionHandler:
                     _tp_before = position.trade_manager.current_take_profit
                     
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h
+                        current_price, df_4h=df_4h, composite_state=composite_state
                     )
                     
                     _sl_after = position.trade_manager.current_stop_loss
@@ -2008,9 +2374,14 @@ class MT5ExecutionHandler:
             return False
 
     def _emergency_close_mt5_position(
-        self, symbol: str, volume: float, original_order_type: int
+        self, symbol: str, volume: float, original_order_type: int, ticket: int = None
     ):
-        """Emergency close of an unwanted MT5 position"""
+        """Emergency close of an unwanted MT5 position.
+
+        ticket: MT5 position ticket. When supplied, the request includes
+        position=ticket so hedging-account brokers close *that* position
+        rather than opening a new counter-position.
+        """
         try:
             close_order_type = (
                 mt5.ORDER_TYPE_SELL
@@ -2036,6 +2407,12 @@ class MT5ExecutionHandler:
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
 
+            # Bug 5 fix: on hedging accounts a plain market order opens a new
+            # position instead of closing the existing one. Specifying
+            # position=ticket targets the exact position regardless of account type.
+            if ticket:
+                request["position"] = ticket
+
             result = mt5.order_send(request)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(f"[MT5] ✓ Emergency close successful")
@@ -2044,6 +2421,74 @@ class MT5ExecutionHandler:
 
         except Exception as e:
             logger.error(f"[MT5] Emergency close error: {e}", exc_info=True)
+
+    # ── Alert infrastructure (Changes 2.2–2.3) ──────────────────────────────
+
+    def _flag_alert(self, asset_name: str, message: str, escalate_after: int = 1):
+        """Queue a deferred alert. escalate_after=1 notifies immediately;
+        >1 only pages once the same condition has recurred that many times
+        consecutively, so transient one-off blips don't fire Telegram."""
+        key = f"{asset_name}:{message[:40]}"
+        self._alert_occurrence_counts[key] = (
+            self._alert_occurrence_counts.get(key, 0) + 1
+        )
+        if self._alert_occurrence_counts[key] >= escalate_after:
+            self._pending_alerts.append({"asset": asset_name, "message": message})
+            self._alert_occurrence_counts[key] = 0
+
+    def _clear_alert_streak(self, asset_name: str, message_prefix: str):
+        """Reset escalation streak once the underlying condition has resolved,
+        so a later unrelated occurrence starts fresh instead of inheriting a
+        stale partial count."""
+        key_prefix = f"{asset_name}:{message_prefix[:40]}"
+        for k in list(self._alert_occurrence_counts.keys()):
+            if k.startswith(key_prefix):
+                self._alert_occurrence_counts[k] = 0
+
+    def _get_verified_current_price(
+        self, symbol: str, asset_name: str
+    ) -> tuple:
+        """Fetch a live tick price and sanity-check it against the bar-close cache.
+
+        Returns (price, is_sane, deviation_pct).
+        If the live tick deviates more than price_sanity_max_deviation_pct (default 0.5%)
+        from the last cached bar-close, marks the asset as failed and returns
+        (live_price, False, deviation_pct) so the caller can hold the cycle.
+        A failed check does NOT consume the signal — it defers it to the next cycle,
+        at which point if the deviation persists for escalate_after=3 cycles Telegram fires.
+        """
+        threshold = float(
+            self.trading_config.get("price_sanity_max_deviation_pct", 0.005)
+        )
+
+        live_price = self.get_current_price(symbol, force_live=True)
+        if live_price is None or live_price <= 0:
+            self._price_sanity_status[asset_name] = {
+                "passed": False, "checked_at": datetime.now()
+            }
+            return (None, False, 0.0)
+
+        cached_price = price_cache.get(symbol)
+        if cached_price is None or cached_price <= 0:
+            # No cached reference — accept live price, cannot sanity-check
+            self._price_sanity_status[asset_name] = {
+                "passed": True, "checked_at": datetime.now()
+            }
+            return (live_price, True, 0.0)
+
+        deviation_pct = abs(live_price - cached_price) / cached_price
+
+        if deviation_pct > threshold:
+            self._price_sanity_status[asset_name] = {
+                "passed": False, "checked_at": datetime.now()
+            }
+            return (live_price, False, deviation_pct)
+
+        self._price_sanity_status[asset_name] = {
+            "passed": True, "checked_at": datetime.now()
+        }
+        self._clear_alert_streak(asset_name, "Price check failed")
+        return (live_price, True, deviation_pct)
 
     @handle_errors(
         component="mt5_handler",
@@ -2196,40 +2641,10 @@ class MT5ExecutionHandler:
                         # ── Query MT5 deal history for the authoritative fill price
                         # and P&L.  _fetch_broker_close_data polls with a short
                         # backoff so it handles the brief MT5 history lag after a close.
-                        broker_data = self._fetch_broker_close_data(pos.mt5_ticket)
+                        # Fix 3: broker data fetch + P&L via extracted method
+                        exit_price, broker_data, _raw_profit = \
+                            self._record_mt5_external_close(pos, asset, current_price, symbol)
 
-                        exit_price = None
-                        if broker_data:
-                            exit_price = broker_data.get("fill_price")
-                            logger.info(
-                                f"[SYNC] Broker close data for #{pos.mt5_ticket}: "
-                                f"fill=${exit_price}, profit=${broker_data.get('profit', 'n/a')}, "
-                                f"swap=${broker_data.get('swap', 0)}, "
-                                f"commission=${broker_data.get('commission', 0)}"
-                            )
-                        else:
-                            logger.debug(
-                                f"[SYNC] No broker deal found for #{pos.mt5_ticket} — "
-                                f"will fall back to current market price."
-                            )
-
-                        if exit_price is None or exit_price <= 0:
-                            # Deal history unavailable; use current market price as fallback
-                            if current_price is None:
-                                current_price = self.get_current_price(symbol)
-                            exit_price = current_price
-                            logger.debug(
-                                f"[SYNC] Falling back to market price ${exit_price} "
-                                f"for #{pos.mt5_ticket} P&L calc."
-                            )
-
-                        # ── Calculate P&L for alert ─────────────────────────
-                        _raw_profit = broker_data.get("profit") if broker_data else None
-                        if _raw_profit is None and exit_price:
-                            if pos.side == "short":
-                                _raw_profit = (pos.entry_price - exit_price) * pos.quantity
-                            else:
-                                _raw_profit = (exit_price - pos.entry_price) * pos.quantity
 
                         # ── Telegram alert — position closed outside the bot ─
                         try:
@@ -2272,402 +2687,100 @@ class MT5ExecutionHandler:
             logger.error(f"[SYNC] Error for {asset}: {e}")
             return False
 
-            # ================================================================
-            # Dead code below — kept as reference only
-            # ================================================================
-            if mt5_count > 0 and portfolio_count == 0:
-                import_enabled = bool(
-                    self.config.get("portfolio", {}).get(
-                        "import_existing_positions", False
+
+    def _record_mt5_external_close(
+        self, pos, asset: str, current_price, symbol: str
+    ):
+        """
+        Fix 3: Extracted from sync_positions_with_mt5 Scenario-2.
+        Fetches broker close data for a ticket that disappeared from MT5,
+        resolves exit price (with market-price fallback), and calculates P&L.
+        Returns (exit_price, broker_data, raw_profit).
+        """
+        broker_data = self._fetch_broker_close_data(pos.mt5_ticket)
+
+        exit_price = None
+        if broker_data:
+            exit_price = broker_data.get("fill_price")
+            logger.info(
+                f"[SYNC] Broker close data for #{pos.mt5_ticket}: "
+                f"fill=${exit_price}, profit=${broker_data.get('profit', 'n/a')}, "
+                f"swap=${broker_data.get('swap', 0)}, "
+                f"commission=${broker_data.get('commission', 0)}"
+            )
+        else:
+            logger.debug(
+                f"[SYNC] No broker deal found for #{pos.mt5_ticket} — "
+                f"will fall back to current market price."
+            )
+
+        if exit_price is None or exit_price <= 0:
+            # Deal history unavailable; use current market price as fallback.
+            # force_live=True: reconciliation paths must not use a stale bar-close
+            # (same root cause as the 2026-07-01 BTC price-source bug).
+            if current_price is None:
+                current_price = self.get_current_price(symbol, force_live=True)
+            exit_price = current_price
+            logger.debug(
+                f"[SYNC] Falling back to market price ${exit_price} "
+                f"for #{pos.mt5_ticket} P&L calc."
+            )
+
+        # ── Calculate P&L for alert ─────────────────────────
+        _raw_profit = broker_data.get("profit") if broker_data else None
+        if _raw_profit is None and exit_price:
+            if pos.side == "short":
+                _raw_profit = (pos.entry_price - exit_price) * pos.quantity
+            else:
+                _raw_profit = (exit_price - pos.entry_price) * pos.quantity
+        return exit_price, broker_data, _raw_profit
+
+    def _handle_mt5_exchange_close(self, pos, asset: str, symbol: str, reason: str):
+        """
+        S2.3: Recorder for a position detected closed on MT5 by reconcile_positions.
+        Fetches authoritative fill price, sends Telegram alert, and calls close_position.
+        """
+        try:
+            # force_live=True: reconciliation must use a live tick, not a stale
+            # bar-close from the price cache (same root cause as 2026-07-01 BTC bug).
+            current_price = self.get_current_price(symbol, force_live=True)
+            exit_price, broker_data, _raw_profit = \
+                self._record_mt5_external_close(pos, asset, current_price, symbol)
+
+            # Telegram alert
+            try:
+                _bot = getattr(self, 'trading_bot', None)
+                _telegram = getattr(_bot, 'telegram_bot', None)
+                _send_fn = getattr(_bot, '_send_telegram_notification', None)
+                if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                    _pnl_str = (
+                        f"{'🟢 +' if (_raw_profit or 0) >= 0 else '🔴 '}"
+                        f"${abs(_raw_profit or 0):.2f}"
                     )
-                )
-
-                logger.info(f"[SYNC] Config check:")
-                logger.info(f"  portfolio.import_existing_positions = {import_enabled}")
-
-                if import_enabled:
-                    logger.info(
-                        f"[SYNC] ✅ Import ENABLED - Importing {mt5_count} MT5 position(s) WITH VTM..."
+                    _msg = (
+                        f"⚠️ <b>POSITION CLOSED BY MT5</b>\n"
+                        f"Asset:  <b>{asset}</b> {pos.side.upper()}\n"
+                        f"Ticket: #{pos.mt5_ticket}\n"
+                        f"Entry:  ${pos.entry_price:.4g}\n"
+                        f"Exit:   ${exit_price:.4g}\n"
+                        f"P&L:    {_pnl_str}\n"
+                        f"Reason: SL/TP hit or manual close on broker"
                     )
+                    _coro = _telegram.send_message(text=_msg, parse_mode="HTML")
+                    if _coro:
+                        _send_fn(_coro)
+            except Exception as _tg:
+                logger.debug(f"[RECONCILE] MT5 Telegram alert failed: {_tg}")
 
-                    # ============================================================
-                    # STEP 1: Fetch OHLC data for VTM
-                    # ============================================================
-                    ohlc_data = None
-                    df = None
-
-                    try:
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=10)
-
-                        df = self.data_manager.fetch_mt5_data(
-                            symbol=symbol,
-                            timeframe=self.config["assets"][asset].get(
-                                "timeframe", "H1"
-                            ),
-                            start_date=start_time.strftime("%Y-%m-%d"),
-                            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-
-                        if len(df) > 50:
-                            ohlc_data = {
-                                "high": df["high"].values,
-                                "low": df["low"].values,
-                                "close": df["close"].values,
-                                "volume": df["volume"].values,
-                            }
-                            logger.info(
-                                f"[VTM] ✅ Fetched {len(df)} bars for dynamic management"
-                            )
-                        else:
-                            logger.warning(
-                                f"[VTM] ⚠️ Insufficient data ({len(df)} bars), VTM will be limited"
-                            )
-
-                    except Exception as e:
-                        logger.error(f"[VTM] ❌ Failed to fetch OHLC: {e}")
-                        ohlc_data = None
-                        df = None
-
-                    # ============================================================
-                    # STEP 2: Get REAL market analysis from HybridAggregatorSelector
-                    # ============================================================
-                    signal_details_base = None
-
-                    if df is not None and len(df) > 200:
-                        try:
-                            logger.info(
-                                f"[HYBRID] Analyzing market for imported positions..."
-                            )
-
-                            # Try to get hybrid selector from parent bot
-                            hybrid_selector = None
-                            if hasattr(self, "trading_bot") and hasattr(
-                                self.trading_bot, "hybrid_selector"
-                            ):
-                                hybrid_selector = self.trading_bot.hybrid_selector
-                                logger.info(
-                                    f"[HYBRID] Using existing hybrid_selector from bot"
-                                )
-                            else:
-                                # Create temporary instance
-                                from src.execution.hybrid_aggregator_selector import (
-                                    HybridAggregatorSelector,
-                                )
-
-                                hybrid_selector = HybridAggregatorSelector(
-                                    self.data_manager,
-                                    self.config,
-                                )
-                                logger.info(
-                                    f"[HYBRID] Created temporary hybrid_selector"
-                                )
-
-                            # Get current market analysis
-                            mode_info = hybrid_selector.get_optimal_mode(asset, df)
-                            analysis = mode_info["analysis"]
-
-                            # Build REAL signal_details from market analysis
-                            signal_details_base = {
-                                "imported": True,
-                                "import_time": datetime.now().isoformat(),
-                                # Real aggregator mode
-                                "aggregator_mode": mode_info["mode"],
-                                "mode_confidence": mode_info["confidence"],
-                                # Real regime analysis
-                                "regime_analysis": {
-                                    "regime_type": analysis["regime_type"],
-                                    "trend_strength": analysis["trend"]["strength"],
-                                    "trend_direction": analysis["trend"]["direction"],
-                                    "adx": analysis["trend"]["adx"],
-                                    "volatility_regime": analysis["volatility"][
-                                        "regime"
-                                    ],
-                                    "volatility_ratio": analysis["volatility"]["ratio"],
-                                    "price_clarity": analysis["price_action"][
-                                        "clarity"
-                                    ],
-                                    "indecision_pct": analysis["price_action"][
-                                        "indecision_pct"
-                                    ],
-                                    "momentum_aligned": analysis["momentum_aligned"],
-                                    "at_key_level": analysis["at_key_level"],
-                                },
-                                "signal_quality": mode_info["confidence"],
-                                "reasoning": f"Position imported from MT5 - {analysis['reasoning']}",
-                            }
-
-                            logger.info(f"[HYBRID] ✅ Market analysis complete:")
-                            logger.info(f"  Mode:       {mode_info['mode'].upper()}")
-                            logger.info(f"  Confidence: {mode_info['confidence']:.0%}")
-                            logger.info(f"  Regime:     {analysis['regime_type']}")
-                            logger.info(
-                                f"  Trend:      {analysis['trend']['strength']} / {analysis['trend']['direction']}"
-                            )
-                            logger.info(
-                                f"  Volatility: {analysis['volatility']['regime']}"
-                            )
-
-                        except Exception as e:
-                            logger.error(f"[HYBRID] ❌ Analysis failed: {e}")
-                            signal_details_base = None
-
-                    # Fallback if hybrid analysis fails
-                    if signal_details_base is None:
-                        logger.warning(
-                            f"[HYBRID] Using fallback signal_details (no market analysis)"
-                        )
-                        signal_details_base = {
-                            "imported": True,
-                            "import_time": datetime.now().isoformat(),
-                            "aggregator_mode": "unknown",
-                            "mode_confidence": 0.5,
-                            "regime_analysis": {
-                                "regime_type": "unknown",
-                                "trend_strength": "unknown",
-                                "trend_direction": "unknown",
-                                "adx": 20.0,
-                                "volatility_regime": "normal",
-                                "volatility_ratio": 1.0,
-                                "price_clarity": "unknown",
-                                "indecision_pct": 0.0,
-                                "momentum_aligned": False,
-                                "at_key_level": False,
-                            },
-                            "signal_quality": 0.5,
-                            "reasoning": "Position imported from MT5 - market analysis unavailable",
-                        }
-
-                    # ============================================================
-                    # STEP 3: Get actual account balance
-                    # ============================================================
-                    try:
-                        import MetaTrader5 as mt5
-
-                        account_info = mt5.account_info()
-                        account_balance = (
-                            account_info.equity
-                            if account_info
-                            else self.portfolio_manager.current_capital
-                        )
-                        logger.info(f"[MT5] Account balance: ${account_balance:,.2f}")
-                    except:
-                        account_balance = self.portfolio_manager.current_capital
-                        logger.warning(
-                            f"[MT5] Using portfolio capital: ${account_balance:,.2f}"
-                        )
-
-                    # ============================================================
-                    # STEP 4: Import each position
-                    # ============================================================
-                    imported_count = 0
-                    for pos in mt5_positions:
-                        pos_type = (
-                            "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                        )
-
-                        logger.info(
-                            f"\n  → Importing MT5 {pos_type.upper()}: ticket={pos.ticket}, "
-                            f"entry=${pos.price_open:.2f}, current=${pos.price_current:.2f}"
-                        )
-
-                        # Check if we can import
-                        can_import, reason = self.portfolio_manager.can_open_position(
-                            asset, pos_type
-                        )
-                        if not can_import:
-                            logger.warning(f"[SYNC] ⚠️ Cannot import position: {reason}")
-                            continue
-
-                        # Add position-specific details
-                        signal_details = signal_details_base.copy()
-                        signal_details["mt5_ticket"] = pos.ticket
-                        signal_details["side"] = pos_type
-                        signal_details["entry_price"] = pos.price_open
-
-                        # Import position
-                        # The above code is attempting to call the `add_position` method of the
-                        # `portfolio_manager` object within the `self` context.
-                        success = self.portfolio_manager.add_position(
-                            asset=asset,
-                            symbol=symbol,
-                            side=pos_type,
-                            entry_price=pos.price_open,
-                            position_size_usd=(
-                                pos.volume
-                                * pos.price_open
-                                * self.symbol_info.trade_contract_size
-                            ),
-                            stop_loss=pos.sl if pos.sl > 0 else None,
-                            take_profit=pos.tp if pos.tp > 0 else None,
-                            trailing_stop_pct=self.config["assets"][asset]
-                            .get("risk", {})
-                            .get("trailing_stop_pct"),
-                            mt5_ticket=pos.ticket,
-                            ohlc_data=ohlc_data,
-                            use_dynamic_management=True,
-                            entry_time=datetime.fromtimestamp(pos.time),
-                            signal_details=signal_details,
-                            # account_balance=account_balance,
-                        )
-
-                        if success:
-                            imported_count += 1
-
-                            # Verify VTM initialized
-                            imported_positions = (
-                                self.portfolio_manager.get_asset_positions(asset)
-                            )
-                            if imported_positions:
-                                imported_pos = imported_positions[-1]
-                                if imported_pos.trade_manager:
-                                    vtm_status = imported_pos.get_vtm_status()
-                                    logger.info(
-                                        f"[VTM] ✅ ACTIVE with market analysis\n"
-                                        f"      Ticket:  {pos.ticket}\n"
-                                        f"      Mode:    {signal_details['aggregator_mode'].upper()}\n"
-                                        f"      Regime:  {signal_details['regime_analysis']['regime_type']}\n"
-                                        f"      Entry:   ${vtm_status['entry_price']:,.2f}\n"
-                                        f"      SL:      ${vtm_status['stop_loss']:,.2f} (VTM calculated)\n"
-                                        f"      TP:      ${vtm_status.get('take_profit', 0):,.2f} (VTM calculated)"
-                                    )
-                                else:
-                                    logger.error(
-                                        f"[VTM] ❌ NOT INITIALIZED for ticket {pos.ticket}"
-                                    )
-                                    logger.error(
-                                        f"      OHLC data: {ohlc_data is not None}"
-                                    )
-                                    logger.error(
-                                        f"      signal_details: {bool(signal_details)}"
-                                    )
-                                    logger.error(
-                                        f"      account_balance: {account_balance}"
-                                    )
-                        else:
-                            logger.error(
-                                f"[SYNC] ❌ Failed to import {asset} {pos_type} position"
-                            )
-
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"[SYNC] Import complete: {imported_count}/{mt5_count} positions imported\n"
-                        f"{'='*80}"
-                    )
-
-                    # Verify VTM status after import
-                    if imported_count > 0:
-                        self._verify_vtm_status_after_sync(asset)
-
-                    return True
-
-                else:
-                    logger.warning(
-                        f"\n{'='*80}\n"
-                        f"[SYNC] ⚠️ IMPORT DISABLED IN CONFIG\n"
-                        f"{'='*80}\n"
-                        f"Found {mt5_count} MT5 position(s) but import is disabled.\n"
-                        f"These positions will NOT be managed by the bot.\n"
-                        f"{'='*80}"
-                    )
-
-                    for pos in mt5_positions:
-                        pos_type = (
-                            "LONG" if pos.type == mt5.POSITION_TYPE_BUY else "SHORT"
-                        )
-                        logger.info(
-                            f"  → MT5 {pos_type}: ticket={pos.ticket}, entry=${pos.price_open:.2f}"
-                        )
-
-                    return True
-
-            # ================================================================
-            # SCENARIO 2: Portfolio has positions, MT5 is empty → CLOSE ALL
-            # ================================================================
-            if portfolio_count > 0 and mt5_count == 0:
-                logger.warning(
-                    f"\n{'='*80}\n"
-                    f"[SYNC] ⚠️ POSITION MISMATCH\n"
-                    f"{'='*80}\n"
-                    f"Portfolio shows {portfolio_count} position(s) but MT5 has 0.\n"
-                    f"Removing positions from portfolio...\n"
-                    f"{'='*80}"
-                )
-
-                current_price = self.get_current_price(symbol)
-                closed_count = 0
-
-                for position in portfolio_positions:
-                    trade_result = self.portfolio_manager.close_position(
-                        position_id=position.position_id,
-                        exit_price=current_price,
-                        reason="sync_missing_mt5",
-                    )
-                    if trade_result:
-                        closed_count += 1
-                        logger.info(f"  ✅ Removed position {position.position_id}")
-
-                logger.info(
-                    f"\n[SYNC] Cleanup complete: {closed_count}/{portfolio_count} positions removed\n"
-                )
-                return closed_count == portfolio_count
-
-            # ================================================================
-            # SCENARIO 3: Both have positions → VALIDATE
-            # ================================================================
-            if mt5_count > 0 and portfolio_count > 0:
-                logger.info(
-                    f"[SYNC] Validating {portfolio_count} portfolio vs {mt5_count} MT5 positions..."
-                )
-
-                mt5_by_ticket = {pos.ticket: pos for pos in mt5_positions}
-                positions_to_remove = []
-
-                for pos in portfolio_positions:
-                    if pos.mt5_ticket and pos.mt5_ticket not in mt5_by_ticket:
-                        logger.warning(
-                            f"[SYNC] ⚠️ Portfolio position {pos.position_id} (ticket={pos.mt5_ticket}) "
-                            f"not found in MT5 → Marking for removal"
-                        )
-                        positions_to_remove.append(pos)
-
-                if positions_to_remove:
-                    current_price = self.get_current_price(symbol)
-                    for pos in positions_to_remove:
-                        self.portfolio_manager.close_position(
-                            position_id=pos.position_id,
-                            exit_price=current_price,
-                            reason="sync_mt5_ticket_missing",
-                        )
-                        logger.info(f"  ✅ Removed orphaned position {pos.position_id}")
-
-                remaining_portfolio_count = (
-                    self.portfolio_manager.get_asset_position_count(asset)
-                )
-
-                if remaining_portfolio_count == mt5_count:
-                    logger.info(
-                        f"\n{'='*80}\n"
-                        f"[SYNC] ✅ {asset} positions in sync ({remaining_portfolio_count} positions)\n"
-                        f"{'='*80}"
-                    )
-                    self._verify_vtm_status_after_sync(asset)
-                    return True
-                else:
-                    logger.warning(
-                        f"[SYNC] ⚠️ Count mismatch after sync: Portfolio={remaining_portfolio_count}, MT5={mt5_count}"
-                    )
-                    return False
-
-            # ================================================================
-            # SCENARIO 4: Both empty
-            # ================================================================
-            logger.info(f"[SYNC] ✅ No positions for {asset} in MT5 or portfolio")
-            return True
-
+            self.portfolio_manager.close_position(
+                position_id=pos.position_id,
+                exit_price=exit_price,
+                reason=reason,
+                already_closed_on_exchange=True,
+                preloaded_broker_data=broker_data,
+            )
         except Exception as e:
-            logger.error(f"[SYNC] ❌ Error syncing MT5 positions: {e}", exc_info=True)
-            return False
+            logger.error(f"[RECONCILE] _handle_mt5_exchange_close failed for {pos.position_id}: {e}")
 
     def _verify_vtm_status_after_sync(self, asset: str):
         """Verify VTM is working after position sync"""
