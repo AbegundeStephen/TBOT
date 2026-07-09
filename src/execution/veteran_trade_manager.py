@@ -330,6 +330,7 @@ class VeteranTradeManager:
         lot_precision_override: Optional[int] = None,  # ✨ NEW: Exness compatibility
         structure_levels_ref: Optional[list] = None,   # Item 5: level traded against
         entry_retest_type: Optional[str] = None,       # Item 5: RetestEngine tier at entry
+        telegram=None,  # Brain rebuild Part 0.3
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -355,6 +356,7 @@ class VeteranTradeManager:
         # this just makes sure they exist so later work isn't blocked on it.
         self.structure_levels_ref = structure_levels_ref
         self.entry_retest_type = entry_retest_type
+        self.telegram = telegram  # Brain rebuild Part 0.3 — used by 3.5's alert layer
         self.atr_at_entry = self._calculate_atr()
 
         # Determine asset type for leverage ceiling
@@ -468,6 +470,10 @@ class VeteranTradeManager:
         _cs = (signal_details or {}).get("composite_state", {})
         self.livermore_state_4h         = _cs.get("livermore_state_4h")
         self.livermore_state_age_4h     = int(_cs.get("livermore_state_age_4h",  0))
+        # Brain Rebuild Part 3.3 (D4): 1H companion to the 4H state above —
+        # used by _apply_livermore_transition's thesis-confirmation check.
+        self.livermore_state_1h         = _cs.get("livermore_state_1h")
+        self.livermore_state_age_1h     = int(_cs.get("livermore_state_age_1h", 0))
         self.livermore_anchor_main_up   = _cs.get("livermore_anchor_main_up_max")
         self.livermore_anchor_main_down = _cs.get("livermore_anchor_main_down_min")
         self.livermore_anchor_nat_high  = _cs.get("livermore_anchor_natural_high")
@@ -620,6 +626,29 @@ class VeteranTradeManager:
                 pct_str = ""
             logger.info(f"  {i}. {target_str} {pct_str} → Exit {size_str}")
         logger.info("=" * 80)
+
+    def __getstate__(self):
+        """
+        Custom method for pickling. Mirrors Position.__getstate__: self.telegram
+        (added Brain Rebuild Part 0.3) is a live reference to the running
+        TradingTelegramBot, which back-references TradingBot itself — pickling
+        it walks the entire live object graph (threads, sockets, Supabase
+        client internals, ...) on every state save, none of which survives a
+        restart anyway. Every VTM construction path (fresh open, state
+        reload) already passes telegram=self.telegram_bot explicitly, so
+        this is safe to drop and re-attach rather than pickle.
+        """
+        state = self.__dict__.copy()
+        if "telegram" in state:
+            del state["telegram"]
+        return state
+
+    def __setstate__(self, state):
+        """Custom method for unpickling. Re-initializes telegram as None —
+        re-attached by whichever VTM-construction path picks this position
+        back up (state reload passes a live telegram_bot explicitly)."""
+        self.__dict__.update(state)
+        self.telegram = None
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
     def _lot_geom(self):
@@ -1305,6 +1334,7 @@ class VeteranTradeManager:
         current_price: float,
         df_4h: Optional[pd.DataFrame] = None,
         composite_state=None,
+        judge_scores: Optional[Dict] = None,
     ) -> Optional[Dict]:
         try:
             atr = self._calculate_atr()
@@ -1315,6 +1345,21 @@ class VeteranTradeManager:
             # If composite_state is None, all structural checks in check_exit
             # gracefully skip and ATR behaviour is preserved.
             self._live_cs = composite_state
+            # Brain Rebuild Part 3.4: same idea for judge scores — feeds the
+            # human-alert layer's (Part 3.5) structure-break-against-position
+            # check. {"buy": {...}, "sell": {...}} or None.
+            self._live_judge_scores = judge_scores
+
+            # Brain Rebuild Part 3.5: human-alert layer. Fires once per
+            # position (not every tick) the moment 3+ independent signals
+            # turn against it — same one-shot pattern as
+            # _structural_warning_fired below, so this doesn't spam Telegram
+            # once the condition is met.
+            if not getattr(self, "_human_alert_fired", False):
+                _alert_msg = self._check_alert_conditions()
+                if _alert_msg:
+                    self._human_alert_fired = True
+                    self._safe_send_alert(_alert_msg)
 
 
             # ── PHASE 4: Live Livermore State Refresh ──────────────────────────
@@ -1326,6 +1371,16 @@ class VeteranTradeManager:
             _phase_cfg = self.risk_config.get("phase_config", {})
             _per_tick_enabled = _phase_cfg.get("per_tick_livermore_enabled", False)
             if composite_state is not None and _per_tick_enabled:
+                # Brain Rebuild Part 3.3 (D4): keep the 1H companion current
+                # every cycle — it changes far more often than 4H, so it isn't
+                # gated behind the 4H change-detection below.
+                _new_lv1h = getattr(composite_state, "livermore_state_1h", None)
+                if _new_lv1h:
+                    self.livermore_state_1h = _new_lv1h
+                    self.livermore_state_age_1h = int(
+                        getattr(composite_state, "livermore_state_age_1h", 0) or 0
+                    )
+
                 _new_lv4h = getattr(composite_state, "livermore_state_4h", None)
                 _new_age   = int(getattr(composite_state, "livermore_state_age_4h", 0) or 0)
                 if _new_lv4h and _new_lv4h != self.livermore_state_4h:
@@ -1650,16 +1705,89 @@ class VeteranTradeManager:
 
         # ── MAIN → opposite MAIN: direct structural reversal ─────────────
         elif prev_state in _MAIN and new_state in _MAIN and prev_state != new_state:
-            # e.g. MAIN_DOWN → MAIN_UP while holding SHORT — thesis invalidated
-            self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
-            if not getattr(self, "_lv_breakeven_locked", False):
-                self.current_stop_loss = self.entry_price
-                self._lv_breakeven_locked = True
-            logger.warning(
-                "[VTM LIVE LSM] %s: %s→%s (DIRECT REVERSAL) — SL at breakeven $%.2f, trail %.2f× ATR",
-                self.asset, prev_state, new_state,
-                self.entry_price, self.runner_trail_atr_multiplier,
+            # Brain Rebuild Part 3.3 (D4): the unconditional "thesis
+            # invalidated" treatment below assumed the position was aligned
+            # with prev_state, so any flip to the opposite MAIN was adverse.
+            # That's not true for a counter-trend position (e.g. held LONG
+            # while prev_state was MAIN_DOWN, betting on a reversal) — for
+            # that position, flipping to MAIN_UP CONFIRMS the thesis rather
+            # than invalidating it. thesis_confirmed checks the new 4H state
+            # against position direction; lv_1h_confirmed requires the 1H
+            # read to agree too before easing off, matching this codebase's
+            # established "don't trust a single timeframe alone" pattern
+            # (e.g. the Trend judge's 1H/4H agreement design).
+            thesis_confirmed = (
+                (is_long and new_state == "MAIN_UP")
+                or (not is_long and new_state == "MAIN_DOWN")
             )
+            lv_1h_confirmed = (
+                (is_long and self.livermore_state_1h == "MAIN_UP")
+                or (not is_long and self.livermore_state_1h == "MAIN_DOWN")
+            )
+            if thesis_confirmed and lv_1h_confirmed:
+                self.runner_trail_atr_multiplier = _config_trail * _main_trail
+                self._lv_breakeven_locked = False
+                logger.info(
+                    "[VTM LIVE LSM] %s: %s→%s (thesis confirmed, 1H agrees) — "
+                    "trail restored to %.2f× ATR",
+                    self.asset, prev_state, new_state,
+                    self.runner_trail_atr_multiplier,
+                )
+            else:
+                # e.g. MAIN_DOWN → MAIN_UP while holding SHORT — thesis invalidated
+                self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
+                if not getattr(self, "_lv_breakeven_locked", False):
+                    self.current_stop_loss = self.entry_price
+                    self._lv_breakeven_locked = True
+                logger.warning(
+                    "[VTM LIVE LSM] %s: %s→%s (DIRECT REVERSAL) — SL at breakeven $%.2f, trail %.2f× ATR",
+                    self.asset, prev_state, new_state,
+                    self.entry_price, self.runner_trail_atr_multiplier,
+                )
+
+    def _check_alert_conditions(self) -> Optional[str]:
+        """
+        Brain Rebuild Part 3.5: human-alert layer. Independent of any
+        auto-management action VTM takes — this only decides whether a
+        human should be told that multiple signals have turned against an
+        open position. Returns the alert message, or None if fewer than 3
+        of the tracked signals have fired.
+        """
+        if self._live_cs is None:
+            return None
+        _cs = self._live_cs
+        _against = "sell" if self.side == "long" else "buy"
+        signals_fired = []
+        if getattr(_cs, "choch_detected", False):
+            signals_fired.append("CHoCH against position")
+        if (
+            getattr(_cs, "bos_detected", False)
+            and self._live_judge_scores
+            and self._live_judge_scores.get(_against, {}).get("structure", 0) > 0
+        ):
+            signals_fired.append("structure break against position")
+        if getattr(_cs, "conviction_dying", False):
+            signals_fired.append("conviction fading")
+        if getattr(_cs, "bearish_divergence" if self.side == "long" else "bullish_divergence", False):
+            signals_fired.append("momentum divergence against position")
+        if len(signals_fired) >= 3:
+            return (
+                f"{self.asset} {self.side}: {len(signals_fired)} signals against — "
+                + ", ".join(signals_fired)
+            )
+        return None
+
+    def _safe_send_alert(self, message: str) -> None:
+        """Brain Rebuild Part 3.5. Best-effort — never raises into the tick loop."""
+        if not self.telegram or not getattr(self.telegram, "is_running", False):
+            return
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.telegram.send_notification(message))
+        except Exception as e:
+            logger.error(f"[VTM ALERT] Failed to send: {e}")
 
     def _calculate_adx(self) -> float:
         try:

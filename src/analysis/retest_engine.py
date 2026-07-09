@@ -5,6 +5,7 @@ Returns a RetestResult with a score-modifier delta and entry_type for VTM.
 
 Priority cascade (evaluated top-to-bottom; first match wins):
   1. CLEAN        (−0.20)  — price at a defended level; textbook pullback entry
+  1b. CHOCH_HOLD  (−0.30)  — CLEAN, plus a CHoCH just fired at that level
   2. BREAKOUT     (+0.10 / +0.20 / +0.40) — fresh Livermore state (age ≤ 5 bars)
   2B. CONTINUATION (+0.10 / +0.20) — Phase 4 ext, gated by phase_config.continuation_targets_enabled
                   (default OFF). Tight 1H consolidation breaking out inside an
@@ -38,6 +39,7 @@ ET_REJECT          = "REJECT"
 
 # ── retest_type string constants ─────────────────────────────────────────
 RT_CLEAN           = "CLEAN"
+RT_CHOCH_HOLD      = "CHOCH_HOLD"
 RT_BREAKOUT        = "BREAKOUT"
 RT_CONTINUATION    = "CONTINUATION"
 RT_WICK            = "WICK"
@@ -189,13 +191,34 @@ class RetestEngine:
         level_3   = getattr(state, "nearby_4h_level_3", None)
         asset_cfg = self._assets.get(symbol, self._assets.get("DEFAULT", {}))
 
-        # ── 1. CLEAN ───────────────────────────────────────────────
+        # ── 1. CLEAN / 1b. CHOCH_HOLD ────────────────────────────────
         # Price within clean_proximity_atr_mult × ATR of the nearby 4H level,
         # AND the level has been actively defended (level_defended = True).
         if level is not None:
             dist_atr = abs(close - level) / atr
             level_defended = getattr(state, "level_defended", False)
             if dist_atr <= self._clean_atr_mult and level_defended:
+                # Part 1.10 (Brain Rebuild) — Tier 2.1: a defended clean level
+                # where a CHoCH just fired is a stronger tell than a plain
+                # clean retest (structure just flipped, not merely holding),
+                # so it earns a slightly better modifier. Checked first since
+                # its condition is a strict superset of plain CLEAN's — placed
+                # after would make it unreachable (CLEAN always matches first).
+                choch_now = getattr(state, "choch_detected", False)
+                if choch_now:
+                    logger.debug("retest_engine: CHOCH_HOLD @ %.5f (dist=%.2f ATR)", level, dist_atr)
+                    _rh, _rl = self._maybe_swing_range(state, df)
+                    return RetestResult(
+                        retest_type=RT_CHOCH_HOLD,
+                        modifier=self._mod_clean - 0.1,
+                        entry_type=ET_RANGE_BOUNDARY,
+                        direction=direction,
+                        level=level,
+                        range_high=_rh,
+                        range_low=_rl,
+                        level_2=level_2,
+                        level_3=level_3,
+                    )
                 logger.debug("retest_engine: CLEAN @ %.5f (dist=%.2f ATR)", level, dist_atr)
                 _rh, _rl = self._maybe_swing_range(state, df)
                 # A level tested multiple times is more proven than a fresh one —
@@ -217,33 +240,44 @@ class RetestEngine:
                 )
 
         # ── 2. BREAKOUT ──────────────────────────────────────────────
-        # Livermore 1H state flipped within the last breakout_age_max_bars bars.
-        # Price must still be within breakout_proximity_atr_mult × ATR of the
-        # Livermore anchor that was just broken.
+        # Livermore 1H state flipped; price still within
+        # breakout_proximity_atr_mult × ATR of the anchor that was broken.
+        #
+        # Brain Rebuild Part 3.1 (applied verbatim per explicit instruction,
+        # 2026-07-09): age_1h no longer gates whether BREAKOUT fires at all —
+        # it only adjusts the modifier (+0.15 when stale, age_1h >
+        # breakout_age_max). Doc's own open flag ("for Stephen"): this makes
+        # 2B. CONTINUATION's stale-case largely unreachable, since BREAKOUT
+        # (checked first) now also handles stale ages, just at a higher bar.
+        # Left unresolved per the doc — low risk today since CONTINUATION is
+        # gated behind phase_config.continuation_targets_enabled, off in the
+        # live config.
         age_1h = int(getattr(state, "livermore_state_age_1h", 999))
-        if age_1h <= self._breakout_age_max:
-            bo_level = self._get_breakout_level(state, direction)
-            if bo_level is not None:
-                dist_atr = abs(close - bo_level) / atr
-                prox_mult = float(asset_cfg.get(
-                    "breakout_proximity_atr_mult",
-                    2.0 if self._is_btc(symbol) else 1.25,
-                ))
-                if dist_atr <= prox_mult:
-                    mod = self._breakout_modifier(symbol, state, direction)
-                    logger.debug(
-                        "retest_engine: BREAKOUT @ %.5f (dist=%.2f ATR, mod=%.2f)",
-                        bo_level, dist_atr, mod,
-                    )
-                    return RetestResult(
-                        retest_type=RT_BREAKOUT,
-                        modifier=mod,
-                        entry_type=ET_TREND_FOLLOWING,
-                        direction=direction,
-                        level=bo_level,
-                        level_2=level_2,
-                        level_3=level_3,
-                    )
+        bo_level = self._get_breakout_level(state, direction)
+        if bo_level is not None:
+            dist_atr = abs(close - bo_level) / atr
+            prox_mult = float(asset_cfg.get(
+                "breakout_proximity_atr_mult",
+                2.0 if self._is_btc(symbol) else 1.25,
+            ))
+            if dist_atr <= prox_mult:
+                mod = self._breakout_modifier(symbol, state, direction)
+                _fresh = age_1h <= self._breakout_age_max
+                if not _fresh:
+                    mod += 0.15
+                logger.debug(
+                    "retest_engine: BREAKOUT @ %.5f (dist=%.2f ATR, mod=%.2f, fresh=%s)",
+                    bo_level, dist_atr, mod, _fresh,
+                )
+                return RetestResult(
+                    retest_type=RT_BREAKOUT,
+                    modifier=mod,
+                    entry_type=ET_TREND_FOLLOWING,
+                    direction=direction,
+                    level=bo_level,
+                    level_2=level_2,
+                    level_3=level_3,
+                )
 
         # ── 2B. CONTINUATION (Scenario B) ────────────────────────
         # Tight 1H consolidation breaking out INSIDE an already-established 4H

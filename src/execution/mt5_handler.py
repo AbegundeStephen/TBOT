@@ -193,10 +193,11 @@ class MT5ExecutionHandler:
     MT5 Execution Handler with Multi-Asset Support & Hybrid Position Sizing
     """
 
-    def __init__(self, config: Dict, portfolio_manager, data_manager=None):
+    def __init__(self, config: Dict, portfolio_manager, data_manager=None, aggregators=None):
         self.config = config
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
+        self.aggregators = aggregators  # Brain rebuild Part 0.4
         self.sizer = HybridPositionSizer(config, portfolio_manager)
 
         self.risk_config = config.get("risk_management", {})
@@ -2301,9 +2302,17 @@ class MT5ExecutionHandler:
                     # VTM-SL/TP: snapshot values before update to detect movement
                     _sl_before = position.trade_manager.current_stop_loss
                     _tp_before = position.trade_manager.current_take_profit
-                    
+
+                    # Brain Rebuild Part 3.4: read cached judge scores (refreshed
+                    # each main cycle, ~5 min) rather than re-invoking
+                    # get_aggregated_signal here — that would append extra
+                    # sub-minute entries to score_history and corrupt Part 1.3/1.8's
+                    # cycle-counting, which assume one entry per main cycle.
+                    _judge_scores = getattr(self.trading_bot, "_latest_judge_scores", {}).get(asset_name)
+
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h, composite_state=composite_state
+                        current_price, df_4h=df_4h, composite_state=composite_state,
+                        judge_scores=_judge_scores,
                     )
                     
                     _sl_after = position.trade_manager.current_stop_loss

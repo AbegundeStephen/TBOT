@@ -217,6 +217,7 @@ class TradingTelegramBot:
         admin_ids: List[int],
         trading_bot,
         signal_monitor: SignalMonitoringIntegration,
+        outcome_pipeline=None,  # Brain rebuild Part 0.2
     ):
         self.instance_id = uuid.uuid4()
         logger.info(f"Creating new TradingTelegramBot instance with ID: {self.instance_id}")
@@ -225,6 +226,7 @@ class TradingTelegramBot:
         self.trading_bot = trading_bot
         self.application = None
         self.is_running = False
+        self.outcome_pipeline = outcome_pipeline  # Brain rebuild Part 0.2
 
         # Signal monitoring (keep existing)
         self.signal_monitor = signal_monitor
@@ -1000,6 +1002,21 @@ class TradingTelegramBot:
                 await self._send_overrides_message(query)
             elif callback_data == "preset_history":
                 await self._send_preset_history_message(query)
+            elif callback_data.startswith("rlhf_label:"):
+                # Part 1.9 (Brain Rebuild): RLHF-light label button tap.
+                _, label, trade_id_str = callback_data.split(":", 2)
+                _attached = False
+                if getattr(self, "outcome_pipeline", None) is not None:
+                    try:
+                        _attached = self.outcome_pipeline.attach_human_label(
+                            int(trade_id_str), label
+                        )
+                    except Exception as e:
+                        logger.debug(f"[RLHF] attach_human_label failed: {e}")
+                _readable = label.replace("_", " ")
+                await query.edit_message_text(
+                    f"Logged: {_readable}" if _attached else f"Could not log: {_readable} (trade not found)"
+                )
             else:
                 await query.edit_message_text(f"⚠️ Unknown command: {callback_data}")
         except Exception as e:
@@ -2623,7 +2640,14 @@ class TradingTelegramBot:
                 self.trading_bot, "_current_regime_data"
             ) else None
 
-            msg = engine.peek(asset, mtf_regime)
+            # Best-effort — the cache may not have a fresh entry for this
+            # asset yet; peek() handles composite_state=None gracefully
+            # (just skips the spread-ratio display line).
+            composite_state = self.trading_bot._latest_composite_state.get(asset) if hasattr(
+                self.trading_bot, "_latest_composite_state"
+            ) else None
+
+            msg = engine.peek(asset, mtf_regime, composite_state=composite_state)
             await update.message.reply_text(msg, parse_mode="HTML")
 
         except Exception as e:
@@ -3482,6 +3506,40 @@ class TradingTelegramBot:
         msg += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         await self.send_notification(msg)
+
+    async def send_rlhf_label_prompt(self, asset: str, pnl_pct: float, trade_id):
+        """
+        Part 1.9 (Brain Rebuild): RLHF-light. Ask for a quick qualitative
+        label on a just-closed real trade via inline buttons. Tapping one
+        routes through button_callback's "rlhf_label:" branch, which calls
+        outcome_pipeline.attach_human_label(trade_id, label).
+        """
+        if not self._is_ready or not self.application:
+            logger.debug("[RLHF] Not ready, skipping label prompt")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton("Clean, good result", callback_data=f"rlhf_label:clean_good:{trade_id}"),
+                InlineKeyboardButton("Lucky, weak process", callback_data=f"rlhf_label:lucky_weak:{trade_id}"),
+            ],
+            [
+                InlineKeyboardButton("Good process, bad luck", callback_data=f"rlhf_label:good_bad_luck:{trade_id}"),
+                InlineKeyboardButton("Process was wrong", callback_data=f"rlhf_label:wrong:{trade_id}"),
+            ],
+        ]
+        text = f"{asset} closed {pnl_pct:+.1f}%. Was this:"
+        for admin_id in self.admin_ids:
+            try:
+                await asyncio.wait_for(
+                    self.application.bot.send_message(
+                        chat_id=admin_id,
+                        text=text,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    ),
+                    timeout=15.0,
+                )
+            except Exception as e:
+                logger.debug(f"[RLHF] label prompt send failed for {admin_id}: {e}")
 
     async def notify_profit_milestone(
         self,

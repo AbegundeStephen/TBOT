@@ -81,6 +81,10 @@ class FunnelLogger:
             "silent zone": "blocked_silent_zone",
             "silent_zone": "blocked_silent_zone",
             "hard_veto": "blocked_hard_veto",
+            # Part 1.7 (Brain Rebuild): prep for Part 4's "wait for clarity"
+            # handling, which will start setting this reasoning string when
+            # both sides of a council contest clear their thresholds.
+            "ambiguous_both_sides_cleared": "blocked_ambiguous_contest",
             "warmup": "blocked_warmup",
             "blocked_trading_limits": "blocked_trading_limits",
             "blocked_cooldown": "blocked_cooldown",

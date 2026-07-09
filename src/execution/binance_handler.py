@@ -340,13 +340,15 @@ class BinanceExecutionHandler:
     """
 
     def __init__(
-        self, config: Dict, client: Client, portfolio_manager, data_manager=None
+        self, config: Dict, client: Client, portfolio_manager, data_manager=None,
+        aggregators=None,  # Brain rebuild Part 0.4
     ):
         self.config = config
         self.client = client
         self.client.session.headers.update(CLOUDFRONT_HEADERS)
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
+        self.aggregators = aggregators  # Brain rebuild Part 0.4
 
         self.asset_config = config["assets"]["BTC"]
         self.risk_config = config["risk_management"]
@@ -363,6 +365,9 @@ class BinanceExecutionHandler:
         self.execution_lock = {}  # ✨ NEW: Prevent duplicate trades
         self.last_trade_time = {}  # ✨ NEW: Rapid-fire cooldown
         self.trade_timestamps_hourly = []  # ✨ NEW: Hourly trade limit
+
+        # Part 1.8 (Brain Rebuild): liveness companion for HealthMonitor.check_connections
+        self._last_successful_call = None
 
         # VTM SL/TP exchange-push tracking (mirrors MT5 handler pattern)
         # Keyed by position_id so multiple simultaneous positions don't collide.
@@ -514,12 +519,14 @@ class BinanceExecutionHandler:
                         public_client = BClient("", "", requests_params={'timeout': 5})
                         public_client.API_URL = "https://fapi.binance.com"
                         ticker = public_client.futures_symbol_ticker(symbol=symbol)
+                        self._last_successful_call = time.time()
                         return float(ticker["price"])
                     except Exception as e:
                         logger.debug(f"[PRICE] Could not fetch live futures ticker for {symbol}: {e}")
-                
+
                 # Fallback to the primary client (might be testnet or live keys)
                 ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                self._last_successful_call = time.time()
                 return float(ticker["price"])
             else:
                 logger.warning("[PRICE] Live futures price fetch skipped: Futures handler not available.")
@@ -528,6 +535,12 @@ class BinanceExecutionHandler:
             # Catch all exceptions (APIError, JSONDecodeError, etc.) and return None
             # The error is already logged by the calling function, so we suppress it here.
             return None
+
+    def is_stale(self, max_age_sec: int = 120) -> bool:
+        """Part 1.8 (Brain Rebuild): used by HealthMonitor.check_connections."""
+        if self._last_successful_call is None:
+            return True
+        return (time.time() - self._last_successful_call) > max_age_sec
 
     @handle_errors(
         component="binance_handler",
@@ -1729,8 +1742,14 @@ class BinanceExecutionHandler:
                     _sl_before = position.trade_manager.current_stop_loss
                     _tp_before = position.trade_manager.current_take_profit
 
+                    # Brain Rebuild Part 3.4: read cached judge scores (see
+                    # mt5_handler.py's mirror of this for the full rationale —
+                    # avoids polluting score_history with sub-minute entries).
+                    _judge_scores = getattr(self.trading_bot, "_latest_judge_scores", {}).get(asset_name)
+
                     exit_signal = position.trade_manager.update_with_current_price(
-                        current_price, df_4h=df_4h, composite_state=composite_state
+                        current_price, df_4h=df_4h, composite_state=composite_state,
+                        judge_scores=_judge_scores,
                     )
 
                     _sl_after = position.trade_manager.current_stop_loss
