@@ -38,6 +38,16 @@ class CompositeState:
     # ══════════════════════════════════════
     choch_detected: bool = False
     bos_detected: bool = False
+    # Directional siblings (added for VTM's human-alert layer, Part 3.5 follow-up):
+    # choch_detected/bos_detected are each set from two independent, OPPOSITE-
+    # meaning branches (lower-high vs higher-low for CHoCH; higher-high vs
+    # lower-low for BOS) with no way to tell which one fired. These record
+    # which direction actually triggered, additive — nothing that reads the
+    # original two booleans needs to change.
+    choch_bearish: bool = False  # lower high — bearish reversal warning
+    choch_bullish: bool = False  # higher low — bullish reversal warning
+    bos_bullish: bool = False    # higher high — uptrend continuing
+    bos_bearish: bool = False    # lower low — downtrend continuing
     nearby_4h_level:   Optional[float] = None
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level

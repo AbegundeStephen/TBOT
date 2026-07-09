@@ -1524,14 +1524,18 @@ class PerformanceWeightedAggregator:
             if len(swing_highs) >= 2:
                 if swing_highs[0] > swing_highs[1]:
                     state.bos_detected = True    # Higher high — trend continuing
+                    state.bos_bullish = True
                 elif swing_highs[0] < swing_highs[1]:
                     state.choch_detected = True  # Lower high — reversal warning
+                    state.choch_bearish = True
 
             if len(swing_lows) >= 2:
                 if swing_lows[0] < swing_lows[1]:
                     state.bos_detected = True    # Lower low — downtrend continuing
+                    state.bos_bearish = True
                 elif swing_lows[0] > swing_lows[1]:
                     state.choch_detected = True  # Higher low — reversal warning
+                    state.choch_bullish = True
 
         except Exception as e:
             logger.error(

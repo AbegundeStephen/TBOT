@@ -1747,29 +1747,48 @@ class VeteranTradeManager:
 
     def _check_alert_conditions(self) -> Optional[str]:
         """
-        Brain Rebuild Part 3.5: human-alert layer. Independent of any
-        auto-management action VTM takes — this only decides whether a
-        human should be told that multiple signals have turned against an
-        open position. Returns the alert message, or None if fewer than 3
-        of the tracked signals have fired.
+        Brain Rebuild Part 3.5 (direction-aware follow-up): human-alert
+        layer. Independent of any auto-management action VTM takes — this
+        only decides whether a human should be told that multiple signals
+        have turned against an open position. Returns the alert message,
+        or None if fewer than 3 of the tracked signals have fired.
+
+        CHoCH/BOS are each set from two independent, opposite-meaning swing
+        patterns at the source (signal_aggregator.py's _update_structure)
+        with no way to tell which one fired from the plain boolean alone —
+        choch_bearish/choch_bullish and bos_bearish/bos_bullish disambiguate
+        that. conviction_dying is direction-agnostic too (just "candle
+        bodies shrinking", regardless of which way price is moving) — it
+        only means something for THIS position if the trend losing
+        conviction is the one that's been carrying it favorably (the
+        tailwind stalling), not the market actively turning, so it's
+        cross-checked against the Livermore 1H read.
         """
         if self._live_cs is None:
             return None
         _cs = self._live_cs
-        _against = "sell" if self.side == "long" else "buy"
+        is_long = self.side == "long"
         signals_fired = []
-        if getattr(_cs, "choch_detected", False):
+
+        if getattr(_cs, "choch_bearish" if is_long else "choch_bullish", False):
             signals_fired.append("CHoCH against position")
-        if (
-            getattr(_cs, "bos_detected", False)
-            and self._live_judge_scores
-            and self._live_judge_scores.get(_against, {}).get("structure", 0) > 0
-        ):
+
+        if getattr(_cs, "bos_bearish" if is_long else "bos_bullish", False):
             signals_fired.append("structure break against position")
-        if getattr(_cs, "conviction_dying", False):
+
+        _lsm_1h = getattr(_cs, "livermore_state_1h", None)
+        _bull_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+        _bear_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+        _favorable_trend_dying = getattr(_cs, "conviction_dying", False) and (
+            (is_long and _lsm_1h in _bull_states)
+            or (not is_long and _lsm_1h in _bear_states)
+        )
+        if _favorable_trend_dying:
             signals_fired.append("conviction fading")
-        if getattr(_cs, "bearish_divergence" if self.side == "long" else "bullish_divergence", False):
+
+        if getattr(_cs, "bearish_divergence" if is_long else "bullish_divergence", False):
             signals_fired.append("momentum divergence against position")
+
         if len(signals_fired) >= 3:
             return (
                 f"{self.asset} {self.side}: {len(signals_fired)} signals against — "
