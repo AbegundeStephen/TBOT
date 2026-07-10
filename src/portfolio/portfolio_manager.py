@@ -176,6 +176,8 @@ class Position:
         is_futures: bool = False,
         min_lot: Optional[float] = None,  # ✨ NEW: Exness compatibility
         lot_precision: Optional[int] = None,  # ✨ NEW: Exness compatibility
+        telegram=None,  # Brain rebuild Part 0.3 fix: Position has no telegram_bot
+        # of its own (unlike PortfolioManager) — must be passed in explicitly.
     ):
         self.asset = asset
         self.symbol = symbol
@@ -193,6 +195,7 @@ class Position:
         self.min_lot = min_lot
         self.lot_precision = lot_precision
         self.disable_partials = disable_partials
+        self.telegram = telegram  # Brain rebuild Part 0.3 fix
 
         self.stop_loss = None
         self.take_profit = None
@@ -300,7 +303,9 @@ class Position:
                     # to None today, starts flowing once a future tier does.
                     structure_levels_ref=signal_details.get("structure_levels_ref"),
                     entry_retest_type=signal_details.get("retest_type"),
-                    telegram=self.telegram_bot,  # Brain rebuild Part 0.3
+                    telegram=self.telegram,  # Brain rebuild Part 0.3 fix: was self.telegram_bot,
+                    # which doesn't exist on Position (only on PortfolioManager) — crashed
+                    # VTM init on every fresh position open, leaving it stop-loss-less.
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -690,6 +695,14 @@ class Position:
         # Remove the unpickleable db_manager attribute
         if "db_manager" in state:
             del state["db_manager"]
+        # self.telegram (Brain rebuild Part 0.3 fix) is a live reference to
+        # the running TradingTelegramBot, which back-references TradingBot
+        # itself — same reason VeteranTradeManager.__getstate__ excludes its
+        # own telegram attribute. It only ever existed here to be passed
+        # through to the VTM constructor at position-open time; nothing
+        # reads position.telegram directly afterward, so it's safe to drop.
+        if "telegram" in state:
+            del state["telegram"]
         return state
 
     def __setstate__(self, state):
@@ -701,6 +714,7 @@ class Position:
         # Re-initialize the db_manager attribute after unpickling.
         # It will need to be re-assigned by the PortfolioManager after loading.
         self.db_manager = None
+        self.telegram = None
         # Always reset closing flags on reload to prevent stuck positions
         self.closing = False
         self.last_close_attempt = None
@@ -2695,6 +2709,7 @@ class PortfolioManager:
             disable_partials=disable_partials,
             min_lot=min_lot,
             lot_precision=lot_precision,
+            telegram=self.telegram_bot,  # Brain rebuild Part 0.3 fix
         )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
@@ -3603,7 +3618,8 @@ class PortfolioManager:
             pnl_pct = position.get_pnl_pct(exit_price)
             logger.debug(
                 f"[CLOSE] Broker P&L unavailable for {position.asset}; "
-                f"falling back to local calc using exit ${exit_price:,.5f}"
+                f"falling back to local calc using exit "
+                f"{f'${exit_price:,.5f}' if exit_price is not None else 'N/A'}"
             )
 
         self.realized_pnl_today += pnl

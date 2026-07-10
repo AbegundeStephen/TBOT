@@ -1298,7 +1298,15 @@ class VeteranTradeManager:
 
             min_lot = self.min_lot_override if self.min_lot_override is not None else MIN_LOT.get(self.asset.upper(), 0.01)
 
-            if final_size < min_lot:
+            # Compare the RAW (unrounded) size against min_lot, not the display-
+            # rounded final_size. When re-initializing VTM for an existing
+            # position, min_lot_override is set to that position's own exact
+            # quantity (e.g. 999.9627491152916) — rounding self.position_size
+            # to the asset's lot precision first (e.g. 999.96) made a position
+            # fail this check against its own unrounded quantity every single
+            # retry, permanently blocking VTM re-init. Small epsilon absorbs
+            # float-representation noise, not a real shortfall.
+            if self.position_size < min_lot - 1e-9:
                 logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot {min_lot} for {self.asset}.")
                 # We raise an exception here to signal the manager to abort trade creation
                 raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
