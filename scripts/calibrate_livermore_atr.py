@@ -46,6 +46,7 @@ ASSET_FILES: Dict[str, str] = {
     "GBPAUD": "GBPAUDm_4h.csv",
     "GBPUSD": "GBPUSDm_4h.csv",
     "USOIL":  "USOILm_4h.csv",
+    "USDJPY": "USDJPYm_4h.csv",
 }
 
 DATA_DIR = ROOT / "data" / "raw"

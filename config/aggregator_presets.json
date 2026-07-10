@@ -405,6 +405,13 @@
       "atr_period": 14,
       "_calibration": "GBPAUD 4H Feb-Jun2026: 1.20 t/w, main_frac=45%, avg_main_dur=78 bars"
     },
+    "GBPUSD": {
+      "major_mult": 3.5,
+      "minor_mult": 0.5,
+      "dual_confirm": 1,
+      "atr_period": 14,
+      "_calibration": "GBPUSD 4H Mar-Jul2026 (543 bars): 1.55 t/w, main_frac=41%, avg_main_dur=38 bars — grid-searched via scripts/calibrate_livermore_atr.py, previously fell back to BTC's tighter calibration"
+    },
     "USOIL": {
       "major_mult": 3.5,
       "minor_mult": 0.5,
@@ -418,7 +425,8 @@
       "minor_mult": 0.5,
       "dual_confirm": 1,
       "atr_period": 14,
-      "_calibration": "USDJPY 4H Feb-Jun2026: 1.11 t/w, main_frac=31%, avg_main_dur=43 bars"
+      "_calibration": "USDJPY 4H Mar-Jul2026 (543 bars): 1.05 t/w, main_frac=30%, avg_main_dur=41 bars — reconfirmed via scripts/calibrate_livermore_atr.py (same major/minor/dual_confirm as prior Feb-Jun2026 calibration: 1.11 t/w, main_frac=31%)",
+      "_watch": "main_frac consistently sits just below the 40% target floor both calibration runs — USDJPY spends more time in NATURAL/SECONDARY states than most other assets, by design of the real data, not a mis-tune"
     }
   },
   "REQUIRED_SCORE_MODIFIER": {
