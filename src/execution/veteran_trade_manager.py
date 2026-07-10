@@ -331,6 +331,7 @@ class VeteranTradeManager:
         structure_levels_ref: Optional[list] = None,   # Item 5: level traded against
         entry_retest_type: Optional[str] = None,       # Item 5: RetestEngine tier at entry
         telegram=None,  # Brain rebuild Part 0.3
+        council_ref=None,  # Gate Tier 4.1 — reuses _check_lifecycle_phase in the alert layer
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -357,6 +358,7 @@ class VeteranTradeManager:
         self.structure_levels_ref = structure_levels_ref
         self.entry_retest_type = entry_retest_type
         self.telegram = telegram  # Brain rebuild Part 0.3 — used by 3.5's alert layer
+        self.council_ref = council_ref  # Gate Tier 4.1 — used by the alert layer's lifecycle-phase reuse
         self.atr_at_entry = self._calculate_atr()
 
         # Determine asset type for leverage ceiling
@@ -641,6 +643,12 @@ class VeteranTradeManager:
         state = self.__dict__.copy()
         if "telegram" in state:
             del state["telegram"]
+        # Gate Tier 4.1: council_ref is a live aggregator reference — same
+        # pickling hazard as telegram (back-references TradingBot). Every VTM
+        # construction path passes council_ref explicitly, so drop and
+        # re-attach rather than pickle.
+        if "council_ref" in state:
+            del state["council_ref"]
         return state
 
     def __setstate__(self, state):
@@ -649,6 +657,7 @@ class VeteranTradeManager:
         back up (state reload passes a live telegram_bot explicitly)."""
         self.__dict__.update(state)
         self.telegram = None
+        self.council_ref = None
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
     def _lot_geom(self):
@@ -1406,6 +1415,28 @@ class VeteranTradeManager:
                         atr=atr,
                     )
 
+                # Gate Tier 3.2: does the retracement this trade was opened
+                # against still hold, or is it already failing? Independent
+                # of Gate Tier 3.1's entry-side flag — emergency brake here is
+                # its own switch (gate3_d4_extension_enabled, default True) so
+                # a shadow-mode divergence can be attributed to one piece or
+                # the other, not bundled.
+                if _phase_cfg.get("gate3_d4_extension_enabled", True):
+                    _retr_signal = self._check_retracement_holding(current_price, atr)
+                    if _retr_signal == "retracement_failing":
+                        _config_trail = self.risk_config.get("runner_trail_atr_multiplier", 1.0)
+                        _sec_trail = self.risk_config.get("livermore_atr_adjustments", {}).get(
+                            "secondary_trail_mult", 0.7
+                        )
+                        # Tighten, don't lock breakeven outright — genuinely
+                        # different confidence than a confirmed 4H MAIN flip.
+                        self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+                        logger.warning(
+                            "[VTM D4] %s: retracement failing (depth recovered >50%% "
+                            "since entry) — trail tightened to %.2f× ATR",
+                            self.asset, self.runner_trail_atr_multiplier,
+                        )
+
             # ── L4: VTM structural exit awareness ──────────────────────────────
             # CHoCH/BOS detection is finer-grained and faster than a discrete
             # livermore_state_4h transition (which only updates on a 4H close).
@@ -1753,6 +1784,53 @@ class VeteranTradeManager:
                     self.entry_price, self.runner_trail_atr_multiplier,
                 )
 
+    def _estimate_retracement_depth(
+        self, current_price: float, atr: float, lsm_state: str
+    ) -> float:
+        """Gate Tier 3.2 — how far price has already pulled back from its own
+        recent extreme, in ATRs. Post-entry companion to main.py's entry-time
+        helper of the same name (Gate Tier 3.1): that one reads a 1H candle
+        df directly since it runs pre-entry; the tick loop here never
+        receives a 1H df (update_with_current_price only gets current_price
+        and df_4h), so this reads the extremes VTM already tracks every tick
+        (highest/lowest_price_reached since THIS position's entry) instead.
+        Approximation, not exact parity with the entry-time read — good
+        enough to detect "is the retracement still deepening or has it
+        already turned," which is what _check_retracement_holding needs.
+        """
+        try:
+            if atr <= 0:
+                return 1.0  # neutral default, doesn't over- or under-penalize
+            if lsm_state == "NATURAL_RETRACEMENT":
+                _extreme = self.highest_price_reached if self.highest_price_reached is not None else current_price
+                return max(0.0, (_extreme - current_price) / atr)
+            elif lsm_state == "NATURAL_REBOUND":
+                _extreme = self.lowest_price_reached if self.lowest_price_reached is not None else current_price
+                return max(0.0, (current_price - _extreme) / atr)
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def _check_retracement_holding(self, current_price: float, atr: float) -> Optional[str]:
+        """Gate Tier 3.2 — a genuinely new transition type: does the
+        retracement a Gate-Tier-3.1 counter-trend-adjacent trade was opened
+        against continue to hold, or has it already started failing (i.e.
+        the original trend resuming)? D4's existing _apply_livermore_transition
+        watch only covers discrete MAIN-to-opposite-MAIN state flips — a
+        different and structurally larger risk than a retracement quietly
+        failing while livermore_state_1h hasn't changed state label at all.
+        """
+        if self.livermore_state_1h not in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+            return None
+        _current_depth = self._estimate_retracement_depth(current_price, atr, self.livermore_state_1h)
+        _entry_depth = getattr(self, "_retracement_depth_at_entry", None)
+        if _entry_depth is None:
+            self._retracement_depth_at_entry = _current_depth
+            return None
+        if _current_depth < _entry_depth * 0.5:
+            return "retracement_failing"  # already recovered more than half its own depth — original trend likely resuming
+        return None
+
     def _check_alert_conditions(self) -> Optional[str]:
         """
         Brain Rebuild Part 3.5 (direction-aware follow-up): human-alert
@@ -1796,6 +1874,25 @@ class VeteranTradeManager:
 
         if getattr(_cs, "bearish_divergence" if is_long else "bullish_divergence", False):
             signals_fired.append("momentum divergence against position")
+
+        # Gate Tier 4.1: reuse the council's entry-time lifecycle classifier
+        # continuously, not just at entry. _check_lifecycle_phase already does
+        # a richer exhaustion read (ADX decline + overextension + RSI
+        # divergence) than this alert layer builds from raw flags alone.
+        if self.council_ref is not None and hasattr(self.council_ref, "_check_lifecycle_phase"):
+            try:
+                _lc_df = pd.DataFrame({"high": self.high, "low": self.low, "close": self.close})
+                _, _phase_label = self.council_ref._check_lifecycle_phase(
+                    _lc_df,
+                    1 if is_long else -1,
+                    self._calculate_adx(),
+                    0,  # required_score unused for this read-only call
+                    governor_data={"composite_state": _cs},
+                )
+                if _phase_label == "EXHAUSTED":
+                    signals_fired.append("lifecycle_phase: EXHAUSTED (reused entry-time classifier)")
+            except Exception as _lc_err:
+                logger.debug(f"[VTM ALERT] lifecycle_phase reuse failed: {_lc_err}")
 
         if len(signals_fired) >= 3:
             return (

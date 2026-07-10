@@ -1444,6 +1444,30 @@ class PerformanceWeightedAggregator:
             state.median_regime_duration, 1.0
         )
 
+    def _is_genuine_rejection(self, df, level, atr, direction, n_candles=2):
+        """Gate Tier 4.3 — borrowed principle from momentum-alignment (Gate
+        Tier 1.5): a rejection only counts if price actually traveled away
+        from the level, not just closed on the technically-correct side of
+        it. Standalone utility, not yet wired into a call site: the repo has
+        no mechanism literally named "zone ladder" as the redesign plan
+        assumed, and the closest real analog — _update_structure's
+        nearby_4h_level/support/resistance "tests" counters just below —
+        increments a test count exactly WHEN price is close to the level
+        (best_dist < 0.3 ATR), which is structurally the opposite moment
+        from "has price displaced 0.3+ ATR away from the level." Wiring this
+        into that block using the same current price would make the "tests"
+        counter never increment. Left available for whichever call site
+        actually needs a post-retest displacement confirmation.
+        """
+        try:
+            if atr <= 0 or len(df) < n_candles + 1:
+                return True  # insufficient data, don't block on this alone
+            _recent_closes = df["close"].iloc[-(n_candles):].values
+            _displacement = abs(_recent_closes[-1] - level)
+            return _displacement >= (0.3 * atr)
+        except Exception:
+            return True
+
     # ── E.1: ChoCh / BOS Detection ───────────────────────────────────────
 
     def _update_structure(self, state, df):
