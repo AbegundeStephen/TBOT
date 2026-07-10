@@ -4089,16 +4089,221 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 3: MOMENTUM (Bidirectional & Adaptive) — LEGACY reference.
 
-        Brain Rebuild Part 5.1: Part 2.2's proposed rewrite turned out to be
-        a fragmentary excerpt whose substance (ADX-slope delta table,
-        Livermore-aware interpretation, conviction_dying handling) already
-        matched this implementation — no new version was created, so this
-        is a thin delegate rather than a duplicate copy that could drift
-        out of sync with the live judge below.
+        Brain Rebuild Part 2.2 (corrected pass): the delegate this used to be
+        is retired. Base-score ceiling (lsm_age/_fresh_transition) is the one
+        thing Part 2.2 actually changes in the live judge below — this is a
+        real, frozen copy of the pre-fix behavior so Part 5.1/5.3's shadow
+        comparison has something genuine to diverge against, not a mirror of
+        whatever the live judge currently does.
         """
-        return self._judge_momentum_bidirectional(
-            df, is_bull, is_breakout_mode, weight, adx, governor_data=governor_data
-        )
+        try:
+            if weight == 0:
+                return 0.0, 0.0, {"buy": "MOM: Disabled", "sell": "MOM: Disabled"}
+
+            _adx_for_gate = adx
+            try:
+                _df4 = (governor_data or {}).get("df_4h")
+                if _df4 is not None and len(_df4) >= 14:
+                    _adx_4h = float(
+                        ta.ADX(
+                            _df4["high"].values,
+                            _df4["low"].values,
+                            _df4["close"].values,
+                            timeperiod=14,
+                        )[-1]
+                    )
+                    if not np.isnan(_adx_4h):
+                        _adx_for_gate = max(adx, _adx_4h)
+            except Exception as _adx4_err:
+                logger.debug(f"[MOMENTUM-LEGACY] 4H ADX lookup failed (non-blocking): {_adx4_err}")
+
+            if _adx_for_gate > 32:
+                buy_score = weight if is_bull else 0.0
+                sell_score = weight if not is_bull else 0.0
+                buy_exp = (
+                    f"MOM BUY: ✅ Super-Cycle ({buy_score:.1f}) - ADX {_adx_for_gate:.1f} > 32"
+                    if is_bull
+                    else "MOM BUY: ❌ Dead in Bear Super-Cycle"
+                )
+                sell_exp = (
+                    f"MOM SELL: ✅ Super-Cycle ({sell_score:.1f}) - ADX {_adx_for_gate:.1f} > 32"
+                    if not is_bull
+                    else "MOM SELL: ❌ Dead in Bull Super-Cycle"
+                )
+                return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
+
+            features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+            if features_mr.empty:
+                return 0.0, 0.0, {"buy": "MOM: No data", "sell": "MOM: No data"}
+
+            rsi = features_mr.iloc[-1].get("rsi", 50)
+
+            buy_score = 0.0
+            sell_score = 0.0
+            buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
+            sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
+
+            div_res = self.divergence_detector.analyze(df)
+            if div_res.type != "NONE":
+                if div_res.type == "BULLISH":
+                    buy_score = min(buy_score + 0.3 * weight, weight)
+                    buy_exp += f" | ✨ {div_res.explanation}"
+                elif div_res.type == "BEARISH":
+                    sell_score = min(sell_score + 0.3 * weight, weight)
+                    sell_exp += f" | ✨ {div_res.explanation}"
+                elif div_res.type == "HIDDEN_BULLISH":
+                    buy_score = min(buy_score + 0.2 * weight, weight)
+                    buy_exp += f" | 🚀 {div_res.explanation}"
+                elif div_res.type == "HIDDEN_BEARISH":
+                    sell_score = min(sell_score + 0.2 * weight, weight)
+                    sell_exp += f" | 🚀 {div_res.explanation}"
+
+            _cs_mom = (governor_data or {}).get("composite_state") if governor_data else None
+            lsm_age = (
+                (_cs_mom.get("livermore_state_age_1h") if isinstance(_cs_mom, dict)
+                 else getattr(_cs_mom, "livermore_state_age_1h", None))
+                if _cs_mom is not None else None
+            )
+            _fresh_transition = lsm_age is not None and lsm_age <= 3
+            base = weight if _fresh_transition else weight * 0.5
+            _buy_rsi_confirms = rsi > 50
+            _sell_rsi_confirms = rsi < 50
+            buy_score = min(base * (1.15 if _buy_rsi_confirms else 0.85), weight)
+            sell_score = min(base * (1.15 if _sell_rsi_confirms else 0.85), weight)
+            _fresh_tag = "FRESH" if _fresh_transition else "AGED"
+            buy_exp = (
+                f"MOM BUY: {'✅' if _buy_rsi_confirms else '⚠️'} {_fresh_tag} "
+                f"({buy_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+            )
+            sell_exp = (
+                f"MOM SELL: {'✅' if _sell_rsi_confirms else '⚠️'} {_fresh_tag} "
+                f"({sell_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+            )
+
+            if self.config["macd_confirmation"]:
+                macd = features_mr.iloc[-1].get("macd", 0)
+                macd_signal = features_mr.iloc[-1].get("macd_signal", 0)
+
+                if buy_score > 0 and macd > macd_signal:
+                    buy_score = min(buy_score + 0.2, weight)
+                    buy_exp += " +MACD"
+
+                if sell_score > 0 and macd < macd_signal:
+                    sell_score = min(sell_score + 0.2, weight)
+                    sell_exp += " +MACD"
+
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
+            if cs:
+
+                def _cs(attr, default=False):
+                    if isinstance(cs, dict):
+                        return cs.get(attr, default)
+                    return getattr(cs, attr, default)
+
+                conviction_dying = bool(_cs("conviction_dying", False))
+                vpd_diverging = bool(_cs("vpd_diverging", False))
+                cvd_trend = int(_cs("cvd_trend", 0))
+
+                if conviction_dying:
+                    penalty = 0.20 * weight
+                    _cd_dir = self.config.get("phase_config", {}).get(
+                        "conviction_dying_directional_enabled", False
+                    )
+                    _lsm_1h = getattr(cs, "livermore_state_1h", None)
+                    if _cd_dir and _lsm_1h == "NATURAL_REBOUND":
+                        buy_score = max(0.0, buy_score - penalty)
+                        buy_exp += " -conviction_dying(NATURAL_REBOUND, BUY-only)"
+                    else:
+                        buy_score = max(0.0, buy_score - penalty)
+                        sell_score = max(0.0, sell_score - penalty)
+                        buy_exp += " -conviction_dying"
+                        sell_exp += " -conviction_dying"
+
+                if vpd_diverging:
+                    div_penalty = 0.15 * weight
+                    if is_bull:
+                        buy_score = max(0.0, buy_score - div_penalty)
+                        buy_exp += " -vpd_div"
+                    else:
+                        sell_score = max(0.0, sell_score - div_penalty)
+                        sell_exp += " -vpd_div"
+
+                if cvd_trend > 0:
+                    buy_score = min(buy_score + 0.15 * weight, weight)
+                    buy_exp += " +cvd"
+                elif cvd_trend < 0:
+                    sell_score = min(sell_score + 0.15 * weight, weight)
+                    sell_exp += " +cvd"
+
+            try:
+                _adx_col = df["adx"].dropna().values if "adx" in df.columns else None
+                _slope = compute_adx_slope(_adx_col)
+                _regime = _slope["regime"]
+
+                _SLOPE_DELTA = {
+                    "RISING_FAST": +0.20 * weight,
+                    "RISING": +0.10 * weight,
+                    "FLAT": 0.0,
+                    "FALLING": -0.15 * weight,
+                    "FALLING_FAST": -0.25 * weight,
+                }
+                _delta = _SLOPE_DELTA.get(_regime, 0.0)
+
+                _lsm_1h = None
+                if cs:
+                    _lsm_1h = _cs("livermore_state_1h", None)
+
+                _lsm_context = "MAIN"
+                if _lsm_1h in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
+                    _lsm_context = "SECONDARY"
+                elif _lsm_1h in ("NATURAL_RETRACEMENT", "NATURAL_REBOUND"):
+                    _lsm_context = "NATURAL"
+
+                if _lsm_context == "SECONDARY":
+                    _delta = -_delta
+                elif _lsm_context == "NATURAL":
+                    if _delta > 0:
+                        _delta = 0.0
+
+                _lsm_tag = (
+                    f"|lsm={_lsm_1h}" if _lsm_1h and _lsm_context != "MAIN" else ""
+                )
+
+                if _delta != 0.0:
+                    if buy_score >= sell_score and buy_score > 0:
+                        buy_score = float(np.clip(buy_score + _delta, 0.0, weight))
+                        _sign = "+" if _delta > 0 else ""
+                        buy_exp += (
+                            f" ADX-slope:{_regime}{_lsm_tag}"
+                            f"(s={_slope['short_slope']:+.1f}"
+                            f" m={_slope['med_slope']:+.1f}"
+                            f" {_sign}{_delta:.2f})"
+                        )
+                    elif sell_score > buy_score and sell_score > 0:
+                        sell_score = float(np.clip(sell_score + _delta, 0.0, weight))
+                        _sign = "+" if _delta > 0 else ""
+                        sell_exp += (
+                            f" ADX-slope:{_regime}{_lsm_tag}"
+                            f"(s={_slope['short_slope']:+.1f}"
+                            f" m={_slope['med_slope']:+.1f}"
+                            f" {_sign}{_delta:.2f})"
+                        )
+
+                if adx < 20 and _regime in ("FALLING", "FALLING_FAST"):
+                    _chop_penalty = 0.10 * weight
+                    buy_score = max(0.0, buy_score - _chop_penalty)
+                    sell_score = max(0.0, sell_score - _chop_penalty)
+                    buy_exp += f" -chop(ADX{adx:.0f}↓)"
+                    sell_exp += f" -chop(ADX{adx:.0f}↓)"
+
+            except Exception:
+                pass  # ADX slope is non-critical; never block a trade on failure
+
+            return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
+
+        except Exception as e:
+            logger.error(f"[MOMENTUM-LEGACY] Error: {e}", exc_info=True)
+            return 0.0, 0.0, {"buy": "MOM: Error", "sell": "MOM: Error"}
 
     def _judge_momentum_bidirectional(
         self,
@@ -4111,6 +4316,17 @@ class InstitutionalCouncilAggregator:
     ) -> Tuple[float, float, Dict]:
         """
         JUDGE 3: MOMENTUM (Bidirectional & Adaptive)
+
+        Brain Rebuild Part 2.2 (corrected pass, 2026-07-10): the base-score
+        ceiling no longer reads Livermore freshness (lsm_age/_fresh_transition,
+        now only in the _legacy twin below). Ceiling is _adx_for_gate — ADX's
+        own dedicated strength reading, already computed above for the
+        Super-Cycle gate — scaled against that same gate's 32 threshold so no
+        new number gets introduced. Everything downstream (RSI confirm, MACD,
+        Phase 3B enrichment, the ADX-slope SECONDARY/NATURAL flip) is
+        unchanged — it was already independent, dedicated evidence; it just
+        needed a correctly-computed base to operate on instead of one gated
+        by a different judge's state read.
         """
         try:
             if weight == 0:
@@ -4186,33 +4402,24 @@ class InstitutionalCouncilAggregator:
                     sell_score = min(sell_score + 0.2 * weight, weight)
                     sell_exp += f" | 🚀 {div_res.explanation}"
 
-            # Item 2.9: redefined — how FRESH the current 1H Livermore state is
-            # matters more than a raw RSI zone read. A fresh state-flip (age <=3
-            # bars) is genuine momentum; RSI only confirms/disconfirms direction
-            # (+15%/-15%) rather than gating the score to zero the way the old
-            # bullish/bearish RSI-zone threshold did. min(..., weight) caps the
-            # confirmed case at the judge's own ceiling — an earlier version of
-            # this could exceed it.
-            _cs_mom = (governor_data or {}).get("composite_state") if governor_data else None
-            lsm_age = (
-                (_cs_mom.get("livermore_state_age_1h") if isinstance(_cs_mom, dict)
-                 else getattr(_cs_mom, "livermore_state_age_1h", None))
-                if _cs_mom is not None else None
-            )
-            _fresh_transition = lsm_age is not None and lsm_age <= 3
-            base = weight if _fresh_transition else weight * 0.5
+            # Brain Rebuild Part 2.2 (corrected pass): base is dedicated momentum
+            # evidence now — _adx_for_gate (the 1H/4H-blended ADX already computed
+            # above for the Super-Cycle gate), scaled against that same gate's 32
+            # threshold. No Livermore read left in the base score; RSI still only
+            # confirms/disconfirms direction (+15%/-15%), never gates to zero.
+            base = weight * min(_adx_for_gate / 32.0, 1.0)
             _buy_rsi_confirms = rsi > 50
             _sell_rsi_confirms = rsi < 50
             buy_score = min(base * (1.15 if _buy_rsi_confirms else 0.85), weight)
             sell_score = min(base * (1.15 if _sell_rsi_confirms else 0.85), weight)
-            _fresh_tag = "FRESH" if _fresh_transition else "AGED"
+            _strength_tag = "STRONG" if _adx_for_gate >= 25 else "WEAK"
             buy_exp = (
-                f"MOM BUY: {'✅' if _buy_rsi_confirms else '⚠️'} {_fresh_tag} "
-                f"({buy_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+                f"MOM BUY: {'✅' if _buy_rsi_confirms else '⚠️'} {_strength_tag} "
+                f"({buy_score:.2f}) - ADX={_adx_for_gate:.1f}, RSI {rsi:.1f}"
             )
             sell_exp = (
-                f"MOM SELL: {'✅' if _sell_rsi_confirms else '⚠️'} {_fresh_tag} "
-                f"({sell_score:.2f}) - LSM age={lsm_age}, RSI {rsi:.1f}"
+                f"MOM SELL: {'✅' if _sell_rsi_confirms else '⚠️'} {_strength_tag} "
+                f"({sell_score:.2f}) - ADX={_adx_for_gate:.1f}, RSI {rsi:.1f}"
             )
 
             # MACD confirmation
