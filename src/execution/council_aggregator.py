@@ -11,12 +11,13 @@ import logging
 import time
 from typing import Dict, Tuple, Optional
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from src.utils.trap_filter import validate_candle_structure
 from src.indicators.divergence import RSIDivergenceDetector
 from src.analysis.break_retest import BreakRetestValidator
 from src.execution.transition_detector import TransitionDetector
 from src.strategies.trend_following import compute_adx_slope
+from src.execution.shadow_trader import FRICTION_PENALTIES  # Gate Tier 1.3 — real friction data
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ JUDGE_SOURCE_REGISTRY = {
     "structure": [("independent", 0.85), ("livermore_1h", 0.15)],
     "volume":    [("independent", 0.85), ("livermore_1h", 0.15)],
     "reversion": [("independent", 1.0)],
+    "recent_momentum_alignment": [("independent", 1.0)],  # Gate Tier 1.5 — real, dedicated candle-displacement evidence, now visible to 5.1
 }
 
 
@@ -80,6 +82,7 @@ class InstitutionalCouncilAggregator:
         mtf_integration=None,  # ✨ INJECTED: The Governor
         performance_tracker=None,  # ✨ INJECTED: Performance Analytics
         outcome_pipeline=None,  # Brain rebuild Part 0.2
+        shadow_trader=None,  # Gate Tier 1.3 — real friction data in the economics gate
         use_macro_governor: bool = True,
         use_gatekeeper: bool = True,
     ):
@@ -92,6 +95,7 @@ class InstitutionalCouncilAggregator:
         self.mtf_integration = mtf_integration
         self.performance_tracker = performance_tracker
         self.outcome_pipeline = outcome_pipeline  # Brain rebuild Part 0.2
+        self.shadow_trader = shadow_trader  # Gate Tier 1.3 — for real friction data in the economics gate
         # L7: telemetry tag for the most recent TREND judge / Livermore agreement
         # check — read by funnel/shadow logging, not behavior-critical itself.
         self._last_trend_judge_tag: str = "LSM_UNAVAILABLE"
@@ -529,6 +533,13 @@ class InstitutionalCouncilAggregator:
         """
         Hybrid Confirmation: AI Pattern OR Momentum Impulse.
         ✅ INSTITUTIONAL UPGRADE: Mandatory Displacement Fork (Binance vs Exness).
+
+        [ARCHIVED — not called in the live path as of this rebuild. The displacement/
+        coiled-spring/Turtle-breakout logic here is real and well-built; it was
+        formally retired ("MRS Phase 0") with the veto removed but the computation
+        never actually stopped running. Candidate for reintroduction as a
+        Corroboration-layer evidence source, added to JUDGE_SOURCE_REGISTRY if it
+        ever gets wired back in — do not silently re-enable without that step.
         """
         try:
             latest = df.iloc[-1]
@@ -728,10 +739,14 @@ class InstitutionalCouncilAggregator:
         stop_loss: float,
         atr_fast: float,
         first_tp_mult: float = 1.5,
+        asset_name: Optional[str] = None,
     ) -> bool:
         """
         The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling.
         ✅ FIXED: Corrected mathematical impossibility (1.5 < 0.5)
+        Gate Tier 1.3: now nets out real, continuously-corrected per-asset friction
+        (FRICTION_PENALTIES, updated live from observed fill slippage) instead of
+        implicitly assuming trading is free.
         """
         try:
             risk = abs(entry - stop_loss)
@@ -741,9 +756,22 @@ class InstitutionalCouncilAggregator:
             expected_reward = risk * first_tp_mult
             min_required = 0.5 * atr_fast
 
+            # Real, observed friction cost — replaces the implicit "cost is zero"
+            # assumption. FRICTION_PENALTIES stores round-trip cost as a FRACTION
+            # of price (e.g. 0.0003 = 0.03%), so no /100 conversion here — that
+            # conversion only applies where the source value is itself a percent.
+            _friction_cost = 0.0
+            if asset_name:
+                _friction_fraction = FRICTION_PENALTIES.get(asset_name.upper())
+                if _friction_fraction is not None:
+                    _friction_cost = _friction_fraction * entry
+                    expected_reward -= _friction_cost
+
             if expected_reward < min_required:
                 logger.info(
-                    f"[PROFIT GATE] ❌ Blocked - Low Reward (reward {expected_reward:.4f} < {min_required:.4f})"
+                    f"[PROFIT GATE] ❌ Blocked - Low Reward after real friction "
+                    f"(reward {expected_reward:.4f} < {min_required:.4f}, "
+                    f"friction_cost={_friction_cost:.4f})"
                 )
                 return False
 
@@ -2264,6 +2292,31 @@ class InstitutionalCouncilAggregator:
             _buy_threshold  = _effective_trend_threshold   if (is_bull or _is_neutral_regime) else _effective_counter_threshold
             _sell_threshold = _effective_trend_threshold   if (not is_bull or _is_neutral_regime) else _effective_counter_threshold
 
+            # Gate Tier 3.3: regime/Livermore disagreement, graduated instead of a
+            # full-cycle skip. Emergency brake: disagreement_gate_shadow_enabled=True
+            # reverts to the exact old HOLD behavior below (default False = new
+            # graduated behavior live). Applied here, before achievable-max/clears,
+            # so it's a modifier on the bar the regime-favored side must clear —
+            # same "modifier before comparison" shape as dual_confirmation above —
+            # rather than a branch that preempts the score comparison entirely.
+            _disagree_gate_shadow = bool(
+                (getattr(_composite_state, "phase_config", {}) or {}).get(
+                    "disagreement_gate_shadow_enabled", False
+                )
+            )
+            if _regime_lsm_disagree and not _disagree_gate_shadow:
+                _disagree_bump_side = "buy" if is_bull else "sell"
+                if _disagree_bump_side == "buy":
+                    _buy_threshold += 0.5
+                else:
+                    _sell_threshold += 0.5
+                logger.info(
+                    f"[COUNCIL] {self.asset_type} 4H Livermore lean ({_lsm_lean_c}) disagrees "
+                    f"with macro regime lean ({_regime_lean_c}) — required_score +0.5 on "
+                    f"{_disagree_bump_side} side, not skipped "
+                    f"(disagreement_gate_shadow_enabled=False)"
+                )
+
             # Item 7.1: TF/EMA as confirmation, not veto. Nudges buy_total/
             # sell_total by how many of {TF, EMA} agree or disagree with that
             # side, BEFORE the achievable-max clear/no-clear decision below —
@@ -2319,10 +2372,11 @@ class InstitutionalCouncilAggregator:
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
             _sell_clears = _sell_score_pct >= _sell_required_pct
 
-            # 3. Regime/Livermore disagreement is a full-cycle HOLD — previously
-            #    only sat in front of the is_bull+buy branch, silently letting the
-            #    other three branches (GATE B) fire anyway.
-            if _regime_lsm_disagree:
+            # 3. Regime/Livermore disagreement: full-cycle HOLD only under the
+            #    Gate Tier 3.3 emergency brake (disagreement_gate_shadow_enabled=True).
+            #    Default path already applied the graduated threshold bump above and
+            #    falls through to the normal clears comparison below.
+            if _regime_lsm_disagree and _disagree_gate_shadow:
                 logger.info(
                     f"[COUNCIL] {self.asset_type} 4H Livermore lean ({_lsm_lean_c}) disagrees "
                     f"with macro regime lean ({_regime_lean_c}) — HOLD "
@@ -2448,7 +2502,30 @@ class InstitutionalCouncilAggregator:
                     gov_passed, trade_type = self._check_governor_filter(
                         df, signal, governor_data, trade_type
                     )
-                    if not gov_passed:
+                    if not gov_passed and trade_type == "TREND":
+                        # Gate Tier 2.1: graduated, not binary. Only the strict
+                        # daily-trend disagreement case (TREND gating) is scaled —
+                        # the NEUTRAL (no governor data) and REVERSION (asset-DNA
+                        # rule) hard blocks below stay absolute, since those aren't
+                        # "how strongly does the daily trend disagree" cases, there's
+                        # nothing to grade. gov_confidence reuses the same
+                        # abs(regime_status.score)-derived value mtf_integration.py
+                        # already computes for the Governor's own regime read.
+                        _gov_confidence = float(
+                            (governor_data or {}).get(
+                                "consensus_confidence",
+                                (governor_data or {}).get("confidence", 0.5),
+                            )
+                        )
+                        _gov_penalty = 0.5 * (1.0 - _gov_confidence)
+                        required_score += _gov_penalty
+                        trade_type = "TREND"  # restore for downstream gates
+                        logger.info(
+                            f"[GOVERNOR] {self.asset_type}: daily trend disagrees "
+                            f"(conf={_gov_confidence:.2f}) — required_score raised by "
+                            f"{_gov_penalty:.2f}, not blocked outright"
+                        )
+                    elif not gov_passed:
                         logger.info(f"[VETO] ❌ BLOCKED - Macro Regime Conflict.")
                         return 0, {
                             "timestamp": timestamp,
@@ -2618,29 +2695,15 @@ class InstitutionalCouncilAggregator:
                     regime_confidence=regime_conf,
                     regime_aligned=_trap_regime_aligned,
                 ):
-                    logger.info(f"[VETO] ❌ BLOCKED - Institutional Wick Trap.")
-                    return 0, {
-                        "timestamp": timestamp,
-                        "signal": 0,
-                        "asset": self.asset_type,
-                        "decision_type": "BLOCKED (Institutional Wick Trap)",
-                        "action": "rejected",
-                        "original_signal": signal,
-                        "reasoning": "blocked_by_trap_filter",
-                        "final_signal": 0,
-                        "signal_quality": 0.0,
-                        "total_score": total_score,
-                        "scores": chosen_scores,
-                        "buy_total": buy_total,
-                        "sell_total": sell_total,
-                        "regime": regime_name,
-                        "mr_signal": mr_signal,
-                        "mr_confidence": mr_conf,
-                        "tf_signal": tf_signal,
-                        "tf_confidence": tf_conf,
-                        "ema_signal": ema_signal,
-                        "ema_confidence": ema_conf,
-                    }
+                    # Gate Tier 2.2: graduated instead of absolute — a wick trap
+                    # firing once costs a real but recoverable penalty; the
+                    # threshold itself already scales 1.0x-1.5x ATR by regime,
+                    # this just stops the FINAL step from being all-or-nothing.
+                    required_score += 0.4
+                    logger.info(
+                        f"[TRAP] {self.asset_type}: wick structure flagged — "
+                        f"required_score +0.4, not blocked outright"
+                    )
 
                 # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
                 if not self._check_volatility_gate_adaptive(df, atr_fast, atr_slow):
@@ -2911,20 +2974,13 @@ class InstitutionalCouncilAggregator:
             if signal != 0:
                 penalty = 0.0
 
-                # A. SNIPER LOCK — MRS §6 Phase 0: gate removed.
-                # CNN-LSTM sniper disconnected. Displacement check retained as
-                # informational log only — no score penalty applied.
-                sniper_passed, sniper_details = self._check_sniper_filter(df, signal)
-                if not sniper_passed:
-                    logger.debug(
-                        f"[DISPLACEMENT] Low momentum candle — informational only, no penalty "
-                        f"(MRS Phase 0 sniper gate removed)"
-                    )
+                # A. SNIPER LOCK — Gate Tier 1.1: call removed from the live path.
+                # See _check_sniper_filter's docstring for archival status.
 
                 # B. PROFIT ECONOMICS
                 # ✅ FIXED: Using corrected method from Task 10
                 if not self._check_profit_economics_adaptive(
-                    entry_price, stop_loss, atr_fast
+                    entry_price, stop_loss, atr_fast, asset_name=self.asset_type
                 ):
                     penalty += 1.0
                     logger.info(f"[PENALTY] ⚠️ Low profit economics: -1.0")
@@ -3100,6 +3156,23 @@ class InstitutionalCouncilAggregator:
                             )
                     except Exception as e:
                         logger.warning(f"[DYNAMIC WEIGHT] Failed: {e}")
+
+                    # Gate Tier 1.4: performance track record routes into the shared
+                    # outcome pipeline. Purely additive — feeds real win-rate/profit-
+                    # factor data in, changes no live behavior.
+                    if getattr(self, "outcome_pipeline", None) is not None:
+                        try:
+                            _dw_price = float(df["close"].iloc[-1]) if len(df) else None
+                            if _dw_price is not None:
+                                self.outcome_pipeline.tag(
+                                    asset=self.asset_type,
+                                    direction="circuit_breaker_check",
+                                    price=_dw_price,
+                                    timestamp=datetime.now(timezone.utc),
+                                    event_type=f"perf_track_wr={winrate:.2f}_pf={(_pf if _pf is not None else 0.0):.2f}",
+                                )
+                        except Exception as _op_perf_err:
+                            logger.debug(f"[COUNCIL] outcome_pipeline perf-track tag failed: {_op_perf_err}")
 
                 # ════════════════════════════════════════════════════════════
                 # LIFECYCLE / PHASE-AWARENESS GATE

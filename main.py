@@ -1415,6 +1415,7 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper,
                         outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
+                        shadow_trader=self.shadow_trader,  # Gate Tier 1.3
                     )
                     # Lightweight companion for Livermore state machines + composite_state.
                     # Council aggregator has no Livermore of its own — without this companion
@@ -1505,6 +1506,7 @@ class TradingBot:
                         use_macro_governor=use_macro_gov,
                         use_gatekeeper=use_gatekeeper,
                         outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
+                        shadow_trader=self.shadow_trader,  # Gate Tier 1.3
                     )
 
                     # Fix 1 (hybrid path): same gap as the council path above — without
@@ -2332,12 +2334,20 @@ class TradingBot:
             actual_score = merged_details.get("total_score", 0)
 
             if signal != 0 and actual_score < min_score:
-                logger.info(
-                    f"[COUNCIL] Signal filtered: {actual_score:.2f} < {min_score:.2f}"
+                # This check is mathematically redundant with council's own internal
+                # threshold comparison (confirmed 2026-07-10) — by the time signal
+                # reaches here, council already zeroed it if this were true using the
+                # SAME numbers. If this ever fires, something upstream desynced
+                # merged_details from what council actually decided. Loud on purpose.
+                logger.error(
+                    f"[STEP8 TRIPWIRE] {asset_name}: council said signal={signal} but "
+                    f"STEP 8's re-check found {actual_score:.2f} < {min_score:.2f} — "
+                    f"this should be mathematically impossible. Investigate merged_details "
+                    f"drift between council's return and this point."
                 )
                 signal = 0
                 merged_details["reasoning"] = (
-                    f"Council score too low ({actual_score:.2f}/{min_score:.2f})"
+                    f"STEP8_TRIPWIRE_FIRED ({actual_score:.2f}/{min_score:.2f})"
                 )
 
         elif selected_mode == "performance":
@@ -2773,6 +2783,46 @@ class TradingBot:
         except Exception as _e:
             logger.debug(f"[SHADOW] _shadow_open_blocked failed: {_e}")
 
+    def _estimate_retracement_depth(self, df, lsm_state: str) -> float:
+        """Gate Tier 3.2 helper (pre-entry copy) — how far price has already
+        pulled back from its own recent extreme, in ATRs. Feeds Gate Tier 3.1's
+        graduated counter-trend bump at entry. VeteranTradeManager carries its
+        own copy of this same calculation (using its live-position ATR) for the
+        post-entry retracement-holding watch — this one is entry-time only, using
+        the same regime-adaptive ATR7/14/28 pattern as _shadow_open_blocked.
+        """
+        try:
+            import numpy as _np_rd
+            if df is None or len(df) < 30:
+                return 1.0  # neutral default, doesn't over- or under-penalize
+            def _rolling_atr(n):
+                tr = _np_rd.maximum(
+                    df["high"].values[-n-1:] - df["low"].values[-n-1:],
+                    _np_rd.abs(df["high"].values[-n-1:] - df["close"].shift(1).values[-n-1:]),
+                    _np_rd.abs(df["low"].values[-n-1:] - df["close"].shift(1).values[-n-1:]),
+                )
+                return float(_np_rd.nanmean(tr[-n:]))
+            _atr7, _atr14, _atr28 = _rolling_atr(7), _rolling_atr(14), _rolling_atr(28)
+            if _atr28 > 0:
+                _ratio = _atr7 / _atr28
+                atr = _atr7 if _ratio > 1.30 else (_atr28 if _ratio < 0.70 else _atr14)
+            else:
+                atr = _atr14
+            if atr <= 0:
+                return 1.0
+            lookback = df.tail(20)
+            if lsm_state == "NATURAL_RETRACEMENT":
+                _extreme = lookback["high"].max()
+                _current = df["close"].iloc[-1]
+                return max(0.0, (_extreme - _current) / atr)
+            elif lsm_state == "NATURAL_REBOUND":
+                _extreme = lookback["low"].min()
+                _current = df["close"].iloc[-1]
+                return max(0.0, (_current - _extreme) / atr)
+            return 1.0
+        except Exception:
+            return 1.0
+
     def _check_tier3_divergence(
         self, asset_name: str, signal: int, details: dict, df, current_price: float, asset_cfg: dict,
     ) -> None:
@@ -3050,6 +3100,7 @@ class TradingBot:
                     use_macro_governor=use_macro_gov,
                     use_gatekeeper=use_gatekeeper,
                     outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
+                    shadow_trader=self.shadow_trader,  # Gate Tier 1.3
                 )
 
                 # Transfer warmed Livermore state so reinit doesn't cold-start the LSM.
@@ -3095,6 +3146,7 @@ class TradingBot:
                     use_macro_governor=use_macro_gov,
                     use_gatekeeper=use_gatekeeper,
                     outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
+                    shadow_trader=self.shadow_trader,  # Gate Tier 1.3
                 )
                 # Create a lightweight PerformanceWeightedAggregator companion whose sole
                 # purpose is to own the Livermore state machines and build composite_state.
@@ -3833,6 +3885,13 @@ class TradingBot:
                                 structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
                                 entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
                                 telegram=self.telegram_bot,  # Brain rebuild Part 0.3
+                                council_ref=(  # Gate Tier 4.1
+                                    self.aggregators.get(position.asset, {}).get("council")
+                                    if isinstance(self.aggregators.get(position.asset), dict)
+                                    else self.aggregators.get(position.asset)
+                                    if hasattr(self.aggregators.get(position.asset), "_check_lifecycle_phase")
+                                    else None
+                                ),
                             )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
@@ -4979,41 +5038,110 @@ class TradingBot:
                 _4h_confirms_long = _lsm_4h_post == "MAIN_UP"
                 _4h_confirms_short = _lsm_4h_post == "MAIN_DOWN"
 
+                # Gate Tier 3.1: the two PURE counter-trend cases below (no 4H
+                # state can rescue them) are graduated by default instead of an
+                # absolute veto — vetoing a signal TREND earned independently,
+                # solely because Livermore's 1H state disagrees, undermines the
+                # whole point of running an independent judge system. The other
+                # two branches further down (NATURAL_REBOUND+short,
+                # NATURAL_RETRACEMENT+long) already have their own 4H-confirmation
+                # /structure-judge escape hatches and are untouched here.
+                # Emergency brake: gate3_shadow_enabled=True reverts to the exact
+                # old hard-veto behavior below, no redeploy required.
+                _gate3_shadow_mode = self.config.get("phase_config", {}).get(
+                    "gate3_shadow_enabled", False
+                )
+
                 if _lsm_post == "NATURAL_RETRACEMENT" and signal < 0:
                     # Pure counter-trend short — 1H itself implies an uptrend
                     # context. No 4H state makes this correct: 4H=MAIN_UP means
                     # shorting against both timeframes; 4H=MAIN_DOWN means the
                     # 1H "uptrend" read is fighting the 4H trend, which is a
-                    # no-trade case, not a short setup either. Always blocked.
-                    logger.info(
-                        f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
-                        f"1H NATURAL_RETRACEMENT (pullback in uptrend) vs "
-                        f"4H={_lsm_4h_post} — not a SHORT setup at any 4H state"
-                    )
-                    # Record in shadow trader BEFORE zeroing — the shadow records
-                    # what would have happened if this signal had been allowed through.
-                    # This data is essential for Phase 3B learning on blocked setups.
-                    _original_signal = signal
-                    signal = 0
-                    details["reasoning"] = "livermore_counter_trend_block"
-                    self._shadow_open_blocked(
-                        asset_name, _original_signal, details, df, current_price,
-                        "livermore_counter_trend_block", asset_cfg,
-                    )
+                    # no-trade case, not a short setup either.
+                    _retr_depth_atr = self._estimate_retracement_depth(df, _lsm_post)
+                    # Deeper retracement already run = smaller bump (more likely
+                    # genuinely reversing); shallow, fresh retracement = larger
+                    # bump (more likely to resume the original trend, which is
+                    # what this block exists to protect).
+                    _new_bump = max(0.15, 0.6 - (0.15 * _retr_depth_atr))
+                    _total_score_post = details.get("total_score")
+                    _required_score_post = details.get("required_score")
+                    if _total_score_post is not None and _required_score_post is not None:
+                        _new_bar = _required_score_post + _new_bump
+                        _clears_new_bar = _total_score_post >= _new_bar
+                    else:
+                        # No real score data for this aggregator mode (e.g.
+                        # performance mode has no total_score/required_score) —
+                        # nothing to grade against, fail safe to the old block.
+                        _clears_new_bar = False
+
+                    if _gate3_shadow_mode or not _clears_new_bar:
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
+                            f"1H NATURAL_RETRACEMENT (pullback in uptrend) vs "
+                            f"4H={_lsm_4h_post} — not a SHORT setup at any 4H state"
+                        )
+                        # Record in shadow trader BEFORE zeroing — the shadow records
+                        # what would have happened if this signal had been allowed through.
+                        # This data is essential for Phase 3B learning on blocked setups.
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_counter_trend_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "gate3_counter_trend_old" if _gate3_shadow_mode else "livermore_counter_trend_block",
+                            asset_cfg,
+                        )
+                    else:
+                        details["required_score"] = _new_bar
+                        details["gate3_divergence"] = {
+                            "old_would_block": True,
+                            "new_bump_applied": _new_bump,
+                            "gate_label": f"gate3_counter_trend_new_{asset_name}",
+                        }
+                        logger.info(
+                            f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
+                            f"graduated (+{_new_bump:.2f} required_score) not blocked — "
+                            f"depth={_retr_depth_atr:.2f}ATR"
+                        )
                 elif _lsm_post == "NATURAL_REBOUND" and signal > 0:
-                    # Mirror of above — pure counter-trend long, always blocked.
-                    logger.info(
-                        f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
-                        f"1H NATURAL_REBOUND (bounce in downtrend) vs "
-                        f"4H={_lsm_4h_post} — not a LONG setup at any 4H state"
-                    )
-                    _original_signal = signal
-                    signal = 0
-                    details["reasoning"] = "livermore_counter_trend_block"
-                    self._shadow_open_blocked(
-                        asset_name, _original_signal, details, df, current_price,
-                        "livermore_counter_trend_block", asset_cfg,
-                    )
+                    # Mirror of above — pure counter-trend long.
+                    _retr_depth_atr = self._estimate_retracement_depth(df, _lsm_post)
+                    _new_bump = max(0.15, 0.6 - (0.15 * _retr_depth_atr))
+                    _total_score_post = details.get("total_score")
+                    _required_score_post = details.get("required_score")
+                    if _total_score_post is not None and _required_score_post is not None:
+                        _new_bar = _required_score_post + _new_bump
+                        _clears_new_bar = _total_score_post >= _new_bar
+                    else:
+                        _clears_new_bar = False
+
+                    if _gate3_shadow_mode or not _clears_new_bar:
+                        logger.info(
+                            f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
+                            f"1H NATURAL_REBOUND (bounce in downtrend) vs "
+                            f"4H={_lsm_4h_post} — not a LONG setup at any 4H state"
+                        )
+                        _original_signal = signal
+                        signal = 0
+                        details["reasoning"] = "livermore_counter_trend_block"
+                        self._shadow_open_blocked(
+                            asset_name, _original_signal, details, df, current_price,
+                            "gate3_counter_trend_old" if _gate3_shadow_mode else "livermore_counter_trend_block",
+                            asset_cfg,
+                        )
+                    else:
+                        details["required_score"] = _new_bar
+                        details["gate3_divergence"] = {
+                            "old_would_block": True,
+                            "new_bump_applied": _new_bump,
+                            "gate_label": f"gate3_counter_trend_new_{asset_name}",
+                        }
+                        logger.info(
+                            f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
+                            f"graduated (+{_new_bump:.2f} required_score) not blocked — "
+                            f"depth={_retr_depth_atr:.2f}ATR"
+                        )
                 elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
                     if _4h_confirms_short:
                         # 4H=MAIN_DOWN backs this short: bounce-exhaustion entry
@@ -5094,6 +5222,15 @@ class TradingBot:
                             asset_name, _original_signal, details, df, current_price,
                             "livermore_retracement_sl_sweep_block", asset_cfg,
                         )
+
+                # Gate Tier 3.1: log the divergence — what the OLD hard veto
+                # would have done, for the same real comparison Tier 3's judges got.
+                if details.get("gate3_divergence"):
+                    _div = details["gate3_divergence"]
+                    self._shadow_open_blocked(
+                        asset_name, signal, details, df, current_price,
+                        _div["gate_label"], asset_cfg,
+                    )
 
             # ── SECONDARY STATE DIRECTIONAL BLOCK ─────────────────────────────
             # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most

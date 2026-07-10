@@ -178,6 +178,7 @@ class Position:
         lot_precision: Optional[int] = None,  # ✨ NEW: Exness compatibility
         telegram=None,  # Brain rebuild Part 0.3 fix: Position has no telegram_bot
         # of its own (unlike PortfolioManager) — must be passed in explicitly.
+        council_ref=None,  # Gate Tier 4.1 — passed through to the VTM constructor below
     ):
         self.asset = asset
         self.symbol = symbol
@@ -196,6 +197,7 @@ class Position:
         self.lot_precision = lot_precision
         self.disable_partials = disable_partials
         self.telegram = telegram  # Brain rebuild Part 0.3 fix
+        self.council_ref = council_ref  # Gate Tier 4.1
 
         self.stop_loss = None
         self.take_profit = None
@@ -306,6 +308,7 @@ class Position:
                     telegram=self.telegram,  # Brain rebuild Part 0.3 fix: was self.telegram_bot,
                     # which doesn't exist on Position (only on PortfolioManager) — crashed
                     # VTM init on every fresh position open, leaving it stop-loss-less.
+                    council_ref=self.council_ref,  # Gate Tier 4.1
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -703,6 +706,11 @@ class Position:
         # reads position.telegram directly afterward, so it's safe to drop.
         if "telegram" in state:
             del state["telegram"]
+        # Gate Tier 4.1: council_ref is a live aggregator reference, same
+        # pickling hazard as telegram above — only ever exists to be passed
+        # through to the VTM constructor at position-open time.
+        if "council_ref" in state:
+            del state["council_ref"]
         return state
 
     def __setstate__(self, state):
@@ -715,6 +723,7 @@ class Position:
         # It will need to be re-assigned by the PortfolioManager after loading.
         self.db_manager = None
         self.telegram = None
+        self.council_ref = None
         # Always reset closing flags on reload to prevent stuck positions
         self.closing = False
         self.last_close_attempt = None
@@ -812,6 +821,25 @@ class PortfolioManager:
             )
         else:
             logger.info("✓ Using PAPER mode with simulated capital")
+
+    def _resolve_council_ref(self, asset: str):
+        """Gate Tier 4.1 — resolve the live InstitutionalCouncilAggregator
+        instance for an asset, if one exists. self.aggregators entries are
+        either a bare aggregator (performance-only mode, no
+        _check_lifecycle_phase) or a dict wrapper with a "council" key
+        (council/hybrid mode) — same shape main.py's aggregator consumers
+        already unwrap. Returns None rather than a performance-mode
+        aggregator so callers can rely on hasattr(..., "_check_lifecycle_phase").
+        """
+        try:
+            _agg = (self.aggregators or {}).get(asset)
+            if isinstance(_agg, dict):
+                return _agg.get("council")
+            if hasattr(_agg, "_check_lifecycle_phase"):
+                return _agg
+            return None
+        except Exception:
+            return None
 
     def _resolve_symbol(self, asset_name: str) -> str:
         """Return the broker-correct symbol for the asset's configured exchange."""
@@ -1033,6 +1061,7 @@ class PortfolioManager:
                                     structure_levels_ref=signal_details.get("structure_levels_ref"),
                                     entry_retest_type=signal_details.get("retest_type"),
                                     telegram=self.telegram_bot,  # Brain rebuild Part 0.3
+                                    council_ref=self._resolve_council_ref(position.asset),  # Gate Tier 4.1
                                 )
                                 logger.info(
                                     f"[STATE] VTM for {position_id} successfully created."
@@ -2710,6 +2739,7 @@ class PortfolioManager:
             min_lot=min_lot,
             lot_precision=lot_precision,
             telegram=self.telegram_bot,  # Brain rebuild Part 0.3 fix
+            council_ref=self._resolve_council_ref(asset),  # Gate Tier 4.1
         )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
@@ -3892,6 +3922,26 @@ class PortfolioManager:
                             )
             except Exception as e:
                 logger.debug(f"[D2/D3] structure-level outcome tracking failed: {e}")
+
+        # Gate Tier 4.2: D4's retracement outcomes feed outcome_pipeline —
+        # closes the loop 3.2 opens. The entry-time bump (3.1) is currently a
+        # reasoned estimate; this is what eventually replaces it with a real,
+        # checked number. Same reason-normalisation as the D2/D3 block above.
+        if self.outcome_pipeline is not None and getattr(_vtm, "_retracement_depth_at_entry", None) is not None:
+            try:
+                _reason_norm = str(trade_result["reason"]).lower()
+                if _reason_norm.startswith("vtm_"):
+                    _reason_norm = _reason_norm[4:]
+                _outcome = "held" if _reason_norm != ExitReason.STOP_LOSS.value else "failed"
+                self.outcome_pipeline.tag(
+                    asset=_vtm.asset,
+                    direction=f"retracement_{_outcome}",
+                    price=_vtm.entry_price,
+                    timestamp=datetime.now(timezone.utc),
+                    event_type=f"gate3_retracement_depth={_vtm._retracement_depth_at_entry:.2f}atr",
+                )
+            except Exception as e:
+                logger.debug(f"[GATE3.2] retracement-depth outcome tagging failed: {e}")
 
         return trade_result
 
