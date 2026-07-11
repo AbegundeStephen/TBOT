@@ -513,7 +513,7 @@ class MLStrategy(bt.Strategy):
         ("take_profit_pct",        0.008),   # 2×SL by default
         ("trailing_stop_pct",      0.015),
         ("risk_per_trade",         0.015),
-        ("max_position_pct",       0.95),
+        ("max_position_pct",       0.50),   # matches live hard cap: portfolio_manager.py absolute_max = free_margin * 0.50
         ("use_atr_sizing",         True),
         ("atr_period",             14),
         ("atr_multiplier",         1.8),

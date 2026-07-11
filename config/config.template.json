@@ -1342,7 +1342,7 @@
   },
   "backtesting": {
     "initial_capital": 10000,
-    "commission_pct": 0.001,
+    "commission_pct": 0.0,
     "slippage_pct": 0.0005,
     "start_date": "2024-01-01",
     "end_date": "2025-11-01",
