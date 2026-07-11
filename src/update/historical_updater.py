@@ -93,8 +93,11 @@ class HistoricalDataUpdater:
         try:
             # ✅ Check Market Hours
             from src.utils.market_hours import MarketHours
-            # BTC/Crypto is 24/7, ignore the institutional weekend gate for data updates
-            if "BTC" in asset_name.upper():
+            # BTC/Crypto is 24/7, ignore the institutional weekend gate for data updates.
+            # A forced full refresh is a historical backfill (copy_rates_range), not a live
+            # feed poll, so it must also bypass the gate — MT5 returns past bars regardless
+            # of whether the market is open right now.
+            if "BTC" in asset_name.upper() or force_full_refresh:
                 market_open = True
             else:
                 market_open = MarketHours.should_trade(asset_name)
