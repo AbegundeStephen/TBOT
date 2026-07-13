@@ -1232,14 +1232,25 @@ class TradingBot:
             logger.info("Analyzing market conditions for each asset...")
 
             asset_presets = {}
+            _valid_preset_names = ("conservative", "balanced", "aggressive", "scalper")
 
             # Get preset for each enabled asset
             for asset_name in self.strategies.keys():
                 if self.config["assets"][asset_name].get("enabled", False):
-                    # Use the preset already calculated during init
-                    selected_preset = self.dynamic_selector.current_presets.get(
-                        asset_name, "balanced"
-                    )
+                    # Per-asset explicit override (fix/backtest-findings,
+                    # 2026-07-13) takes priority over the dynamic selector —
+                    # these are backtest-validated fixed presets, not a
+                    # regime-adaptive guess. Any asset without its own
+                    # "preset" key keeps the existing auto/dynamic behavior
+                    # unchanged.
+                    _explicit = self.config["assets"][asset_name].get("preset")
+                    if _explicit in _valid_preset_names:
+                        selected_preset = _explicit
+                    else:
+                        # Use the preset already calculated during init
+                        selected_preset = self.dynamic_selector.current_presets.get(
+                            asset_name, "balanced"
+                        )
                     asset_presets[asset_name] = selected_preset
 
             logger.info("\n📊 CURRENT PRESETS:")
@@ -1323,15 +1334,21 @@ class TradingBot:
             selected_preset = PRESET_NAME_MAP.get(selected_preset, selected_preset)
 
             # Map asset to its preset bucket.
-            # FX pairs have a dedicated preset tuned for tighter ranges and
-            # higher MR relevance. Commodities/indices use GOLD. BTC is its own.
-            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
-            if "BTC" in asset_name.upper():
-                config_key = "BTC"
-            elif asset_name.upper() in _FX_ASSETS:
+            # USTEC/USOIL/EURUSD split out of the shared GOLD/FX buckets
+            # 2026-07-13 (fix/backtest-findings) — each now has its own
+            # backtest-validated thresholds instead of inheriting a
+            # neighbor's numbers. Remaining FX pairs (EURJPY/GBPUSD/GBPAUD/
+            # USDJPY) and any future commodity/index are untested this pass
+            # and keep the shared bucket as an honest "not yet tuned" default.
+            _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD"}
+            _FX_ASSETS = {"EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            _asset_upper = asset_name.upper()
+            if _asset_upper in _DEDICATED_ASSETS:
+                config_key = _asset_upper
+            elif _asset_upper in _FX_ASSETS:
                 config_key = "FX"
             else:
-                config_key = "GOLD"  # GOLD, USTEC, USOIL and any future commodity/index
+                config_key = "GOLD"  # untested commodity/index fallback
             preset_config = AGGREGATOR_PRESETS.get(config_key, {}).get(selected_preset)
 
             if preset_config is None:

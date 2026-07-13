@@ -124,6 +124,30 @@ class TrendFollowingStrategy(BaseStrategy):
         # Return thresholds
         self.min_return_threshold = config.get("min_return_threshold", 0.001)
 
+        # High-volatility-expansion penalty (bb_width_norm >= 70th pct).
+        # Was a flat -0.5 applied identically to both directions on every
+        # asset — backtest evidence showed this regime is direction- and
+        # asset-dependent (e.g. BTC longs lose heavily here, GOLD longs
+        # thrive, USTEC shorts lose heavily). Configurable per-asset so each
+        # side can be tuned independently; defaults preserve the old flat
+        # -0.5/-0.5 behaviour until overridden in config.json.
+        self.high_vol_expansion_bull_penalty = config.get(
+            "high_vol_expansion_bull_penalty", 0.5
+        )
+        self.high_vol_expansion_bear_penalty = config.get(
+            "high_vol_expansion_bear_penalty", 0.5
+        )
+
+        # ADX slope bonus for a FALLING/FALLING_FAST trend — the bonus still
+        # awarded to the already-leading side even as its own momentum rolls
+        # over. Backtest evidence: BTC's largest and worst-performing trade
+        # bucket by far is longs entered while the bullish side's ADX regime
+        # is FALLING (buying a fading rally) — GOLD shows the opposite
+        # (fine to buy dips even as momentum cools). Configurable per-asset;
+        # defaults preserve the original flat 0.60/0.30 bonus table.
+        self.adx_bonus_falling = config.get("adx_bonus_falling", 0.60)
+        self.adx_bonus_falling_fast = config.get("adx_bonus_falling_fast", 0.30)
+
         # Score threshold
         # ✅ T1.2A: Standardized to 2.5 to eliminate single-indicator noise
         self.min_score_threshold = config.get("min_conditions", 2.5)
@@ -454,8 +478,8 @@ class TrendFollowingStrategy(BaseStrategy):
             "RISING_FAST":  1.50,
             "RISING":       1.20,
             "FLAT":         1.00,
-            "FALLING":      0.60,
-            "FALLING_FAST": 0.30,
+            "FALLING":      self.adx_bonus_falling,
+            "FALLING_FAST": self.adx_bonus_falling_fast,
         }
         _adx_bonus = _SLOPE_BONUS.get(_adx_regime, 1.00)
 
@@ -513,8 +537,14 @@ class TrendFollowingStrategy(BaseStrategy):
                 bullish_score += _sq_bonus; bearish_score += _sq_bonus
                 if not silent: logger.info(f"[{self.name}] 🌀 Volatility Squeeze detected (+{_sq_bonus:.2f} bonus)")
             elif latest["bb_width_norm"] >= upper_70:
-                bullish_score -= 0.5; bearish_score -= 0.5
-                if not silent: logger.info(f"[{self.name}] 🌋 High Volatility Expansion (-0.5 penalty)")
+                bullish_score -= self.high_vol_expansion_bull_penalty
+                bearish_score -= self.high_vol_expansion_bear_penalty
+                if not silent:
+                    logger.info(
+                        f"[{self.name}] 🌋 High Volatility Expansion "
+                        f"(bull -{self.high_vol_expansion_bull_penalty:.2f}, "
+                        f"bear -{self.high_vol_expansion_bear_penalty:.2f})"
+                    )
 
         # 4H Context
         if self.use_4h_context and df_4h is not None:

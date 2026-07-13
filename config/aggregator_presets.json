@@ -360,6 +360,137 @@
         "trend_following_weight": 0.55,
         "ema_weight": 0.5
       }
+    },
+    "USTEC": {
+      "_comment": "Split out of the shared GOLD bucket 2026-07-13 (fix/backtest-findings) so USTEC gets its own backtest-validated thresholds instead of inheriting GOLD's. Council-weighting/momentum-alignment fields copied from GOLD unchanged — not individually retuned this pass.",
+      "conservative": {
+        "description": "Strict USTEC settings. Focus: Capital Preservation.",
+        "buy_threshold": 0.36, "sell_threshold": 0.40, "two_strategy_bonus": 0.18, "three_strategy_bonus": 0.22,
+        "bull_buy_boost": 0.09, "bull_sell_penalty": 0.11, "bear_sell_boost": 0.09, "bear_buy_penalty": 0.11,
+        "min_confidence_to_use": 0.12, "min_signal_quality": 0.30, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.75, "opposition_penalty": 0.75, "verbose": false,
+        "council_trend_aligned": 4.0, "council_counter_trend": 4.5,
+        "mean_reversion_weight": 0.25, "trend_following_weight": 0.8, "ema_weight": 0.3,
+        "momentum_alignment": {"_comment": "Copied from GOLD/conservative.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "balanced": {
+        "description": "Standard USTEC settings — validated best for Council mode (fix/backtest-findings): +1.52% return, 3.73% DD, beats both looser presets on this asset.",
+        "buy_threshold": 0.31, "sell_threshold": 0.35, "two_strategy_bonus": 0.20, "three_strategy_bonus": 0.24,
+        "bull_buy_boost": 0.10, "bull_sell_penalty": 0.10, "bear_sell_boost": 0.10, "bear_buy_penalty": 0.10,
+        "min_confidence_to_use": 0.10, "min_signal_quality": 0.27, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.72, "opposition_penalty": 0.75, "verbose": false,
+        "council_trend_aligned": 3.5, "council_counter_trend": 4.0,
+        "mean_reversion_weight": 0.35, "trend_following_weight": 0.7, "ema_weight": 0.4,
+        "momentum_alignment": {"_comment": "Copied from GOLD/balanced.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "aggressive": {
+        "description": "Active USTEC settings. Focus: Trend Catching.",
+        "buy_threshold": 0.26, "sell_threshold": 0.30, "two_strategy_bonus": 0.22, "three_strategy_bonus": 0.27,
+        "bull_buy_boost": 0.11, "bull_sell_penalty": 0.11, "bear_sell_boost": 0.11, "bear_buy_penalty": 0.11,
+        "min_confidence_to_use": 0.09, "min_signal_quality": 0.22, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.70, "opposition_penalty": 0.6, "verbose": false,
+        "council_trend_aligned": 3.0, "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.45, "trend_following_weight": 0.65, "ema_weight": 0.5,
+        "momentum_alignment": {"_comment": "Copied from GOLD/aggressive.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "scalper": {
+        "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak.",
+        "description": "High frequency USTEC settings — validated best for Performance mode (fix/backtest-findings): +5.23% return, 3.86% DD, best of the three presets tested.",
+        "buy_threshold": 0.22, "sell_threshold": 0.28, "two_strategy_bonus": 0.25, "three_strategy_bonus": 0.32,
+        "bull_buy_boost": 0.13, "bull_sell_penalty": 0.09, "bear_sell_boost": 0.13, "bear_buy_penalty": 0.09,
+        "min_confidence_to_use": 0.07, "min_signal_quality": 0.18, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.65, "verbose": false,
+        "min_quality_margin": 0.06, "opposition_penalty": 0.6,
+        "council_trend_aligned": 2.8, "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.35, "trend_following_weight": 0.65, "ema_weight": 0.5,
+        "momentum_alignment": {"_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.", "enabled": false, "candles": 3, "min_agreement": 3}
+      }
+    },
+    "USOIL": {
+      "_comment": "Split out of the shared GOLD bucket 2026-07-13 (fix/backtest-findings) so USOIL gets its own backtest-validated thresholds instead of inheriting GOLD's. Council-weighting/momentum-alignment fields copied from GOLD unchanged — not individually retuned this pass.",
+      "conservative": {
+        "description": "Strict USOIL settings. Focus: Capital Preservation.",
+        "buy_threshold": 0.37, "sell_threshold": 0.41, "two_strategy_bonus": 0.18, "three_strategy_bonus": 0.24,
+        "bull_buy_boost": 0.08, "bull_sell_penalty": 0.10, "bear_sell_boost": 0.08, "bear_buy_penalty": 0.10,
+        "min_confidence_to_use": 0.12, "min_signal_quality": 0.30, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.75, "opposition_penalty": 0.75, "verbose": false,
+        "council_trend_aligned": 4.0, "council_counter_trend": 4.5,
+        "mean_reversion_weight": 0.25, "trend_following_weight": 0.8, "ema_weight": 0.3,
+        "momentum_alignment": {"_comment": "Copied from GOLD/conservative.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "balanced": {
+        "description": "Standard USOIL settings.",
+        "buy_threshold": 0.32, "sell_threshold": 0.36, "two_strategy_bonus": 0.20, "three_strategy_bonus": 0.25,
+        "bull_buy_boost": 0.09, "bull_sell_penalty": 0.09, "bear_sell_boost": 0.09, "bear_buy_penalty": 0.09,
+        "min_confidence_to_use": 0.10, "min_signal_quality": 0.27, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.72, "opposition_penalty": 0.75, "verbose": false,
+        "council_trend_aligned": 3.5, "council_counter_trend": 4.0,
+        "mean_reversion_weight": 0.35, "trend_following_weight": 0.7, "ema_weight": 0.4,
+        "momentum_alignment": {"_comment": "Copied from GOLD/balanced.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "aggressive": {
+        "description": "Active USOIL settings — validated best for both Performance (+21.07%, 9.44% DD) and Council (best-of-three) modes (fix/backtest-findings).",
+        "buy_threshold": 0.27, "sell_threshold": 0.31, "two_strategy_bonus": 0.22, "three_strategy_bonus": 0.29,
+        "bull_buy_boost": 0.10, "bull_sell_penalty": 0.10, "bear_sell_boost": 0.10, "bear_buy_penalty": 0.10,
+        "min_confidence_to_use": 0.08, "min_signal_quality": 0.22, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.70, "opposition_penalty": 0.6, "verbose": false,
+        "council_trend_aligned": 3.0, "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.45, "trend_following_weight": 0.65, "ema_weight": 0.5,
+        "momentum_alignment": {"_comment": "Copied from GOLD/aggressive.", "enabled": true, "mode": "soft", "candles": 3, "min_agreement": 3, "adverse_atr_mult": 1.0, "strong_adx": 28.0, "soft_penalty": 0.75}
+      },
+      "scalper": {
+        "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak. WARNING: backtest showed this preset HURTS USOIL Performance (+21.07%→+16.57%) and pushes Council drawdown to 15.05% — aggressive is the validated choice, not this.",
+        "description": "High frequency USOIL settings. Do not use for USOIL — see warning above.",
+        "buy_threshold": 0.23, "sell_threshold": 0.29, "two_strategy_bonus": 0.25, "three_strategy_bonus": 0.34,
+        "bull_buy_boost": 0.12, "bull_sell_penalty": 0.08, "bear_sell_boost": 0.12, "bear_buy_penalty": 0.08,
+        "min_confidence_to_use": 0.06, "min_signal_quality": 0.18, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.65, "verbose": false,
+        "min_quality_margin": 0.06, "opposition_penalty": 0.6,
+        "council_trend_aligned": 2.8, "council_counter_trend": 3.5,
+        "mean_reversion_weight": 0.35, "trend_following_weight": 0.65, "ema_weight": 0.5,
+        "momentum_alignment": {"_comment": "Scalper mode: disabled — scalpers trade fast reversals intentionally.", "enabled": false, "candles": 3, "min_agreement": 3}
+      }
+    },
+    "EURUSD": {
+      "_comment": "Split out of the shared FX bucket 2026-07-13 (fix/backtest-findings) so EURUSD gets its own backtest-validated thresholds instead of inheriting the shared FX (EURJPY/GBPUSD/GBPAUD/USDJPY) numbers. Council-weighting fields copied from FX unchanged — not individually retuned this pass. EURUSD showed a faint but real edge upgrade this session (was flat-to-negative on 'balanced').",
+      "conservative": {
+        "description": "Strict EURUSD settings. Focus: Capital Preservation.",
+        "buy_threshold": 0.38, "sell_threshold": 0.42, "two_strategy_bonus": 0.18, "three_strategy_bonus": 0.25,
+        "bull_buy_boost": 0.07, "bull_sell_penalty": 0.09, "bear_sell_boost": 0.07, "bear_buy_penalty": 0.09,
+        "min_confidence_to_use": 0.12, "min_signal_quality": 0.30, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.75, "opposition_penalty": 0.55, "verbose": false,
+        "council_trend_aligned": 3.8, "council_counter_trend": 4.2,
+        "mean_reversion_weight": 0.45, "trend_following_weight": 0.65, "ema_weight": 0.35
+      },
+      "balanced": {
+        "description": "Standard EURUSD settings.",
+        "buy_threshold": 0.32, "sell_threshold": 0.36, "two_strategy_bonus": 0.20, "three_strategy_bonus": 0.25,
+        "bull_buy_boost": 0.09, "bull_sell_penalty": 0.09, "bear_sell_boost": 0.09, "bear_buy_penalty": 0.09,
+        "min_confidence_to_use": 0.10, "min_signal_quality": 0.27, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.72, "opposition_penalty": 0.45, "verbose": false,
+        "council_trend_aligned": 3.3, "council_counter_trend": 3.8,
+        "mean_reversion_weight": 0.5, "trend_following_weight": 0.6, "ema_weight": 0.4
+      },
+      "aggressive": {
+        "description": "Active EURUSD settings — validated best for Performance mode (fix/backtest-findings): +0.82% return, 2.04% DD, 37.7% win rate — all the best of the three presets tested.",
+        "buy_threshold": 0.26, "sell_threshold": 0.30, "two_strategy_bonus": 0.22, "three_strategy_bonus": 0.30,
+        "bull_buy_boost": 0.10, "bull_sell_penalty": 0.10, "bear_sell_boost": 0.10, "bear_buy_penalty": 0.10,
+        "min_confidence_to_use": 0.08, "min_signal_quality": 0.22, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.70, "opposition_penalty": 0.38, "verbose": false,
+        "council_trend_aligned": 2.8, "council_counter_trend": 3.3,
+        "mean_reversion_weight": 0.55, "trend_following_weight": 0.55, "ema_weight": 0.45
+      },
+      "scalper": {
+        "_comment": "Ranging Mode logic in signal_aggregator.py will now override max trades to 1 regardless of this preset if trend is weak. Validated best for Council mode (fix/backtest-findings): +1.06% return, 1.39% DD, 40.1% win rate — flips Council from -1.81% on balanced.",
+        "description": "High frequency EURUSD settings.",
+        "buy_threshold": 0.22, "sell_threshold": 0.28, "two_strategy_bonus": 0.25, "three_strategy_bonus": 0.35,
+        "bull_buy_boost": 0.12, "bull_sell_penalty": 0.08, "bear_sell_boost": 0.12, "bear_buy_penalty": 0.08,
+        "min_confidence_to_use": 0.06, "min_signal_quality": 0.18, "hold_contribution_pct": 0.0,
+        "allow_single_override": true, "single_override_threshold": 0.65, "verbose": false,
+        "min_quality_margin": 0.06, "opposition_penalty": 0.32,
+        "council_trend_aligned": 2.5, "council_counter_trend": 3.2,
+        "mean_reversion_weight": 0.5, "trend_following_weight": 0.55, "ema_weight": 0.5
+      }
     }
   },
   "LIVERMORE_PIVOTS": {

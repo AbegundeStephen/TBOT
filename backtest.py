@@ -98,6 +98,38 @@ SUPPORTED_ASSETS = list(DATA_FILE_MAP.keys())
 logger.debug("DATA_FILE_MAP: %s", DATA_FILE_MAP)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-asset, per-aggregator preset recommendations — every entry below was
+# individually tested (balanced vs aggressive vs scalper, full-year, both
+# aggregators) rather than left on an untested default (fix/backtest-findings,
+# 2026-07-12/13). "balanced" appears explicitly where it won, not as a
+# fallback — BTC/USTEC Council both got *worse* on looser presets, so
+# "balanced" there is a verified choice, not an assumption. An explicit
+# --preset on the CLI always overrides this table.
+# ─────────────────────────────────────────────────────────────────────────────
+RECOMMENDED_PRESETS = {
+    ("GOLD",   "performance"): "scalper",
+    ("GOLD",   "council"):     "aggressive",
+    ("USOIL",  "performance"): "aggressive",
+    ("USOIL",  "council"):     "aggressive",
+    ("BTC",    "performance"): "balanced",
+    ("BTC",    "council"):     "balanced",
+    ("USTEC",  "performance"): "scalper",
+    ("USTEC",  "council"):     "balanced",
+    ("EURUSD", "performance"): "aggressive",
+    ("EURUSD", "council"):     "scalper",
+}
+
+
+def _resolve_preset(asset_key: str, aggregator_type: str, cli_preset: str = None) -> str:
+    """Explicit --preset always wins; otherwise use the validated per-asset
+    recommendation above. Any asset/aggregator pair not in the table (e.g.
+    GBPUSD, USDJPY — never backtested this session) falls back to 'balanced'
+    as an untested default, not a recommendation."""
+    if cli_preset is not None:
+        return cli_preset
+    return RECOMMENDED_PRESETS.get((asset_key.upper(), aggregator_type), "balanced")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Asset-specific presets for PerformanceWeightedAggregator
 # ─────────────────────────────────────────────────────────────────────────────
 AGGREGATOR_PRESETS = {
@@ -521,6 +553,11 @@ class MLStrategy(bt.Strategy):
         ("aggregator_preset",      "balanced"),
         ("aggregator_type",        "performance"),  # "performance" | "council"
         ("use_trailing_stop",      True),
+        # Trailing stop only starts ratcheting once price has moved this many
+        # multiples of the initial risk (stop_distance) in the trade's favor.
+        # 0.0 = legacy behavior: trails from the entry price on bar 1, no
+        # grace period. 1.0 = don't arm the trail until the trade is up 1R.
+        ("trailing_activation_rr", 0.0),
         ("exit_on_opposite_signal", True),
         # AI validation
         ("use_ai_validation",              True),
@@ -617,8 +654,23 @@ class MLStrategy(bt.Strategy):
                 strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,
                 use_macro_governor=self.params.use_macro_governor,
                 use_gatekeeper=self.params.use_gatekeeper,
+                # Never touch the live bot's data/aggregator_state.json — a
+                # backtest replays its whole window in one process lifetime
+                # and must not read stale/foreign state from, or overwrite,
+                # the file main.py's live trading depends on.
+                state_persistence_path=None,
             )
             logger.info(f"[AGGREGATOR] PerformanceWeightedAggregator selected")
+
+        # Fix 1 (backtest parity): propagate phase_config gate flags onto the
+        # aggregator the same way main.py does at every call site (all marked
+        # "Fix 1" there). signal_aggregator.py builds CompositeState via
+        # state.phase_config = getattr(self, "phase_config", {}) — without this
+        # assignment the aggregator never has a .phase_config attribute, so
+        # every phase_config-gated feature (Mode3 climax-fade, pullback
+        # completion, council counter-trend cap, etc.) is silently disabled in
+        # every backtest run regardless of what config.json actually says.
+        self.aggregator.phase_config = config.get("phase_config", {})
 
         # ── LSM companion — composite_state for the Council path ────────────
         # InstitutionalCouncilAggregator has no _build_composite_state of its
@@ -654,7 +706,9 @@ class MLStrategy(bt.Strategy):
                 enable_detailed_logging=False,
                 use_macro_governor=False,
                 use_gatekeeper=False,
+                state_persistence_path=None,
             )
+            self._lsm_companion.phase_config = config.get("phase_config", {})
             logger.info("[AGGREGATOR] LSM companion (composite_state builder) attached for Council mode")
 
         self.order        = None
@@ -869,6 +923,7 @@ class MLStrategy(bt.Strategy):
                         atr_value     = self.atr[0]
                         stop_distance = atr_value * self._atr_multiplier
 
+                        self._entry_stop_distance = stop_distance
                         if signal == 1:
                             self.order      = self.buy(size=size)
                             self.stop_loss   = current_price - stop_distance
@@ -923,7 +978,21 @@ class MLStrategy(bt.Strategy):
         return max(min(size, max_size), 0)
 
     def _update_trailing_stop(self, price: float, is_long: bool, is_short: bool):
-        """Ratchet trailing stop for both longs and shorts."""
+        """Ratchet trailing stop for both longs and shorts.
+
+        Gated by trailing_activation_rr: the trail doesn't arm until price
+        has moved that many multiples of the trade's own risk (stop_distance)
+        in its favor. At the default 0.0 this is a no-op (legacy: arms on
+        bar 1 from the entry price itself).
+        """
+        activation_rr = self.params.trailing_activation_rr
+        if activation_rr > 0:
+            required_move = getattr(self, "_entry_stop_distance", 0.0) * activation_rr
+            if is_long and (price - self.entry_price) < required_move:
+                return
+            if is_short and (self.entry_price - price) < required_move:
+                return
+
         if is_long:
             if self.highest_price_since_entry is None:
                 self.highest_price_since_entry = price
@@ -1105,7 +1174,7 @@ def run_backtest(
 # ─────────────────────────────────────────────────────────────────────────────
 def run_comparison(
     assets: list,
-    preset: str = "balanced",
+    preset: str = None,
     use_ai: bool = True,
     use_macro_gov: bool = True,
     use_gatekeeper: bool = True,
@@ -1114,15 +1183,19 @@ def run_comparison(
 ):
     """
     Run Performance then Council on each asset and print a comparison table.
+
+    preset=None (the CLI default) resolves per (asset, aggregator) via
+    RECOMMENDED_PRESETS; passing an explicit preset forces it for every run.
     """
     all_results = []
 
     for asset in assets:
         for agg in ("performance", "council"):
+            resolved_preset = _resolve_preset(asset, agg, preset)
             r = run_backtest(
                 asset_key=asset,
                 aggregator_type=agg,
-                aggregator_preset=preset,
+                aggregator_preset=resolved_preset,
                 use_ai=use_ai,
                 use_macro_gov=use_macro_gov,
                 use_gatekeeper=use_gatekeeper,
@@ -1223,9 +1296,11 @@ Examples:
         help="Aggregator to use (ignored when --compare-both is set)",
     )
     parser.add_argument(
-        "--preset", type=str, default="balanced",
+        "--preset", type=str, default=None,
         choices=["conservative", "balanced", "aggressive", "scalper"],
-        help="Signal threshold preset",
+        help="Signal threshold preset. Omit to use the validated per-asset/"
+             "per-aggregator recommendation (see RECOMMENDED_PRESETS); "
+             "passing this flag always overrides it.",
     )
     parser.add_argument(
         "--compare-both", action="store_true",
@@ -1285,7 +1360,7 @@ Examples:
             run_backtest(
                 asset_key=asset,
                 aggregator_type=args.aggregator,
-                aggregator_preset=args.preset,
+                aggregator_preset=_resolve_preset(asset, args.aggregator, args.preset),
                 use_ai=not args.no_ai,
                 use_macro_gov=use_gov,
                 use_gatekeeper=use_gatekeeper,
