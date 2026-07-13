@@ -46,6 +46,7 @@ class PerformanceWeightedAggregator:
         strong_signal_bypass_threshold: float = 0.70,
         use_macro_governor: bool = True,
         use_gatekeeper: bool = True,
+        state_persistence_path: str = "data/aggregator_state.json",
     ):
         self.s_mean_reversion = mean_reversion_strategy
         self.s_trend_following = trend_following_strategy
@@ -296,9 +297,21 @@ class PerformanceWeightedAggregator:
         # 4. Independent strategy thresholds (T1.1 fix)
         # allow_single_override and single_override_threshold exist in presets but were
         # never read by this class — orphaned config keys. Now wired.
+        #
+        # MR was given its own fallback default here (0.75 vs TF/EMA's 0.72)
+        # but all three read the SAME config key ("single_override_threshold"),
+        # so MR's distinct default never actually applied whenever a preset
+        # was in play — it just silently inherited TF/EMA's number. That
+        # matters because MR's own confidence formulas (Mode1/2/3 combined)
+        # empirically top out at 0.67-0.70 across every asset tested — below
+        # every preset's threshold except "scalper" (0.65). MR was therefore
+        # structurally incapable of ever winning the independent-fire contest
+        # under "balanced" or "aggressive", regardless of signal quality.
+        # Give it its own config key, calibrated to its real achievable range,
+        # so a genuinely fired MR signal gets a chance to compete.
         self.independent_thresholds = {
             "trend_following": self.config.get("single_override_threshold", 0.72),
-            "mean_reversion": self.config.get("single_override_threshold", 0.75),
+            "mean_reversion": self.config.get("mr_independent_threshold", 0.60),
             "ema": self.config.get("single_override_threshold", 0.72),
         }
         self.allow_independent = self.config.get("allow_single_override", True)
@@ -381,9 +394,15 @@ class PerformanceWeightedAggregator:
         # F.7: Spread history for MT5 assets (per asset, last 20 values)
         self._spread_history = {}
 
-        # B.4: State persistence — survive restarts
-        self._state_persistence_path = "data/aggregator_state.json"
-        self._load_persisted_state()
+        # B.4: State persistence — survive restarts.
+        # Backtests must never share this path with live trading: backtest.py
+        # passes an isolated per-asset/per-run path (or None to disable
+        # persistence outright) so replaying a year of history can't read
+        # stale/foreign state from — or overwrite — the live bot's real
+        # calibration file.
+        self._state_persistence_path = state_persistence_path
+        if self._state_persistence_path:
+            self._load_persisted_state()
         # ────────────────────────────────────────────────────────────────────
 
         # Regime transition evidence collector (SLIGHTLY regimes only)
@@ -540,6 +559,8 @@ class PerformanceWeightedAggregator:
 
     def _persist_state(self):
         """Save critical state to disk. Called once per candle close."""
+        if not self._state_persistence_path:
+            return
         try:
             import json, os
 
@@ -4805,6 +4826,60 @@ class PerformanceWeightedAggregator:
                             f"[INDEPENDENT] {self.asset_type}: {best_name} fires alone "
                             f"(conf={best_conf:.2f}, aligned={len(agreeing)} strategies)"
                         )
+
+                        # O3b parity: the overextension discount above (lines ~4733-4743)
+                        # only ever applied to consensus signals — signal_quality gets
+                        # fully overwritten by the independent-fire block, so a solo TF/EMA/MR
+                        # fire chasing an already-extreme move never got discounted at all.
+                        # Apply the same guard here, directionally: only when the fired
+                        # signal chases the extension (LONG into EMA_ABOVE_FAR, SHORT into
+                        # EMA_BELOW_FAR) rather than fading it.
+                        if state is not None:
+                            _is_extreme = bool(getattr(state, "is_parabolic", False))
+                            _ema_status = getattr(state, "ema_50_status", None)
+                            _chasing_extension = (
+                                (final_signal == 1 and _ema_status == "EMA_ABOVE_FAR")
+                                or (final_signal == -1 and _ema_status == "EMA_BELOW_FAR")
+                            )
+                            if _is_extreme and _chasing_extension:
+                                _dist_z = float(getattr(state, "distance_zscore", 0.0))
+                                _overext_discount = min(0.85, 1.0 - max(0.0, _dist_z - 2.5) * 0.06)
+                                signal_quality = round(signal_quality * _overext_discount, 4)
+                                logger.debug(
+                                    f"[QUALITY] {self.asset_type}: independent fire chasing "
+                                    f"extension (ema={_ema_status}, z={_dist_z:.2f}) — "
+                                    f"quality discounted to {signal_quality:.3f}"
+                                )
+
+                        if final_signal != 0 and signal_quality < self.config["min_signal_quality"]:
+                            final_signal = 0
+                            reasoning = f"hold_lowquality_independent (quality:{signal_quality:.2f})"
+
+                        # BTC-specific: independent-fire LONGs on BTC showed no
+                        # discernible edge across a full trending year (worse
+                        # take-profit:stop-loss hit ratio than SHORT, and no
+                        # discriminating entry-quality signal found across three
+                        # tested hypotheses — volatility-expansion tag, ADX slope,
+                        # overextension/parabolic z-score). Suppress independent
+                        # LONG fires for BTC only; SHORT and consensus-path (2+
+                        # strategy agreement) LONGs are unaffected. Toggleable via
+                        # phase_config so its effect can be isolated from other
+                        # gates (e.g. ai_validator_gates_performance_mode) during
+                        # backtest soak comparisons — default True preserves the
+                        # validated behavior.
+                        _btc_veto_enabled = getattr(self, "phase_config", {}).get(
+                            "btc_independent_long_veto_enabled", True
+                        )
+                        if self.asset_type == "BTC" and final_signal == 1 and _btc_veto_enabled:
+                            logger.info(
+                                f"[INDEPENDENT-VETO] BTC: suppressed independent LONG "
+                                f"from {best_name} (conf={best_conf:.2f})"
+                            )
+                            final_signal = 0
+                            reasoning = (
+                                f"hold_btc_independent_long_suppressed "
+                                f"(was {best_name}, conf:{best_conf:.2f})"
+                            )
 
                 # Update original_signal to capture any consensus OR independent signal
                 # before final filters (volatility, governor, etc) are applied.
