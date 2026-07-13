@@ -1312,6 +1312,16 @@ class PerformanceWeightedAggregator:
             logger.debug("[ema200_1d_dist_atr] compute error: %s", _ema200_err)
         # ─────────────────────────────────────────────────────────────────────
 
+        # A12: compute net_conviction unconditionally so main.py's pattern-
+        # confluence veto (which reads it off composite_state) is reachable
+        # in every mode, not just when _score_confluence separately runs it.
+        # Neutral tf_conf/signal defaults here — _score_confluence overwrites
+        # this with the real values when it runs afterward in performance mode.
+        try:
+            self._compute_net_conviction(state)
+        except Exception as _nc_err:
+            logger.debug("[net_conviction] compute error: %s", _nc_err)
+
         state.sanitise()
         return state
 
@@ -2009,6 +2019,85 @@ class PerformanceWeightedAggregator:
 
     # ── Section I: Confluence Engine ─────────────────────────────────────
 
+    def _compute_net_conviction(self, state, tf_conf: float = 0.0, signal: int = 0) -> float:
+        """
+        A12: net_conviction extracted out of _score_confluence's STEP-2
+        else-branch into its own method so it can be computed unconditionally
+        from _build_composite_state — not just when _score_confluence itself
+        runs (which only happens inside get_aggregated_signal's STEP 6B,
+        gated on the Performance aggregator's own final_signal != 0). Council/
+        hybrid mode only ever calls _build_composite_state directly (main.py's
+        composite_state injection, to borrow Livermore/structure fields for
+        the council judges) and never reaches STEP 6B, which previously left
+        state.net_conviction permanently at its 0.0 dataclass default in
+        those modes — making main.py's pattern-confluence veto's bypass
+        check (`net_conviction <= threshold`, threshold defaults to -1.0)
+        structurally unreachable there, since 0.0 is never <= -1.0.
+
+        tf_conf/signal default to neutral (0.0/"unknown direction") when
+        called from _build_composite_state before a signal direction is
+        known — this only affects two minor sub-terms (CHoCH's direction-
+        aware severity, and the order-book-wall direction approximation);
+        every other term here is state-only. _score_confluence still passes
+        the real tf_conf/signal it already has when it calls this itself.
+        """
+        _exhaust = 0.0
+        if state.choch_detected:
+            if signal == 1:
+                _exhaust += 0.3 if state.regime_age_ratio <= 1.0 else 1.0
+            elif signal == -1:
+                _exhaust += 2.0
+            else:
+                _exhaust += 1.0  # unknown direction — moderate penalty
+        if state.is_parabolic:
+            _exhaust += 1.5
+        if state.divergence_detected:
+            _exhaust += state.divergence_strength * 2
+        if state.regime_age_ratio > 1.5:
+            _exhaust += min(2.0, state.regime_age_ratio - 1.5)
+        if state.conviction_dying:
+            _exhaust += 1.0
+        if state.structural_decay:
+            _exhaust += 1.5
+        if state.absorption_detected:
+            _exhaust += 1.0
+        if state.vpd_diverging:
+            _exhaust += 1.5
+        if state.order_book_wall_detected:
+            _tf_signal = 1 if tf_conf > 0 else -1  # approximate direction
+            if _tf_signal == 1 and state.order_book_imbalance < -0.5:
+                _exhaust += 1.5  # Sell wall blocking longs
+            elif _tf_signal == -1 and state.order_book_imbalance > 0.5:
+                _exhaust += 1.5  # Buy wall blocking shorts
+        if state.spread_velocity_spike:
+            _exhaust += 1.0
+        if state.outside_bar:
+            _exhaust += 0.5
+
+        _confirm = 0.0
+        if state.bos_detected:
+            _confirm += 2.0
+        if state.slopes_aligned:
+            _confirm += 1.0
+        if state.lifecycle_phase == "PICKUP":
+            _confirm += 1.5
+        if state.lifecycle_phase == "CONFIRMATION":
+            _confirm += 1.0
+        if state.squeeze_active:
+            _confirm += 0.5
+        if state.ema_50_status == "DEFENDED":
+            _confirm += 1.0
+        elif state.ema_50_status == "EMA_ABOVE":
+            _confirm += 0.5
+        if state.cvd_trend != 0 and not state.cvd_stale:
+            _confirm += 1.0
+        if state.level_defended:
+            _confirm += 1.5
+
+        _net = _confirm - _exhaust
+        state.net_conviction = _net
+        return _net
+
     def _score_confluence(self, state, tf_conf: float, mr_conf: float, signal: int = 0):
         """
         The Brain. Reads the complete state and applies adjustments
@@ -2144,69 +2233,12 @@ class PerformanceWeightedAggregator:
             # judge back to its legacy candlestick fallback for no reason.
             pass
 
-            _exhaust = 0.0
-            if state.choch_detected:
-                # Direction-aware CHoCH penalty (Fix #19):
-                # CHoCH = lower swing high = potential bull → bear reversal.
-                # For a SHORT signal this IS exhaustion evidence (+2.0).
-                # For a LONG signal in an early/mid bull regime it's just a pullback
-                # dip — penalise lightly only if the regime is already long in the
-                # tooth (age_ratio > 1.0). In fresh bull regimes it's noise (0.3).
-                if signal == 1:
-                    _exhaust += 0.3 if state.regime_age_ratio <= 1.0 else 1.0
-                elif signal == -1:
-                    _exhaust += 2.0
-                else:
-                    _exhaust += 1.0  # unknown direction — moderate penalty
-            if state.is_parabolic:
-                _exhaust += 1.5
-            if state.divergence_detected:
-                _exhaust += state.divergence_strength * 2
-            if state.regime_age_ratio > 1.5:
-                _exhaust += min(2.0, state.regime_age_ratio - 1.5)
-            if state.conviction_dying:
-                _exhaust += 1.0
-            if state.structural_decay:
-                _exhaust += 1.5
-            if state.absorption_detected:
-                _exhaust += 1.0
-            if state.vpd_diverging:
-                _exhaust += 1.5
-            # F.6: Order book wall blocking the signal direction
-            if state.order_book_wall_detected:
-                _tf_signal = 1 if tf_conf > 0 else -1  # approximate direction
-                if _tf_signal == 1 and state.order_book_imbalance < -0.5:
-                    _exhaust += 1.5  # Sell wall blocking longs
-                elif _tf_signal == -1 and state.order_book_imbalance > 0.5:
-                    _exhaust += 1.5  # Buy wall blocking shorts
-            # F.7: Widening spread = liquidity withdrawal = volatility warning
-            if state.spread_velocity_spike:
-                _exhaust += 1.0
-            if state.outside_bar:
-                _exhaust += 0.5
-
-            _confirm = 0.0
-            if state.bos_detected:
-                _confirm += 2.0
-            if state.slopes_aligned:
-                _confirm += 1.0
-            if state.lifecycle_phase == "PICKUP":
-                _confirm += 1.5
-            if state.lifecycle_phase == "CONFIRMATION":
-                _confirm += 1.0
-            if state.squeeze_active:
-                _confirm += 0.5
-            if state.ema_50_status == "DEFENDED":
-                _confirm += 1.0
-            elif state.ema_50_status == "EMA_ABOVE":
-                _confirm += 0.5  # Trend continuation bonus
-            if state.cvd_trend != 0 and not state.cvd_stale:
-                _confirm += 1.0
-            if state.level_defended:
-                _confirm += 1.5
-
-            _net = _confirm - _exhaust
-            state.net_conviction = _net
+            # A12: net_conviction computation moved to _compute_net_conviction
+            # so it can also run from _build_composite_state directly (see
+            # that method's docstring for why council/hybrid mode needed
+            # this). Same call, same result — just shared instead of
+            # duplicated.
+            _net = self._compute_net_conviction(state, tf_conf=tf_conf, signal=signal)
 
             if _net > 0:
                 _boost = min(1.35, 1.0 + (_net * 0.05))

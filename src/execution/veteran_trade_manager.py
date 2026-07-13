@@ -1917,6 +1917,24 @@ class VeteranTradeManager:
         if _sweep_against:
             signals_fired.append("liquidity sweep against position")
 
+        # A9: governor/1D-macro-regime relay. Reuses the same live council_ref
+        # connection Gate Tier 4.1 built for _check_lifecycle_phase reuse —
+        # _check_macro_regime is a clean, read-only regime read (needs only
+        # the asset name), so it costs nothing extra to call continuously
+        # here. Flags when the 1D macro regime now opposes the position,
+        # independent of the 1H Livermore/structure signals above.
+        if self.council_ref is not None and hasattr(self.council_ref, "_check_macro_regime"):
+            try:
+                _macro_regime = self.council_ref._check_macro_regime(self.asset)
+                _macro_against = (
+                    (is_long and _macro_regime == "BEARISH")
+                    or (not is_long and _macro_regime == "BULLISH")
+                )
+                if _macro_against:
+                    signals_fired.append(f"1D macro regime against position ({_macro_regime})")
+            except Exception as _macro_err:
+                logger.debug(f"[VTM ALERT] macro regime reuse failed: {_macro_err}")
+
         # Gate Tier 4.1: reuse the council's entry-time lifecycle classifier
         # continuously, not just at entry. _check_lifecycle_phase already does
         # a richer exhaustion read (ADX decline + overextension + RSI
