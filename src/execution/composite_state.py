@@ -52,6 +52,12 @@ class CompositeState:
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
     nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
+    # A4: level_defended was only ever computed against the single primary
+    # nearby_4h_level. These extend the same rejection-wick defense check to
+    # the 2nd/3rd nearest levels so RetestEngine can classify CLEAN off a
+    # defended secondary/tertiary level when the primary isn't nearby.
+    level_2_defended: bool = False
+    level_3_defended: bool = False
     level_test_count: int = 0
     # Item 3.1/3.4: direction-split levels — nearest support (below price) and
     # nearest resistance (above price), each with its own distinct-visit test

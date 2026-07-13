@@ -5086,41 +5086,26 @@ class TradingBot:
                     if _total_score_post is not None and _required_score_post is not None:
                         _new_bar = _required_score_post + _new_bump
                         _clears_new_bar = _total_score_post >= _new_bar
+                        details["required_score"] = _new_bar
                     else:
                         # No real score data for this aggregator mode (e.g.
-                        # performance mode has no total_score/required_score) —
-                        # nothing to grade against, fail safe to the old block.
+                        # performance mode has no total_score/required_score).
                         _clears_new_bar = False
 
-                    if _gate3_shadow_mode or not _clears_new_bar:
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
-                            f"1H NATURAL_RETRACEMENT (pullback in uptrend) vs "
-                            f"4H={_lsm_4h_post} — not a SHORT setup at any 4H state"
-                        )
-                        # Record in shadow trader BEFORE zeroing — the shadow records
-                        # what would have happened if this signal had been allowed through.
-                        # This data is essential for Phase 3B learning on blocked setups.
-                        _original_signal = signal
-                        signal = 0
-                        details["reasoning"] = "livermore_counter_trend_block"
-                        self._shadow_open_blocked(
-                            asset_name, _original_signal, details, df, current_price,
-                            "gate3_counter_trend_old" if _gate3_shadow_mode else "livermore_counter_trend_block",
-                            asset_cfg,
-                        )
-                    else:
-                        details["required_score"] = _new_bar
-                        details["gate3_divergence"] = {
-                            "old_would_block": True,
-                            "new_bump_applied": _new_bump,
-                            "gate_label": f"gate3_counter_trend_new_{asset_name}",
-                        }
-                        logger.info(
-                            f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
-                            f"graduated (+{_new_bump:.2f} required_score) not blocked — "
-                            f"depth={_retr_depth_atr:.2f}ATR"
-                        )
+                    # B4: hard veto removed — counter-trend signals always take
+                    # the graduated score bump instead of being zeroed. The old
+                    # would-have-blocked outcome is still recorded via
+                    # gate3_divergence for the shadow-comparison logging below.
+                    details["gate3_divergence"] = {
+                        "old_would_block": bool(_gate3_shadow_mode or not _clears_new_bar),
+                        "new_bump_applied": _new_bump,
+                        "gate_label": f"gate3_counter_trend_new_{asset_name}",
+                    }
+                    logger.info(
+                        f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
+                        f"graduated (+{_new_bump:.2f} required_score) not blocked — "
+                        f"depth={_retr_depth_atr:.2f}ATR"
+                    )
                 elif _lsm_post == "NATURAL_REBOUND" and signal > 0:
                     # Mirror of above — pure counter-trend long.
                     _retr_depth_atr = self._estimate_retracement_depth(df, _lsm_post)
@@ -5130,35 +5115,21 @@ class TradingBot:
                     if _total_score_post is not None and _required_score_post is not None:
                         _new_bar = _required_score_post + _new_bump
                         _clears_new_bar = _total_score_post >= _new_bar
+                        details["required_score"] = _new_bar
                     else:
                         _clears_new_bar = False
 
-                    if _gate3_shadow_mode or not _clears_new_bar:
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
-                            f"1H NATURAL_REBOUND (bounce in downtrend) vs "
-                            f"4H={_lsm_4h_post} — not a LONG setup at any 4H state"
-                        )
-                        _original_signal = signal
-                        signal = 0
-                        details["reasoning"] = "livermore_counter_trend_block"
-                        self._shadow_open_blocked(
-                            asset_name, _original_signal, details, df, current_price,
-                            "gate3_counter_trend_old" if _gate3_shadow_mode else "livermore_counter_trend_block",
-                            asset_cfg,
-                        )
-                    else:
-                        details["required_score"] = _new_bar
-                        details["gate3_divergence"] = {
-                            "old_would_block": True,
-                            "new_bump_applied": _new_bump,
-                            "gate_label": f"gate3_counter_trend_new_{asset_name}",
-                        }
-                        logger.info(
-                            f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
-                            f"graduated (+{_new_bump:.2f} required_score) not blocked — "
-                            f"depth={_retr_depth_atr:.2f}ATR"
-                        )
+                    # B4: hard veto removed — see mirror branch above.
+                    details["gate3_divergence"] = {
+                        "old_would_block": bool(_gate3_shadow_mode or not _clears_new_bar),
+                        "new_bump_applied": _new_bump,
+                        "gate_label": f"gate3_counter_trend_new_{asset_name}",
+                    }
+                    logger.info(
+                        f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
+                        f"graduated (+{_new_bump:.2f} required_score) not blocked — "
+                        f"depth={_retr_depth_atr:.2f}ATR"
+                    )
                 elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
                     if _4h_confirms_short:
                         # 4H=MAIN_DOWN backs this short: bounce-exhaustion entry
@@ -5249,21 +5220,19 @@ class TradingBot:
                         _div["gate_label"], asset_cfg,
                     )
 
-            # ── SECONDARY STATE DIRECTIONAL BLOCK ─────────────────────────────
+            # ── SECONDARY STATE DIRECTIONAL LOG ───────────────────────────────
             # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most
-            # dangerous counter-moves. Two distinct risks:
+            # dangerous counter-moves. Two distinct cases, both logged for
+            # visibility (B5: the chase-direction case is no longer blocked —
+            # independent judges already scored the signal on its own merits):
             #
             # 1. Chasing the secondary direction (SELL in SECONDARY_RETRACEMENT,
             #    LONG in SECONDARY_REBOUND) — TF/EMA blindly sees momentum and
-            #    piles in. Livermore is explicit: do NOT chase secondary moves.
+            #    piles in. Livermore is explicit that this is elevated risk.
             #
             # 2. Fading the secondary (LONG in SECONDARY_RETRACEMENT, SHORT in
             #    SECONDARY_REBOUND) — MR Mode 2 exhaustion play. This IS a
-            #    legitimate Livermore trade at the secondary extreme. Allow it.
-            #
-            # Solution: block signals in the SAME direction as the secondary
-            # move; allow signals opposing it. Direction-based, not provenance-
-            # based — avoids the untrackable "which strategy fired this" problem.
+            #    legitimate Livermore trade at the secondary extreme.
             if signal != 0 and _lsm_post in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
                 _chasing_secondary = (
                     (_lsm_post == "SECONDARY_RETRACEMENT" and signal < 0) or
@@ -5272,16 +5241,9 @@ class TradingBot:
                 if _chasing_secondary:
                     _chase_dir = "SELL" if signal < 0 else "BUY"
                     logger.info(
-                        f"[LIVERMORE BLOCK] {asset_name}: {_chase_dir} zeroed — "
-                        f"{_lsm_post} (4H={_lsm_4h_post}): chasing the secondary "
-                        f"move is the highest-risk entry. Wait for exhaustion."
-                    )
-                    _original_signal = signal
-                    signal = 0
-                    details["reasoning"] = "livermore_secondary_chase_block"
-                    self._shadow_open_blocked(
-                        asset_name, _original_signal, details, df, current_price,
-                        "livermore_secondary_chase_block", asset_cfg,
+                        f"[LIVERMORE BLOCK] {asset_name}: {_chase_dir} allowed — "
+                        f"{_lsm_post} (4H={_lsm_4h_post}): chase block removed, "
+                        f"independent judges already scored this signal."
                     )
                 else:
                     # Opposing the secondary = exhaustion fade. Allowed — but log

@@ -5,6 +5,7 @@ Veteran Trade Manager - Strategic/Tactical Risk Architecture
 """
 
 import logging
+import threading
 import numpy as np
 import talib
 import pandas as pd
@@ -572,6 +573,14 @@ class VeteranTradeManager:
         self._early_scaled = False          # fires at most once per trade
         self._greed_mode_activated = False  # fires at most once per trade
         self._time_stop_extended = False    # fires at most once per trade
+
+        # A13: market_watcher.py runs on its own 15s-poll daemon thread and
+        # writes current_stop_loss directly (via _push_sl) outside this
+        # object's own tick loop (check_exit, called from the single-
+        # threaded main loop). Shared lock so the two can't interleave a
+        # read-modify-write on the same SL — market_watcher acquires this
+        # same lock before its write (see market_watcher.py's _push_sl).
+        self._sl_lock = threading.Lock()
 
         # State
         self.initial_stop_loss = None
@@ -1353,6 +1362,23 @@ class VeteranTradeManager:
         composite_state=None,
         judge_scores: Optional[Dict] = None,
     ) -> Optional[Dict]:
+        # A13: this method writes current_stop_loss directly (trailing/
+        # breakeven updates below) before calling check_exit — hold the same
+        # lock for the whole tick so market_watcher.py's cross-thread SL push
+        # can't land in the middle of it.
+        with self._sl_lock:
+            return self._update_with_current_price_locked(
+                current_price, df_4h=df_4h, composite_state=composite_state,
+                judge_scores=judge_scores,
+            )
+
+    def _update_with_current_price_locked(
+        self,
+        current_price: float,
+        df_4h: Optional[pd.DataFrame] = None,
+        composite_state=None,
+        judge_scores: Optional[Dict] = None,
+    ) -> Optional[Dict]:
         try:
             atr = self._calculate_atr()
 
@@ -1611,7 +1637,10 @@ class VeteranTradeManager:
                         self.current_stop_loss = _struct_sl
                 # ──────────────────────────────────────────────────────────────
 
-            return self.check_exit(current_price, atr, df_4h=df_4h)
+            # A13: already holding _sl_lock (acquired by the update_with_
+            # current_price wrapper) — call the unlocked impl directly to
+            # avoid re-acquiring the same non-reentrant lock (deadlock).
+            return self._check_exit_locked(current_price, atr, df_4h=df_4h)
         except Exception as e:
             logger.error(f"[VTM] Price update error: {e}")
             return None
@@ -1875,6 +1904,19 @@ class VeteranTradeManager:
         if getattr(_cs, "bearish_divergence" if is_long else "bullish_divergence", False):
             signals_fired.append("momentum divergence against position")
 
+        # A3: sweep_detected consumer — a liquidity sweep (stop-hunt wick)
+        # against the position's direction. Distinct from the per-tick trail
+        # tighten in check_exit (which reacts to sweep_direction alone); this
+        # is the human-alert count, so it only counts a sweep that's both
+        # detected AND directionally against the position.
+        _sweep_dir = getattr(_cs, "sweep_direction", 0) or 0
+        _sweep_against = (
+            getattr(_cs, "sweep_detected", False)
+            and ((is_long and _sweep_dir < 0) or (not is_long and _sweep_dir > 0))
+        )
+        if _sweep_against:
+            signals_fired.append("liquidity sweep against position")
+
         # Gate Tier 4.1: reuse the council's entry-time lifecycle classifier
         # continuously, not just at entry. _check_lifecycle_phase already does
         # a richer exhaustion read (ADX decline + overextension + RSI
@@ -2030,6 +2072,13 @@ class VeteranTradeManager:
             logger.debug(f"[7.4] MFE log failed (non-blocking): {_e74}")
 
     def check_exit(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
+        # A13: hold _sl_lock for the whole tick so market_watcher.py's
+        # cross-thread SL push (which acquires the same lock) can't
+        # interleave with this method's own current_stop_loss writes.
+        with self._sl_lock:
+            return self._check_exit_locked(current_price, atr_value=atr_value, df_4h=df_4h)
+
+    def _check_exit_locked(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
@@ -2956,8 +3005,12 @@ class VeteranTradeManager:
                 f"Use /set_tp to move take profit instead."
             )
 
-        old_sl = self.current_stop_loss
-        self.current_stop_loss = new_sl
+        # A13: third writer of current_stop_loss (Telegram-triggered manual
+        # override, its own async context) — same shared lock as the
+        # market_watcher/check_exit pair.
+        with self._sl_lock:
+            old_sl = self.current_stop_loss
+            self.current_stop_loss = new_sl
         logger.info(
             f"[VTM] 🖊️ Manual SL override: {self.asset} {self.side.upper()} "
             f"SL {old_sl:.5f} → {new_sl:.5f}"

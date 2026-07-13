@@ -410,15 +410,18 @@ class SystemValidator:
             # Blocks A-D in signal_aggregator.py logged "HARD_VETO" and are
             # now retired. main.py's consolidated Livermore block uses different
             # reasoning tags. Recognise both so this metric doesn't show "dead."
+            # B4/B5: livermore_counter_trend_block and livermore_secondary_
+            # chase_block were removed from main.py (counter-trend now always
+            # graduates instead of hard-vetoing; secondary chase is no longer
+            # blocked) — dropped here too so this metric isn't diluted by
+            # watching for tags that can no longer fire.
             _reasoning_str = str(signal_details.get("reasoning", ""))
             _veto_fired = any(
                 tag in _reasoning_str
                 for tag in (
                     "HARD_VETO",
-                    "livermore_counter_trend_block",
                     "livermore_rebound_sl_sweep_block",
                     "livermore_retracement_sl_sweep_block",
-                    "livermore_secondary_chase_block",
                 )
             )
             self._liveness_buffers[_veto_name].append(1 if _veto_fired else 0)
