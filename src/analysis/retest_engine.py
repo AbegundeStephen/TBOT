@@ -83,8 +83,10 @@ class RetestResult:
     # None when the feature is off or no box was computed.
     range_high: Optional[float] = None
     range_low: Optional[float] = None
-    # Second and third nearest 4H structural levels — visible context only.
-    # Currently logged but do not alter CLEAN/BREAKOUT/CHASE classification.
+    # Second and third nearest 4H structural levels. A4: also checked for
+    # their own defended-wick status (level_2_defended/level_3_defended) as
+    # a CLEAN fallback when the primary level doesn't qualify — otherwise
+    # visible context only, does not alter BREAKOUT/CHASE classification.
     level_2: Optional[float] = None
     level_3: Optional[float] = None
 
@@ -233,6 +235,37 @@ class RetestEngine:
                     entry_type=ET_RANGE_BOUNDARY,
                     direction=direction,
                     level=level,
+                    range_high=_rh,
+                    range_low=_rl,
+                    level_2=level_2,
+                    level_3=level_3,
+                )
+
+        # ── 1c. CLEAN off a secondary/tertiary level (A4) ─────────────
+        # level_defended was only ever computed for the single primary
+        # nearby_4h_level. A strong rejection wick can defend the 2nd/3rd
+        # nearest level instead (e.g. price sits between two levels and the
+        # "nearest" one isn't where the actual defense happened) — check
+        # those independently before falling through to BREAKOUT/WICK/CHASE.
+        for _lvl, _defended in (
+            (level_2, bool(getattr(state, "level_2_defended", False))),
+            (level_3, bool(getattr(state, "level_3_defended", False))),
+        ):
+            if _lvl is None or not _defended:
+                continue
+            _dist_atr_alt = abs(close - _lvl) / atr
+            if _dist_atr_alt <= self._clean_atr_mult:
+                logger.debug(
+                    "retest_engine: CLEAN (secondary level) @ %.5f (dist=%.2f ATR)",
+                    _lvl, _dist_atr_alt,
+                )
+                _rh, _rl = self._maybe_swing_range(state, df)
+                return RetestResult(
+                    retest_type=RT_CLEAN,
+                    modifier=self._mod_clean,
+                    entry_type=ET_RANGE_BOUNDARY,
+                    direction=direction,
+                    level=_lvl,
                     range_high=_rh,
                     range_low=_rl,
                     level_2=level_2,

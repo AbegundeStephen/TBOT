@@ -34,7 +34,6 @@ JUDGE_SOURCE_REGISTRY = {
     "structure": [("independent", 0.85), ("livermore_1h", 0.15)],
     "volume":    [("independent", 0.85), ("livermore_1h", 0.15)],
     "reversion": [("independent", 1.0)],
-    "recent_momentum_alignment": [("independent", 1.0)],  # Gate Tier 1.5 — real, dedicated candle-displacement evidence, now visible to 5.1
 }
 
 
@@ -465,13 +464,6 @@ class InstitutionalCouncilAggregator:
             else:
                 # --- TREND GATING (STRICT) ---
                 if (is_bullish and signal == -1) or (is_bearish and signal == 1):
-                    # ✨ Explosive Momentum Overrule (V-Shape Reversal)
-                    if self._is_explosive_momentum(df, signal):
-                        logger.info(
-                            f"[GOV] 🚀 EXPLOSIVE MOMENTUM - Overruling Macro Veto ({regime_name})"
-                        )
-                        return True, "V_SHAPE"
-
                     # ✨ SLIGHTLY regimes are ambiguous — soft block instead of hard block.
                     # Returns SLIGHTLY_COUNTER so the caller raises required_score by +0.5
                     # (needs ≥4.0) rather than rejecting outright.  Full BEARISH/BULLISH
@@ -740,6 +732,7 @@ class InstitutionalCouncilAggregator:
         atr_fast: float,
         first_tp_mult: float = 1.5,
         asset_name: Optional[str] = None,
+        trade_type: Optional[str] = None,
     ) -> bool:
         """
         The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling.
@@ -747,6 +740,11 @@ class InstitutionalCouncilAggregator:
         Gate Tier 1.3: now nets out real, continuously-corrected per-asset friction
         (FRICTION_PENALTIES, updated live from observed fill slippage) instead of
         implicitly assuming trading is free.
+
+        B7: single R:R check (folds in the formerly-separate rr_gate_rejected_
+        trend/reversion veto). trade_type sets the minimum R:R: REVERSION gets
+        the lower 0.6 bar (MR targets the nearer EMA-20 magnet, not a full
+        trend leg), TREND needs 1.0, anything else keeps the original 1.2.
         """
         try:
             risk = abs(entry - stop_loss)
@@ -775,100 +773,18 @@ class InstitutionalCouncilAggregator:
                 )
                 return False
 
-            # Minimum 1.2:1 R:R check
-            return (expected_reward / risk) >= 1.2
+            # Minimum R:R check — trade-type aware (B7)
+            if trade_type == "TREND":
+                _min_rr = 1.0
+            elif trade_type == "REVERSION":
+                _min_rr = 0.6
+            else:
+                _min_rr = 1.2
+            return (expected_reward / risk) >= _min_rr
 
         except Exception as e:
             logger.error(f"[PROFIT] Error: {e}")
             return True
-
-    def _check_recent_momentum_alignment(
-        self,
-        df: pd.DataFrame,
-        signal: int,
-        atr_fast: float,
-        n_candles: int = 3,
-        min_agreement: int = 2,
-        adverse_atr_mult: float = 1.0,
-    ) -> Tuple[bool, str, float]:
-        """
-        Candle Momentum Alignment detector (veteran rewrite 2026-06-24).
-
-        Flags a trend-aligned entry as ADVERSE only when BOTH conditions hold over
-        the last `n_candles` CLOSED bars (the forming candle is excluded):
-          1. a directional majority (>= `min_agreement` candles) closes AGAINST the
-             proposed trade, AND
-          2. NET close-to-close displacement (first open → last close) moves against
-             the trade by at least `adverse_atr_mult` × fast-ATR.
-
-        Why both — the old majority-only test fired on noise. Three candles of
-        {two tiny green, one big red} net DOWN, yet voted 2:1 "bullish" and blocked
-        a SELL that was correctly aligned with the move. Requiring real net
-        displacement means a counter-move only counts when price has actually
-        TRAVELLED against the entry — a genuine bounce — not merely printed a couple
-        of small opposite-colour bodies. The displacement floor also subsumes the
-        old doji filter (tiny candles can't clear it), so that is removed.
-
-        Returns:
-            (is_adverse: bool, reason: str, adverse_atr_ratio: float)
-            is_adverse=False → momentum is not against the trade; proceed.
-            is_adverse=True  → genuine counter-move; caller decides veto vs penalty.
-            adverse_atr_ratio = net adverse displacement in ATRs (0.0 when not
-            adverse), used by the caller to scale the response.
-
-        Set `adverse_atr_mult=0.0` to fall back to majority-only (legacy) behaviour.
-        """
-        try:
-            if atr_fast is None or atr_fast <= 0 or len(df) < n_candles + 2:
-                return False, "insufficient data", 0.0
-
-            # n confirmed-closed bars, excluding the most-recent forming candle.
-            _recent = df.iloc[-(n_candles + 1) : -1]
-            _opens = _recent["open"].values
-            _closes = _recent["close"].values
-
-            _bullish = int((_closes > _opens).sum())
-            _bearish = int((_closes < _opens).sum())
-
-            # Net displacement across the window (first open → last close), in ATRs.
-            # Positive = price rose over the window, negative = price fell.
-            _net_atr = float(_closes[-1] - _opens[0]) / atr_fast
-
-            if signal == -1:  # SELL: adverse = price RISING
-                _majority = _bullish >= min_agreement
-                _adverse_disp = _net_atr  # positive is adverse
-                _dir, _side = "bullish", "SELL"
-            elif signal == 1:  # BUY: adverse = price FALLING
-                _majority = _bearish >= min_agreement
-                _adverse_disp = -_net_atr  # positive is adverse
-                _dir, _side = "bearish", "BUY"
-            else:
-                return False, "no signal", 0.0
-
-            if _majority and _adverse_disp >= adverse_atr_mult:
-                reason = (
-                    f"{max(_bullish, _bearish)}/{n_candles} candles {_dir} AND net "
-                    f"{_adverse_disp:+.2f} ATR against {_side} "
-                    f"(>= {adverse_atr_mult:.2f}) — genuine counter-move"
-                )
-                logger.info(
-                    f"[CMR] ⛔ {_side} adverse momentum — {max(_bullish, _bearish)}/"
-                    f"{n_candles} {_dir}, net {_adverse_disp:+.2f} ATR against entry."
-                )
-                return True, reason, float(_adverse_disp)
-
-            return (
-                False,
-                (
-                    f"not adverse (majority={_majority}, net "
-                    f"{_adverse_disp:+.2f} ATR vs floor {adverse_atr_mult:.2f})"
-                ),
-                0.0,
-            )
-
-        except Exception as e:
-            logger.warning(f"[CMR] Check failed, allowing signal: {e}")
-            return False, f"check error: {e}", 0.0
 
     def _check_macro_regime(self, asset: str) -> str:
         """
@@ -1123,51 +1039,6 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.debug(f"[LIFECYCLE] L9 Livermore overlay skipped: {e}")
             return adj_score, phase_label
-
-    def _is_explosive_momentum(self, df: pd.DataFrame, signal: int) -> bool:
-        """
-        Detects 'V-Shape' or 'Parabolic' price action that overrules macro bias.
-        Criteria:
-        1. ADX > 22 (Meaningful trend — lowered from 30 to catch geopolitical/supply-shock moves)
-        2. Velocity: Last 6 bars move > 1.5 * ATR14 (lowered from 2.0 to be less restrictive)
-        3. Alignment: Price > EMA20 > EMA50 (for Longs)
-        """
-        try:
-            if len(df) < 50:
-                return False
-
-            close = df["close"].values
-            high = df["high"].values
-            low = df["low"].values
-
-            # 1. Trend Strength (22 catches strong momentum without requiring parabolic ADX)
-            adx = ta.ADX(high, low, close, timeperiod=14)[-1]
-            if adx < 22:
-                return False
-
-            # 2. ATR-Scaled Velocity (1.5x ATR over last 6 bars)
-            atr = ta.ATR(high, low, close, timeperiod=14)[-1]
-            move = close[-1] - close[-6]
-            velocity_ratio = abs(move) / (atr if atr > 0 else 1)
-
-            if velocity_ratio < 1.5:
-                return False
-
-            # 3. Local Alignment
-            ema20 = ta.EMA(close, timeperiod=20)[-1]
-            ema50 = ta.EMA(close, timeperiod=50)[-1]
-
-            if signal == 1:  # Buying into a bear regime
-                if move > 0 and close[-1] > ema20 > ema50:
-                    return True
-            elif signal == -1:  # Selling into a bull regime
-                if move < 0 and close[-1] < ema20 < ema50:
-                    return True
-
-            return False
-        except Exception as e:
-            logger.debug(f"[MOMENTUM] Overrule check error: {e}")
-            return False
 
     def _effective_vote_count(self, contributing_judges, registry) -> float:
         """
@@ -2807,186 +2678,53 @@ class InstitutionalCouncilAggregator:
                         distance_to_tp / distance_to_sl if distance_to_sl > 0 else 0
                     )
 
-                    # Strategy Rules
-                    if trade_type == "TREND" and rr_ratio < 1.0:
-                        logger.info(
-                            f"[COUNCIL] R/R Gate: Trend trade rejected (R/R: {rr_ratio:.2f} < 1.0)"
-                        )
-                        return 0, {
-                            "timestamp": timestamp,
-                            "action": "rejected",
-                            "original_signal": signal,
-                            "reasoning": "rr_gate_rejected_trend",
-                            "signal": 0,
-                            "rr_ratio": rr_ratio,
-                            "total_score": total_score,
-                            "scores": chosen_scores,
-                            "mr_signal": mr_signal,
-                            "mr_confidence": mr_conf,
-                            "tf_signal": tf_signal,
-                            "tf_confidence": tf_conf,
-                            "ema_signal": ema_signal,
-                            "ema_confidence": ema_conf,
-                        }
-
-                    if trade_type == "REVERSION" and rr_ratio < 0.6:
-                        logger.info(
-                            f"[COUNCIL] MR Trade rejected due to poor R/R (Magnet: {ema_20:.2f}, R/R: {rr_ratio:.2f} < 0.6)."
-                        )
-                        return 0, {
-                            "timestamp": timestamp,
-                            "action": "rejected",
-                            "original_signal": signal,
-                            "reasoning": "rr_gate_rejected_reversion",
-                            "signal": 0,
-                            "rr_ratio": rr_ratio,
-                            "total_score": total_score,
-                            "scores": chosen_scores,
-                            "mr_signal": mr_signal,
-                            "mr_confidence": mr_conf,
-                            "tf_signal": tf_signal,
-                            "tf_confidence": tf_conf,
-                            "ema_signal": ema_signal,
-                            "ema_confidence": ema_conf,
-                        }
+                    # B7: standalone rr_gate_rejected_trend/reversion veto removed —
+                    # consolidated into _check_profit_economics_adaptive below
+                    # (single R:R check, still TREND=1.0/REVERSION=0.6 aware).
 
                 except Exception as e:
                     logger.warning(f"[COUNCIL] Risk/Reward Gate simulation failed: {e}")
-
-                # 5. CANDLE MOMENTUM ALIGNMENT GATE (ABSOLUTE VETO)
-                # Reason: Prevents adding trend-aligned exposure when short-term
-                # price action is clearly moving against the proposed direction.
-                # Addresses "9 SELL signals while BTC bounces" — macro regime is
-                # sticky (BEARISH for hours) but recent 1H candles may show a
-                # clear bullish rebound, making a new short entry very poor timing.
-                #
-                # Only applied to TREND-ALIGNED signals (counter-trend signals
-                # already require a higher council score; MR setups may legitimately
-                # trade against recent momentum).
-                _cmr_trend_aligned = (
-                    signal == -1 and not is_bull
-                ) or (  # SELL in BEARISH regime
-                    signal == 1 and is_bull
-                )  # BUY  in BULLISH regime
-                if _cmr_trend_aligned:
-                    _cmr_cfg = self.config.get("momentum_alignment", {}) or {}
-                    # mode: "soft" (default) | "off" | "veto"
-                    _cmr_mode = str(_cmr_cfg.get("mode", "soft")).strip().lower()
-                    if _cmr_mode != "off" and _cmr_cfg.get("enabled", True):
-                        _cmr_candles = int(_cmr_cfg.get("candles", 3))
-                        _cmr_min_agree = int(_cmr_cfg.get("min_agreement", 2))
-                        _cmr_adv_mult = float(_cmr_cfg.get("adverse_atr_mult", 1.0))
-                        _cmr_strong_adx = float(_cmr_cfg.get("strong_adx", 28.0))
-                        _cmr_penalty = float(_cmr_cfg.get("soft_penalty", 0.75))
-                        _is_adverse, _cmr_reason, _adv_ratio = (
-                            self._check_recent_momentum_alignment(
-                                df,
-                                signal,
-                                atr_fast,
-                                n_candles=_cmr_candles,
-                                min_agreement=_cmr_min_agree,
-                                adverse_atr_mult=_cmr_adv_mult,
-                            )
-                        )
-                        if _is_adverse:
-                            # Pullback-in-strong-trend exemption: when ADX confirms a
-                            # strong trend, a counter-move IS the pullback-continuation
-                            # entry a trend system wants — soften the response.
-                            # Use the higher of 1H and 4H ADX so a strong 4H trend
-                            # correctly exempts its own pullback candles on 1H, matching
-                            # the same pattern as Fix 9 (momentum super-cycle gate).
-                            _adx_4h_cmr = 0.0
-                            try:
-                                _df4_cmr = (governor_data or {}).get("df_4h")
-                                if _df4_cmr is not None and len(_df4_cmr) >= 14:
-                                    _adx_4h_cmr = float(
-                                        ta.ADX(
-                                            _df4_cmr["high"].values,
-                                            _df4_cmr["low"].values,
-                                            _df4_cmr["close"].values,
-                                            timeperiod=14,
-                                        )[-1]
-                                    )
-                                    if not np.isfinite(_adx_4h_cmr):
-                                        _adx_4h_cmr = 0.0
-                            except Exception:
-                                _adx_4h_cmr = 0.0
-                            _adx_for_cmr = max(adx if (adx is not None and np.isfinite(adx)) else 0.0, _adx_4h_cmr)
-                            _strong_trend = bool(_adx_for_cmr >= _cmr_strong_adx)
-                            # Block vs allow:
-                            #   "veto" → hard block (unless strong-trend pullback).
-                            #   "soft" → require an elevated score (required_score +
-                            #            penalty). A high-conviction council survives a
-                            #            bad-timing bounce; a marginal one stands down.
-                            #            Strong trend halves the penalty.
-                            _cmr_block = False
-                            _cmr_detail = _cmr_reason
-                            if _cmr_mode == "veto" and not _strong_trend:
-                                _cmr_block = True
-                            else:
-                                _eff_pen = _cmr_penalty * (0.5 if _strong_trend else 1.0)
-                                _cmr_bar = required_score + _eff_pen
-                                if total_score < _cmr_bar:
-                                    _cmr_block = True
-                                    _cmr_detail = (
-                                        f"{_cmr_reason}; score {total_score:.2f} < "
-                                        f"elevated bar {_cmr_bar:.2f} "
-                                        f"(pen={_eff_pen:+.2f}, strong_trend={_strong_trend})"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"[CMR] ⚠️ Adverse momentum noted ({_cmr_reason}) "
-                                        f"but council score {total_score:.2f} >= elevated "
-                                        f"bar {_cmr_bar:.2f} (pen={_eff_pen:+.2f}, "
-                                        f"strong_trend={_strong_trend}) — entry allowed."
-                                    )
-                            if _cmr_block:
-                                logger.info(
-                                    f"[VETO] ❌ BLOCKED - Candle Momentum Reversal: {_cmr_detail}"
-                                )
-                                return 0, {
-                                    "timestamp": timestamp,
-                                    "signal": 0,
-                                    "asset": self.asset_type,
-                                    "decision_type": "BLOCKED (Candle Momentum Reversal)",
-                                    "action": "rejected",
-                                    "original_signal": signal,
-                                    "reasoning": "blocked_by_candle_momentum_reversal",
-                                    "final_signal": 0,
-                                    "signal_quality": 0.0,
-                                    "total_score": total_score,
-                                    "scores": chosen_scores,
-                                    "buy_total": buy_total,
-                                    "sell_total": sell_total,
-                                    "regime": regime_name,
-                                    "mr_signal": mr_signal,
-                                    "mr_confidence": mr_conf,
-                                    "tf_signal": tf_signal,
-                                    "tf_confidence": tf_conf,
-                                    "ema_signal": ema_signal,
-                                    "ema_confidence": ema_conf,
-                                    "cmr_reason": _cmr_detail,
-                                }
 
             # ====================================================================
             # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)
             # ====================================================================
             if signal != 0:
-                penalty = 0.0
-
                 # A. SNIPER LOCK — Gate Tier 1.1: call removed from the live path.
                 # See _check_sniper_filter's docstring for archival status.
 
-                # B. PROFIT ECONOMICS
-                # ✅ FIXED: Using corrected method from Task 10
+                # B. PROFIT ECONOMICS — B7: single R:R veto (trade-type aware:
+                # TREND needs 1.0, REVERSION 0.6), replacing the old separate
+                # rr_gate_rejected_trend/reversion block above.
                 if not self._check_profit_economics_adaptive(
-                    entry_price, stop_loss, atr_fast, asset_name=self.asset_type
+                    entry_price, stop_loss, atr_fast,
+                    asset_name=self.asset_type, trade_type=trade_type,
                 ):
-                    penalty += 1.0
-                    logger.info(f"[PENALTY] ⚠️ Low profit economics: -1.0")
-
-                # Apply penalties
-                total_score -= penalty
+                    logger.info(
+                        f"[VETO] ❌ BLOCKED - R:R Gate ({trade_type}): reward doesn't "
+                        f"clear the minimum R:R after friction."
+                    )
+                    return 0, {
+                        "timestamp": timestamp,
+                        "signal": 0,
+                        "asset": self.asset_type,
+                        "decision_type": "BLOCKED (R:R Gate)",
+                        "action": "rejected",
+                        "original_signal": signal,
+                        "reasoning": (
+                            "rr_gate_rejected_trend" if trade_type == "TREND"
+                            else "rr_gate_rejected_reversion" if trade_type == "REVERSION"
+                            else "rr_gate_rejected"
+                        ),
+                        "final_signal": 0,
+                        "signal_quality": 0.0,
+                        "total_score": total_score,
+                        "mr_signal": mr_signal,
+                        "mr_confidence": mr_conf,
+                        "tf_signal": tf_signal,
+                        "tf_confidence": tf_conf,
+                        "ema_signal": ema_signal,
+                        "ema_confidence": ema_conf,
+                    }
 
                 # C. SESSION LIQUIDITY PENALTY (Extended to all MT5 Assets)
                 try:
@@ -3066,35 +2804,14 @@ class InstitutionalCouncilAggregator:
                     try:
                         winrate = self.performance_tracker.get_winrate(trade_type)
 
-                        # A. PERFORMANCE CIRCUIT BREAKER (HARD VETO)
-                        # Reason: Pause strategies that are statistically proven to be losing.
+                        # B6: strategy_circuit_breaker hard veto removed. The
+                        # winrate/total_trades data collection stays — it's
+                        # still consumed below by dynamic weighting and by the
+                        # outcome_pipeline tag (purely additive, no live gating).
                         stats = self.performance_tracker.get_all_stats().get(
                             trade_type, {}
                         )
                         total_trades = stats.get("wins", 0) + stats.get("losses", 0)
-
-                        if total_trades >= 10 and winrate < 0.35:
-                            logger.warning(
-                                f"[VETO] 🛑 Strategy Circuit Breaker: {trade_type} winrate {winrate:.1%} "
-                                f"after {total_trades} trades is below 35% threshold. Blocking trade."
-                            )
-                            return 0, {
-                                "timestamp": timestamp,
-                                "signal": 0,
-                                "asset": self.asset_type,
-                                "decision_type": f"BLOCKED (Strategy Circuit Breaker: {winrate:.1%})",
-                                "action": "rejected",
-                                "original_signal": signal,
-                                "reasoning": "strategy_circuit_breaker",
-                                "final_signal": 0,
-                                "signal_quality": 0.0,
-                                "mr_signal": mr_signal,
-                                "mr_confidence": mr_conf,
-                                "tf_signal": tf_signal,
-                                "tf_confidence": tf_conf,
-                                "ema_signal": ema_signal,
-                                "ema_confidence": ema_conf,
-                            }
 
                         # B. DYNAMIC WEIGHTING (SOFT ADJUSTMENT)
                         # Requires the same minimum sample as the circuit breaker (10 trades)
@@ -3767,8 +3484,10 @@ class InstitutionalCouncilAggregator:
         2026-07-09): raw EMA-signal/confidence is the primary score again,
         with 1H Livermore agreement folded in as a capped +15% bonus rather
         than the primary driver. This replaces the Item 2.8 design (full
-        weight on 1H/4H Livermore agreement, 0.3x baseline on disagreement)
-        and drops that design's O2a slopes_aligned/conviction_dying handling.
+        weight on 1H/4H Livermore agreement, 0.3x baseline on disagreement).
+        A2 (2026-07-13): slopes_aligned re-added as its own capped +10%
+        bonus; conviction_dying is not restored here (VOLUME/MOMENTUM judges
+        already apply it).
         """
         try:
             buy_score = weight * ema_conf if ema_signal == 1 else 0.0
@@ -3788,6 +3507,25 @@ class InstitutionalCouncilAggregator:
                 buy_score = min(buy_score * 1.15, weight)
             if sell_score > 0 and lv_state in _bear_states:
                 sell_score = min(sell_score * 1.15, weight)
+
+            # A2: slopes_aligned bonus — re-added on top of the Part 2.1 raw
+            # EMA-primary scoring (this was dropped from this function by
+            # Part 2.1 on 2026-07-09; restored per explicit instruction).
+            # 1H/4H EMA slope agreement is independent evidence from the
+            # Livermore-state bonus above, so it's applied as its own capped
+            # +10% rather than folded into the 1.15x Livermore multiplier.
+            _cs_slopes = (governor_data or {}).get("composite_state") if governor_data else None
+            _slopes_aligned = bool(
+                getattr(_cs_slopes, "slopes_aligned", False) if not isinstance(_cs_slopes, dict)
+                else (_cs_slopes.get("slopes_aligned", False) if _cs_slopes else False)
+            )
+            if _slopes_aligned:
+                if buy_score > 0 and buy_score >= sell_score:
+                    buy_score = min(buy_score * 1.10, weight)
+                    buy_exp += " +slopes_aligned"
+                elif sell_score > 0 and sell_score > buy_score:
+                    sell_score = min(sell_score * 1.10, weight)
+                    sell_exp += " +slopes_aligned"
 
             return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
         except Exception as e:
@@ -3938,6 +3676,21 @@ class InstitutionalCouncilAggregator:
                 if choch_detected and is_bearish_regime:
                     buy_score = min(buy_score + 0.3 * weight, weight)
                     buy_exp += " +CHoCH"
+
+                # A7: Outside bar — engulfs the prior bar's full range, a
+                # volatility-expansion/reversal tell. composite_state only
+                # flags that one occurred (direction-agnostic), so the
+                # direction comes from this bar's own close vs open, same as
+                # how the rest of this judge reads df directly.
+                _outside_bar = bool(_cs("outside_bar", False))
+                if _outside_bar and len(df) >= 1:
+                    _ob_bullish = float(df["close"].iloc[-1]) > float(df["open"].iloc[-1])
+                    if _ob_bullish and buy_score < weight:
+                        buy_score = min(buy_score + 0.3 * weight, weight)
+                        buy_exp += " +outside_bar"
+                    elif not _ob_bullish and sell_score < weight:
+                        sell_score = min(sell_score + 0.3 * weight, weight)
+                        sell_exp += " +outside_bar"
 
                 # ── Livermore Anchor Proximity ────────────────────────────────
                 # The SMC-derived fields above detect structure from recent price
@@ -4522,7 +4275,12 @@ class InstitutionalCouncilAggregator:
 
                 conviction_dying = bool(_cs("conviction_dying", False))
                 vpd_diverging = bool(_cs("vpd_diverging", False))
-                cvd_trend = int(_cs("cvd_trend", 0))
+                # A1: CVD staleness guard. main.py only refreshes cvd_trend for
+                # BTC-on-Binance and marks it stale (frozen on its last value)
+                # once the feed goes quiet; a stale reading is worse than no
+                # reading; treat it as neutral (0) rather than trusting a
+                # frozen number.
+                cvd_trend = 0 if bool(_cs("cvd_stale", False)) else int(_cs("cvd_trend", 0))
 
                 if conviction_dying:
                     # Shrinking candle bodies = conviction dying; penalise both
@@ -4732,30 +4490,69 @@ class InstitutionalCouncilAggregator:
                         },
                     )
                 elif inst_pattern in ("COMPRESSION", "CONSOLIDATION"):
-                    buy_score = weight * 0.5
-                    sell_score = weight * 0.5
+                    # A6: sharpen the flat 0.5/0.5 split using the continuous
+                    # squeeze_strength reading (0-1) instead of a fixed
+                    # multiplier — tighter compression (higher strength) earns
+                    # more credit than a barely-qualifying squeeze.
+                    _sq_strength = float(
+                        getattr(_gd_composite, "squeeze_strength", 0.0) if not isinstance(_gd_composite, dict)
+                        else (_gd_composite.get("squeeze_strength", 0.0) if _gd_composite else 0.0)
+                    )
+                    _sq_mult = 0.5 + (0.3 * min(max(_sq_strength, 0.0), 1.0))  # 0.5-0.8
+                    buy_score = weight * _sq_mult
+                    sell_score = weight * _sq_mult
                     return (
                         buy_score,
                         sell_score,
                         {
-                            "buy": f"PATTERN BUY: ⚠️ {inst_pattern} ({buy_score:.1f}) — range bound",
-                            "sell": f"PATTERN SELL: ⚠️ {inst_pattern} ({sell_score:.1f}) — range bound",
+                            "buy": f"PATTERN BUY: ⚠️ {inst_pattern} (str={_sq_strength:.2f}, {buy_score:.1f}) — range bound",
+                            "sell": f"PATTERN SELL: ⚠️ {inst_pattern} (str={_sq_strength:.2f}, {sell_score:.1f}) — range bound",
                         },
                     )
-            # Item 5.3: candlestick fallback removed entirely. institutional_pattern
-            # is now always one of ACCUMULATION/DISTRIBUTION/COMPRESSION/None
-            # (Item 5.2's rebuilt _compute_institutional_pattern) — no other
-            # string value is ever set, so there is no longer an "unknown
-            # pattern" case to fall through on. None means honestly no
-            # pattern: both scores stay 0.0 rather than reaching for the old,
-            # weak candlestick heuristic as a consolation score.
-            return (
-                buy_score, sell_score,
-                {
-                    "buy": "PATTERN BUY: ❌ No institutional pattern",
-                    "sell": "PATTERN SELL: ❌ No institutional pattern",
-                },
+
+            # Item 5.3: institutional_pattern is normally one of ACCUMULATION/
+            # DISTRIBUTION/COMPRESSION/None. A6/A8/A10: when it's None, two
+            # other real signals can still give PATTERN something honest to
+            # say instead of flatlining at 0.0 — a coiled-spring compression
+            # read (independent of institutional_pattern, since a spring can
+            # form without Wyckoff accumulation/distribution being confirmed
+            # yet) and EMA-50 defense/break, which are direction-bearing.
+            buy_exp = "PATTERN BUY: ❌ No institutional pattern"
+            sell_exp = "PATTERN SELL: ❌ No institutional pattern"
+
+            _coiled = bool(
+                getattr(_gd_composite, "coiled_spring", False) if not isinstance(_gd_composite, dict)
+                else (_gd_composite.get("coiled_spring", False) if _gd_composite else False)
             )
+            if _coiled:
+                # A10: coiled-spring escape hatch — the old sniper-filter
+                # override that used this signal to overrule the macro veto
+                # was archived (B1); this is its replacement path, folded
+                # into PATTERN's own scoring instead of a separate veto-
+                # overrule mechanism. Bidirectional and modest (breakout
+                # readiness is confirmed, direction is not) — EMA-50 below
+                # supplies the directional lean when available.
+                buy_score = max(buy_score, weight * 0.4)
+                sell_score = max(sell_score, weight * 0.4)
+                buy_exp += " +coiled_spring"
+                sell_exp += " +coiled_spring"
+
+            _ema50_status = (
+                getattr(_gd_composite, "ema_50_status", "UNTESTED") if not isinstance(_gd_composite, dict)
+                else (_gd_composite.get("ema_50_status", "UNTESTED") if _gd_composite else "UNTESTED")
+            )
+            _ema50_reclass = (
+                getattr(_gd_composite, "ema_50_reclassified", None) if not isinstance(_gd_composite, dict)
+                else (_gd_composite.get("ema_50_reclassified", None) if _gd_composite else None)
+            )
+            if _ema50_status == "DEFENDED" and _ema50_reclass == "SUPPORT":
+                buy_score = min(weight, buy_score + weight * 0.4)
+                buy_exp += " +ema50_defended_support"
+            elif _ema50_status == "BROKEN":
+                sell_score = min(weight, sell_score + weight * 0.4)
+                sell_exp += " +ema50_broken"
+
+            return (buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp})
 
         except Exception as e:
             logger.error(f"[PATTERN] Error: {e}")

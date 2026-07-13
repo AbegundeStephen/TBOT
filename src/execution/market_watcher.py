@@ -672,9 +672,17 @@ class MarketWatcher:
                     f"[WATCHER] SL pushed → ${new_sl:.4g} for "
                     f"{asset_name} ticket #{position.mt5_ticket}"
                 )
-                # Update position object so VTM doesn't fight us
+                # A13: this write races against VTM's own check_exit tick
+                # (runs on the main loop's thread, this runs on the watcher's
+                # own 15s-poll thread). Acquire the same lock check_exit
+                # holds for its whole tick so the two can't interleave.
                 if position.trade_manager:
-                    position.trade_manager.current_stop_loss = new_sl
+                    _sl_lock = getattr(position.trade_manager, "_sl_lock", None)
+                    if _sl_lock is not None:
+                        with _sl_lock:
+                            position.trade_manager.current_stop_loss = new_sl
+                    else:
+                        position.trade_manager.current_stop_loss = new_sl
         except Exception as exc:
             logger.error(f"[WATCHER] SL push failed for {asset_name}: {exc}")
 

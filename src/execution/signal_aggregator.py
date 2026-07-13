@@ -930,6 +930,20 @@ class PerformanceWeightedAggregator:
                             state.rejection_at_level = True
                             state.rejection_strength = _wick_ratio
                             state.level_defended = True
+
+                    # A4: same defended-wick check extended to the 2nd/3rd
+                    # nearest levels — independent of the primary level above,
+                    # since a strong reversal wick can be rejecting off a
+                    # different level than whichever is currently "nearest".
+                    if _wick_ratio > 0.75:
+                        if state.nearby_4h_level_2 is not None:
+                            _dist_2 = abs(_c - state.nearby_4h_level_2) / max(_atr, 0.001)
+                            if _dist_2 < 0.5:
+                                state.level_2_defended = True
+                        if state.nearby_4h_level_3 is not None:
+                            _dist_3 = abs(_c - state.nearby_4h_level_3) / max(_atr, 0.001)
+                            if _dist_3 < 0.5:
+                                state.level_3_defended = True
         except Exception:
             pass
 
