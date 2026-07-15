@@ -4648,6 +4648,8 @@ class InstitutionalCouncilAggregator:
 
             # ── O2b: Orphan signal wiring — absorption_detected, vpd_diverging ──
             _cs_v = (governor_data or {}).get("composite_state") if governor_data else None
+            _buy_score_v, _sell_score_v = score, score
+            _buy_exp_v, _sell_exp_v = exp, exp
             if _cs_v is not None:
                 _absorption = bool(
                     getattr(_cs_v, "absorption_detected", False) if not isinstance(_cs_v, dict)
@@ -4658,20 +4660,29 @@ class InstitutionalCouncilAggregator:
                     else _cs_v.get("vpd_diverging", False)
                 )
 
-                # absorption_detected = institutional orders absorbing at price.
-                # High-conviction Wyckoff signal regardless of raw volume ratio.
-                # Boosts both directions equally since absorption confirms
-                # institutional interest without specifying which way.
-                if _absorption:
-                    score = min(weight, score + 0.30 * weight)
-                    exp  += " +absorption"
+                # Brain Fix A5: absorption is directional evidence AGAINST
+                # whichever side was pushing — high volume with no result
+                # means that push is failing, which is exhaustion evidence
+                # for the OPPOSITE direction. Replaces the old "boosts both
+                # directions equally" treatment, which threw away the
+                # direction the absorption itself implies.
+                if _absorption and len(df) >= 5:
+                    _push_was_up = df["close"].iloc[-1] > df["close"].iloc[-5]
+                    if _push_was_up:
+                        _sell_score_v = min(weight, _sell_score_v + 0.20 * weight)
+                        _sell_exp_v  += " +absorption(up-push exhausted)"
+                    else:
+                        _buy_score_v = min(weight, _buy_score_v + 0.20 * weight)
+                        _buy_exp_v   += " +absorption(down-push exhausted)"
 
                 # vpd_diverging = volume not supporting price movement.
                 # Warning that the current move lacks conviction behind it.
                 # Penalise both directions.
                 if _vpd_diverging:
-                    score = score * 0.70
-                    exp  += " -vpd_diverging"
+                    _buy_score_v  *= 0.70
+                    _sell_score_v *= 0.70
+                    _buy_exp_v  += " -vpd_diverging"
+                    _sell_exp_v += " -vpd_diverging"
 
                 # order_book_wall_detected = large resting orders at price.
                 # Indicates institutional positioning. Modest buy/sell boost
@@ -4682,11 +4693,13 @@ class InstitutionalCouncilAggregator:
                     else _cs_v.get("order_book_wall_detected", False)
                 )
                 if _ob_wall:
-                    score = min(weight, score + 0.20 * weight)
-                    exp  += " +ob_wall"
+                    _buy_score_v  = min(weight, _buy_score_v  + 0.20 * weight)
+                    _sell_score_v = min(weight, _sell_score_v + 0.20 * weight)
+                    _buy_exp_v  += " +ob_wall"
+                    _sell_exp_v += " +ob_wall"
 
             _buy_score, _sell_score, _buy_exp, _sell_exp = self._apply_volume_divergence_bonus(
-                score, score, exp, exp, _cs_v, weight
+                _buy_score_v, _sell_score_v, _buy_exp_v, _sell_exp_v, _cs_v, weight
             )
             return _buy_score, _sell_score, {"buy": _buy_exp, "sell": _sell_exp}
 
