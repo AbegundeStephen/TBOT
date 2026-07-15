@@ -35,6 +35,7 @@ All numeric thresholds in config/aggregator_presets.json → MR_THREE_MODE.
 
 import json
 import os
+from typing import Optional
 import pandas as pd
 import numpy as np
 import talib as ta
@@ -199,7 +200,7 @@ class MeanReversionStrategy(BaseStrategy):
     # SPRING DETECTION  (Mode 1 mandatory)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _detect_spring(self, df: pd.DataFrame) -> tuple:
+    def _detect_spring(self, df: pd.DataFrame, anchor: Optional[float] = None) -> tuple:
         """
         Wyckoff spring: a bar's wick sweeps below a prior swing low then closes
         back above it within spring_recovery_max_bars of the current bar.
@@ -208,7 +209,29 @@ class MeanReversionStrategy(BaseStrategy):
         Current-bar volume must be lower than the spring bar's volume
         (spring bar = selling climax; entry bar = quiet absorption).
 
-        Returns: (found: bool, strength: float 0–1)
+        `anchor`: when provided (the same livermore_anchor_natural_low the
+        structural gate — BreakRetestValidator — already confirmed a
+        sweep-and-recover against), this is used as the reference level
+        instead of an independently-computed rolling swing low.
+
+        Investigation finding (2026-07-14): BRV's "structural proof" for
+        NATURAL_RETRACEMENT is itself a spring check ("the spring — market
+        tested the proven structural low") against livermore_anchor_natural_low
+        — a state-machine-confirmed, cycle-locked level. This function was
+        independently recomputing its own rolling 20-bar swing low as the
+        reference instead, a different level that drifts every bar. The two
+        checks were effectively re-verifying the same event against two
+        unrelated reference points — across a full backtest, 26 bars passed
+        BRV's spring check and only 1 of those 26 also passed this one.
+        Reusing the same anchor BRV already validated removes that mismatch.
+        Falls back to the old rolling-swing-low calculation when no anchor is
+        available (state machine hasn't locked one yet).
+
+        Returns: (found: bool, strength: float 0–1, spring_bar_idx: Optional[int])
+        spring_bar_idx is the negative array index of the identified spring
+        bar, so callers (the optional-confirmation checks) can exclude it from
+        their own scans instead of penalising the exact high-volume bar the
+        spring mechanically requires.
         """
         cfg = self._mr3_cfg["mode1"]
         min_pen  = cfg["spring_min_penetration"]    # 0.005
@@ -216,24 +239,30 @@ class MeanReversionStrategy(BaseStrategy):
         max_bars = cfg["spring_recovery_max_bars"]  # 3
         swing_lb = cfg["spring_swing_lookback"]     # 20
 
-        min_total = swing_lb + max_bars + 2
-        if len(df) < min_total:
-            return False, 0.0
-
         close  = df["close"].values
         low    = df["low"].values
         volume = df["volume"].values if "volume" in df.columns else None
 
-        # Prior swing low is established from the window BEFORE the search bars
-        # so we don't confuse the spring bar itself as the swing low.
-        _win_end   = -(max_bars + 1)           # index of last bar before search window
-        _win_start = _win_end - swing_lb
-        _prior_arr = low[_win_start:_win_end]
-        if len(_prior_arr) < 5:
-            return False, 0.0
-        prior_swing_low = float(np.min(_prior_arr))
-        if prior_swing_low <= 0:
-            return False, 0.0
+        if anchor is not None and float(anchor) > 0:
+            if len(df) < max_bars + 2:
+                return False, 0.0, None
+            prior_swing_low = float(anchor)
+        else:
+            # Fallback: independently-computed rolling swing low (legacy path,
+            # used only when the Livermore anchor isn't confirmed yet).
+            min_total = swing_lb + max_bars + 2
+            if len(df) < min_total:
+                return False, 0.0, None
+            # Prior swing low is established from the window BEFORE the search
+            # bars so we don't confuse the spring bar itself as the swing low.
+            _win_end   = -(max_bars + 1)           # index of last bar before search window
+            _win_start = _win_end - swing_lb
+            _prior_arr = low[_win_start:_win_end]
+            if len(_prior_arr) < 5:
+                return False, 0.0, None
+            prior_swing_low = float(np.min(_prior_arr))
+            if prior_swing_low <= 0:
+                return False, 0.0, None
 
         # Scan the last max_bars bars (not including current bar) for the spring
         for k in range(1, max_bars + 1):
@@ -267,20 +296,29 @@ class MeanReversionStrategy(BaseStrategy):
             # Spring confirmed.  Strength peaks near 2.5% penetration.
             _optimal  = 0.025
             strength  = max(0.30, 1.0 - abs(penetration - _optimal) / _optimal)
-            return True, float(min(strength, 1.0))
+            return True, float(min(strength, 1.0)), bar_idx
 
-        return False, 0.0
+        return False, 0.0, None
 
     # ─────────────────────────────────────────────────────────────────────────
     # OPTIONAL CONDITIONS  (shared by Mode 1 and Mode 2)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _check_vol_contraction(self, df: pd.DataFrame, direction: int) -> bool:
+    def _check_vol_contraction(self, df: pd.DataFrame, direction: int, exclude_bar_idx: Optional[int] = None) -> bool:
         """
         Volume Contraction:
           - Down-close bar volumes < 80% of 20-bar average (for longs)
           - No single bar in the last 5 exceeds 150% of average
         Signals quiet re-accumulation, not continued distribution.
+
+        `exclude_bar_idx`: Mode 1's mandatory spring bar is, by its own
+        definition, a high-volume down bar (_detect_spring requires spring-bar
+        volume > current-bar volume — "spring bar = selling climax"). That
+        bar normally falls inside this function's own last-5-bars scan window
+        (spring_recovery_max_bars=3 vs this scan's -6:-1), so a genuine spring
+        was mechanically vetoing this check on the exact bar that makes it a
+        spring. Excluding the identified spring bar from the scan resolves
+        that self-contradiction without loosening the volume thresholds.
         """
         if "volume" not in df.columns or len(df) < 22:
             return False
@@ -298,6 +336,8 @@ class MeanReversionStrategy(BaseStrategy):
                 return False
             # Scan last 5 bars (excluding current)
             for j in range(-6, -1):
+                if exclude_bar_idx is not None and j == exclude_bar_idx:
+                    continue
                 bv    = float(vol[j])
                 is_dn = float(close[j]) < float(open_[j])
                 if is_dn and bv > avg_vol * avg_pct:
@@ -345,11 +385,19 @@ class MeanReversionStrategy(BaseStrategy):
             return False
         return False
 
-    def _check_bb_contraction(self, df: pd.DataFrame, direction: int) -> bool:
+    def _check_bb_contraction(self, df: pd.DataFrame, direction: int, eval_bar_idx: Optional[int] = None) -> bool:
         """
         BB Contraction: price is in the lower 20% (long) or upper 80%+ (short)
         of the Bollinger Band while bandwidth is stable or declining.
         Confirms the price is stretched AND momentum is bleeding off.
+
+        `eval_bar_idx`: for Mode 1, defaults to the current bar (-1), but a
+        real spring's own recovery rally routinely carries price and
+        bandwidth well past this zone within 1-3 bars — investigation
+        (2026-07-14) found bb_position >0.88 (i.e. near/above the *upper*
+        band) and expanding bandwidth at all 4 sampled post-spring bars.
+        This check needs to confirm the coil existed AT the spring, not
+        that it's still there now — pass spring_bar_idx to evaluate there.
         """
         try:
             if len(df) < self.bb_period + 5:
@@ -358,15 +406,18 @@ class MeanReversionStrategy(BaseStrategy):
             zone_pct = cfg["bb_lower_zone_threshold"]   # 0.20
             bb_pos   = df["bb_position"].values
             bb_wid   = df["bb_width_norm"].values
-            if pd.isna(bb_pos[-1]) or pd.isna(bb_wid[-1]):
+            _idx = eval_bar_idx if eval_bar_idx is not None else -1
+            if pd.isna(bb_pos[_idx]) or pd.isna(bb_wid[_idx]):
                 return False
-            pos       = float(bb_pos[-1])
-            bw_prev5  = bb_wid[-6:-1]
-            bw_prev5  = bw_prev5[~np.isnan(bw_prev5)]
+            pos        = float(bb_pos[_idx])
+            _win_end   = _idx
+            _win_start = _win_end - 5
+            bw_prev5   = bb_wid[_win_start:_win_end]
+            bw_prev5   = bw_prev5[~np.isnan(bw_prev5)]
             if len(bw_prev5) == 0:
                 return False
-            bw_mean     = float(np.mean(bw_prev5))
-            bw_declining = float(bb_wid[-1]) <= bw_mean
+            bw_mean      = float(np.mean(bw_prev5))
+            bw_declining = float(bb_wid[_idx]) <= bw_mean
 
             if direction == 1:
                 return pos < zone_pct and bw_declining
@@ -376,23 +427,29 @@ class MeanReversionStrategy(BaseStrategy):
             return False
         return False
 
-    def _check_ma_proximity(self, df: pd.DataFrame, direction: int) -> bool:
+    def _check_ma_proximity(self, df: pd.DataFrame, direction: int, eval_bar_idx: Optional[int] = None) -> bool:
         """
-        MA Proximity: current price is within 0.5×ATR of EMA50 or EMA200.
+        MA Proximity: price is within 0.5×ATR of EMA50 or EMA200.
         Classic Wyckoff Last Point of Support — price testing a major MA.
+
+        `eval_bar_idx`: same rationale as _check_bb_contraction — a spring's
+        recovery rally moves price away from the MA it bounced off within a
+        few bars (investigation found 1.86-5.19 ATR away at the sampled
+        events). Pass spring_bar_idx to check proximity at the spring itself.
         """
         try:
             if len(df) < 5:
                 return False
             cfg    = self._mr3_cfg["mode1"]
             mult   = cfg["ma_proximity_atr_mult"]    # 0.5
-            close  = float(df["close"].values[-1])
-            atr_v  = float(df["atr"].values[-1]) if not pd.isna(df["atr"].values[-1]) else 0.0
+            _idx   = eval_bar_idx if eval_bar_idx is not None else -1
+            close  = float(df["close"].values[_idx])
+            atr_v  = float(df["atr"].values[_idx]) if not pd.isna(df["atr"].values[_idx]) else 0.0
             if atr_v <= 0:
                 return False
             threshold = mult * atr_v
-            ema50  = df["ema_50"].values[-1]  if "ema_50"  in df.columns else None
-            ema200 = df["ema_200"].values[-1] if "ema_200" in df.columns else None
+            ema50  = df["ema_50"].values[_idx]  if "ema_50"  in df.columns else None
+            ema200 = df["ema_200"].values[_idx] if "ema_200" in df.columns else None
             if ema50  is not None and not pd.isna(ema50)  and abs(close - float(ema50))  <= threshold:
                 return True
             if ema200 is not None and not pd.isna(ema200) and abs(close - float(ema200)) <= threshold:
@@ -401,13 +458,16 @@ class MeanReversionStrategy(BaseStrategy):
             return False
         return False
 
-    def _count_optional(self, df: pd.DataFrame, direction: int) -> int:
+    def _count_optional(
+        self, df: pd.DataFrame, direction: int,
+        exclude_bar_idx: Optional[int] = None, eval_bar_idx: Optional[int] = None,
+    ) -> int:
         """Count how many of the 4 optional conditions are met."""
         return sum([
-            self._check_vol_contraction(df, direction),
+            self._check_vol_contraction(df, direction, exclude_bar_idx=exclude_bar_idx),
             self._check_hidden_divergence(df, direction),
-            self._check_bb_contraction(df, direction),
-            self._check_ma_proximity(df, direction),
+            self._check_bb_contraction(df, direction, eval_bar_idx=eval_bar_idx),
+            self._check_ma_proximity(df, direction, eval_bar_idx=eval_bar_idx),
         ])
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -517,7 +577,10 @@ class MeanReversionStrategy(BaseStrategy):
         )
 
         # ── Spring (mandatory) ─────────────────────────────────────────────
-        spring_ok, spring_strength = self._detect_spring(features)
+        # Reuse the exact level BRV just validated the sweep-and-recover
+        # against, instead of independently recomputing a rolling swing low
+        # (see _detect_spring's docstring for why these must not diverge).
+        spring_ok, spring_strength, spring_bar_idx = self._detect_spring(features, anchor=_brv_result.level)
         if not spring_ok:
             logger.info(f"[MR Mode1] {self.asset}: no spring detected → 0")
             return 0, 0.0
@@ -537,7 +600,9 @@ class MeanReversionStrategy(BaseStrategy):
             logger.info(f"[MR Mode1] {self.asset}: coiled_spring=True — strong spring precondition")
 
         # ── Optional conditions (2 of 4 required) ─────────────────────────
-        opt_count = self._count_optional(features, direction=1)
+        opt_count = self._count_optional(
+            features, direction=1, exclude_bar_idx=spring_bar_idx, eval_bar_idx=spring_bar_idx,
+        )
         min_opt   = cfg["optional_min_count"]
 
         # failed_breakout = price wicked above recent high, closed below it.
@@ -560,10 +625,10 @@ class MeanReversionStrategy(BaseStrategy):
                     f"< 40 — directionally invalid for long spring, gate not reduced"
                 )
         if opt_count < min_opt:
-            _vc = self._check_vol_contraction(features, 1)
+            _vc = self._check_vol_contraction(features, 1, exclude_bar_idx=spring_bar_idx)
             _hd = self._check_hidden_divergence(features, 1)
-            _bc = self._check_bb_contraction(features, 1)
-            _mp = self._check_ma_proximity(features, 1)
+            _bc = self._check_bb_contraction(features, 1, eval_bar_idx=spring_bar_idx)
+            _mp = self._check_ma_proximity(features, 1, eval_bar_idx=spring_bar_idx)
             logger.info(
                 f"[MR Mode1] {self.asset}: spring OK but opt={opt_count}/{min_opt} → 0 "
                 f"[vol={'✓' if _vc else '✗'} "
@@ -571,6 +636,55 @@ class MeanReversionStrategy(BaseStrategy):
                 f"bbc={'✓' if _bc else '✗'} "
                 f"map={'✓' if _mp else '✗'}]"
             )
+            # TEMP-DIAGNOSTIC: raw near-miss margins for the optional-gate
+            # investigation (2026-07-14) — remove once the bottleneck is found.
+            try:
+                _vol_arr = features["volume"].values
+                _n = min(22, len(_vol_arr))
+                _avg_vol = float(np.mean(_vol_arr[-_n:][:-2]))
+                _bars_dump = []
+                for _j in range(-6, -1):
+                    if spring_bar_idx is not None and _j == spring_bar_idx:
+                        _bars_dump.append(f"{_j}=EXCLUDED(spring)")
+                        continue
+                    _bv = float(_vol_arr[_j])
+                    _is_dn = float(features["close"].values[_j]) < float(features["open"].values[_j])
+                    _bars_dump.append(f"{_j}={'DN' if _is_dn else 'UP'}:{_bv/_avg_vol:.2f}x")
+                logger.info(f"[MR DIAG vol] {self.asset}: avg_vol={_avg_vol:.0f} bars={_bars_dump}")
+
+                _low_arr, _high_arr, _rsi_arr = features["low"].values, features["high"].values, features["rsi"].values
+                _recent_low, _prior_low = float(np.min(_low_arr[-6:-1])), float(np.min(_low_arr[-26:-6]))
+                _recent_rsi, _prior_rsi = float(np.nanmin(_rsi_arr[-6:-1])), float(np.nanmin(_rsi_arr[-26:-6]))
+                logger.info(
+                    f"[MR DIAG hdiv] {self.asset}: recent_low={_recent_low:.4g}(vs prior={_prior_low:.4g}, "
+                    f"lower={_recent_low < _prior_low}) recent_rsi={_recent_rsi:.1f}(vs prior={_prior_rsi:.1f}, "
+                    f"higher={_recent_rsi > _prior_rsi})"
+                )
+
+                _eval_idx = spring_bar_idx if spring_bar_idx is not None else -1
+                _bb_pos = float(features["bb_position"].values[_eval_idx])
+                _bb_wid = features["bb_width_norm"].values
+                _bw_prev5 = _bb_wid[_eval_idx - 5:_eval_idx]
+                _bw_prev5 = _bw_prev5[~np.isnan(_bw_prev5)]
+                _bw_mean = float(np.mean(_bw_prev5)) if len(_bw_prev5) else float("nan")
+                logger.info(
+                    f"[MR DIAG bbc] {self.asset}: @idx={_eval_idx} bb_pos={_bb_pos:.3f}(need<0.20) "
+                    f"bw_now={float(_bb_wid[_eval_idx]):.4f} bw_prev5_mean={_bw_mean:.4f} "
+                    f"declining={float(_bb_wid[_eval_idx]) <= _bw_mean if _bw_prev5.size else 'N/A'}"
+                )
+
+                _close_v = float(features["close"].values[_eval_idx])
+                _atr_v = float(features["atr"].values[_eval_idx])
+                _ema50 = float(features["ema_50"].values[_eval_idx]) if "ema_50" in features.columns else float("nan")
+                _ema200 = float(features["ema_200"].values[_eval_idx]) if "ema_200" in features.columns else float("nan")
+                _dist50 = abs(_close_v - _ema50) / _atr_v if _atr_v > 0 else float("nan")
+                _dist200 = abs(_close_v - _ema200) / _atr_v if _atr_v > 0 else float("nan")
+                logger.info(
+                    f"[MR DIAG map] {self.asset}: dist_to_ema50={_dist50:.2f}ATR "
+                    f"dist_to_ema200={_dist200:.2f}ATR (need <=0.5ATR either)"
+                )
+            except Exception as _diag_err:
+                logger.info(f"[MR DIAG] {self.asset}: diagnostic dump failed: {_diag_err}")
             return 0, 0.0
 
         # ── BTC near 4H EMA200: small confidence penalty ──────────────────
