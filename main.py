@@ -443,6 +443,7 @@ class TradingBot:
         self._log_all_signals = _db_cfg.get("log_all_signals", True)
         self._log_system_events = _db_cfg.get("log_system_events", True)
         self._df_4h_cache = {}
+        self._df_1d_cache = {}
         self._df_1h_cache = {}
         # Tracks last bar timestamp seen per asset — prevents on_new_bar() being
         # called multiple times within the same 1H candle (5-min cycle cadence).
@@ -2013,6 +2014,14 @@ class TradingBot:
             if _cached_4h is not None:
                 mtf_regime["df_4h"] = _cached_4h
 
+            # Same guard as df_4h above: _df_1d_cache is populated inside
+            # trade_asset(), which runs AFTER this point. On the first cycle
+            # get() returns None — the `is not None` check stops it
+            # overwriting anything already set.
+            _cached_1d = self._df_1d_cache.get(asset_name)
+            if _cached_1d is not None:
+                mtf_regime["df_1d"] = _cached_1d
+
             # ── Livermore composite_state injection ───────────────────────────
             # The council aggregator has no Livermore state machine of its own.
             # Run the performance aggregator's _build_composite_state so the council
@@ -2123,6 +2132,11 @@ class TradingBot:
             _cached_4h = self._df_4h_cache.get(asset_name)
             if _cached_4h is not None:
                 mtf_regime["df_4h"] = _cached_4h
+
+            # Guard: same first-cycle None risk as the council path above.
+            _cached_1d = self._df_1d_cache.get(asset_name)
+            if _cached_1d is not None:
+                mtf_regime["df_1d"] = _cached_1d
 
             signal, details = aggregator.get_aggregated_signal(
                 df,
@@ -4774,6 +4788,8 @@ class TradingBot:
 
             # Fetch and cache 4H data for VTM loop
             self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
+            # Fetch and cache 1D data for the zone ladder's daily tier
+            self._df_1d_cache[asset_name] = self._fetch_1d_data(asset_name)
             # Propagate df_4h into the persistent regime dict so it's available
             # to the hybrid selector forks even on cycles where MTF wasn't re-run.
             if asset_name in self._current_regime_data:
@@ -6302,6 +6318,65 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"[4H] {asset_name}: Failed to fetch 4H data: {e}")
+            return None
+
+    def _fetch_1d_data(self, asset_name: str) -> pd.DataFrame:
+        """
+        Fetch 1D (daily) data for the zone ladder's daily tier.
+        Mirrors _fetch_4h_data exactly. Returns None (not an empty DataFrame)
+        when data is unavailable so downstream guards (`if df_1d is not None`)
+        skip rather than crash.
+        """
+        try:
+            asset_cfg = self.config["assets"][asset_name]
+            symbol = self._resolve_symbol(asset_name)
+            exchange = asset_cfg.get("exchange", "binance")
+
+            end_time = datetime.now(timezone.utc)
+            # CHANGE 1 vs 4H: 200 days, not 30. The ladder's widest view is
+            # 180 days; the extra 20 is headroom for weekends/holidays so
+            # FX and indices still clear 180 real bars.
+            start_time = end_time - timedelta(days=200)
+
+            if exchange == "binance":
+                df = self.data_manager.fetch_binance_data(
+                    symbol=symbol,
+                    interval="1d",          # CHANGE 2: Binance daily interval
+                    start_date=start_time.strftime("%Y-%m-%d"),
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            else:
+                df = self.data_manager.fetch_mt5_data(
+                    symbol=symbol,
+                    timeframe="D1",         # CHANGE 3: MT5 daily timeframe
+                    start_date=start_time.strftime("%Y-%m-%d"),
+                    end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+
+            df_1d = self.data_manager.clean_data(df)
+
+            # CHANGE 4: need >= 90 bars for the default 90-day view.
+            # (4H needs only 10 — different job, different bar.)
+            if df_1d is None or df_1d.empty or len(df_1d) < 90:
+                logger.warning(
+                    f"[1D] {asset_name}: Insufficient daily data "
+                    f"({0 if df_1d is None or df_1d.empty else len(df_1d)} bars) — "
+                    f"daily tier disabled this cycle"
+                )
+                return None
+
+            df_1d.columns = [c.lower() for c in df_1d.columns]
+
+            # Drop the incomplete current daily candle — confirmed bars only.
+            # Same rule as 4H's B.1 guard, floored to the day.
+            _now_floor_1d = pd.Timestamp.now(tz='UTC').floor('1D')
+            if df_1d.index[-1] >= _now_floor_1d:
+                df_1d = df_1d.iloc[:-1]
+
+            return df_1d if not df_1d.empty else None
+
+        except Exception as e:
+            logger.error(f"[1D] {asset_name}: Failed to fetch daily data: {e}")
             return None
 
     def _update_funding_rate(self):
