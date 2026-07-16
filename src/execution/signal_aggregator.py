@@ -444,6 +444,7 @@ class PerformanceWeightedAggregator:
             # (see Step 3/composite_state_builder.py) — read/write there so
             # persisted state actually reaches the code that reads it.
             self._cs_builder._structure_levels = saved.get("structure_levels", {})
+            self._cs_builder._zone_levels = saved.get("zone_levels", {})
 
             # Restore regime tracking
             self._cs_builder._previous_regime = saved.get("previous_regime", {})
@@ -520,6 +521,7 @@ class PerformanceWeightedAggregator:
             state_data = {
                 "threshold_cache": _tc,
                 "structure_levels": getattr(_csb, "_structure_levels", {}),
+                "zone_levels": getattr(_csb, "_zone_levels", {}),
                 "previous_regime": getattr(_csb, "_previous_regime", {}),
                 "regime_start_times": {
                     k: v.isoformat()

@@ -181,6 +181,28 @@ class CompositeState:
     # ── Fix 1: phase_config gate flags (populated by main.py → consumed by aggregator + VTM)
     phase_config: dict = field(default_factory=dict)
 
+    # ── Zone ladder: 4H tier ──
+    zone_4h_current_upper: Optional[float] = None
+    zone_4h_current_lower: Optional[float] = None
+    zone_4h_outer_high: Optional[float] = None    # body-only max over window
+    zone_4h_outer_low: Optional[float] = None     # body-only min over window
+    zone_4h_extended: bool = False                # True = 180d/5-zone view
+
+    # ── Zone ladder: 1D tier ──
+    zone_1d_current_upper: Optional[float] = None
+    zone_1d_current_lower: Optional[float] = None
+    zone_1d_outer_high: Optional[float] = None
+    zone_1d_outer_low: Optional[float] = None
+    zone_1d_extended: bool = False
+
+    # ── MA extension (mirrors ema_50_status/ema_50_reclassified above) ──
+    ema_200_status: str = "UNTESTED"
+    ema_200_reclassified: Optional[str] = None
+    ema_50_status_1d: str = "UNTESTED"
+    ema_50_reclassified_1d: Optional[str] = None
+    ema_200_status_1d: str = "UNTESTED"
+    ema_200_reclassified_1d: Optional[str] = None
+
     def sanitise(self) -> None:
         """
         NaN guard. Call after all fields populated, before any downstream read.
