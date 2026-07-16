@@ -339,7 +339,7 @@ class BacktestGovernor:
     SLOPE_WINDOW  = 5        # bars to measure EMA200 slope direction
     SLOPE_THRESH  = 0.0003   # minimum % change per bar to classify as directional
 
-    def __init__(self, csv_path: str, asset_name: str):
+    def __init__(self, csv_path: str, asset_name: str, daily_csv_path: str = None):
         self.asset_name = asset_name
         raw = load_ohlcv_csv(csv_path)
         if raw.empty:
@@ -349,6 +349,31 @@ class BacktestGovernor:
             f"[GOVERNOR] ✅ {asset_name} — {len(self._df)} 4H bars loaded "
             f"({csv_path})"
         )
+
+        # Daily tier (mirrors main.py's _fetch_1d_data / _df_1d_cache): cached
+        # and made available as governor_data["df_1d"], same as df_4h above.
+        # Deliberately NOT run through _compute_regime — no regime/EMA
+        # computation on daily bars yet, this only makes the raw data
+        # available. Nothing reads df_1d today (in live or backtest), so
+        # this cannot change any existing behaviour.
+        self._daily_df = None
+        if daily_csv_path is not None:
+            try:
+                _daily_raw = load_ohlcv_csv(daily_csv_path)
+                if _daily_raw.empty:
+                    logger.warning(
+                        f"[GOVERNOR] ⚠️  Empty 1D CSV for {asset_name}: {daily_csv_path}"
+                    )
+                else:
+                    self._daily_df = _daily_raw.sort_index()
+                    logger.info(
+                        f"[GOVERNOR] ✅ {asset_name} — {len(self._daily_df)} 1D bars loaded "
+                        f"({daily_csv_path})"
+                    )
+            except Exception as _daily_err:
+                logger.warning(
+                    f"[GOVERNOR] ⚠️  Failed to load 1D CSV for {asset_name}: {_daily_err}"
+                )
 
     # ── Internal regime computation ───────────────────────────────────────────
 
@@ -398,6 +423,26 @@ class BacktestGovernor:
             return "SLIGHTLY_BEARISH", -0.5
         return "NEUTRAL", 0.0
 
+    def _get_daily_slice(self, dt: datetime):
+        """
+        Trailing 1D slice as of `dt`, no lookahead — mirrors the df_4h_slice
+        logic in get_regime_at, applied to self._daily_df instead of self._df.
+        Returns None when daily data isn't loaded or dt precedes it entirely.
+        """
+        if self._daily_df is None or self._daily_df.empty:
+            return None
+        idx = self._daily_df.index
+        if hasattr(idx, "tz"):
+            if idx.tz is None:
+                idx = idx.tz_localize("UTC")
+            else:
+                idx = idx.tz_convert("UTC")
+        last_pos = int(idx.searchsorted(dt, side="right")) - 1
+        if last_pos < 0:
+            return None
+        # 200-bar trailing window — matches main.py's _fetch_1d_data lookback.
+        return self._daily_df.iloc[max(0, last_pos - 199) : last_pos + 1].copy()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_regime_at(self, dt: datetime) -> dict:
@@ -438,6 +483,11 @@ class BacktestGovernor:
 
         # Pass a trailing 4H slice so aggregators that read df_4h get real data
         df_4h_slice = self._df.iloc[max(0, last_pos - 199) : last_pos + 1].copy()
+
+        # Mirrors main.py's df_1d cache — daily data available via
+        # governor_data["df_1d"], same as df_4h above. Nothing consumes this
+        # yet (in live or backtest), so this cannot change existing behaviour.
+        df_1d_slice = self._get_daily_slice(dt)
 
         # council_aggregator._check_governor_filter() does:
         #   governor = governor_data.get('governor') or governor_data.get('full_regime_status')
@@ -483,6 +533,7 @@ class BacktestGovernor:
             "reasoning":           f"4H EMA regime: {regime} (score={score:+.1f})",
             "timestamp":           dt.isoformat(),
             "df_4h":               df_4h_slice,
+            "df_1d":               df_1d_slice,
             "h1_momentum_dir":     "FLAT",
             "h1_momentum_pct":     0.0,
             "h1_lower_highs":      False,
@@ -523,7 +574,7 @@ class BacktestGovernor:
             "risk_level": "high", "volatility": "high",
             "max_positions": 0, "reasoning": "No 4H data available yet",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "df_4h": None, "h1_momentum_dir": "FLAT",
+            "df_4h": None, "df_1d": None, "h1_momentum_dir": "FLAT",
             "h1_momentum_pct": 0.0, "h1_lower_highs": False,
             "h1_higher_lows": False, "funding_rate_zscore": 0.0,
             "cvd_trend": 0,           # int: +1 buying, -1 selling, 0 flat/unknown
@@ -730,14 +781,26 @@ class MLStrategy(bt.Strategy):
         h1_filename = DATA_FILE_MAP.get(self.asset_key, f"{self.asset_key}_1h.csv")
         h4_filename = h1_filename.replace("_1h.csv", "_4h.csv")
         h4_path     = Path("data/raw") / h4_filename
+        # Daily tier, same derivation pattern — optional, mirrors main.py's
+        # df_1d cache. Passed as None if missing; BacktestGovernor already
+        # handles that (df_1d stays None in governor_data, same as if this
+        # file never existed).
+        h1d_filename = h1_filename.replace("_1h.csv", "_1d.csv")
+        h1d_path     = Path("data/raw") / h1d_filename
+        _daily_csv_path = str(h1d_path) if h1d_path.exists() else None
         if h4_path.exists():
-            self.governor = BacktestGovernor(str(h4_path), self.asset_key)
+            self.governor = BacktestGovernor(str(h4_path), self.asset_key, daily_csv_path=_daily_csv_path)
         else:
             logger.warning(
                 f"[GOVERNOR] ⚠️  4H file not found: {h4_path}  "
                 f"— governor disabled for {self.asset_key}"
             )
             self.governor = None
+        if h4_path.exists() and _daily_csv_path is None:
+            logger.warning(
+                f"[GOVERNOR] ⚠️  1D file not found: {h1d_path} — daily tier disabled "
+                f"for {self.asset_key} (df_1d will be None; nothing consumes it yet)"
+            )
 
         logger.info("=" * 70)
         logger.info(f" Strategy: {self.asset_key} | Aggregator: {agg_type.upper()} | Preset: {preset_name}")
