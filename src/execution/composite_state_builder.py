@@ -40,6 +40,18 @@ class CompositeStateBuilder:
         # ── Structure memory ──
         self._structure_levels = {}
 
+        # ── Zone ladder store ──
+        # Deliberately SEPARATE from _structure_levels. That store is built for
+        # near-price stop levels and has three limits that make it unusable here:
+        #   1. It hard-deletes any level >3 ATR from price — which is exactly
+        #      what the zone ladder's outer levels are.
+        #   2. Its "age_hours" increments once per CYCLE, not per hour, so its
+        #      "90 day" window is really ~2160 cycles (a couple of days).
+        #   3. It `break`s after the first swing per side — it never builds
+        #      a history, only tracks the two most recent swings.
+        # This store fixes all three. _structure_levels stays untouched.
+        self._zone_levels = {}
+
         # ── Session levels ──
         self._pdh = {}
         self._pdl = {}
@@ -274,7 +286,39 @@ class CompositeStateBuilder:
         self._update_structure_memory(state, df, df_4h)
 
         # ── E.3: MA Defense Validator ─────────────────────────────────────
-        self._update_ma_defense(state, df)
+        self._update_ma_defense(state, df, span=50, suffix="")
+        self._update_ma_defense(state, df, span=200, suffix="")
+
+        _df_1d = governor_data.get("df_1d") if governor_data else None
+        if _df_1d is not None and len(_df_1d) >= 90:
+            self._update_ma_defense(state, _df_1d, span=50, suffix="_1d")
+            self._update_ma_defense(state, _df_1d, span=200, suffix="_1d")
+
+        # ── Zone ladder ──
+        # _atr_now reuses the _atr local variable already computed above
+        # ("Shared ATR — used by multiple sub-modules") instead of reading
+        # state.atr, which doesn't exist on CompositeState — a getattr with
+        # a 0 default there would silently zero out the tolerance/hysteresis
+        # math below and risk a ZeroDivisionError in the test-hysteresis
+        # distance check.
+        _atr_now = _atr
+        _price_now = float(df["close"].iloc[-1])
+
+        if df_4h is not None:
+            self._update_zone_levels(self.asset_type, df_4h, "4H", _atr_now, _price_now)
+            _v4 = self._build_zone_view(df_4h, self.asset_type, "4H", _price_now)
+            state.zone_4h_current_upper = _v4["current_upper"]
+            state.zone_4h_current_lower = _v4["current_lower"]
+            state.zone_4h_outer_high = _v4["outer_high"]
+            state.zone_4h_outer_low = _v4["outer_low"]
+
+        if _df_1d is not None:
+            self._update_zone_levels(self.asset_type, _df_1d, "1D", _atr_now, _price_now)
+            _v1 = self._build_zone_view(_df_1d, self.asset_type, "1D", _price_now)
+            state.zone_1d_current_upper = _v1["current_upper"]
+            state.zone_1d_current_lower = _v1["current_lower"]
+            state.zone_1d_outer_high = _v1["outer_high"]
+            state.zone_1d_outer_low = _v1["outer_low"]
 
         # ── E.4: Parabolic Space (Dynamic Z-Score) ────────────────────────
         try:
@@ -1257,17 +1301,177 @@ class CompositeStateBuilder:
         except Exception:
             pass
 
+    # ── Zone Ladder ──────────────────────────────────────────────────────
+
+    def _update_zone_levels(self, asset, df_tf, tf: str, atr: float, current_price: float):
+        """Maintain the zone-ladder level store for one timeframe.
+
+        Mirrors _update_structure_memory's proven mechanics (3-bar fractal,
+        tolerance grouping, role reversal, test hysteresis) but with real
+        timestamps, no distance prune, and a full-window scan.
+        """
+        import time as _time
+        from datetime import datetime as _dt, timezone as _tz
+
+        if df_tf is None or len(df_tf) < 10:
+            return
+
+        _now = _time.time()
+        _window_secs = 180 * 24 * 3600  # 180 days — the widest view we support
+
+        if asset not in self._zone_levels:
+            self._zone_levels[asset] = []
+
+        # ── Prune by TIME only. Never by distance. ──
+        self._zone_levels[asset] = [
+            lvl for lvl in self._zone_levels[asset]
+            if (_now - lvl.get("first_seen", _now)) < _window_secs
+        ]
+
+        # ── Role reversal — copied from _update_structure_memory:1648.
+        # 0.3% buffer stops flip-flopping on noise. Test count resets on flip:
+        # a flipped level is a new level and must earn its history again.
+        for lvl in self._zone_levels[asset]:
+            if lvl["tf"] != tf:
+                continue
+            if lvl["type"] == "swing_high" and current_price > lvl["price"] * 1.003:
+                lvl["type"] = "swing_low"
+                lvl["role_flipped_at"] = _dt.now(_tz.utc).isoformat()
+                lvl["tests"] = 0
+            elif lvl["type"] == "swing_low" and current_price < lvl["price"] * 0.997:
+                lvl["type"] = "swing_high"
+                lvl["role_flipped_at"] = _dt.now(_tz.utc).isoformat()
+                lvl["tests"] = 0
+
+        # ── Tolerance: 0.3 ATR, capped at 0.4% of price.
+        # The cap stops two genuinely distinct levels' bands growing into each
+        # other in high volatility. 0.4% ≈ 75 pips on GBPAUD.
+        _tol = min(0.3 * atr, 0.004 * current_price)
+
+        _highs = df_tf["high"].values
+        _lows = df_tf["low"].values
+
+        # ── FULL-WINDOW scan. No `break` — that's the point.
+        # 3-bar fractal: a candle is a peak if its high beats both neighbours.
+        for i in range(2, len(_highs) - 2):
+            if _highs[i] > _highs[i - 1] and _highs[i] > _highs[i + 1]:
+                if not any(
+                    abs(lvl["price"] - _highs[i]) < _tol and lvl["tf"] == tf
+                    for lvl in self._zone_levels[asset]
+                ):
+                    self._zone_levels[asset].append({
+                        "price": float(_highs[i]),
+                        "tf": tf,
+                        "type": "swing_high",
+                        "tests": 0,
+                        "first_seen": _now,
+                        "last_test": _now,
+                        "role_flipped_at": None,
+                        "_last_dist_atr": 99,
+                    })
+            if _lows[i] < _lows[i - 1] and _lows[i] < _lows[i + 1]:
+                if not any(
+                    abs(lvl["price"] - _lows[i]) < _tol and lvl["tf"] == tf
+                    for lvl in self._zone_levels[asset]
+                ):
+                    self._zone_levels[asset].append({
+                        "price": float(_lows[i]),
+                        "tf": tf,
+                        "type": "swing_low",
+                        "tests": 0,
+                        "first_seen": _now,
+                        "last_test": _now,
+                        "role_flipped_at": None,
+                        "_last_dist_atr": 99,
+                    })
+
+        # ── Test counting with hysteresis — copied from :1725.
+        # Without _was_away, price loitering near a level racks up dozens of
+        # fake "tests" per day. It must leave (>=0.5 ATR) before returning
+        # (<0.3 ATR) for a touch to count.
+        if atr > 0:
+            for lvl in self._zone_levels[asset]:
+                if lvl["tf"] != tf:
+                    continue
+                _dist = abs(current_price - lvl["price"]) / atr
+                if _dist < 0.3 and lvl.get("_last_dist_atr", 99) >= 0.5:
+                    lvl["tests"] = lvl.get("tests", 0) + 1
+                    lvl["last_test"] = _now
+                lvl["_last_dist_atr"] = _dist
+
+    def _build_zone_view(self, df_tf, asset, tf: str, current_price: float,
+                         extended: bool = False) -> dict:
+        """Return the zone picture for one timeframe.
+
+        tf="4H" reads only 4H levels. tf="1D" reads BOTH 4H and 1D levels —
+        that's the "1D sees 4H's lines" rule, one-directional by design.
+
+        extended=False → 90-day window (3 zones). True → 180-day (5 zones).
+        """
+        import time as _time
+
+        _out = {"current_upper": None, "current_lower": None,
+                "outer_high": None, "outer_low": None}
+        if df_tf is None or len(df_tf) < 10:
+            return _out
+
+        _days = 180 if extended else 90
+        _bars = _days * (6 if tf == "4H" else 1)
+        _slice = df_tf.iloc[-_bars:] if len(df_tf) > _bars else df_tf
+
+        # ── Outer edges: BODY-ONLY. Wicks never count.
+        # Computed fresh, never stored — the dataframe fully answers this and
+        # it can't go stale.
+        _bodies_hi = _slice[["open", "close"]].max(axis=1)
+        _bodies_lo = _slice[["open", "close"]].min(axis=1)
+        _out["outer_high"] = float(_bodies_hi.max())
+        _out["outer_low"] = float(_bodies_lo.min())
+
+        # ── Inner lines: from the store. These MUST persist — their value is
+        # the accumulated test count and role-flip history, which cannot be
+        # recomputed from a snapshot of candles.
+        _now = _time.time()
+        _window = _days * 24 * 3600
+        _visible = "4H" if tf == "4H" else None  # None = accept 4H and 1D
+
+        _cands = [
+            lvl for lvl in self._zone_levels.get(asset, [])
+            if (_now - lvl.get("first_seen", _now)) < _window
+            and (_visible is None or lvl["tf"] == _visible)
+            and lvl.get("tests", 0) >= 1   # must have real history
+        ]
+
+        _above = [l for l in _cands if l["price"] > current_price]
+        _below = [l for l in _cands if l["price"] < current_price]
+
+        if _above:
+            _out["current_upper"] = min(_above, key=lambda l: l["price"] - current_price)["price"]
+        if _below:
+            _out["current_lower"] = max(_below, key=lambda l: l["price"])["price"]
+
+        return _out
+
     # ── E.3: MA Defense Validator ─────────────────────────────────────────
 
-    def _update_ma_defense(self, state, df):
-        """Check if key EMAs were tested and defended on this closed candle."""
+    def _update_ma_defense(self, state, df, span: int = 50, suffix: str = ""):
+        """Check if key EMAs were tested and defended on this closed candle.
+
+        span/suffix: parameterized (Stage 2 zone ladder) so the same
+        wick/body defense math can run against EMA50/EMA200 on both 1H and
+        1D data. Field names embed span (ema_{span}_status{suffix}) so the
+        original span=50/suffix="" call keeps writing the exact original
+        ema_50_status/ema_50_reclassified fields untouched. defense_strength
+        and absorption_detected are NOT parameterized — every call (1H-50,
+        1H-200, 1D-50, 1D-200) writes the same shared fields, so whichever
+        call runs last in _build_composite_state's sequence wins.
+        """
         try:
             candle = df.iloc[-1]
             _o = candle["open"]
             _h = candle["high"]
             _l = candle["low"]
             _c = candle["close"]
-            _ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+            _ema50 = df["close"].ewm(span=span, adjust=False).mean().iloc[-1]
 
             _pierced_from_above = _l < _ema50 < _c  # Wick below, closed above
             _broke_down = _c < _ema50 and _o > _ema50
@@ -1287,46 +1491,46 @@ class CompositeStateBuilder:
                 _atr_val = abs(_c - _ema50) * 0.5  # rough fallback
 
             if _pierced_from_above:
-                state.ema_50_status = "DEFENDED"
+                setattr(state, f"ema_{span}_status{suffix}", "DEFENDED")
                 _wick = _ema50 - _l
                 _body = abs(_c - _o)
                 state.defense_strength = min(1.0, _wick / max(_body, 0.0001) / 3.0)
 
                 if state.defense_strength > 0.5 and state.effort_result_zscore > 1.5:
-                    state.ema_50_reclassified = "SUPPORT"
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "SUPPORT")
                     state.absorption_detected = True
                 else:
-                    state.ema_50_reclassified = "LINE"
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "LINE")
             elif _broke_down:
-                state.ema_50_status = "BROKEN"
-                state.ema_50_reclassified = "RESISTANCE"
+                setattr(state, f"ema_{span}_status{suffix}", "BROKEN")
+                setattr(state, f"ema_{span}_reclassified{suffix}", "RESISTANCE")
             elif _c > _ema50 and _atr_val > 0:
                 # Price is above EMA50 — label "EMA_ABOVE" with a distance tier.
                 # This unlocks the EMA_ABOVE branch in _score_confluence for
                 # trend-continuation scoring without requiring a pierce/defend event.
                 _dist_atr = (_c - _ema50) / _atr_val
                 if _dist_atr < 3.0:
-                    state.ema_50_status = "EMA_ABOVE"  # close proximity — continuation
-                    state.ema_50_reclassified = "SUPPORT"  # treat as dynamic support
+                    setattr(state, f"ema_{span}_status{suffix}", "EMA_ABOVE")  # close proximity — continuation
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "SUPPORT")  # treat as dynamic support
                 else:
-                    state.ema_50_status = "EMA_ABOVE_FAR"  # extended from EMA50
-                    state.ema_50_reclassified = "LINE"
+                    setattr(state, f"ema_{span}_status{suffix}", "EMA_ABOVE_FAR")  # extended from EMA50
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "LINE")
             elif _c < _ema50 and _atr_val > 0:
                 _dist_atr = (_ema50 - _c) / _atr_val
                 if _dist_atr < 3.0:
-                    state.ema_50_status = "EMA_BELOW"
-                    state.ema_50_reclassified = "RESISTANCE"
+                    setattr(state, f"ema_{span}_status{suffix}", "EMA_BELOW")
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "RESISTANCE")
                 else:
-                    state.ema_50_status = "EMA_BELOW_FAR"
-                    state.ema_50_reclassified = "LINE"
+                    setattr(state, f"ema_{span}_status{suffix}", "EMA_BELOW_FAR")
+                    setattr(state, f"ema_{span}_reclassified{suffix}", "LINE")
             else:
-                state.ema_50_status = "UNTESTED"
+                setattr(state, f"ema_{span}_status{suffix}", "UNTESTED")
 
             # Fix #15: MA Defense diagnostics
             logger.debug(
-                f"[MA_DEFENSE] {self.asset_type}: "
-                f"status={state.ema_50_status} "
-                f"reclassified={state.ema_50_reclassified} "
+                f"[MA_DEFENSE] {self.asset_type}: span={span}{suffix} "
+                f"status={getattr(state, f'ema_{span}_status{suffix}')} "
+                f"reclassified={getattr(state, f'ema_{span}_reclassified{suffix}')} "
                 f"dist_to_50={abs(_c - _ema50):.4f} "
                 f"defense_strength={state.defense_strength:.2f}"
             )
