@@ -723,6 +723,14 @@ class MLStrategy(bt.Strategy):
         # every backtest run regardless of what config.json actually says.
         self.aggregator.phase_config = config.get("phase_config", {})
 
+        # Fix 6c (backtest parity): propagate the per-asset risk block the
+        # same way main.py now does at every Council injection site. Without
+        # this, council_aggregator.py's getattr(self, "risk_config", {})
+        # always resolves to {} in backtests, so sl_mult/tp_mult/min_rr would
+        # silently keep using the old hardcoded 1.5/2.0/1.5 defaults here
+        # even after live trading reads the real assets.<ASSET>.risk values.
+        self.aggregator.risk_config = config.get("assets", {}).get(self.asset_key, {}).get("risk", {})
+
         # ── LSM companion — composite_state for the Council path ────────────
         # InstitutionalCouncilAggregator has no _build_composite_state of its
         # own; live trading (main.py) builds one via a lightweight
