@@ -241,7 +241,6 @@ class CompositeStateBuilder:
                 state.session_name = "NY_CLOSE"
             else:
                 state.session_name = "OFF_HOURS"
-            state.is_friday_pm = _dow == 4 and _hour >= 15
         except Exception:
             pass
 
@@ -963,7 +962,6 @@ class CompositeStateBuilder:
             )
 
             self._regime_start_time[asset] = now
-            state.transition_type = f"{prev}→{regime_name}"
 
             # Only overwrite lifecycle_phase from regime events when Livermore
             # is not yet warmed — once Livermore is running it has higher authority.

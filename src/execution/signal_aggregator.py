@@ -819,9 +819,6 @@ class PerformanceWeightedAggregator:
                 _discount = max(0.40, 1.0 + (_net * 0.07))
                 tf_conf *= _discount
 
-        # Friday PM flag for VTM
-        state.friday_tighten = state.is_friday_pm
-
         logger.info(
             f"[CONFLUENCE] {self.asset_type}: Phase={state.lifecycle_phase} "
             f"Pattern={state.institutional_pattern} "
@@ -3844,7 +3841,6 @@ class PerformanceWeightedAggregator:
                     "institutional_pattern": (
                         state.institutional_pattern if state else None
                     ),
-                    "friday_tighten": state.friday_tighten if state else False,
                     "composite_state": state.to_dict() if state else {},
                 }
             )
