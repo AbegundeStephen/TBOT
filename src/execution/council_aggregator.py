@@ -742,9 +742,14 @@ class InstitutionalCouncilAggregator:
         implicitly assuming trading is free.
 
         B7: single R:R check (folds in the formerly-separate rr_gate_rejected_
-        trend/reversion veto). trade_type sets the minimum R:R: REVERSION gets
-        the lower 0.6 bar (MR targets the nearer EMA-20 magnet, not a full
-        trend leg), TREND needs 1.0, anything else keeps the original 1.2.
+        trend/reversion veto).
+
+        Fix 6c: the minimum R:R is read from assets.<ASSET>.risk.min_rr (same
+        source VTM already uses), never from trade_type. The old ladder
+        (TREND 1.0 / REVERSION 0.6 / else 1.2) approved counter-trend trades
+        risking more than they stood to make — R:R is a property of the
+        instrument, not the direction. trade_type is kept in the signature
+        for other logic that may use it; it no longer affects this check.
         """
         try:
             risk = abs(entry - stop_loss)
@@ -773,13 +778,14 @@ class InstitutionalCouncilAggregator:
                 )
                 return False
 
-            # Minimum R:R check — trade-type aware (B7)
-            if trade_type == "TREND":
-                _min_rr = 1.0
-            elif trade_type == "REVERSION":
-                _min_rr = 0.6
-            else:
-                _min_rr = 1.2
+            # Strategy minimum is 1:1.5, per asset — never by trade type.
+            # The old ladder (TREND 1.0 / REVERSION 0.6 / else 1.2) approved
+            # trades risking more than they stood to make, and gave counter-trend
+            # an easier bar by formula — the same pattern B4/B5 removed.
+            # R:R is a property of the instrument, not the direction.
+            # Same source VTM already uses (vtm:231), so both halves of the bot
+            # now judge the same trade by the same rule.
+            _min_rr = float(getattr(self, "risk_config", {}).get("min_rr", 1.5))
             return (expected_reward / risk) >= _min_rr
 
         except Exception as e:
@@ -2334,7 +2340,9 @@ class InstitutionalCouncilAggregator:
                 # Pre-calculate entry and stop loss for gates and penalties
                 try:
                     entry_price = float(df["close"].iloc[-1])
-                    risk_cfg = self.config.get("risk", {})
+                    # self.risk_config = assets.<ASSET>.risk, set by main.py.
+                    # NOT self.config — that's the aggregator preset.
+                    risk_cfg = getattr(self, "risk_config", {}) or {}
                     sl_mult = risk_cfg.get("atr_multiplier", 1.5)
                     # 7.2 LIVE: mirror VTM's Livermore overlay so the gate judges the
                     # stop the trade will ACTUALLY get. Reads from _composite_state (in scope).
@@ -2663,7 +2671,9 @@ class InstitutionalCouncilAggregator:
                         take_profit = ema_20
                     else:
                         # Simulate Take Profit for TREND (Using first partial target or default)
-                        risk_cfg = self.config.get("risk", {})
+                        # self.risk_config = assets.<ASSET>.risk, set by main.py.
+                        # NOT self.config — that's the aggregator preset.
+                        risk_cfg = getattr(self, "risk_config", {}) or {}
                         tp_mult_raw = risk_cfg.get("partial_targets", [2.0])[0]
                         tp_dist = atr_fast * tp_mult_raw
                         take_profit = (
