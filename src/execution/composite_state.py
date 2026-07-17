@@ -24,14 +24,12 @@ class CompositeState:
     # Intentionally unconsumed — formatted debug string ("prev→new"), not judge-ready
     # data. RSM state_modifiers keys on current state alone, not a transition pair.
     # Build a fresh consumer if transition-specific logic is ever needed.
-    transition_type: Optional[str] = None
     regime_age_hours: float = 0.0
     regime_age_ratio: float = 0.0
     median_regime_duration: float = 12.0
     slopes_aligned: bool = False
     slope_diverging: bool = False
     structural_decay: bool = False
-    is_friday_pm: bool = False
 
     # ══════════════════════════════════════
     # LAYER 2: STRUCTURAL REALITY
@@ -84,7 +82,6 @@ class CompositeState:
     inside_bar: bool = False
     outside_bar: bool = False
     failed_breakout: bool = False
-    ema_20_status: str = "UNTESTED"
     ema_50_status: str = "UNTESTED"
     ema_50_reclassified: Optional[str] = None
     absorption_detected: bool = False
@@ -130,7 +127,6 @@ class CompositeState:
     # ══════════════════════════════════════
     institutional_pattern: Optional[str] = None
     net_conviction: float = 0.0
-    friday_tighten: bool = False
 
     # ══════════════════════════════════════════════════════════════
     # PHASE 1 RESERVED — Livermore State Machine

@@ -2104,8 +2104,9 @@ class VeteranTradeManager:
         # ── J: Friday PM trailing tightener ───────────────────────────────
         try:
             from datetime import datetime as _dtf
-            _is_friday_pm = self.signal_details.get("friday_tighten") or \
-                            (_dtf.utcnow().weekday() == 4 and _dtf.utcnow().hour >= 15)
+            # friday_tighten's only writer lived in dead code (get_aggregated_signal),
+            # so this always fell through to the local check anyway. Own it outright.
+            _is_friday_pm = (_dtf.utcnow().weekday() == 4 and _dtf.utcnow().hour >= 15)
             if _is_friday_pm:
                 if hasattr(self, 'runner_trail_distance') and self.runner_trail_distance:
                     self.runner_trail_distance *= 0.6  # 40% tighter on Friday PM

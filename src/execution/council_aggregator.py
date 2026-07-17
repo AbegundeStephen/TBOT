@@ -1510,7 +1510,11 @@ class InstitutionalCouncilAggregator:
             # divergence tagging and the emergency-brake comparison. Flip
             # the flag to True to instantly revert Trend to the pre-Part-2.1
             # (Item 2.8) behavior with no redeploy.
-            _tier3_shadow_mode = self.config.get("phase_config", {}).get(
+            # Read self.phase_config (set by main.py:1465 after construction),
+            # NOT self.config — that's the aggregator PRESET and never carries
+            # phase_config. See the note at line 1953. Use getattr: __init__ runs
+            # before main.py assigns it.
+            _tier3_shadow_mode = getattr(self, "phase_config", {}).get(
                 "tier3_shadow_enabled", False
             )
 
@@ -2827,7 +2831,7 @@ class InstitutionalCouncilAggregator:
                         # profit factor is available, map PF→multiplier
                         # (PF 1.0→1.0x, 1.5→1.3x, 0.5→0.7x, clamped 0.7–1.3).
                         # Default OFF == current win-rate behaviour.
-                        _pc_dw = self.config.get("phase_config", {}) or {}
+                        _pc_dw = getattr(self, "phase_config", {}) or {}
                         _DW_MIN_TRADES = int(
                             _pc_dw.get("council_dyn_weight_min_trades", 10)
                         )

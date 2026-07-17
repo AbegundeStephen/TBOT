@@ -4794,6 +4794,11 @@ class TradingBot:
             # to the hybrid selector forks even on cycles where MTF wasn't re-run.
             if asset_name in self._current_regime_data:
                 self._current_regime_data[asset_name]["df_4h"] = self._df_4h_cache.get(asset_name)
+                # df_1d rides the same road as df_4h. Council's build sites
+                # (trade_asset:4871, _update_asset_signal:6609) read mtf_regime,
+                # which IS _current_regime_data[asset_name] — so this reaches
+                # both without touching either call site.
+                self._current_regime_data[asset_name]["df_1d"] = self._df_1d_cache.get(asset_name)
 
             if len(df) < 250:
                 _diag = ""
