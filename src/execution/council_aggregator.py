@@ -2318,7 +2318,11 @@ class InstitutionalCouncilAggregator:
             # confident BUY (a coin-flip). When council_min_score_margin > 0 we
             # require the chosen side to beat the other by that gap, else HOLD.
             # Default 0.0 == current behaviour (no change until backtested).
-            _pc_cfg = self.config.get("phase_config", {}) or {}
+            # Read self.phase_config (set by main.py:1465 after construction),
+            # NOT self.config — that's the aggregator PRESET and never carries
+            # phase_config. See the note at line 1953. Use getattr: __init__
+            # runs before main.py assigns it.
+            _pc_cfg = getattr(self, "phase_config", {}) or {}
             _min_margin = float(_pc_cfg.get("council_min_score_margin", 0.0))
             if signal != 0 and _min_margin > 0.0:
                 _gap = (
