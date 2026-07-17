@@ -1464,14 +1464,6 @@ class TradingBot:
                     _pc = self.config.get("phase_config", {})
                     _council_agg.phase_config = _pc
                     _lsm_companion.phase_config = _pc
-                    # Per-asset risk block (assets.<ASSET>.risk). Council reads
-                    # self.config.get("risk") today — but self.config is the
-                    # aggregator PRESET, and "risk" isn't top-level either. Both
-                    # wrong, so the gate has always used hardcoded defaults.
-                    # VTM already reads this same block correctly (vtm:231).
-                    _council_agg.risk_config = (
-                        self.config.get("assets", {}).get(asset_name, {}).get("risk", {})
-                    )
 
                     logger.info(f"  Type:       Council Aggregator + LSM companion")
                     logger.info(
@@ -1545,11 +1537,6 @@ class TradingBot:
                     _pc = self.config.get("phase_config", {})
                     perf_agg.phase_config = _pc
                     council_agg.phase_config = _pc
-                    # Per-asset risk block (assets.<ASSET>.risk) — same gap as
-                    # the council path above; VTM already reads it correctly.
-                    council_agg.risk_config = (
-                        self.config.get("assets", {}).get(asset_name, {}).get("risk", {})
-                    )
 
                     # Store both in a dict
                     self.aggregators[asset_name] = {
@@ -3162,11 +3149,6 @@ class TradingBot:
                 _pc = self.config.get("phase_config", {})
                 perf_agg.phase_config = _pc
                 council_agg.phase_config = _pc
-                # Per-asset risk block (assets.<ASSET>.risk) — same gap as
-                # the initial setup path above.
-                council_agg.risk_config = (
-                    self.config.get("assets", {}).get(asset_name, {}).get("risk", {})
-                )
 
                 self.aggregators[asset_name] = {
                     "performance": perf_agg,
