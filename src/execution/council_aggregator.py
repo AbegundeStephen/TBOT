@@ -3463,7 +3463,10 @@ class InstitutionalCouncilAggregator:
                         sell_exp  += " +slopes_aligned_bear"
 
                 if _conviction_dying:
-                    _cd_directional = self.config.get("phase_config", {}).get(
+                    # Read self.phase_config (set by main.py after construction),
+                    # NOT self.config — that's the aggregator PRESET and never
+                    # carries phase_config. Same fix as Fix 6b Part A (line 2325).
+                    _cd_directional = getattr(self, "phase_config", {}).get(
                         "conviction_dying_directional_enabled", False
                     )
                     _lsm_state_1h = getattr(_cs_t, "livermore_state_1h", None)
@@ -4050,7 +4053,10 @@ class InstitutionalCouncilAggregator:
 
                 if conviction_dying:
                     penalty = 0.20 * weight
-                    _cd_dir = self.config.get("phase_config", {}).get(
+                    # Read self.phase_config (set by main.py after construction),
+                    # NOT self.config — that's the aggregator PRESET and never
+                    # carries phase_config. Same fix as Fix 6b Part A (line 2325).
+                    _cd_dir = getattr(self, "phase_config", {}).get(
                         "conviction_dying_directional_enabled", False
                     )
                     _lsm_1h = getattr(cs, "livermore_state_1h", None)
@@ -4304,7 +4310,10 @@ class InstitutionalCouncilAggregator:
                     # Shrinking candle bodies = conviction dying; penalise both
                     # directions — unless directional mode is enabled (flag gated).
                     penalty = 0.20 * weight
-                    _cd_dir = self.config.get("phase_config", {}).get(
+                    # Read self.phase_config (set by main.py after construction),
+                    # NOT self.config — that's the aggregator PRESET and never
+                    # carries phase_config. Same fix as Fix 6b Part A (line 2325).
+                    _cd_dir = getattr(self, "phase_config", {}).get(
                         "conviction_dying_directional_enabled", False
                     )
                     _lsm_1h = getattr(cs, "livermore_state_1h", None)
