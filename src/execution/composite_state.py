@@ -187,6 +187,10 @@ class CompositeState:
     # ── Zone ladder: 4H tier ──
     zone_4h_current_upper: Optional[float] = None
     zone_4h_current_lower: Optional[float] = None
+    zone_4h_current_upper_tests: int = 0
+    zone_4h_current_lower_tests: int = 0
+    zone_4h_current_upper_type: Optional[str] = None
+    zone_4h_current_lower_type: Optional[str] = None
     zone_4h_outer_high: Optional[float] = None    # body-only max over window
     zone_4h_outer_low: Optional[float] = None     # body-only min over window
     zone_4h_extended: bool = False                # True = 180d/5-zone view
@@ -194,6 +198,10 @@ class CompositeState:
     # ── Zone ladder: 1D tier ──
     zone_1d_current_upper: Optional[float] = None
     zone_1d_current_lower: Optional[float] = None
+    zone_1d_current_upper_tests: int = 0
+    zone_1d_current_lower_tests: int = 0
+    zone_1d_current_upper_type: Optional[str] = None
+    zone_1d_current_lower_type: Optional[str] = None
     zone_1d_outer_high: Optional[float] = None
     zone_1d_outer_low: Optional[float] = None
     zone_1d_extended: bool = False
