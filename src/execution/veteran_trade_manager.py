@@ -658,15 +658,26 @@ class VeteranTradeManager:
         # re-attach rather than pickle.
         if "council_ref" in state:
             del state["council_ref"]
+        # _sl_lock is a raw threading.Lock() (A13) — not picklable at all.
+        # Left in here it either crashes the save outright or, once already
+        # None from a prior bad round-trip, silently pickles as None and
+        # every with self._sl_lock: call downstream raises TypeError forever.
+        if "_sl_lock" in state:
+            del state["_sl_lock"]
         return state
 
     def __setstate__(self, state):
         """Custom method for unpickling. Re-initializes telegram as None —
         re-attached by whichever VTM-construction path picks this position
-        back up (state reload passes a live telegram_bot explicitly)."""
+        back up (state reload passes a live telegram_bot explicitly).
+        _sl_lock is rebuilt fresh — a restored lock can't preserve any
+        cross-thread waiters anyway, and every construction path needs a
+        real Lock, not None, before market_watcher.py or the VTM tick loop
+        can safely enter their `with self._sl_lock:` sections."""
         self.__dict__.update(state)
         self.telegram = None
         self.council_ref = None
+        self._sl_lock = threading.Lock()
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
     def _lot_geom(self):
