@@ -20,6 +20,7 @@ from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.ema_strategy import EMAStrategy
 from src.execution.signal_aggregator import PerformanceWeightedAggregator
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
+from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.ai import DynamicAnalyst, OHLCSniper, HybridSignalValidator
 
 logging.basicConfig(
@@ -592,9 +593,6 @@ class MLStrategy(bt.Strategy):
     """
 
     params = (
-        ("stop_loss_pct",          0.004),
-        ("take_profit_pct",        0.008),   # 2×SL by default
-        ("trailing_stop_pct",      0.015),
         ("risk_per_trade",         0.015),
         ("max_position_pct",       0.50),   # matches live hard cap: portfolio_manager.py absolute_max = free_margin * 0.50
         ("use_atr_sizing",         True),
@@ -603,12 +601,6 @@ class MLStrategy(bt.Strategy):
         ("lookback",               300),   # 200-bar EMA warmup + 100 signal buffer
         ("aggregator_preset",      "balanced"),
         ("aggregator_type",        "performance"),  # "performance" | "council"
-        ("use_trailing_stop",      True),
-        # Trailing stop only starts ratcheting once price has moved this many
-        # multiples of the initial risk (stop_distance) in the trade's favor.
-        # 0.0 = legacy behavior: trails from the entry price on bar 1, no
-        # grace period. 1.0 = don't arm the trail until the trade is up 1R.
-        ("trailing_activation_rr", 0.0),
         ("exit_on_opposite_signal", True),
         # AI validation
         ("use_ai_validation",              True),
@@ -642,22 +634,23 @@ class MLStrategy(bt.Strategy):
             _sc["phase_config"] = config.get("phase_config", {})
 
         # ── Per-asset risk params — override global defaults from config ────────
-        # The backtest strategy params are global defaults. For GOLD, USOIL, etc.
-        # the ATR multiplier, trailing stop, and TP ratio differ significantly
-        # from FX pairs and must be read from config to match live behaviour.
+        # The backtest strategy params are global defaults. atr_multiplier still
+        # feeds _calculate_position_size()'s risk-based sizing (a separate concern
+        # from where SL/TP actually go, which real VTM now determines below).
         _asset_risk = config.get("assets", {}).get(self.asset_key, {}).get("risk", {})
-        self._atr_multiplier    = _asset_risk.get("atr_multiplier",    self.params.atr_multiplier)
-        self._trailing_stop_pct = _asset_risk.get("trailing_stop_pct", self.params.trailing_stop_pct)
-        self._tp_ratio          = _asset_risk.get("tp_ratio",          2.0)   # TP = stop × tp_ratio
-        logger.info(
-            f"[RISK] {self.asset_key}  ATR×{self._atr_multiplier}  "
-            f"trail={self._trailing_stop_pct:.1%}  TP-ratio={self._tp_ratio}×"
-        )
+        self._atr_multiplier = _asset_risk.get("atr_multiplier", self.params.atr_multiplier)
+        logger.info(f"[RISK] {self.asset_key}  ATR×{self._atr_multiplier}")
+
+        # VTM integration: real risk_config (with phase_config merged in, same
+        # way production does it — portfolio_manager.py's add_position path —
+        # so structural_stops_enabled/structural_trailing_enabled/
+        # per_tick_livermore_enabled resolve the same as live, not silently False).
+        self._risk_config = dict(_asset_risk)
+        self._risk_config["phase_config"] = config.get("phase_config", {})
+        self.trade_manager = None
+        self._entry_size = None
 
         self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
-        self.trailing_stop_price = None
-        self.highest_price_since_entry = None
-        self.lowest_price_since_entry  = None
 
         self.mean_reversion  = MeanReversionStrategy(mr_config)
         self.trend_following = TrendFollowingStrategy(tf_config)
@@ -679,6 +672,7 @@ class MLStrategy(bt.Strategy):
 
         # ── Aggregator selection ─────────────────────────────────────────────
         agg_type = self.params.aggregator_type.lower()
+        self._agg_is_council = (agg_type == "council")
         if agg_type == "council":
             self.aggregator = InstitutionalCouncilAggregator(
                 mean_reversion_strategy=self.mean_reversion,
@@ -775,8 +769,6 @@ class MLStrategy(bt.Strategy):
         self.signal_log   = []
         self.next_call_count = 0
         self.entry_price  = None
-        self.stop_loss    = None
-        self.take_profit  = None
 
         self.ai_stats = {
             "total_signals": 0, "ai_approved": 0, "ai_rejected": 0,
@@ -863,11 +855,8 @@ class MLStrategy(bt.Strategy):
 
             if not self.position:
                 self.entry_price  = None
-                self.stop_loss    = None
-                self.take_profit  = None
-                self.trailing_stop_price       = None
-                self.highest_price_since_entry = None
-                self.lowest_price_since_entry  = None
+                self.trade_manager = None
+                self._entry_size   = None
 
             self.order = None
 
@@ -888,39 +877,6 @@ class MLStrategy(bt.Strategy):
 
         try:
             current_price = self.data.close[0]
-
-            # ── Exit logic for open positions ────────────────────────────────
-            if self.position:
-                is_long  = self.position.size > 0
-                is_short = self.position.size < 0
-
-                # Update trailing stop
-                if self.params.use_trailing_stop:
-                    self._update_trailing_stop(current_price, is_long, is_short)
-
-                # Check stop-loss
-                if self.stop_loss:
-                    if (is_long and current_price <= self.stop_loss) or \
-                       (is_short and current_price >= self.stop_loss):
-                        self.order = self.close()
-                        logger.info(f"🛑 STOP-LOSS @ ${current_price:.5f}")
-                        return
-
-                # Check take-profit
-                if self.take_profit:
-                    if (is_long and current_price >= self.take_profit) or \
-                       (is_short and current_price <= self.take_profit):
-                        self.order = self.close()
-                        logger.info(f"🎯 TAKE-PROFIT @ ${current_price:.5f}")
-                        return
-
-                # Check trailing stop
-                if self.params.use_trailing_stop and self.trailing_stop_price:
-                    if (is_long and current_price <= self.trailing_stop_price) or \
-                       (is_short and current_price >= self.trailing_stop_price):
-                        self.order = self.close()
-                        logger.info(f"📉 TRAILING-STOP @ ${current_price:.5f}")
-                        return
 
             # ── Prepare OHLCV slice ──────────────────────────────────────────
             lb = self.params.lookback
@@ -953,14 +909,71 @@ class MLStrategy(bt.Strategy):
             # pattern. Without this, every composite_state-dependent judge
             # branch (Structure, Pattern, Volume divergence, Reversion,
             # RetestEngine) silently never fires in a Council-mode backtest.
-            if self._lsm_companion is not None and governor_data is not None:
+            #
+            # VTM integration needs BOTH forms of this: _cs (the raw
+            # CompositeState object) for update_with_current_price, which reads
+            # it via getattr — a dict there would silently no-op the Livermore/
+            # BOS/sweep/absorption checks instead of erroring; and _cs_dict (its
+            # .to_dict()) for VTM's constructor, which does plain dict .get()
+            # calls with no getattr fallback and crashes on the raw object.
+            _cs = None
+            _cs_dict = {}
+            if self._agg_is_council and self._lsm_companion is not None and governor_data is not None:
                 try:
                     _cs = self._lsm_companion._build_composite_state(
                         df, governor_data.get("df_4h"), governor_data
                     )
                     governor_data["composite_state"] = _cs
+                    _cs_dict = _cs.to_dict()
                 except Exception as _cs_err:
                     logger.debug(f"[LSM companion] composite_state build failed: {_cs_err}")
+
+            # ── Exit logic for open positions (real VTM) ─────────────────────
+            # on_new_bar grows VTM's own high/low/close arrays and bars_in_trade
+            # — update_with_current_price does neither, so skipping on_new_bar
+            # would starve the >=10-bar structural swing trail and leave ATR
+            # permanently stale. Only fall through to update_with_current_price
+            # (the Q3/Livermore/zone-aware checks) if on_new_bar didn't already
+            # decide to exit, to avoid double-mutating remaining_position/
+            # partials_hit within the same bar.
+            if self.position and self.trade_manager is not None:
+                is_long = self.position.size > 0
+                exit_signal = self.trade_manager.on_new_bar(
+                    new_high=self.data.high[0], new_low=self.data.low[0], new_close=current_price
+                )
+                if exit_signal is None:
+                    exit_signal = self.trade_manager.update_with_current_price(
+                        current_price,
+                        df_4h=governor_data.get("df_4h") if governor_data else None,
+                        composite_state=_cs,
+                    )
+                if exit_signal and "action" not in exit_signal:
+                    frac = exit_signal.get("size", 1.0)
+                    reason = exit_signal.get("reason", "unknown")
+                    reason_str = reason.value if hasattr(reason, "value") else str(reason)
+                    price = exit_signal.get("price", current_price)
+                    if frac >= 0.999:
+                        self.order = self.close()
+                        logger.info(f"🛑 VTM EXIT ({reason_str}) @ ${price:.5f}")
+                    else:
+                        # Clamp to the ACTUAL remaining backtrader position —
+                        # never trust frac*_entry_size alone. If it drifted
+                        # past what's actually left (rounding, or VTM's own
+                        # remaining_position bookkeeping getting out of step
+                        # with backtrader's), a raw sell/buy that exceeds the
+                        # current position size doesn't just reduce it —
+                        # backtrader closes it AND opens a new position on the
+                        # far side, flipping long<->short with a stale
+                        # self.trade_manager still attached. Clamping guarantees
+                        # this call only ever reduces or fully closes.
+                        qty = min(frac * self._entry_size, abs(self.position.size))
+                        if qty >= abs(self.position.size) - 1e-9:
+                            self.order = self.close()
+                            logger.info(f"🛑 VTM EXIT ({reason_str}) @ ${price:.5f} (full — clamped from {frac:.0%})")
+                        else:
+                            self.order = self.sell(size=qty) if is_long else self.buy(size=qty)
+                            logger.info(f"🎯 VTM PARTIAL EXIT ({reason_str}) {frac:.0%} @ ${price:.5f}")
+                    return
 
             signal, details = self.aggregator.get_aggregated_signal(
                 df,
@@ -968,6 +981,12 @@ class MLStrategy(bt.Strategy):
                 is_bull_market  = governor_data.get("is_bull", True)      if governor_data else True,
                 governor_data   = governor_data,
             )
+
+            # Non-Council mode: PerformanceWeightedAggregator's own details dict
+            # already carries composite_state as a dict (signal_aggregator.py),
+            # unlike council_aggregator.py which never puts it at the top level.
+            if not self._agg_is_council:
+                _cs_dict = details.get("composite_state", {}) or _cs_dict
 
             # Periodic log
             if self.next_call_count % 10 == 0:
@@ -991,30 +1010,31 @@ class MLStrategy(bt.Strategy):
                 if signal in (1, -1):
                     size = self._calculate_position_size()
                     if size > 0:
-                        atr_value     = self.atr[0]
-                        stop_distance = atr_value * self._atr_multiplier
-
-                        self._entry_stop_distance = stop_distance
-                        if signal == 1:
-                            self.order      = self.buy(size=size)
-                            self.stop_loss   = current_price - stop_distance
-                            self.take_profit = current_price + stop_distance * self._tp_ratio
-                            self.highest_price_since_entry = current_price
-                            self.lowest_price_since_entry  = current_price
-                            logger.info(
-                                f"🟢 BUY  @ ${current_price:.5f}  "
-                                f"SL=${self.stop_loss:.5f}  TP=${self.take_profit:.5f}  "
-                                f"size={size:.6f} | {details.get('reasoning','')}"
+                        side_str = "long" if signal == 1 else "short"
+                        signal_details = {**details, "composite_state": _cs_dict}
+                        try:
+                            self.trade_manager = VeteranTradeManager(
+                                entry_price=current_price, side=side_str, asset=self.asset_key,
+                                risk_config=self._risk_config,
+                                high=df["high"].values, low=df["low"].values, close=df["close"].values,
+                                volume=df["volume"].values if "volume" in df else None,
+                                quantity=size, signal_details=signal_details,
+                                trade_type=details.get("trade_type", "TREND"),
+                                account_risk=self.params.risk_per_trade, atr_period=self.params.atr_period,
                             )
+                        except Exception as e:
+                            logger.error(f"[VTM] init failed, skipping entry: {e}")
+                            self.trade_manager = None
                         else:
-                            self.order      = self.sell(size=size)
-                            self.stop_loss   = current_price + stop_distance
-                            self.take_profit = current_price - stop_distance * self._tp_ratio
-                            self.highest_price_since_entry = current_price
-                            self.lowest_price_since_entry  = current_price
+                            self._entry_size = size
+                            if signal == 1:
+                                self.order = self.buy(size=size)
+                            else:
+                                self.order = self.sell(size=size)
                             logger.info(
-                                f"🔴 SELL @ ${current_price:.5f}  "
-                                f"SL=${self.stop_loss:.5f}  TP=${self.take_profit:.5f}  "
+                                f"{'🟢 BUY ' if signal == 1 else '🔴 SELL'} @ ${current_price:.5f}  "
+                                f"SL=${self.trade_manager.initial_stop_loss:.5f}  "
+                                f"TP={self.trade_manager.take_profit_levels}  "
                                 f"size={size:.6f} | {details.get('reasoning','')}"
                             )
 
@@ -1039,7 +1059,7 @@ class MLStrategy(bt.Strategy):
         cash          = self.broker.getcash()
         atr_value     = self.atr[0]
         stop_distance = atr_value * self._atr_multiplier
-        stop_pct      = stop_distance / current_price if current_price > 0 else self.params.stop_loss_pct
+        stop_pct      = stop_distance / current_price if current_price > 0 else 0.004
 
         risk_amount    = equity * self.params.risk_per_trade
         position_value = risk_amount / stop_pct if stop_pct > 0 else 0
@@ -1047,40 +1067,6 @@ class MLStrategy(bt.Strategy):
 
         max_size = (cash * self.params.max_position_pct) / current_price
         return max(min(size, max_size), 0)
-
-    def _update_trailing_stop(self, price: float, is_long: bool, is_short: bool):
-        """Ratchet trailing stop for both longs and shorts.
-
-        Gated by trailing_activation_rr: the trail doesn't arm until price
-        has moved that many multiples of the trade's own risk (stop_distance)
-        in its favor. At the default 0.0 this is a no-op (legacy: arms on
-        bar 1 from the entry price itself).
-        """
-        activation_rr = self.params.trailing_activation_rr
-        if activation_rr > 0:
-            required_move = getattr(self, "_entry_stop_distance", 0.0) * activation_rr
-            if is_long and (price - self.entry_price) < required_move:
-                return
-            if is_short and (self.entry_price - price) < required_move:
-                return
-
-        if is_long:
-            if self.highest_price_since_entry is None:
-                self.highest_price_since_entry = price
-            else:
-                self.highest_price_since_entry = max(self.highest_price_since_entry, price)
-            new_trail = self.highest_price_since_entry * (1 - self._trailing_stop_pct)
-            if self.trailing_stop_price is None or new_trail > self.trailing_stop_price:
-                self.trailing_stop_price = new_trail
-
-        elif is_short:
-            if self.lowest_price_since_entry is None:
-                self.lowest_price_since_entry = price
-            else:
-                self.lowest_price_since_entry = min(self.lowest_price_since_entry, price)
-            new_trail = self.lowest_price_since_entry * (1 + self._trailing_stop_pct)
-            if self.trailing_stop_price is None or new_trail < self.trailing_stop_price:
-                self.trailing_stop_price = new_trail
 
     def stop(self):
         logger.info("=" * 70)
