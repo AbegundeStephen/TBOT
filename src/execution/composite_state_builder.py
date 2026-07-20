@@ -1191,6 +1191,8 @@ class CompositeStateBuilder:
                         _4h_highs[i] > _4h_highs[i - 1]
                         and _4h_highs[i] > _4h_highs[i + 1]
                     ):
+                        # ROUTE B: first backward hit = most recent 4H swing high.
+                        state.last_swing_high_4h = float(_4h_highs[i])
                         _exists = any(
                             abs(lvl["price"] - _4h_highs[i]) / _atr < 0.3
                             for lvl in self._structure_levels[asset]
@@ -1209,6 +1211,8 @@ class CompositeStateBuilder:
 
                 for i in range(len(_4h_lows) - 3, 4, -1):
                     if _4h_lows[i] < _4h_lows[i - 1] and _4h_lows[i] < _4h_lows[i + 1]:
+                        # ROUTE B: first backward hit = most recent 4H swing low.
+                        state.last_swing_low_4h = float(_4h_lows[i])
                         _exists = any(
                             abs(lvl["price"] - _4h_lows[i]) / _atr < 0.3
                             for lvl in self._structure_levels[asset]
