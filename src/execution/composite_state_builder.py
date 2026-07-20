@@ -308,6 +308,10 @@ class CompositeStateBuilder:
             _v4 = self._build_zone_view(df_4h, self.asset_type, "4H", _price_now)
             state.zone_4h_current_upper = _v4["current_upper"]
             state.zone_4h_current_lower = _v4["current_lower"]
+            state.zone_4h_current_upper_tests = _v4["current_upper_tests"]
+            state.zone_4h_current_lower_tests = _v4["current_lower_tests"]
+            state.zone_4h_current_upper_type = _v4["current_upper_type"]
+            state.zone_4h_current_lower_type = _v4["current_lower_type"]
             state.zone_4h_outer_high = _v4["outer_high"]
             state.zone_4h_outer_low = _v4["outer_low"]
 
@@ -316,6 +320,10 @@ class CompositeStateBuilder:
             _v1 = self._build_zone_view(_df_1d, self.asset_type, "1D", _price_now)
             state.zone_1d_current_upper = _v1["current_upper"]
             state.zone_1d_current_lower = _v1["current_lower"]
+            state.zone_1d_current_upper_tests = _v1["current_upper_tests"]
+            state.zone_1d_current_lower_tests = _v1["current_lower_tests"]
+            state.zone_1d_current_upper_type = _v1["current_upper_type"]
+            state.zone_1d_current_lower_type = _v1["current_lower_type"]
             state.zone_1d_outer_high = _v1["outer_high"]
             state.zone_1d_outer_low = _v1["outer_low"]
 
@@ -1413,6 +1421,8 @@ class CompositeStateBuilder:
         import time as _time
 
         _out = {"current_upper": None, "current_lower": None,
+                "current_upper_tests": 0, "current_lower_tests": 0,
+                "current_upper_type": None, "current_lower_type": None,
                 "outer_high": None, "outer_low": None}
         if df_tf is None or len(df_tf) < 10:
             return _out
@@ -1447,9 +1457,17 @@ class CompositeStateBuilder:
         _below = [l for l in _cands if l["price"] < current_price]
 
         if _above:
-            _out["current_upper"] = min(_above, key=lambda l: l["price"] - current_price)["price"]
+            # Keep the whole level dict — we need its test-count and type,
+            # not just the price. min() already selected the nearest line above.
+            _u = min(_above, key=lambda l: l["price"] - current_price)
+            _out["current_upper"] = _u["price"]
+            _out["current_upper_tests"] = _u.get("tests", 0)
+            _out["current_upper_type"] = _u.get("type")
         if _below:
-            _out["current_lower"] = max(_below, key=lambda l: l["price"])["price"]
+            _d = max(_below, key=lambda l: l["price"])
+            _out["current_lower"] = _d["price"]
+            _out["current_lower_tests"] = _d.get("tests", 0)
+            _out["current_lower_type"] = _d.get("type")
 
         return _out
 
