@@ -183,14 +183,54 @@ class RetestEngine:
         # the old direction-agnostic level) when no level exists on the
         # correct side — falling back would reintroduce the wrong-direction
         # level this item exists to fix.
+        # Zone ladder switch (Q2b). LONG bounces off the line BELOW price
+        # (current_lower); SHORT rejects off the line ABOVE (current_upper).
+        # These are tested lines (view filters tests >= 1) carrying their own
+        # test-count and type — supplied by Q2a.
         if direction == 1:
-            level = getattr(state, "nearby_support_level", None)
-            _level_tests = getattr(state, "nearby_support_level_tests", 0)
+            level = getattr(state, "zone_4h_current_lower", None)
+            _level_tests = getattr(state, "zone_4h_current_lower_tests", 0)
         else:
-            level = getattr(state, "nearby_resistance_level", None)
-            _level_tests = getattr(state, "nearby_resistance_level_tests", 0)
-        level_2   = getattr(state, "nearby_4h_level_2", None)
-        level_3   = getattr(state, "nearby_4h_level_3", None)
+            level = getattr(state, "zone_4h_current_upper", None)
+            _level_tests = getattr(state, "zone_4h_current_upper_tests", 0)
+        # A4 absorbed: the ladder's opposite-side line is the second directional
+        # candidate. LONG's secondary check is the line above (current_upper);
+        # SHORT's is the line below. level_3 no longer applies — the ladder
+        # gives two directional lines, not a near-price cluster of three.
+        if direction == 1:
+            level_2 = getattr(state, "zone_4h_current_upper", None)
+        else:
+            level_2 = getattr(state, "zone_4h_current_lower", None)
+        level_3 = None
+
+        # ── Q2b: compute defense against the ladder lines locally. ──
+        # Lifted verbatim from the builder's E.2 block (composite_state_builder
+        # ~440-472), swapping the old near-price level for the ladder line.
+        # The builder keeps its OWN copy for STRUCTURE/VTM — the two are
+        # deliberately separate (correlated votes aren't confirming votes).
+        _atr_d = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+        level_defended = False
+        _level_2_defended = False
+        if _atr_d > 0 and len(df) >= 1:
+            _o = float(df["open"].iloc[-1])
+            _h = float(df["high"].iloc[-1])
+            _l = float(df["low"].iloc[-1])
+            _c = float(df["close"].iloc[-1])
+            _total = _h - _l
+            if _total > 0:
+                _uw = _h - max(_o, _c)
+                _lw = min(_o, _c) - _l
+                _wick_ratio = max(_uw, _lw) / _total
+                if _wick_ratio > 0.75:
+                    _primary = level                       # from Step 1
+                    if _primary is not None:
+                        if abs(_c - _primary) / max(_atr_d, 0.001) < 0.5:
+                            level_defended = True
+                    _secondary = level_2                   # from Step 2
+                    if _secondary is not None:
+                        if abs(_c - _secondary) / max(_atr_d, 0.001) < 0.5:
+                            _level_2_defended = True
+
         asset_cfg = self._assets.get(symbol, self._assets.get("DEFAULT", {}))
 
         # ── 1. CLEAN / 1b. CHOCH_HOLD ────────────────────────────────
@@ -198,7 +238,8 @@ class RetestEngine:
         # AND the level has been actively defended (level_defended = True).
         if level is not None:
             dist_atr = abs(close - level) / atr
-            level_defended = getattr(state, "level_defended", False)
+            # level_defended computed locally above (Q2b) — do not overwrite
+            # with the builder's old-path value here.
             if dist_atr <= self._clean_atr_mult and level_defended:
                 # Part 1.10 (Brain Rebuild) — Tier 2.1: a defended clean level
                 # where a CHoCH just fired is a stronger tell than a plain
@@ -248,8 +289,8 @@ class RetestEngine:
         # "nearest" one isn't where the actual defense happened) — check
         # those independently before falling through to BREAKOUT/WICK/CHASE.
         for _lvl, _defended in (
-            (level_2, bool(getattr(state, "level_2_defended", False))),
-            (level_3, bool(getattr(state, "level_3_defended", False))),
+            (level_2, _level_2_defended),          # computed locally, Step 3
+            (level_3, False),                       # level_3 retired (Step 2)
         ):
             if _lvl is None or not _defended:
                 continue
@@ -342,7 +383,13 @@ class RetestEngine:
                 level is not None and sweep_level is not None
                 and abs(sweep_level - level) / atr < self._clean_atr_mult
             ):
-                _level_type = getattr(state, "nearby_4h_level_type", None)
+                # Ladder line's type (Q2a). Direction picks the side we're
+                # classifying against, matching Steps 1-2.
+                _level_type = (
+                    getattr(state, "zone_4h_current_lower_type", None)
+                    if direction == 1
+                    else getattr(state, "zone_4h_current_upper_type", None)
+                )
                 _expected_type = "swing_low" if direction == 1 else "swing_high"
                 _role_conflict = _level_type is not None and _level_type != _expected_type
 
