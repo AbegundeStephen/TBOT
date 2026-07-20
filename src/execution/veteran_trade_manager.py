@@ -506,6 +506,10 @@ class VeteranTradeManager:
         # Populated only for RANGE_BOUNDARY/SPRING_ENTRY — None otherwise.
         self.vtm_range_high             = _cs.get("range_high")
         self.vtm_range_low              = _cs.get("range_low")
+        # Q3: zone ladder's nearest tested 4H lines (Q2a/Q2b). Read the same
+        # way as everything else off _cs — VTM's own structural SL/TP source.
+        self.zone_current_upper         = _cs.get("zone_4h_current_upper")
+        self.zone_current_lower         = _cs.get("zone_4h_current_lower")
         # Squeeze flag — drives wider ATR selection in _calculate_atr()
         self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
         # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
@@ -901,36 +905,49 @@ class VeteranTradeManager:
                 wick_buffer = 0.5 * atr
 
                 if self.side == "long":
-                    # Long reversion: price bouncing up from below — SL below entry,
-                    # TP near EMA above.
-                    self.initial_stop_loss = self.low[-1] - wick_buffer
-                    tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
-                    # Guard: if bar data is stale/misaligned, SL might be above the
-                    # actual fill price — MT5 would reject it (retcode 10016).
+                    # Q3: SL = tested zone line BELOW price, wick-buffered.
+                    # Falls back to the bar low if no zone line (check 1),
+                    # then the existing ATR clamp handles bad geometry (check 2).
+                    _sl_line = self.zone_current_lower if self.zone_current_lower else self.low[-1]
+                    self.initial_stop_loss = _sl_line - wick_buffer
+
+                    # Q3: TP = tested zone line ABOVE price (the next zone).
+                    # This is where "TP at the next zone" reaches the live order.
+                    _tp_line = self.zone_current_upper
+                    tp_target = _tp_line if _tp_line else (
+                        self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price + (2.0 * atr)
+                    )
+
+                    # Guards unchanged — they ARE the fallback's second check.
                     if self.initial_stop_loss >= self.entry_price:
                         self.initial_stop_loss = self.entry_price - (1.5 * atr)
                         logger.warning(
-                            f"[VTM] REVERSION LONG: bar-derived SL ({self.initial_stop_loss:.5f}) "
-                            f"was >= entry — clamped to entry - 1.5×ATR"
+                            f"[VTM] REVERSION LONG: SL ({self.initial_stop_loss:.5f}) "
+                            f">= entry — clamped to entry - 1.5×ATR"
                         )
                     if tp_target <= self.entry_price:
                         tp_target = self.entry_price + (2.0 * atr)
                         logger.warning("[VTM] REVERSION LONG: TP was <= entry — clamped to entry + 2×ATR")
 
                 else:
-                    # Short reversion: price falling from above — SL above entry,
-                    # TP below (toward the EMA mean-convergence point).
-                    self.initial_stop_loss = self.high[-1] + wick_buffer
-                    tp_target = self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
-                    # Guard: if bar data is stale (e.g. 1H bars are at a different
-                    # price level than the actual MT5 fill), high[-1] + buffer can
-                    # land BELOW the fill price — MT5 rejects the SL as invalid
-                    # (retcode 10016). Same guard for TP above entry for a SHORT.
+                    # Q3: SL = tested zone line ABOVE price, wick-buffered.
+                    # Falls back to the bar high if no zone line (check 1),
+                    # then the existing ATR clamp handles bad geometry (check 2).
+                    _sl_line = self.zone_current_upper if self.zone_current_upper else self.high[-1]
+                    self.initial_stop_loss = _sl_line + wick_buffer
+
+                    # Q3: TP = tested zone line BELOW price (the next zone).
+                    _tp_line = self.zone_current_lower
+                    tp_target = _tp_line if _tp_line else (
+                        self.ema_4h_50 - (0.2 * atr) if self.ema_4h_50 else self.entry_price - (2.0 * atr)
+                    )
+
+                    # Guards unchanged — they ARE the fallback's second check.
                     if self.initial_stop_loss <= self.entry_price:
                         self.initial_stop_loss = self.entry_price + (1.5 * atr)
                         logger.warning(
-                            f"[VTM] REVERSION SHORT: bar-derived SL ({self.initial_stop_loss:.5f}) "
-                            f"was <= entry — clamped to entry + 1.5×ATR"
+                            f"[VTM] REVERSION SHORT: SL ({self.initial_stop_loss:.5f}) "
+                            f"<= entry — clamped to entry + 1.5×ATR"
                         )
                     if tp_target >= self.entry_price:
                         tp_target = self.entry_price - (2.0 * atr)
@@ -939,6 +956,24 @@ class VeteranTradeManager:
                 self.current_stop_loss = self.initial_stop_loss
                 self.take_profit_levels = [tp_target]
                 self.partial_sizes = [1.0]
+
+                # Q3 check 2: if the zone-derived geometry doesn't clear the
+                # per-asset R:R floor, the zones are too tight for this trade —
+                # fall back to ATR geometry rather than take a sub-threshold R:R.
+                _min_rr = float(self.risk_config.get("min_rr", 1.5))
+                _risk = abs(self.entry_price - self.initial_stop_loss)
+                _reward = abs(tp_target - self.entry_price)
+                if _risk > 0 and (_reward / _risk) < _min_rr:
+                    _atr_tp = self.partial_targets[0] if self.partial_targets else 2.0
+                    if self.side == "long":
+                        tp_target = self.entry_price + (_atr_tp * atr)
+                    else:
+                        tp_target = self.entry_price - (_atr_tp * atr)
+                    self.take_profit_levels = [tp_target]
+                    logger.info(
+                        f"[VTM] REVERSION: zone R:R {_reward/_risk:.2f} < {_min_rr} — "
+                        f"TP fell back to ATR ({_atr_tp}×)"
+                    )
 
                 logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
 
@@ -958,8 +993,11 @@ class VeteranTradeManager:
                     final_sl = standard_sl
 
                     # 2. Joint Synergy: MA Shield (only active when use_ema_structure=true)
+                    # Q3: zone_current_lower joins the MA candidates — it's a tested
+                    # structural line same as the MAs, so it competes on equal terms
+                    # rather than overriding or short-circuiting the existing shield.
                     if self.use_ema_structure:
-                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50, self.zone_current_lower]:
                             if ma and standard_sl < ma < self.entry_price:
                                 buffered_ma_sl = ma - (0.5 * atr)
                                 if buffered_ma_sl > final_sl:
@@ -978,8 +1016,11 @@ class VeteranTradeManager:
                     final_sl = standard_sl
 
                     # 2. Joint Synergy: MA Shield (only active when use_ema_structure=true)
+                    # Q3: zone_current_upper joins the MA candidates — it's a tested
+                    # structural line same as the MAs, so it competes on equal terms
+                    # rather than overriding or short-circuiting the existing shield.
                     if self.use_ema_structure:
-                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50]:
+                        for ma in [self.ema_1d_200, self.ema_4h_200, self.ema_4h_50, self.zone_current_upper]:
                             if ma and standard_sl > ma > self.entry_price:
                                 buffered_ma_sl = ma + (0.5 * atr)
                                 if buffered_ma_sl < final_sl:
@@ -1647,6 +1688,27 @@ class VeteranTradeManager:
                         )
                         self.current_stop_loss = _struct_sl
                 # ──────────────────────────────────────────────────────────────
+
+            # Q3: dynamic zone-aware TP. If price has cleared the zone that was
+            # our target, the next zone up/down becomes the new target — the
+            # position is managed against live structure, not a fixed entry-time TP.
+            if composite_state is not None:
+                _zu = (composite_state.get("zone_4h_current_upper")
+                       if isinstance(composite_state, dict)
+                       else getattr(composite_state, "zone_4h_current_upper", None))
+                _zl = (composite_state.get("zone_4h_current_lower")
+                       if isinstance(composite_state, dict)
+                       else getattr(composite_state, "zone_4h_current_lower", None))
+                _next = _zu if self.side == "long" else _zl
+                if _next is not None and self.take_profit_levels:
+                    _cur_tp = self.take_profit_levels[-1]
+                    # Only ADVANCE the target in the trade's favour, never pull it in.
+                    if self.side == "long" and _next > _cur_tp:
+                        self.take_profit_levels[-1] = _next
+                        logger.info(f"[VTM] {self.asset}: price cleared zone — TP advanced to {_next:.5f}")
+                    elif self.side == "short" and _next < _cur_tp:
+                        self.take_profit_levels[-1] = _next
+                        logger.info(f"[VTM] {self.asset}: price cleared zone — TP advanced to {_next:.5f}")
 
             # A13: already holding _sl_lock (acquired by the update_with_
             # current_price wrapper) — call the unlocked impl directly to

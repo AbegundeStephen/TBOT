@@ -2369,10 +2369,17 @@ class InstitutionalCouncilAggregator:
                             sl_mult = max(
                                 1.5, sl_mult - _adj.get("secondary_stop_sub", 0.2)
                             )
-                    sl_dist = atr_fast * sl_mult
-                    stop_loss = (
-                        entry_price - sl_dist if signal == 1 else entry_price + sl_dist
-                    )
+                    # Q3: prefer the tested zone line for the gate's SL; fall back to
+                    # ATR distance if absent. Keeps the R:R gate judging real structure.
+                    _zsl = (getattr(_composite_state, "zone_4h_current_lower", None) if signal == 1
+                            else getattr(_composite_state, "zone_4h_current_upper", None))
+                    if _zsl is not None:
+                        stop_loss = _zsl - (0.3 * atr_fast) if signal == 1 else _zsl + (0.3 * atr_fast)
+                    else:
+                        sl_dist = atr_fast * sl_mult
+                        stop_loss = (
+                            entry_price - sl_dist if signal == 1 else entry_price + sl_dist
+                        )
                 except Exception as e:
                     logger.warning(f"[COUNCIL] Initial price calculation failed: {e}")
 
@@ -2618,90 +2625,15 @@ class InstitutionalCouncilAggregator:
                         "ema_confidence": ema_conf,
                     }
 
-                # 4. RISK/REWARD GATE (ECONOMIC VETO)
-                # Reason: Ensures trade has sufficient economic potential before execution.
-                try:
-                    distance_to_sl = abs(entry_price - stop_loss)
-
-                    if trade_type == "REVERSION":
-                        # ⚡ EMA 20 as Take-Profit Magnet
-                        ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
-
-                        # Directional Guard: Ensure TP is in the right direction
-                        if signal == 1 and ema_20 <= entry_price:
-                            logger.info(
-                                f"[COUNCIL] ❌ BLOCKED - Inverted TP Magnet (Long): EMA-20 {ema_20:.2f} <= Entry {entry_price:.2f}"
-                            )
-                            return 0, {
-                                "timestamp": timestamp,
-                                "signal": 0,
-                                "asset": self.asset_type,
-                                "decision_type": "BLOCKED (Inverted TP Magnet)",
-                                "action": "rejected",
-                                "original_signal": signal,
-                                "reasoning": "inverted_mr_magnet_long",
-                                "final_signal": 0,
-                                "signal_quality": 0.0,
-                                "total_score": total_score,
-                                "scores": chosen_scores,
-                                "mr_signal": mr_signal,
-                                "mr_confidence": mr_conf,
-                                "tf_signal": tf_signal,
-                                "tf_confidence": tf_conf,
-                                "ema_signal": ema_signal,
-                                "ema_confidence": ema_conf,
-                            }
-                        if signal == -1 and ema_20 >= entry_price:
-                            logger.info(
-                                f"[COUNCIL] ❌ BLOCKED - Inverted TP Magnet (Short): EMA-20 {ema_20:.2f} >= Entry {entry_price:.2f}"
-                            )
-                            return 0, {
-                                "timestamp": timestamp,
-                                "signal": 0,
-                                "asset": self.asset_type,
-                                "decision_type": "BLOCKED (Inverted TP Magnet)",
-                                "action": "rejected",
-                                "original_signal": signal,
-                                "reasoning": "inverted_mr_magnet_short",
-                                "final_signal": 0,
-                                "signal_quality": 0.0,
-                                "total_score": total_score,
-                                "scores": chosen_scores,
-                                "mr_signal": mr_signal,
-                                "mr_confidence": mr_conf,
-                                "tf_signal": tf_signal,
-                                "tf_confidence": tf_conf,
-                                "ema_signal": ema_signal,
-                                "ema_confidence": ema_conf,
-                            }
-
-                        distance_to_tp = abs(entry_price - ema_20)
-                        take_profit = ema_20
-                    else:
-                        # Simulate Take Profit for TREND (Using first partial target or default)
-                        # self.risk_config = assets.<ASSET>.risk, set by main.py.
-                        # NOT self.config — that's the aggregator preset.
-                        risk_cfg = getattr(self, "risk_config", {}) or {}
-                        tp_mult_raw = risk_cfg.get("partial_targets", [2.0])[0]
-                        tp_dist = atr_fast * tp_mult_raw
-                        take_profit = (
-                            entry_price + tp_dist
-                            if signal == 1
-                            else entry_price - tp_dist
-                        )
-                        distance_to_tp = abs(take_profit - entry_price)
-
-                    # Compute R/R
-                    rr_ratio = (
-                        distance_to_tp / distance_to_sl if distance_to_sl > 0 else 0
-                    )
-
-                    # B7: standalone rr_gate_rejected_trend/reversion veto removed —
-                    # consolidated into _check_profit_economics_adaptive below
-                    # (single R:R check, still TREND=1.0/REVERSION=0.6 aware).
-
-                except Exception as e:
-                    logger.warning(f"[COUNCIL] Risk/Reward Gate simulation failed: {e}")
+                # Q3 5b: the old "4. RISK/REWARD GATE" block computed
+                # distance_to_sl/distance_to_tp/take_profit/rr_ratio here, all
+                # of it dead — the real R:R decision is entirely delegated to
+                # _check_profit_economics_adaptive below (B7). The REVERSION
+                # branch also carried an EMA-20 "TP magnet" whose two
+                # inverted-magnet checks BLOCKED real trades (return 0) based
+                # on that discarded TP calculation — removed along with it.
+                # Confirmed via repo-wide search: none of those four variables
+                # are read anywhere outside this block.
 
             # ====================================================================
             # 📉 MINOR FAILURES: SCORING PENALTIES (Phase 4)
