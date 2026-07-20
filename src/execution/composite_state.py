@@ -48,6 +48,13 @@ class CompositeState:
     bos_bearish: bool = False    # lower low — downtrend continuing
     nearby_4h_level:   Optional[float] = None
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
+    # ── Route B: confirmation anchors ──
+    # Most recent 4H swing high / low before the current bar. The strategy's
+    # confirmation rule ("close beyond the swing high before the retest began")
+    # is a 4H measurement; RetestEngine only sees 1H, so the builder computes
+    # this and RetestEngine reads it — same pattern as nearby_4h_level.
+    last_swing_high_4h: Optional[float] = None
+    last_swing_low_4h:  Optional[float] = None
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
     nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
     # A4: level_defended was only ever computed against the single primary
