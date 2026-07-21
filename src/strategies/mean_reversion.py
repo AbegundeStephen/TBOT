@@ -200,19 +200,24 @@ class MeanReversionStrategy(BaseStrategy):
     # SPRING DETECTION  (Mode 1 mandatory)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _detect_spring(self, df: pd.DataFrame, anchor: Optional[float] = None) -> tuple:
+    def _detect_spring(self, df: pd.DataFrame, anchor: Optional[float] = None, direction: int = 1) -> tuple:
         """
-        Wyckoff spring: a bar's wick sweeps below a prior swing low then closes
-        back above it within spring_recovery_max_bars of the current bar.
+        Wyckoff spring (direction=+1): a bar's wick sweeps below a prior swing
+        low then closes back above it within spring_recovery_max_bars of the
+        current bar.
 
-        Penetration must be 0.5–5% of the swing low level.
-        Current-bar volume must be lower than the spring bar's volume
-        (spring bar = selling climax; entry bar = quiet absorption).
+        Unit 2 mirror — Wyckoff upthrust (direction=-1): a bar's wick sweeps
+        ABOVE a prior swing high then closes back BELOW it within the same
+        window. Same penetration/volume conditions, mirrored.
 
-        `anchor`: when provided (the same livermore_anchor_natural_low the
-        structural gate — BreakRetestValidator — already confirmed a
+        Penetration must be 0.5–5% of the swing low/high level.
+        Current-bar volume must be lower than the spring/upthrust bar's volume
+        (that bar = climax; entry bar = quiet absorption).
+
+        `anchor`: when provided (the same livermore_anchor_natural_low/_high
+        the structural gate — BreakRetestValidator — already confirmed a
         sweep-and-recover against), this is used as the reference level
-        instead of an independently-computed rolling swing low.
+        instead of an independently-computed rolling swing low/high.
 
         Investigation finding (2026-07-14): BRV's "structural proof" for
         NATURAL_RETRACEMENT is itself a spring check ("the spring — market
@@ -223,15 +228,18 @@ class MeanReversionStrategy(BaseStrategy):
         checks were effectively re-verifying the same event against two
         unrelated reference points — across a full backtest, 26 bars passed
         BRV's spring check and only 1 of those 26 also passed this one.
-        Reusing the same anchor BRV already validated removes that mismatch.
-        Falls back to the old rolling-swing-low calculation when no anchor is
-        available (state machine hasn't locked one yet).
+        Reusing the same anchor BRV already validated removes that mismatch
+        (Unit 2: the same reasoning applies to the short-side anchor, hence
+        the upthrust mirror also takes its anchor from BRV, never recomputing
+        an independent zone-ladder or rolling level).
+        Falls back to the old rolling-swing-low/high calculation when no
+        anchor is available (state machine hasn't locked one yet).
 
         Returns: (found: bool, strength: float 0–1, spring_bar_idx: Optional[int])
-        spring_bar_idx is the negative array index of the identified spring
-        bar, so callers (the optional-confirmation checks) can exclude it from
-        their own scans instead of penalising the exact high-volume bar the
-        spring mechanically requires.
+        spring_bar_idx is the negative array index of the identified spring/
+        upthrust bar, so callers (the optional-confirmation checks) can
+        exclude it from their own scans instead of penalising the exact
+        high-volume bar the check mechanically requires.
         """
         cfg = self._mr3_cfg["mode1"]
         min_pen  = cfg["spring_min_penetration"]    # 0.005
@@ -241,59 +249,71 @@ class MeanReversionStrategy(BaseStrategy):
 
         close  = df["close"].values
         low    = df["low"].values
+        high   = df["high"].values
         volume = df["volume"].values if "volume" in df.columns else None
+        _ref_arr = low if direction == 1 else high
 
         if anchor is not None and float(anchor) > 0:
             if len(df) < max_bars + 2:
                 return False, 0.0, None
-            prior_swing_low = float(anchor)
+            prior_swing = float(anchor)
         else:
-            # Fallback: independently-computed rolling swing low (legacy path,
-            # used only when the Livermore anchor isn't confirmed yet).
+            # Fallback: independently-computed rolling swing low/high (legacy
+            # path, used only when the Livermore anchor isn't confirmed yet).
             min_total = swing_lb + max_bars + 2
             if len(df) < min_total:
                 return False, 0.0, None
-            # Prior swing low is established from the window BEFORE the search
-            # bars so we don't confuse the spring bar itself as the swing low.
+            # Prior swing is established from the window BEFORE the search
+            # bars so we don't confuse the spring/upthrust bar itself as the swing.
             _win_end   = -(max_bars + 1)           # index of last bar before search window
             _win_start = _win_end - swing_lb
-            _prior_arr = low[_win_start:_win_end]
+            _prior_arr = _ref_arr[_win_start:_win_end]
             if len(_prior_arr) < 5:
                 return False, 0.0, None
-            prior_swing_low = float(np.min(_prior_arr))
-            if prior_swing_low <= 0:
+            prior_swing = float(np.min(_prior_arr)) if direction == 1 else float(np.max(_prior_arr))
+            if prior_swing <= 0:
                 return False, 0.0, None
 
-        # Scan the last max_bars bars (not including current bar) for the spring
+        # Scan the last max_bars bars (not including current bar) for the spring/upthrust
         for k in range(1, max_bars + 1):
             bar_idx   = -(k + 1)   # k positions before current bar
             if abs(bar_idx) > len(df):
                 continue
 
-            bar_low   = float(low[bar_idx])
             bar_close = float(close[bar_idx])
 
-            # Condition 1: wick swept below swing low
-            if bar_low >= prior_swing_low:
-                continue
+            if direction == 1:
+                bar_low = float(low[bar_idx])
+                # Condition 1: wick swept below swing low
+                if bar_low >= prior_swing:
+                    continue
+                # Condition 2: bar closed BACK ABOVE the swept level
+                if bar_close <= prior_swing:
+                    continue
+                # Condition 3: penetration in [0.5%, 5%]
+                penetration = (prior_swing - bar_low) / prior_swing
+            else:
+                bar_high = float(high[bar_idx])
+                # Condition 1: wick swept above swing high
+                if bar_high <= prior_swing:
+                    continue
+                # Condition 2: bar closed BACK BELOW the swept level
+                if bar_close >= prior_swing:
+                    continue
+                # Condition 3: penetration in [0.5%, 5%]
+                penetration = (bar_high - prior_swing) / prior_swing
 
-            # Condition 2: bar closed BACK ABOVE the swept level
-            if bar_close <= prior_swing_low:
-                continue
-
-            # Condition 3: penetration in [0.5%, 5%]
-            penetration = (prior_swing_low - bar_low) / prior_swing_low
             if not (min_pen <= penetration <= max_pen):
                 continue
 
-            # Condition 4: current-bar volume < spring-bar volume
+            # Condition 4: current-bar volume < spring/upthrust-bar volume
             if volume is not None:
-                spring_vol  = float(volume[bar_idx])
+                event_vol   = float(volume[bar_idx])
                 current_vol = float(volume[-1])
-                if spring_vol > 0 and current_vol >= spring_vol:
+                if event_vol > 0 and current_vol >= event_vol:
                     continue
 
-            # Spring confirmed.  Strength peaks near 2.5% penetration.
+            # Spring/upthrust confirmed. Strength peaks near 2.5% penetration.
             _optimal  = 0.025
             strength  = max(0.30, 1.0 - abs(penetration - _optimal) / _optimal)
             return True, float(min(strength, 1.0)), bar_idx
@@ -307,18 +327,21 @@ class MeanReversionStrategy(BaseStrategy):
     def _check_vol_contraction(self, df: pd.DataFrame, direction: int, exclude_bar_idx: Optional[int] = None) -> bool:
         """
         Volume Contraction:
-          - Down-close bar volumes < 80% of 20-bar average (for longs)
+          - direction=+1 (long):  down-close bar volumes < 80% of 20-bar avg
+          - direction=-1 (short): up-close bar volumes < 80% of 20-bar avg
           - No single bar in the last 5 exceeds 150% of average
-        Signals quiet re-accumulation, not continued distribution.
+        Signals quiet re-accumulation (long) / re-distribution (short), not
+        continued adverse pressure.
 
-        `exclude_bar_idx`: Mode 1's mandatory spring bar is, by its own
-        definition, a high-volume down bar (_detect_spring requires spring-bar
-        volume > current-bar volume — "spring bar = selling climax"). That
+        `exclude_bar_idx`: Mode 1's mandatory spring/upthrust bar is, by its
+        own definition, a high-volume adverse-close bar (_detect_spring
+        requires that bar's volume > current-bar volume — "climax bar"). That
         bar normally falls inside this function's own last-5-bars scan window
         (spring_recovery_max_bars=3 vs this scan's -6:-1), so a genuine spring
         was mechanically vetoing this check on the exact bar that makes it a
-        spring. Excluding the identified spring bar from the scan resolves
-        that self-contradiction without loosening the volume thresholds.
+        spring. Excluding the identified spring/upthrust bar from the scan
+        resolves that self-contradiction without loosening the volume
+        thresholds.
         """
         if "volume" not in df.columns or len(df) < 22:
             return False
@@ -338,10 +361,13 @@ class MeanReversionStrategy(BaseStrategy):
             for j in range(-6, -1):
                 if exclude_bar_idx is not None and j == exclude_bar_idx:
                     continue
-                bv    = float(vol[j])
-                is_dn = float(close[j]) < float(open_[j])
-                if is_dn and bv > avg_vol * avg_pct:
-                    return False    # Down bar with above-threshold volume
+                bv = float(vol[j])
+                _is_adverse = (
+                    float(close[j]) < float(open_[j]) if direction == 1
+                    else float(close[j]) > float(open_[j])
+                )
+                if _is_adverse and bv > avg_vol * avg_pct:
+                    return False    # Adverse-close bar with above-threshold volume
                 if bv > avg_vol * spike_pct:
                     return False    # Spike bar breaks contraction
             return True
@@ -498,17 +524,29 @@ class MeanReversionStrategy(BaseStrategy):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _mode1_pullback_completion(
-        self, df: pd.DataFrame, composite_state
+        self, df: pd.DataFrame, composite_state, side: str = "long"
     ) -> tuple:
         """
-        Mode 1 — Pullback Completion (1H NATURAL_RETRACEMENT, LONG only).
+        Mode 1 — Pullback Completion (1H NATURAL_RETRACEMENT, LONG by default).
+
+        Unit 2: side="short" mirrors the whole method for NATURAL_REBOUND —
+        upthrust instead of spring, BRV's BEARISH_RETEST anchor
+        (livermore_anchor_natural_high) instead of BULLISH_RETEST's, and
+        every directional optional-confirmation check flipped to direction=-1.
 
         [MANDATORY] BB/KC squeeze OR NR7/NR7-ID active (compression required)
-        [MANDATORY] Spring detected in last 1–3 bars
+        [MANDATORY] Spring/upthrust detected in last 1–3 bars
         [2 of 4]    Optional: vol_contraction, hidden_div, bb_contraction, ma_proximity
-        [VETO]      vol_down_ratio > 1.2
+        [VETO]      vol_down_ratio > 1.2 (Unit 2: dampener when flagged — see caller)
         [MODIFIER]  BTC near 4H EMA200 → −0.10 confidence
         """
+        _direction = 1 if side == "long" else -1
+        # Unit 2: reset defensively at entry, not just after use — several
+        # gates below this point can return 0, 0.0 before ever reaching the
+        # apply-and-reset line near the confidence calc. Resetting here
+        # guarantees no stale dampener from an earlier early-exit cycle ever
+        # reaches a later, successful cycle's confidence.
+        self._vdr_damp = 1.0
         cfg      = self._mr3_cfg["mode1"]
         features = self.generate_features(df.tail(260))
         if len(features) < 50:
@@ -520,10 +558,23 @@ class MeanReversionStrategy(BaseStrategy):
             _vdr_valid = composite_state.vol_down_ratio_valid
             _veto_thr  = cfg["vol_down_ratio_veto"]
             if _vdr_valid and _vdr is not None and float(_vdr) > _veto_thr:
-                logger.info(
-                    f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > {_veto_thr} → VETO"
-                )
-                return 0, 0.0
+                _phase_cfg_vdr = getattr(composite_state, "phase_config", {}) or {}
+                if _phase_cfg_vdr.get("mr_vetoes_as_dampeners_enabled", False):
+                    # Unit 2: dampen instead of kill. Scale confidence down by
+                    # how far over the threshold we are (min 0.4x floor) so a
+                    # strong spring can still fire against mild distribution.
+                    _over = float(_vdr) - _veto_thr
+                    _damp = max(0.4, 1.0 - min(0.6, _over))
+                    self._vdr_damp = _damp   # applied to final conf below
+                    logger.info(
+                        f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > "
+                        f"{_veto_thr} → DAMPEN x{_damp:.2f} (flag ON)"
+                    )
+                else:
+                    logger.info(
+                        f"[MR Mode1] {self.asset}: vol_down_ratio={_vdr:.2f} > {_veto_thr} → VETO"
+                    )
+                    return 0, 0.0
 
         # ── Compression gate: BB/KC squeeze OR NR7/NR7-ID (mandatory) ─────
         # Spring setups require prior volatility compression; without it the
@@ -576,13 +627,18 @@ class MeanReversionStrategy(BaseStrategy):
             self.asset, _brv_result.type, _brv_result.level,
         )
 
-        # ── Spring (mandatory) ─────────────────────────────────────────────
+        # ── Spring/upthrust (mandatory) ─────────────────────────────────────
         # Reuse the exact level BRV just validated the sweep-and-recover
-        # against, instead of independently recomputing a rolling swing low
-        # (see _detect_spring's docstring for why these must not diverge).
-        spring_ok, spring_strength, spring_bar_idx = self._detect_spring(features, anchor=_brv_result.level)
+        # against, instead of independently recomputing a rolling swing
+        # low/high (see _detect_spring's docstring for why these must not
+        # diverge). BRV already resolves the correct anchor for direction
+        # via lsm_state — natural_low for NATURAL_RETRACEMENT (long),
+        # natural_high for NATURAL_REBOUND (short).
+        spring_ok, spring_strength, spring_bar_idx = self._detect_spring(
+            features, anchor=_brv_result.level, direction=_direction
+        )
         if not spring_ok:
-            logger.info(f"[MR Mode1] {self.asset}: no spring detected → 0")
+            logger.info(f"[MR Mode1] {self.asset}: no spring/upthrust detected → 0")
             return 0, 0.0
 
         # ── O3a: Orphan Confluence signals for spring confirmation ─────────
@@ -601,7 +657,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         # ── Optional conditions (2 of 4 required) ─────────────────────────
         opt_count = self._count_optional(
-            features, direction=1, exclude_bar_idx=spring_bar_idx, eval_bar_idx=spring_bar_idx,
+            features, direction=_direction, exclude_bar_idx=spring_bar_idx, eval_bar_idx=spring_bar_idx,
         )
         min_opt   = cfg["optional_min_count"]
 
@@ -610,7 +666,13 @@ class MeanReversionStrategy(BaseStrategy):
         # spring it's a valid precursor — but we must also confirm RSI is NOT
         # in bearish territory (< 40), which would indicate a downtrend rally
         # being rejected rather than a true spring forming.
-        if _failed_breakout:
+        # Unit 2: no symmetric "failed_breakdown" field exists on the board to
+        # build an equally-reasoned mirror for the short/upthrust path, and a
+        # bearish failed_breakout is directionally ALIGNED (not a caution
+        # flag) for a short setup rather than ambiguous the way it is for a
+        # long spring — so this gate-reduction heuristic only applies long;
+        # short never gets this shortcut (stays at least as strict, never less).
+        if _failed_breakout and side == "long":
             _rsi_val = float(features.get("rsi", 50)) if isinstance(features, dict) else 50.0
             _directionally_valid = _rsi_val >= 40  # above 40 = not in bearish flush
             if _directionally_valid:
@@ -625,10 +687,10 @@ class MeanReversionStrategy(BaseStrategy):
                     f"< 40 — directionally invalid for long spring, gate not reduced"
                 )
         if opt_count < min_opt:
-            _vc = self._check_vol_contraction(features, 1, exclude_bar_idx=spring_bar_idx)
-            _hd = self._check_hidden_divergence(features, 1)
-            _bc = self._check_bb_contraction(features, 1, eval_bar_idx=spring_bar_idx)
-            _mp = self._check_ma_proximity(features, 1, eval_bar_idx=spring_bar_idx)
+            _vc = self._check_vol_contraction(features, _direction, exclude_bar_idx=spring_bar_idx)
+            _hd = self._check_hidden_divergence(features, _direction)
+            _bc = self._check_bb_contraction(features, _direction, eval_bar_idx=spring_bar_idx)
+            _mp = self._check_ma_proximity(features, _direction, eval_bar_idx=spring_bar_idx)
             logger.info(
                 f"[MR Mode1] {self.asset}: spring OK but opt={opt_count}/{min_opt} → 0 "
                 f"[vol={'✓' if _vc else '✗'} "
@@ -712,12 +774,18 @@ class MeanReversionStrategy(BaseStrategy):
         if _inside_bar and not _outside_bar:
             conf_mod += 0.02
         confidence = float(min(1.0, base_conf + extra_opt * 0.05 + conf_mod))
+        # Unit 2: apply the vol_down_ratio dampener if it was set above, then
+        # reset — without this reset a dampener from one cycle leaks into
+        # the next call's confidence unrelated to this one's own veto check.
+        confidence = confidence * getattr(self, "_vdr_damp", 1.0)
+        self._vdr_damp = 1.0
 
         logger.info(
-            f"[MR Mode1] {self.asset}: LONG "
-            f"spring_str={spring_strength:.2f} opt={opt_count}/4 conf={confidence:.2f}"
+            f"[MR Mode1] {self.asset}: {side.upper()} "
+            f"{'spring' if side == 'long' else 'upthrust'}_str={spring_strength:.2f} "
+            f"opt={opt_count}/4 conf={confidence:.2f}"
         )
-        return 1, confidence
+        return _direction, confidence
 
     # ─────────────────────────────────────────────────────────────────────────
     # MODE 2: Counter-Trend
@@ -730,6 +798,12 @@ class MeanReversionStrategy(BaseStrategy):
         Mode 2 — Counter-Trend (SECONDARY states only).
         ...
         """
+        # Unit 2: reset defensively at entry, not just after use — several
+        # gates below this point can return 0, 0.0 before ever reaching the
+        # apply-and-reset line near the confidence calc. Resetting here
+        # guarantees no stale dampener from an earlier early-exit cycle ever
+        # reaches a later, successful cycle's confidence.
+        self._rc_damp = 1.0
         cfg      = self._mr3_cfg["mode2"]
         features = self.generate_features(df.tail(260))
         if len(features) < 50:
@@ -762,10 +836,21 @@ class MeanReversionStrategy(BaseStrategy):
         if composite_state is not None:
             _rc = getattr(composite_state, "range_classification", None)
             if _rc == "TRENDING":
-                logger.info(
-                    f"[MR Mode2] {self.asset}: range_classification=TRENDING → VETO"
-                )
-                return 0, 0.0
+                _phase_cfg_rc = getattr(composite_state, "phase_config", {}) or {}
+                if _phase_cfg_rc.get("mr_vetoes_as_dampeners_enabled", False):
+                    # Unit 2: dampen instead of kill. Categorical (not a
+                    # continuous over-threshold reading like vol_down_ratio),
+                    # so a fixed 0.5x rather than a scaled multiplier.
+                    self._rc_damp = 0.5
+                    logger.info(
+                        f"[MR Mode2] {self.asset}: range_classification=TRENDING → "
+                        f"DAMPEN x0.50 (flag ON)"
+                    )
+                else:
+                    logger.info(
+                        f"[MR Mode2] {self.asset}: range_classification=TRENDING → VETO"
+                    )
+                    return 0, 0.0
 
         # Direction from Livermore state
         lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None
@@ -846,6 +931,10 @@ class MeanReversionStrategy(BaseStrategy):
         # ── Confidence: lower ADX = more range-bound = stronger MR edge ──
         adx_factor = max(0.0, (adx_max - adx_val) / adx_max)
         confidence = float(min(1.0, 0.60 + adx_factor * 0.15))
+        # Unit 2: apply the range_classification=TRENDING dampener if set
+        # above, then reset — same leak-prevention rule as Mode 1's _vdr_damp.
+        confidence = confidence * getattr(self, "_rc_damp", 1.0)
+        self._rc_damp = 1.0
 
         _dir_str = "LONG" if direction == 1 else "SHORT"
         logger.info(
@@ -1210,8 +1299,14 @@ class MeanReversionStrategy(BaseStrategy):
                 return self._mode1_pullback_completion(df, composite_state)
 
             elif lsm_state == "NATURAL_REBOUND":
-                # MR silent zone for LONGs (Phase 2 Hard Veto Block A/C covers this).
-                # No Mode 1 SHORT spec in Phase 3A — emit zero here.
+                # Unit 2: rebound-short. When flagged ON, MR may short a
+                # rebound that is behaving like a reversal (the mirror of the
+                # NATURAL_RETRACEMENT long-spring). Longs remain blocked here.
+                # When OFF, behaviour is unchanged (silent zone, return 0).
+                _phase_cfg = getattr(composite_state, "phase_config", {}) or {}
+                if _phase_cfg.get("mr_rebound_short_enabled", False):
+                    return self._mode1_pullback_completion(df, composite_state, side="short")
+                # Flag OFF → original silent-zone behaviour.
                 return 0, 0.0
 
             elif lsm_state in ("SECONDARY_RETRACEMENT", "SECONDARY_REBOUND"):
