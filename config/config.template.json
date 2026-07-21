@@ -1456,6 +1456,10 @@
     "tier3_shadow_enabled": false,
     "gate3_shadow_enabled": false,
     "gate3_d4_extension_enabled": true,
-    "disagreement_gate_shadow_enabled": false
+    "disagreement_gate_shadow_enabled": false,
+    "mr_rebound_short_enabled": false,
+    "mr_vetoes_as_dampeners_enabled": false,
+    "tf_drives_trend_judge_enabled": false,
+    "ema_confirmer_mode_enabled": false
   }
 }
