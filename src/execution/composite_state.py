@@ -235,6 +235,24 @@ class CompositeState:
     activity_ladder_dist_atr: Optional[float] = None
     activity_ladder_side: Optional[str] = None        # "ABOVE" | "BELOW"
 
+    # ═══════════════════════════════════════════════════════════════════
+    # TRAJECTORY LAYER (Plan 1B) — observation-only. Nothing reads these yet.
+    # A "setup" is a multi-candle sequence (born -> maturing -> confirm/die).
+    # Populated by _update_trajectory() just before sanitise().
+    # ═══════════════════════════════════════════════════════════════════
+    # -- Is a setup currently being tracked, and of what kind / direction.
+    setup_active: bool = False
+    setup_kind: Optional[str] = None          # "TF_CONT" | "MR_REV"
+    setup_dir: int = 0                        # +1 long-side, -1 short-side
+    # -- Age of the live setup in cycles (how many builds since it was born).
+    setup_age: int = 0
+    # -- Trajectory of the setup's supporting energy since birth:
+    #    "BUILDING" | "HOLDING" | "FADING". Read from the activity dial trend.
+    setup_energy_trend: Optional[str] = None
+    # -- Fired this cycle: a setup just DIED (with the reason). One-cycle flag.
+    setup_died: bool = False
+    setup_death_reason: Optional[str] = None
+
     def sanitise(self) -> None:
         """
         NaN guard. Call after all fields populated, before any downstream read.

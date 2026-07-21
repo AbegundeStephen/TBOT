@@ -62,6 +62,12 @@ class CompositeStateBuilder:
         # ── Misc trackers ──
         self._last_loss_time = {}
         self._squeeze_was_active = {}
+        # TRAJECTORY (Plan 1B): per-asset live-setup memory. None = no setup.
+        # Shape when active: {"kind","dir","age","born_compression","last_compression"}
+        self._active_setup = {}
+        # Last cycle's compression dial per asset — used to classify the
+        # setup's energy trend (building / holding / fading).
+        self._prev_compression = {}
         self._spread_history = {}
         # NOTE: _lifecycle_age_cfg is deliberately NOT pre-set here. The
         # original class never initializes it either — _update_trend_lifecycle
@@ -947,6 +953,121 @@ class CompositeStateBuilder:
                 (" BREAKOUT_IMMINENT:%s" % state.activity_breakout_texture) if state.activity_breakout_imminent else "",
                 state.activity_ladder_side or "none",
                 state.activity_ladder_dist_atr if state.activity_ladder_dist_atr is not None else -1.0,
+            )
+
+        # ═══════════════════════════════════════════════════════════════
+        # TRAJECTORY LAYER (Plan 1B) — track a setup across cycles.
+        # Observation-only: writes setup_* readouts, consumed by nobody yet.
+        # Reads activity_compression + bos/choch fields set earlier this
+        # method. Fail-safe: on error, no setup is tracked this cycle.
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            _asset = self.asset_type
+            _cur = self._active_setup.get(_asset)   # None or dict
+            _lsm_now = getattr(state, "livermore_state_1h", None)
+            _comp = float(getattr(state, "activity_compression", 0.0) or 0.0)
+
+            # Livermore up/down context (module-level frozensets in livermore_*).
+            _UP = {"MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"}
+            _DOWN = {"MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND"}
+
+            # ---- STEP 1: age + energy-trend an existing setup ----------
+            if _cur is not None:
+                _cur["age"] = int(_cur.get("age", 0)) + 1
+                _prev_comp = float(_cur.get("last_compression", _comp))
+                if _comp > _prev_comp + 0.05:
+                    _cur["energy"] = "BUILDING"
+                elif _comp < _prev_comp - 0.05:
+                    _cur["energy"] = "FADING"
+                else:
+                    _cur["energy"] = "HOLDING"
+                _cur["last_compression"] = _comp
+
+            # ---- STEP 2: evidence-based death check --------------------
+            # A setup dies when the tape invalidates it. Order: master
+            # backstop first (state flip), then setup-specific evidence.
+            _death_reason = None
+            if _cur is not None:
+                _born_state = _cur.get("born_state")
+                _dir = int(_cur.get("dir", 0))
+                # (a) MASTER BACKSTOP — Livermore 1H state transitioned away
+                #     from the context the setup was born into.
+                if _born_state is not None and _lsm_now != _born_state:
+                    # Only kill if the new state flips the directional context
+                    # (a benign retracement within the same trend shouldn't
+                    # necessarily kill it, but a cross to the opposite camp does).
+                    _born_up = _born_state in _UP
+                    _now_up = _lsm_now in _UP
+                    _now_down = _lsm_now in _DOWN
+                    if (_born_up and _now_down) or ((not _born_up) and _now_up):
+                        _death_reason = "LSM_STATE_FLIP"
+                # (b) SETUP-SPECIFIC — a failed breakout against the setup.
+                if _death_reason is None and getattr(state, "failed_breakout", False):
+                    _death_reason = "FAILED_BREAKOUT"
+                # (c) STRUCTURE-AGAINST — a directional structure break the
+                #     opposite way (long setup sees bearish BOS, or vice versa).
+                if _death_reason is None:
+                    if _dir == 1 and getattr(state, "bos_bearish", False):
+                        _death_reason = "OPPOSING_BOS"
+                    elif _dir == -1 and getattr(state, "bos_bullish", False):
+                        _death_reason = "OPPOSING_BOS"
+
+            if _cur is not None and _death_reason is not None:
+                state.setup_died = True
+                state.setup_death_reason = _death_reason
+                self._active_setup[_asset] = None
+                _cur = None
+
+            # ---- STEP 3: birth check (only if nothing is alive) --------
+            if _cur is None:
+                _born = None
+                # TF setup is born at the BREAK (BOS), either direction.
+                if getattr(state, "bos_bullish", False):
+                    _born = {"kind": "TF_CONT", "dir": 1}
+                elif getattr(state, "bos_bearish", False):
+                    _born = {"kind": "TF_CONT", "dir": -1}
+                # MR setup is born at the CHANGE OF CHARACTER (CHoCH) — the
+                # earliest anomaly. CHoCH takes precedence when both appear
+                # in a way that implies a reversal is starting.
+                if getattr(state, "choch_bullish", False):
+                    _born = {"kind": "MR_REV", "dir": 1}
+                elif getattr(state, "choch_bearish", False):
+                    _born = {"kind": "MR_REV", "dir": -1}
+
+                if _born is not None:
+                    _born.update({
+                        "age": 0,
+                        "born_state": _lsm_now,
+                        "born_compression": _comp,
+                        "last_compression": _comp,
+                        "energy": "HOLDING",
+                    })
+                    self._active_setup[_asset] = _born
+                    _cur = _born
+
+            # ---- STEP 4: publish readouts ------------------------------
+            if _cur is not None:
+                state.setup_active = True
+                state.setup_kind = _cur.get("kind")
+                state.setup_dir = int(_cur.get("dir", 0))
+                state.setup_age = int(_cur.get("age", 0))
+                state.setup_energy_trend = _cur.get("energy")
+
+            self._prev_compression[_asset] = _comp
+        except Exception as _traj_err:
+            logger.debug("[trajectory] compute error: %s", _traj_err)
+
+        # Observation log — watch setups born / maturing / dying during soak.
+        if state.setup_died:
+            logger.info(
+                "[TRAJECTORY] %s: setup DIED (%s)",
+                self.asset_type, state.setup_death_reason,
+            )
+        elif state.setup_active:
+            logger.info(
+                "[TRAJECTORY] %s: %s dir=%+d age=%d energy=%s",
+                self.asset_type, state.setup_kind, state.setup_dir,
+                state.setup_age, state.setup_energy_trend,
             )
 
         state.sanitise()
