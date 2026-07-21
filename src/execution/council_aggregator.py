@@ -1432,6 +1432,50 @@ class InstitutionalCouncilAggregator:
                 except Exception as e:
                     logger.error(f"[COUNCIL] EMA signal error: {e}")
 
+                # ── Unit 4: EMA CONFIRMER (Interpretation C) ──────────────
+                # EMA no longer produces its own trend thesis (Unit 3 moved
+                # that to TF). Here it CONFIRMS the other two, multiplicatively:
+                #   TF (continuation): boosted when EMA direction agrees,
+                #     dampened when it opposes.
+                #   MR (reversal): boosted when EMA slope is FLATTENING
+                #     (momentum dying = reversal-friendly), dampened when the
+                #     trend is still accelerating against the reversal.
+                # Never a hard block — a strong signal survives a bad confirm.
+                _cs4 = _composite_state
+                _ema_conf_mode = bool(
+                    (getattr(_cs4, "phase_config", {}) or {}).get("ema_confirmer_mode_enabled", False)
+                    if _cs4 and not isinstance(_cs4, dict)
+                    else (_cs4.get("phase_config", {}) or {}).get("ema_confirmer_mode_enabled", False)
+                    if isinstance(_cs4, dict) else False
+                )
+                if _ema_conf_mode:
+                    # EMA fast-slope proxy for "momentum dying": read the
+                    # board's slopes_aligned (dual-TF direction agreement) and
+                    # the raw ema_signal direction.
+                    _slopes_al = bool(getattr(_cs4, "slopes_aligned", False)) if _cs4 and not isinstance(_cs4, dict) else (
+                        _cs4.get("slopes_aligned", False) if isinstance(_cs4, dict) else False)
+
+                    # --- Confirm TF (continuation): direction agreement ---
+                    if tf_signal != 0 and ema_signal != 0:
+                        if ema_signal == tf_signal:
+                            tf_conf = min(1.0, tf_conf * 1.15)   # EMA agrees → boost
+                        else:
+                            tf_conf = tf_conf * 0.85             # EMA opposes → dampen
+                    # --- Confirm MR (reversal): slope flattening ---
+                    # For a reversal, EMA still pointing WITH the old trend
+                    # (slopes_aligned True) means momentum has NOT yet died →
+                    # dampen. slopes_aligned False = momentum diverging =
+                    # reversal-friendly → boost.
+                    if mr_signal != 0:
+                        if _slopes_al:
+                            mr_conf = mr_conf * 0.85             # trend intact → dampen reversal
+                        else:
+                            mr_conf = min(1.0, mr_conf * 1.15)   # momentum dying → boost reversal
+                    logger.info(
+                        f"[EMA CONFIRMER] {self.asset_type}: tf_conf→{tf_conf:.2f} "
+                        f"mr_conf→{mr_conf:.2f} (slopes_aligned={_slopes_al})"
+                    )
+
             # ================================================================
             # BIDIRECTIONAL SCORING: Evaluate both BUY and SELL
             # ================================================================
@@ -1530,6 +1574,7 @@ class InstitutionalCouncilAggregator:
             )
             _new_buy_trend, _new_sell_trend, _new_trend_exp = self._judge_trend_bidirectional(
                 df, is_bull, w_trend, ema_signal=ema_signal, ema_conf=ema_conf,
+                tf_signal=tf_signal, tf_conf=tf_conf,
                 consensus_regime=consensus_regime, governor_data=governor_data
             )
             buy_scores["trend"], sell_scores["trend"], trend_exp = (
@@ -2208,19 +2253,29 @@ class InstitutionalCouncilAggregator:
             # since neither `signal` nor `total_score` exist yet at this point
             # — the whole point is to influence which side wins, not react
             # after the fact.
-            _buy_tf_agree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
-            _buy_tf_disagree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
-            if _buy_tf_agree == 2:
-                buy_total = min(buy_total + 0.15, 5.0)
-            elif _buy_tf_disagree == 2:
-                buy_total = max(buy_total - 0.15, 0.0)
-
-            _sell_tf_agree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
-            _sell_tf_disagree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
-            if _sell_tf_agree == 2:
-                sell_total = min(sell_total + 0.15, 5.0)
-            elif _sell_tf_disagree == 2:
-                sell_total = max(sell_total - 0.15, 0.0)
+            # Unit 3: when TF drives the trend judge, this TF/EMA agreement
+            # tally double-counts (TF is already the trend score). Disable it
+            # under the flag; keep it live until TF-driving is on.
+            _cs_tally = _composite_state
+            _tf_drives_tally = bool(
+                (getattr(_cs_tally, "phase_config", {}) or {}).get("tf_drives_trend_judge_enabled", False)
+                if _cs_tally and not isinstance(_cs_tally, dict)
+                else (_cs_tally.get("phase_config", {}) or {}).get("tf_drives_trend_judge_enabled", False)
+                if isinstance(_cs_tally, dict) else False
+            )
+            if not _tf_drives_tally:
+                _buy_tf_agree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
+                _buy_tf_disagree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
+                if _buy_tf_agree == 2:
+                    buy_total = min(buy_total + 0.15, 5.0)
+                elif _buy_tf_disagree == 2:
+                    buy_total = max(buy_total - 0.15, 0.0)
+                _sell_tf_agree = sum([1 if tf_signal == -1 else 0, 1 if ema_signal == -1 else 0])
+                _sell_tf_disagree = sum([1 if tf_signal == 1 else 0, 1 if ema_signal == 1 else 0])
+                if _sell_tf_agree == 2:
+                    sell_total = min(sell_total + 0.15, 5.0)
+                elif _sell_tf_disagree == 2:
+                    sell_total = max(sell_total - 0.15, 0.0)
 
             # Achievable-max normalization (Item 2.5): judge weights sum to 5.0
             # today, including through the SLIGHTLY regime reweight above — but
@@ -3429,6 +3484,8 @@ class InstitutionalCouncilAggregator:
         ema_conf: float = 0.0,
         consensus_regime: str = "NEUTRAL",
         governor_data: Optional[Dict] = None,
+        tf_signal: int = 0,
+        tf_conf: float = 0.0,
     ) -> Tuple[float, float, Dict]:
         """
         JUDGE 1: TREND (Bidirectional)
@@ -3443,10 +3500,22 @@ class InstitutionalCouncilAggregator:
         already apply it).
         """
         try:
-            buy_score = weight * ema_conf if ema_signal == 1 else 0.0
-            sell_score = weight * ema_conf if ema_signal == -1 else 0.0
-            buy_exp = f"TREND BUY: {'OK' if buy_score else 'NO'} EMA aligned ({buy_score:.2f})"
-            sell_exp = f"TREND SELL: {'OK' if sell_score else 'NO'} EMA aligned ({sell_score:.2f})"
+            # Unit 3: TF drives the trend base when flagged; else EMA (today's).
+            _cs_flag = (governor_data or {}).get("composite_state") if governor_data else None
+            _tf_drives = bool(
+                (getattr(_cs_flag, "phase_config", {}) or {}).get("tf_drives_trend_judge_enabled", False)
+                if not isinstance(_cs_flag, dict)
+                else (_cs_flag.get("phase_config", {}) or {}).get("tf_drives_trend_judge_enabled", False)
+                if _cs_flag else False
+            )
+            if _tf_drives:
+                _drv_sig, _drv_conf, _drv_name = tf_signal, tf_conf, "TF"
+            else:
+                _drv_sig, _drv_conf, _drv_name = ema_signal, ema_conf, "EMA"
+            buy_score = weight * _drv_conf if _drv_sig == 1 else 0.0
+            sell_score = weight * _drv_conf if _drv_sig == -1 else 0.0
+            buy_exp = f"TREND BUY: {'OK' if buy_score else 'NO'} {_drv_name} aligned ({buy_score:.2f})"
+            sell_exp = f"TREND SELL: {'OK' if sell_score else 'NO'} {_drv_name} aligned ({sell_score:.2f})"
 
             lv_1h = (governor_data or {}).get("composite_state")
             lv_state = (
