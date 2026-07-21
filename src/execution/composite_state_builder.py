@@ -855,6 +855,100 @@ class CompositeStateBuilder:
         except Exception as _nc_err:
             logger.debug("[net_conviction] compute error: %s", _nc_err)
 
+        # ═══════════════════════════════════════════════════════════════
+        # ACTIVITY LAYER (Plan 1A) — compute observation-only readouts.
+        # Reads ONLY already-populated fields above. Writes nothing that
+        # any decision path currently consumes. Fail-safe: on any error,
+        # fields keep their neutral defaults.
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            # ---- 1. Compression dial (0..1) ----------------------------
+            # Blend three lenses already on the board into one knob:
+            #   squeeze_strength  (EMA convergence, 0..1)
+            #   bb_kc squeeze     (volatility-band, scaled by duration)
+            #   nr7_active        (single-bar terminal tightness)
+            _sq = float(getattr(state, "squeeze_strength", 0.0) or 0.0)
+            _bk = 1.0 if getattr(state, "bb_kc_squeeze_active", False) else 0.0
+            _bk_dur = float(getattr(state, "bb_kc_squeeze_duration", 0) or 0)
+            _bk_scaled = _bk * min(1.0, 0.4 + _bk_dur * 0.06)   # longer squeeze = tighter
+            _nr = 0.5 if getattr(state, "nr7_active", False) else 0.0
+            # Weighted max-style blend, capped at 1.0. Max() not sum() so
+            # three overlapping lenses don't triple-count into >1.
+            state.activity_compression = float(min(1.0, max(_sq, _bk_scaled, _nr)))
+
+            # ---- 2. Coiled-release (transition event) ------------------
+            # The board already computes this exact transition as
+            # coiled_spring (squeeze was active, just released). Surface it
+            # under the activity namespace so generators read one API.
+            state.activity_coiled_release = bool(getattr(state, "coiled_spring", False))
+
+            # ---- 3. Post-sweep (directional reversal event) ------------
+            _sweep = bool(getattr(state, "sweep_detected", False))
+            _sweep_dir = int(getattr(state, "sweep_direction", 0) or 0)
+            if _sweep and _sweep_dir != 0:
+                state.activity_post_sweep = True
+                state.activity_post_sweep_dir = _sweep_dir
+
+            # ---- 4. Ladder proximity (dist to NEAREST individual line) -
+            # Q2b already put the nearest upper/lower ladder lines on the
+            # board. Compute distance to whichever is closer, in ATR.
+            _price = None
+            try:
+                _price = float(df["close"].iloc[-1])
+            except Exception:
+                _price = None
+            _atr_prox = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+            _up = getattr(state, "zone_4h_current_upper", None)
+            _lo = getattr(state, "zone_4h_current_lower", None)
+            if _price is not None and _atr_prox > 0:
+                _cands = []
+                if _up is not None:
+                    _cands.append((abs(_up - _price) / _atr_prox, "ABOVE"))
+                if _lo is not None:
+                    _cands.append((abs(_price - _lo) / _atr_prox, "BELOW"))
+                if _cands:
+                    _best = min(_cands, key=lambda c: c[0])
+                    state.activity_ladder_dist_atr = float(_best[0])
+                    state.activity_ladder_side = _best[1]
+
+            # ---- 5. Breakout-imminence WITH texture --------------------
+            # Fires only when compression is meaningful AND price is near a
+            # ladder line AND volatility hasn't already expanded. Texture
+            # names WHICH flavour is driving it, so MR/TF can later react
+            # to the flavour relevant to their role.
+            _near_line = (
+                state.activity_ladder_dist_atr is not None
+                and state.activity_ladder_dist_atr <= 0.75
+            )
+            if state.activity_compression >= 0.5 and _near_line:
+                # Texture selection (priority: wick > sudden > crawl):
+                #   WICK   — a sweep/rejection is the driver (rejection wick)
+                #   SUDDEN — an outside/expansion bar is present
+                #   CRAWL  — grinding compression with neither of the above
+                if getattr(state, "sweep_detected", False) or getattr(state, "rejection_at_level", False):
+                    _texture = "WICK"
+                elif getattr(state, "outside_bar", False):
+                    _texture = "SUDDEN"
+                else:
+                    _texture = "CRAWL"
+                state.activity_breakout_imminent = True
+                state.activity_breakout_texture = _texture
+        except Exception as _act_err:
+            logger.debug("[activity_layer] compute error: %s", _act_err)
+
+        # Observation log — lets us watch the activity layer during soak.
+        if state.activity_breakout_imminent or state.activity_coiled_release or state.activity_post_sweep:
+            logger.info(
+                "[ACTIVITY] %s: compression=%.2f%s%s%s ladder=%s@%.2fATR",
+                self.asset_type,
+                state.activity_compression,
+                " COILED_RELEASE" if state.activity_coiled_release else "",
+                (" POST_SWEEP:%+d" % state.activity_post_sweep_dir) if state.activity_post_sweep else "",
+                (" BREAKOUT_IMMINENT:%s" % state.activity_breakout_texture) if state.activity_breakout_imminent else "",
+                state.activity_ladder_side or "none",
+                state.activity_ladder_dist_atr if state.activity_ladder_dist_atr is not None else -1.0,
+            )
+
         state.sanitise()
         return state
 

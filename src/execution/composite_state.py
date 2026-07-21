@@ -214,6 +214,27 @@ class CompositeState:
     ema_200_status_1d: str = "UNTESTED"
     ema_200_reclassified_1d: Optional[str] = None
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ACTIVITY LAYER (Plan 1A) — observation-only. Nothing reads these yet.
+    # Populated in composite_state_builder just before sanitise().
+    # ═══════════════════════════════════════════════════════════════════
+    # -- Compression dial: 0.0 (quiet) .. 1.0 (maximally coiled). The
+    #    always-on sensitivity knob generators will later read.
+    activity_compression: float = 0.0
+    # -- Coiled-release event: compression WAS high and just released.
+    activity_coiled_release: bool = False
+    # -- Post-sweep event: price swept a level and is reversing off it.
+    activity_post_sweep: bool = False
+    activity_post_sweep_dir: int = 0          # +1 bullish reversal, -1 bearish
+    # -- Breakout-imminence, WITH texture. verdict True when compression +
+    #    near-a-line + waking volume align. texture = which flavour drives it.
+    activity_breakout_imminent: bool = False
+    activity_breakout_texture: Optional[str] = None   # "CRAWL" | "SUDDEN" | "WICK"
+    # -- Ladder proximity: distance (in ATR) from price to the NEAREST
+    #    individual ladder line, and which side that nearest line is on.
+    activity_ladder_dist_atr: Optional[float] = None
+    activity_ladder_side: Optional[str] = None        # "ABOVE" | "BELOW"
+
     def sanitise(self) -> None:
         """
         NaN guard. Call after all fields populated, before any downstream read.
@@ -235,6 +256,7 @@ class CompositeState:
             "defense_strength",
             "distance_zscore",
             "squeeze_strength",
+            "activity_compression",
             "effort_result_zscore",
             "divergence_strength",
             "rejection_strength",
