@@ -1632,6 +1632,36 @@ class InstitutionalCouncilAggregator:
                     governor_data=governor_data,
                 )
                 buy_scores["momentum"], sell_scores["momentum"], momentum_exp = momentum_result
+
+                # FIX (MR-reachability): is_trending_regime routes every
+                # trending-regime cycle to the momentum judge, which is correct
+                # for TREND continuation (that's what this split was built to
+                # fix — see its own comment above: the reversion judge's RSI
+                # check was wrong for continuation setups). But it has a side
+                # effect nobody designed for: _judge_reversion_bidirectional —
+                # the ONLY place mr_signal/mr_conf ever turn into score — never
+                # runs here, so MR's reversal read (including Unit 2's
+                # rebound-short) is silently discarded whenever a NATURAL_
+                # REBOUND/RETRACEMENT bounce happens to sit inside a 4H regime
+                # classified as trending, which is the common case, not the
+                # exception. Continuation and reversal are alternate hypotheses
+                # about the same directional question, not additive evidence,
+                # so when flagged, let the reversion judge also read against
+                # the SAME weight budget (w_momentum) and take whichever side
+                # reads stronger — never both, so this cannot inflate score
+                # beyond what a single judge could already produce alone.
+                _pc_mrreach = getattr(_composite_state, "phase_config", {}) or {}
+                if _pc_mrreach.get("mr_reversal_scoring_in_trend_enabled", False) and mr_signal != 0:
+                    _rev_buy, _rev_sell, _rev_exp = self._judge_reversion_bidirectional(
+                        df, w_momentum, governor_data=governor_data,
+                        mr_signal=mr_signal, mr_conf=mr_conf,
+                    )
+                    if _rev_buy > buy_scores["momentum"]:
+                        buy_scores["momentum"] = _rev_buy
+                        momentum_exp["buy"] = _rev_exp["buy"]
+                    if _rev_sell > sell_scores["momentum"]:
+                        sell_scores["momentum"] = _rev_sell
+                        momentum_exp["sell"] = _rev_exp["sell"]
             else:
                 buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
                     self._judge_reversion_bidirectional(
