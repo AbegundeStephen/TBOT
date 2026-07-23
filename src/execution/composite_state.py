@@ -100,6 +100,16 @@ class CompositeState:
     ema_50_status: str = "UNTESTED"
     ema_50_reclassified: Optional[str] = None
     absorption_detected: bool = False
+    # F3: per-call defense readings. The unsuffixed fields above stay as the
+    # canonical 1H-50 values every existing consumer already reads.
+    defense_strength_50: float = 0.0
+    defense_strength_200: float = 0.0
+    defense_strength_50_1d: float = 0.0
+    defense_strength_200_1d: float = 0.0
+    absorption_detected_50: bool = False
+    absorption_detected_200: bool = False
+    absorption_detected_50_1d: bool = False
+    absorption_detected_200_1d: bool = False
     effort_result_zscore: float = 0.0
 
     # ══════════════════════════════════════
