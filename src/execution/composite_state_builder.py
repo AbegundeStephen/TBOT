@@ -1070,6 +1070,59 @@ class CompositeStateBuilder:
                 state.setup_age, state.setup_energy_trend,
             )
 
+        # ══════════════════════════════════════════════════════════════════
+        # BRC: Break-Retest-Close completed-proof state (OBSERVATION ONLY)
+        #   Beat 1 (break, remembered): setup_active + setup_dir + setup_kind
+        #   Beat 2 (retest): price wicked to the reference within 8 bars
+        #   Beat 3 (strict close): THIS bar closes strictly through it
+        #   Reference by origin:
+        #     MR_REV  (CHoCH): Livermore anchor_natural_low/high
+        #     TF_CONT (BOS):   last_swing_high_4h / last_swing_low_4h
+        # ══════════════════════════════════════════════════════════════════
+        try:
+            _brc_active = bool(getattr(state, "setup_active", False))
+            _brc_dir    = int(getattr(state, "setup_dir", 0) or 0)
+            _brc_kind   = getattr(state, "setup_kind", None)
+
+            if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 9:
+                _brc_ref = None
+                if _brc_kind == "MR_REV":
+                    _brc_ref = (
+                        getattr(state, "livermore_anchor_natural_low", None) if _brc_dir == 1
+                        else getattr(state, "livermore_anchor_natural_high", None)
+                    )
+                elif _brc_kind == "TF_CONT":
+                    _brc_ref = (
+                        getattr(state, "last_swing_high_4h", None) if _brc_dir == 1
+                        else getattr(state, "last_swing_low_4h", None)
+                    )
+
+                if _brc_ref is not None and float(_brc_ref) > 0:
+                    _brc_ref = float(_brc_ref)
+                    _brc_close = float(df["close"].iloc[-1])
+                    _brc_win_high = df["high"].iloc[-9:-1].values
+                    _brc_win_low  = df["low"].iloc[-9:-1].values
+
+                    if _brc_dir == 1:
+                        _retested = any(l <= _brc_ref for l in _brc_win_low)
+                        _closed_through = _brc_close > _brc_ref
+                    else:
+                        _retested = any(h >= _brc_ref for h in _brc_win_high)
+                        _closed_through = _brc_close < _brc_ref
+
+                    if _retested and _closed_through:
+                        state.brc_confirmed = True
+                        state.brc_direction = _brc_dir
+                        state.brc_kind = _brc_kind
+                        state.brc_tier = None
+                        logger.info(
+                            "[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g "
+                            "(strict close-through, 8-bar retest)",
+                            self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close,
+                        )
+        except Exception as _brc_err:
+            logger.debug("[BRC] compute error (non-blocking): %s", _brc_err)
+
         state.sanitise()
         return state
 
