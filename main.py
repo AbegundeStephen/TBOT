@@ -5049,14 +5049,18 @@ class TradingBot:
                     )
             # ──────────────────────────────────────────────────────────────────
 
-            # ── POST-SIGNAL LIVERMORE COUNTER-TREND BLOCK ──────────────────────
-            # Extends Phase 2 Hard Veto Block C to ALL aggregator outputs, not just MR.
-            # In NATURAL_RETRACEMENT price is pulling back inside an uptrend — SHORTs
-            # are counter-trend and historically losing (USOIL June 2026 SHORT $90.28,
-            # USOIL June 2026 LONG $91.60 in wrong conditions both lost).
-            # In NATURAL_REBOUND price is bouncing inside a downtrend — LONGs are
-            # counter-trend. The council's TF judge can still generate these signals
-            # even though MR is correctly blocked — this gate closes that gap.
+            # Fix 2b (unified fixes): the post-signal Livermore counter-trend
+            # block that used to sit here (graduated score bumps + two SL-sweep
+            # hard blocks for NATURAL_RETRACEMENT/NATURAL_REBOUND) is removed —
+            # the BRC completed-proof gate (Fixes 3/4/5) is the real protection
+            # now. ⚠️ Accepted risk until those flags flip: this reopens the
+            # SL-sweep gap the old block existed to close (Gold June-4 pattern —
+            # shorted $4,463, price ran to $4,499, stopped out before reversing).
+            # Dry-run only until Fix 3/4/5 flags are on.
+            #
+            # _lsm_post / _lsm_4h_post are still derived here — both the
+            # surviving SECONDARY STATE DIRECTIONAL LOG below and the MINIMUM
+            # REGIME CONFIDENCE GATE further down read them.
             if signal != 0:
                 # Primary: read from details (signal_aggregator injects this directly
                 # from composite_state, proven reliable since MR reads the same object).
@@ -5085,179 +5089,6 @@ class TradingBot:
                     "[LIVERMORE BLOCK] %s: 1H state=%s 4H state=%s signal=%d",
                     asset_name, _lsm_post, _lsm_4h_post, signal
                 )
-
-                # 4H confirmation: only an unambiguous MAIN_UP/MAIN_DOWN counts.
-                # NATURAL_*/SECONDARY_* 4H states are themselves not a clean trend
-                # read, so they don't get to override the 1H timing gate below.
-                # A missing 4H state (None — warmup, staleness) is NEVER treated
-                # as confirmation; always fail safe to the existing block.
-                _4h_confirms_long = _lsm_4h_post == "MAIN_UP"
-                _4h_confirms_short = _lsm_4h_post == "MAIN_DOWN"
-
-                # Gate Tier 3.1: the two PURE counter-trend cases below (no 4H
-                # state can rescue them) are graduated by default instead of an
-                # absolute veto — vetoing a signal TREND earned independently,
-                # solely because Livermore's 1H state disagrees, undermines the
-                # whole point of running an independent judge system. The other
-                # two branches further down (NATURAL_REBOUND+short,
-                # NATURAL_RETRACEMENT+long) already have their own 4H-confirmation
-                # /structure-judge escape hatches and are untouched here.
-                # Emergency brake: gate3_shadow_enabled=True reverts to the exact
-                # old hard-veto behavior below, no redeploy required.
-                _gate3_shadow_mode = self.config.get("phase_config", {}).get(
-                    "gate3_shadow_enabled", False
-                )
-
-                if _lsm_post == "NATURAL_RETRACEMENT" and signal < 0:
-                    # Pure counter-trend short — 1H itself implies an uptrend
-                    # context. No 4H state makes this correct: 4H=MAIN_UP means
-                    # shorting against both timeframes; 4H=MAIN_DOWN means the
-                    # 1H "uptrend" read is fighting the 4H trend, which is a
-                    # no-trade case, not a short setup either.
-                    _retr_depth_atr = self._estimate_retracement_depth(df, _lsm_post)
-                    # Deeper retracement already run = smaller bump (more likely
-                    # genuinely reversing); shallow, fresh retracement = larger
-                    # bump (more likely to resume the original trend, which is
-                    # what this block exists to protect).
-                    _new_bump = max(0.15, 0.6 - (0.15 * _retr_depth_atr))
-                    _total_score_post = details.get("total_score")
-                    _required_score_post = details.get("required_score")
-                    if _total_score_post is not None and _required_score_post is not None:
-                        _new_bar = _required_score_post + _new_bump
-                        _clears_new_bar = _total_score_post >= _new_bar
-                        details["required_score"] = _new_bar
-                    else:
-                        # No real score data for this aggregator mode (e.g.
-                        # performance mode has no total_score/required_score).
-                        _clears_new_bar = False
-
-                    # B4: hard veto removed — counter-trend signals always take
-                    # the graduated score bump instead of being zeroed. The old
-                    # would-have-blocked outcome is still recorded via
-                    # gate3_divergence for the shadow-comparison logging below.
-                    details["gate3_divergence"] = {
-                        "old_would_block": bool(_gate3_shadow_mode or not _clears_new_bar),
-                        "new_bump_applied": _new_bump,
-                        "gate_label": f"gate3_counter_trend_new_{asset_name}",
-                    }
-                    logger.info(
-                        f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
-                        f"graduated (+{_new_bump:.2f} required_score) not blocked — "
-                        f"depth={_retr_depth_atr:.2f}ATR"
-                    )
-                elif _lsm_post == "NATURAL_REBOUND" and signal > 0:
-                    # Mirror of above — pure counter-trend long.
-                    _retr_depth_atr = self._estimate_retracement_depth(df, _lsm_post)
-                    _new_bump = max(0.15, 0.6 - (0.15 * _retr_depth_atr))
-                    _total_score_post = details.get("total_score")
-                    _required_score_post = details.get("required_score")
-                    if _total_score_post is not None and _required_score_post is not None:
-                        _new_bar = _required_score_post + _new_bump
-                        _clears_new_bar = _total_score_post >= _new_bar
-                        details["required_score"] = _new_bar
-                    else:
-                        _clears_new_bar = False
-
-                    # B4: hard veto removed — see mirror branch above.
-                    details["gate3_divergence"] = {
-                        "old_would_block": bool(_gate3_shadow_mode or not _clears_new_bar),
-                        "new_bump_applied": _new_bump,
-                        "gate_label": f"gate3_counter_trend_new_{asset_name}",
-                    }
-                    logger.info(
-                        f"[COUNTER-TREND] {asset_name}: {_lsm_post} counter-trend, "
-                        f"graduated (+{_new_bump:.2f} required_score) not blocked — "
-                        f"depth={_retr_depth_atr:.2f}ATR"
-                    )
-                elif _lsm_post == "NATURAL_REBOUND" and signal < 0:
-                    if _4h_confirms_short:
-                        # 4H=MAIN_DOWN backs this short: bounce-exhaustion entry
-                        # within a confirmed downtrend is the Livermore "ideal"
-                        # setup, not a timing risk — the higher timeframe is the
-                        # stronger signal here. Let it through.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
-                            f"4H=MAIN_DOWN confirms; 1H NATURAL_REBOUND is bounce "
-                            f"exhaustion within the dominant downtrend"
-                        )
-                    elif details.get("judge_scores", {}).get("structure", 0) > (
-                        0.6 * details.get("total_score", 1)
-                    ):
-                        # Item 2.12: Structure judge already independently drove
-                        # this signal — a defended level/BOS is itself exhaustion
-                        # evidence, not just riding 1H/4H Livermore timing. Treat
-                        # it as equivalent to 4H confirmation rather than
-                        # re-blocking on a question Structure already answered.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: SHORT allowed — "
-                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
-                            f"independently confirmed a defended level/BOS — treating "
-                            f"as exhaustion evidence."
-                        )
-                    else:
-                        # Shorting INTO a rebound sweeps the SL before price resumes
-                        # down. Gold June 4 2026: shorted at $4,463 during
-                        # NATURAL_REBOUND, price ran to $4,499 hitting SL before
-                        # reversing. Wait for exhaustion — no 4H backstop here.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: SHORT zeroed — "
-                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_REBOUND "
-                            f"is an active bounce, shorting INTO it risks SL sweep. "
-                            f"Wait for exhaustion."
-                        )
-                        _original_signal = signal
-                        signal = 0
-                        details["reasoning"] = "livermore_rebound_sl_sweep_block"
-                        self._shadow_open_blocked(
-                            asset_name, _original_signal, details, df, current_price,
-                            "livermore_rebound_sl_sweep_block", asset_cfg,
-                        )
-                elif _lsm_post == "NATURAL_RETRACEMENT" and signal > 0:
-                    if _4h_confirms_long:
-                        # 4H=MAIN_UP backs this long: buying the pullback within a
-                        # confirmed uptrend is the Livermore "ideal" entry. The
-                        # higher timeframe is the stronger timing signal — let it
-                        # through without requiring a separate spring confirmation.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
-                            f"4H=MAIN_UP confirms; 1H NATURAL_RETRACEMENT is the "
-                            f"ideal pullback entry within the dominant uptrend"
-                        )
-                    elif details.get("judge_scores", {}).get("structure", 0) > (
-                        0.6 * details.get("total_score", 1)
-                    ):
-                        # Item 2.12: mirror of the NATURAL_REBOUND+SHORT case above.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: LONG allowed — "
-                            f"4H={_lsm_4h_post} does not confirm, but Structure judge "
-                            f"independently confirmed a defended level/BOS — treating "
-                            f"as exhaustion evidence."
-                        )
-                    else:
-                        # Longing INTO a retracement risks SL sweep before trend
-                        # resumes up. No 4H backstop here — wait for spring/exhaustion.
-                        logger.info(
-                            f"[LIVERMORE BLOCK] {asset_name}: LONG zeroed — "
-                            f"4H={_lsm_4h_post} does not confirm; 1H NATURAL_RETRACEMENT "
-                            f"is an active pullback, longing INTO it risks SL sweep. "
-                            f"Wait for spring/exhaustion."
-                        )
-                        _original_signal = signal
-                        signal = 0
-                        details["reasoning"] = "livermore_retracement_sl_sweep_block"
-                        self._shadow_open_blocked(
-                            asset_name, _original_signal, details, df, current_price,
-                            "livermore_retracement_sl_sweep_block", asset_cfg,
-                        )
-
-                # Gate Tier 3.1: log the divergence — what the OLD hard veto
-                # would have done, for the same real comparison Tier 3's judges got.
-                if details.get("gate3_divergence"):
-                    _div = details["gate3_divergence"]
-                    self._shadow_open_blocked(
-                        asset_name, signal, details, df, current_price,
-                        _div["gate_label"], asset_cfg,
-                    )
 
             # ── SECONDARY STATE DIRECTIONAL LOG ───────────────────────────────
             # SECONDARY_RETRACEMENT and SECONDARY_REBOUND are the deepest, most
