@@ -2552,32 +2552,13 @@ class PerformanceWeightedAggregator:
             # ═══════════════════════════════════════════════════════════════
             if self.use_gatekeeper:
                 # ─────────────────────────────────────────────────────────────
-                # PHASE 2: LIVERMORE STRUCTURAL HOLD — 4H NATURAL STATES
-                # When the 4H macro state is NATURAL (silent zone), no new entries.
-                # NATURAL_RETRACEMENT and NATURAL_REBOUND are the two highest-
-                # value waiting periods in Livermore's system — these are where
-                # the trend breathes before continuation. Entering here was the
-                # primary losing pattern in the pre-v3 bot.
-                #
-                # SECONDARY states are handled via Required Score Modifier (+0.40)
-                # which raises the entry bar — entries still allowed but harder.
-                # Phase 3A MR Mode 1 will add specific NATURAL_RETRACEMENT re-entry
-                # logic (spring detection) that bypasses this hold for that one case.
-                # ─────────────────────────────────────────────────────────────
-                if state is not None and state.is_silent_zone:
-                    if mr_signal != 0 or tf_signal != 0 or ema_signal != 0:
-                        logger.info(
-                            "[GATEKEEPER] %s 4H Livermore=%s (silent zone) → HOLD, no new entries",
-                            self.asset_type,
-                            state.livermore_state_4h or "NATURAL",
-                        )
-                        mr_signal = 0
-                        mr_conf = 0.0
-                        tf_signal = 0
-                        tf_conf = 0.0
-                        ema_signal = 0
-                        ema_conf = 0.0
-                # ─────────────────────────────────────────────────────────────
+                # Fix 2a (unified fixes): the blanket silent-zone gate that used to
+                # sit here zeroed mr_signal/tf_signal/ema_signal on every NATURAL
+                # 4H state — but NATURAL is precisely where MR Mode 1's long spring
+                # and the rebound short live (this block's own old comment promised
+                # a Mode 1 bypass for that case and it was never built). Removed.
+                # The BRC completed-proof gate (Fixes 3/4/5) is the real protection
+                # now — proof, not a blanket regime hold.
 
                 # FAIL-CLOSED guard: no governor data = no regime context.
                 # Trading without regime context risks entering during high-volatility
