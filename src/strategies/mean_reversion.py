@@ -21,14 +21,10 @@ Mode 2 — Counter-Trend  (1H SECONDARY_RETRACEMENT / SECONDARY_REBOUND)
   - BB must have closed back inside bands before entry
   - BTC only: LONG z-score < −2.0; SHORT z-score > +3.5
 
-Mode 3 — Climax Fade  (1H MAIN_UP / MAIN_DOWN)
-  MAIN_UP   → SHORT (fade the overextended leg)
-  MAIN_DOWN → LONG  (fade the selling climax)
-  - leg_stretch_ratio  > 1.5× typical leg  (distance from Livermore anchor)
-  - price              > 2.5×ATR from anchor
-  - High-rank reversal candle (bearish/bullish engulfing or evening/morning star)
-  - Above-average volume on signal bar
-  - Target is EMA20 within MAIN state — NOT a full reversal call
+Mode 3 — REMOVED (unified fixes, Fix 2c). Fired without proof — guessed at a
+top/bottom from stretch statistics alone (leg_stretch_ratio, anchor distance,
+a reversal candle), the opposite of the strategy's break→retest→strict-close
+requirement. MAIN_UP / MAIN_DOWN now hold.
 
 All numeric thresholds in config/aggregator_presets.json → MR_THREE_MODE.
 """
@@ -944,176 +940,6 @@ class MeanReversionStrategy(BaseStrategy):
         return direction, confidence
 
     # ─────────────────────────────────────────────────────────────────────────
-    # MODE 3: Climax Fade
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _mode3_climax_fade(
-        self, df: pd.DataFrame, composite_state
-    ) -> tuple:
-        """
-        Mode 3 — Climax Fade (MAIN_UP / MAIN_DOWN).
-
-        MAIN_UP   → SHORT  (fade the overextended upleg)
-        MAIN_DOWN → LONG   (fade the selling climax downleg)
-
-        [MANDATORY] leg_stretch_ratio > 1.5× (current move from Livermore anchor
-                    vs median window-range over last 50 bars)
-        [MANDATORY] price > 2.5×ATR from Livermore anchor
-        [MANDATORY] High-rank reversal candle:
-                      SHORT: bearish engulfing or evening star
-                      LONG:  bullish engulfing or morning star
-        [MANDATORY] Above-average volume on signal bar
-        NOTE: Target is EMA20 within MAIN state — this is NOT a reversal call.
-        """
-        cfg      = self._mr3_cfg["mode3"]
-        features = self.generate_features(df.tail(260))
-        if len(features) < 60:
-            return 0, 0.0
-
-        # Direction from Livermore state
-        lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None
-        if lsm_state == "MAIN_UP":
-            direction = -1  # SHORT: fade the climax
-        elif lsm_state == "MAIN_DOWN":
-            direction = 1   # LONG: fade the selling climax
-        else:
-            return 0, 0.0
-
-        close    = features["close"].values
-        high_arr = features["high"].values
-        low_arr  = features["low"].values
-        atr_arr  = features["atr"].values
-        atr_now  = float(atr_arr[-1]) if not pd.isna(atr_arr[-1]) else 0.0
-        if atr_now <= 0:
-            return 0, 0.0
-
-        current_close = float(close[-1])
-
-        # ── Pull Livermore anchor from composite state ─────────────────────
-        anchor = None
-        if composite_state is not None:
-            if lsm_state == "MAIN_UP":
-                anchor = getattr(composite_state, "livermore_anchor_main_up_max", None)
-            elif lsm_state == "MAIN_DOWN":
-                anchor = getattr(composite_state, "livermore_anchor_main_down_min", None)
-
-        # ── leg_stretch_ratio: current leg vs typical leg ─────────────────
-        stretch_min = float(cfg["leg_stretch_ratio_min"])
-        leg_stretch_ok = False
-
-        if anchor is not None and float(anchor) > 0:
-            current_leg = abs(current_close - float(anchor))
-            # Typical leg: median of range across N windows of W bars each
-            lb  = min(int(cfg["leg_stretch_lookback"]), len(close) - 1)
-            win = int(cfg["leg_stretch_window"])
-            _h  = high_arr[-lb:]
-            _l  = low_arr[-lb:]
-            _window_ranges = []
-            for _w in range(0, lb - win, win):
-                _window_ranges.append(float(np.max(_h[_w:_w+win]) - np.min(_l[_w:_w+win])))
-            if len(_window_ranges) >= 3:
-                typical_leg = float(np.median(_window_ranges))
-            else:
-                typical_leg = atr_now * 8.0   # Fallback: 8×ATR
-            if typical_leg <= 0:
-                typical_leg = atr_now * 8.0
-
-            leg_stretch_ratio = current_leg / typical_leg
-            if leg_stretch_ratio >= stretch_min:
-                leg_stretch_ok = True
-            else:
-                logger.info(
-                    f"[MR Mode3] {self.asset}: leg_stretch={leg_stretch_ratio:.2f} < {stretch_min} "
-                    f"(leg={current_leg:.4f}, typical={typical_leg:.4f}) → 0"
-                )
-                return 0, 0.0
-        # If anchor unavailable, leg check bypassed (dist_ok becomes sole gate)
-
-        # ── Price distance from anchor: > 2.5×ATR ─────────────────────────
-        _atr_mult = float(cfg["price_anchor_atr_mult"])
-        if anchor is not None and float(anchor) > 0:
-            _anchor_dist_atr = abs(current_close - float(anchor)) / atr_now
-        else:
-            # Fallback: distance from EMA50
-            _ema50 = float(features["ema_50"].values[-1]) if not pd.isna(features["ema_50"].values[-1]) else current_close
-            _anchor_dist_atr = abs(current_close - _ema50) / atr_now
-
-        if _anchor_dist_atr <= _atr_mult:
-            logger.info(
-                f"[MR Mode3] {self.asset}: anchor_dist={_anchor_dist_atr:.2f}×ATR ≤ {_atr_mult} "
-                f"(close={current_close:.4f}, anchor={anchor}) → 0"
-            )
-            return 0, 0.0
-
-        # ── High-rank reversal candle ──────────────────────────────────────
-        # Checked over the last candle_lookback_bars bars (default 3) so the
-        # gate doesn't require the pattern to land on the exact current bar.
-        # Only engulfing and morning/evening star — shooting star excluded
-        # (lower historical reliability ~59%).
-        _n  = min(len(features), 30)
-        _o  = features["open"].values[-_n:]
-        _h  = features["high"].values[-_n:]
-        _l  = features["low"].values[-_n:]
-        _c  = features["close"].values[-_n:]
-
-        _candle_lb = max(1, int(cfg.get("candle_lookback_bars", 1)))
-        reversal_ok  = False
-        reversal_bar = None   # track which bar triggered (for logging)
-
-        if direction == -1:   # MAIN_UP → SHORT
-            _eng = ta.CDLENGULFING(_o, _h, _l, _c)
-            _eve = ta.CDLEVENINGSTAR(_o, _h, _l, _c, penetration=0.3)
-            for _k in range(_candle_lb):
-                if int(_eng[-(_k + 1)]) < 0 or int(_eve[-(_k + 1)]) < 0:
-                    reversal_ok  = True
-                    reversal_bar = _k   # 0 = current bar, 1 = one bar ago, etc.
-                    break
-        elif direction == 1:  # MAIN_DOWN → LONG
-            _eng  = ta.CDLENGULFING(_o, _h, _l, _c)
-            _morn = ta.CDLMORNINGSTAR(_o, _h, _l, _c, penetration=0.3)
-            for _k in range(_candle_lb):
-                if int(_eng[-(_k + 1)]) > 0 or int(_morn[-(_k + 1)]) > 0:
-                    reversal_ok  = True
-                    reversal_bar = _k
-                    break
-
-        if not reversal_ok:
-            logger.info(
-                f"[MR Mode3] {self.asset}: no high-rank reversal candle "
-                f"(engulfing/star) in last {_candle_lb} bars → 0"
-            )
-            return 0, 0.0
-
-        # ── Above-average volume ───────────────────────────────────────────
-        if cfg.get("require_above_avg_volume", True) and "volume" in features.columns:
-            try:
-                _vol_lb   = int(cfg["volume_avg_lookback"])
-                _vol_avg  = float(np.mean(features["volume"].values[-_vol_lb-1:-1]))
-                _vol_now  = float(features["volume"].values[-1])
-                if _vol_avg > 0 and _vol_now <= _vol_avg:
-                    logger.info(
-                        f"[MR Mode3] {self.asset}: volume {_vol_now:.0f} ≤ avg {_vol_avg:.0f} "
-                        f"(need above-avg) → 0"
-                    )
-                    return 0, 0.0
-            except Exception:
-                pass   # Missing volume data: do not block
-
-        # ── Confidence ─────────────────────────────────────────────────────
-        # Scales with how overextended the anchor distance is
-        dist_factor = min(1.5, _anchor_dist_atr / _atr_mult)
-        confidence  = float(min(1.0, 0.60 + (dist_factor - 1.0) * 0.15))
-
-        _dir_str  = "SHORT" if direction == -1 else "LONG"
-        _bar_str  = "current bar" if reversal_bar == 0 else f"{reversal_bar} bar(s) ago"
-        logger.info(
-            f"[MR Mode3] {self.asset}: {_dir_str} climax fade "
-            f"anchor_dist={_anchor_dist_atr:.1f}×ATR "
-            f"reversal_candle={_bar_str} conf={confidence:.2f}"
-        )
-        return direction, confidence
-
-    # ─────────────────────────────────────────────────────────────────────────
     # LEGACY SCORECARD  (fallback during Livermore warmup)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1255,8 +1081,8 @@ class MeanReversionStrategy(BaseStrategy):
           NATURAL_REBOUND       → zero  (MR silent zone; LONGs blocked by Phase 2 HVL)
           SECONDARY_RETRACEMENT → Mode 2 (Counter-Trend, LONG)
           SECONDARY_REBOUND     → Mode 2 (Counter-Trend, SHORT)
-          MAIN_UP               → Mode 3 (Climax Fade, SHORT)
-          MAIN_DOWN             → Mode 3 (Climax Fade, LONG)
+          MAIN_UP               → hold (Mode 3 removed, Fix 2c)
+          MAIN_DOWN             → hold (Mode 3 removed, Fix 2c)
           None (warmup)         → Legacy scorecard fallback
 
         Signature is backward-compatible: composite_state is optional.
@@ -1275,8 +1101,8 @@ class MeanReversionStrategy(BaseStrategy):
                 "NATURAL_REBOUND":       "SILENT_ZONE",
                 "SECONDARY_RETRACEMENT": "Mode2(Counter/LONG)",
                 "SECONDARY_REBOUND":     "Mode2(Counter/SHORT)",
-                "MAIN_UP":               "Mode3(Fade/SHORT)",
-                "MAIN_DOWN":             "Mode3(Fade/LONG)",
+                "MAIN_UP":               "HOLD(Mode3 removed)",
+                "MAIN_DOWN":             "HOLD(Mode3 removed)",
             }
             # Plain-English what's-actually-happening line, added 2026-06-23 so the
             # GATE line is self-explanatory without needing to know the codebase.
@@ -1286,8 +1112,8 @@ class MeanReversionStrategy(BaseStrategy):
                 "NATURAL_REBOUND":       "silent zone — no MR setup, longs blocked",
                 "SECONDARY_RETRACEMENT": "counter-trend LONG — fading a deep pullback, expecting a bounce",
                 "SECONDARY_REBOUND":     "counter-trend SHORT — fading a deep bounce, expecting reversion down",
-                "MAIN_UP":               "climax fade SHORT — fading an overextended up-leg",
-                "MAIN_DOWN":             "climax fade LONG — fading an overextended down-leg",
+                "MAIN_UP":               "Mode 3 (climax fade) removed — fires without proof, holding",
+                "MAIN_DOWN":             "Mode 3 (climax fade) removed — fires without proof, holding",
             }
             _label = _mode_label.get(lsm_state, "LEGACY(warmup)") if lsm_state else "LEGACY(warmup)"
             _desc  = _mode_desc.get(lsm_state, "Livermore state unavailable — using legacy 6-pillar scorecard")
@@ -1317,11 +1143,11 @@ class MeanReversionStrategy(BaseStrategy):
                 return self._mode2_counter_trend(df, composite_state)
 
             elif lsm_state in ("MAIN_UP", "MAIN_DOWN"):
-                _phase_cfg = getattr(composite_state, "phase_config", {}) or {}
-                if not _phase_cfg.get("mr_mode3_climax_fade_enabled", False):
-                    logger.debug(f"[MR GATE] {self.asset}: Mode 3 disabled by phase_config — holding.")
-                    return 0, 0.0
-                return self._mode3_climax_fade(df, composite_state)
+                # Fix 2c (unified fixes): Mode 3 (climax fade) deleted entirely —
+                # it fired without proof, guessing at a top/bottom from stretch
+                # statistics alone. That's the opposite of the strategy (break,
+                # retest, strict close). MAIN states now just hold.
+                return 0, 0.0
 
             else:
                 # Livermore state unavailable (warmup or None) → legacy fallback
