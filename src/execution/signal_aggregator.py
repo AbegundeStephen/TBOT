@@ -3406,6 +3406,34 @@ class PerformanceWeightedAggregator:
                         # Sort by confidence descending; TF wins ties (listed first)
                         candidates.sort(key=lambda x: x[2], reverse=True)
                         best_name, best_signal, best_conf = candidates[0]
+
+                        # ─── SOLO-FIRE PROOF GATE ────────────────────────────
+                        # A solo fire bypasses consensus; it must still carry
+                        # break-retest-close proof in its direction.
+                        # Flag: independent_fire_brc_gate_enabled (default False).
+                        _pc_ind = (governor_data or {}).get("composite_state")
+                        def _ind_get(_attr, _dflt):
+                            if _pc_ind is None:
+                                return _dflt
+                            if isinstance(_pc_ind, dict):
+                                return _pc_ind.get(_attr, _dflt)
+                            return getattr(_pc_ind, _attr, _dflt)
+                        _ind_pc = _ind_get("phase_config", {}) or {}
+                        if _ind_pc.get("independent_fire_brc_gate_enabled", False):
+                            _brc_ok_i = bool(_ind_get("brc_confirmed", False))
+                            _brc_dir_i = int(_ind_get("brc_direction", 0) or 0)
+                            if not (_brc_ok_i and _brc_dir_i == best_signal):
+                                logger.info(
+                                    "[INDEPENDENT] %s: %s solo fire suppressed — no "
+                                    "break-retest-close proof (brc_confirmed=%s "
+                                    "brc_direction=%s vs signal=%+d).",
+                                    self.asset_type, best_name, _brc_ok_i,
+                                    _brc_dir_i, best_signal,
+                                )
+                                candidates = []
+                        # ─────────────────────────────────────────────────────
+
+                    if candidates:
                         final_signal = best_signal
                         signal_quality = (
                             best_conf * 0.85

@@ -1471,10 +1471,13 @@
     "council_mr_lean_bump_secondary": 0.0,
     "council_counter_trend_cap": 3.5,
     "emergency_close_unanchored_weak_signal_enabled": false,
-    "mr_rebound_short_enabled": false,
+    "mr_rebound_short_enabled": true,
     "mr_vetoes_as_dampeners_enabled": false,
     "tf_drives_trend_judge_enabled": false,
     "ema_confirmer_mode_enabled": false,
-    "mr_reversal_scoring_in_trend_enabled": false
+    "mr_reversal_scoring_in_trend_enabled": false,
+    "tf_brc_gate_enabled": false,
+    "mr_mode2_brc_gate_enabled": false,
+    "independent_fire_brc_gate_enabled": false
   }
 }

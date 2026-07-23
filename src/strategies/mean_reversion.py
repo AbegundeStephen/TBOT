@@ -828,6 +828,32 @@ class MeanReversionStrategy(BaseStrategy):
                 self.asset,
             )
 
+        # ── FULL-PROOF GATE: break-retest-close required ─────────────────────
+        # CHoCH above is only beat 1. Full proof = brc_confirmed in the
+        # direction this SECONDARY state trades. Same event as Mode 1's BRV.
+        # Flag: mr_mode2_brc_gate_enabled (default False).
+        #   SECONDARY_RETRACEMENT → LONG (+1) ; SECONDARY_REBOUND → SHORT (-1)
+        if composite_state is not None:
+            _pc2 = getattr(composite_state, "phase_config", {}) or {}
+            if _pc2.get("mr_mode2_brc_gate_enabled", False):
+                _lsm2 = getattr(composite_state, "livermore_state_1h", None)
+                _intended_dir = 1 if _lsm2 == "SECONDARY_RETRACEMENT" else (
+                    -1 if _lsm2 == "SECONDARY_REBOUND" else 0
+                )
+                _brc_ok2 = getattr(composite_state, "brc_confirmed", False)
+                _brc_dir2 = getattr(composite_state, "brc_direction", 0)
+                if not (_brc_ok2 and _intended_dir != 0 and _brc_dir2 == _intended_dir):
+                    logger.info(
+                        "[MR Mode2] %s: no break-retest-close proof dir=%+d "
+                        "(brc_confirmed=%s brc_direction=%s) — full-proof gate holds.",
+                        self.asset, _intended_dir, _brc_ok2, _brc_dir2,
+                    )
+                    return 0, 0.0
+                logger.info(
+                    "[MR Mode2] %s: break-retest-close confirmed dir=%+d — proof met.",
+                    self.asset, _intended_dir,
+                )
+
         # ── TRENDING veto: counter-trend in a strong trend is fatal ──────────
         if composite_state is not None:
             _rc = getattr(composite_state, "range_classification", None)

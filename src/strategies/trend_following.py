@@ -576,6 +576,34 @@ class TrendFollowingStrategy(BaseStrategy):
             signal = -1
             confidence = min(bearish_score / normalization_factor, 1.0)
 
+        # ══════════════════════════════════════════════════════════════════
+        # TF-PROOF: break-retest-close HARD GATE.
+        # TF acts only on proven continuation. Same proof BRV validates for
+        # Mode 1 — one definition, both engines.
+        # Flag: tf_brc_gate_enabled (default False). OFF = today's behaviour.
+        # ══════════════════════════════════════════════════════════════════
+        if signal != 0 and composite_state is not None:
+            _pc = self.config.get("phase_config", {}) or {}
+            if _pc.get("tf_brc_gate_enabled", False):
+                _brc_ok = (
+                    composite_state.get("brc_confirmed", False)
+                    if isinstance(composite_state, dict)
+                    else getattr(composite_state, "brc_confirmed", False)
+                )
+                _brc_dir = (
+                    composite_state.get("brc_direction", 0)
+                    if isinstance(composite_state, dict)
+                    else getattr(composite_state, "brc_direction", 0)
+                )
+                if not (_brc_ok and _brc_dir == signal):
+                    if not silent:
+                        logger.info(
+                            "[TF] %s: signal=%+d suppressed — no break-retest-close "
+                            "proof (brc_confirmed=%s brc_direction=%s).",
+                            getattr(self, "name", "TF"), signal, _brc_ok, _brc_dir,
+                        )
+                    return 0, 0.0
+
         return signal, confidence
 
     def generate_signal(self, df: pd.DataFrame, mode: str = 'live', df_4h: pd.DataFrame = None, silent: bool = False, composite_state=None):
