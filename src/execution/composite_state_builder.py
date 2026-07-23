@@ -1782,11 +1782,23 @@ class CompositeStateBuilder:
                 setattr(state, f"ema_{span}_status{suffix}", "DEFENDED")
                 _wick = _ema50 - _l
                 _body = abs(_c - _o)
-                state.defense_strength = min(1.0, _wick / max(_body, 0.0001) / 3.0)
+                # F3: parameterised so the four calls (1H-50, 1H-200, 1D-50,
+                # 1D-200) stop clobbering one another. The unsuffixed 1H-50
+                # write is preserved as the canonical one STRUCTURE reads.
+                _f3_strength = min(1.0, _wick / max(_body, 0.0001) / 3.0)
+                setattr(state, f"defense_strength_{span}{suffix}", _f3_strength)
+                if span == 50 and suffix == "":
+                    state.defense_strength = _f3_strength
 
-                if state.defense_strength > 0.5 and state.effort_result_zscore > 1.5:
+                # F3: judge THIS call's own strength (_f3_strength), not the
+                # shared state.defense_strength field — that field only holds
+                # the canonical 1H-50 value now, which would misjudge the
+                # other three calls' own absorption/reclassification decision.
+                if _f3_strength > 0.5 and state.effort_result_zscore > 1.5:
                     setattr(state, f"ema_{span}_reclassified{suffix}", "SUPPORT")
-                    state.absorption_detected = True
+                    setattr(state, f"absorption_detected_{span}{suffix}", True)
+                    if span == 50 and suffix == "":
+                        state.absorption_detected = True
                 else:
                     setattr(state, f"ema_{span}_reclassified{suffix}", "LINE")
             elif _broke_down:
@@ -1961,6 +1973,16 @@ class CompositeStateBuilder:
             _dist_res = abs(_close - _res) if _res is not None else float("inf")
             _basing_bullish = _dist_supp < _dist_res
             _basing_bearish = _dist_res < _dist_supp
+
+            # P1: prefer the Livermore anchor — the same level BRV validates
+            # and MR's spring check uses — over an independently-derived basing
+            # level. Two references for one event is how they drift apart.
+            _p1_anchor_lo = getattr(state, "livermore_anchor_natural_low", None)
+            _p1_anchor_hi = getattr(state, "livermore_anchor_natural_high", None)
+            if _p1_anchor_lo is not None and _basing_bullish:
+                _dist_supp = abs(_close - float(_p1_anchor_lo))
+            if _p1_anchor_hi is not None and _basing_bearish:
+                _dist_res = abs(_close - float(_p1_anchor_hi))
 
             if _basing_bullish and (is_tight_range or vol_ratio > 1.3):
                 _conf = 0.3 + 0.2 * min(1.0, atr / max(_dist_supp, 1e-9))

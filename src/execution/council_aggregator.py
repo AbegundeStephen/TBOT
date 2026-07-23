@@ -28,12 +28,12 @@ logger = logging.getLogger(__name__)
 # not measured — revisit once housekeeping's judge-liveness data gives real
 # per-enrichment averages.
 JUDGE_SOURCE_REGISTRY = {
-    "trend":     [("independent", 0.90), ("livermore_1h", 0.10)],
-    "momentum":  [("independent", 0.85), ("livermore_1h", 0.15)],
-    "pattern":   [("independent", 1.0)],
+    "trend":     [("independent", 0.80), ("livermore_1h", 0.10), ("brc", 0.10)],
+    "momentum":  [("independent", 0.75), ("livermore_1h", 0.15), ("mr_features", 0.10)],
+    "pattern":   [("independent", 0.85), ("spring", 0.15)],
     "structure": [("independent", 0.85), ("livermore_1h", 0.15)],
     "volume":    [("independent", 0.85), ("livermore_1h", 0.15)],
-    "reversion": [("independent", 1.0)],
+    "reversion": [("independent", 0.75), ("spring", 0.15), ("brc", 0.10)],
 }
 
 
@@ -132,6 +132,10 @@ class InstitutionalCouncilAggregator:
         self.w_momentum = weight_momentum
         self.w_pattern = weight_pattern
         self.w_volume = weight_volume
+        # Six-slot split: REVERSION's standing weight. 1.0 matches MOMENTUM —
+        # the two are peers: one scores continuation fuel, one scores reversal
+        # conviction.
+        self.w_reversion = self.config.get("w_reversion", 1.0)
 
         # Validate weights sum to 5.0
         total_weight = sum(
@@ -1361,6 +1365,13 @@ class InstitutionalCouncilAggregator:
                 is_bull, regime_conf = self._detect_regime(df)
                 regime_name = "🚀 BULL" if is_bull else "🐻 BEAR"
 
+            # Six-slot split (moved up from below, alongside df_4h originally):
+            # composite_state only depends on governor_data, already a function
+            # parameter, so deriving it here is safe. Needed early because both
+            # _six_slot below and the SLIGHTLY-regime reweight read phase_config
+            # off it before the original derivation point.
+            _composite_state = (governor_data or {}).get("composite_state")
+
             # ================================================================
             # ⚖️ DYNAMIC COUNCIL WEIGHTS (Phase 4)
             # ================================================================
@@ -1369,6 +1380,14 @@ class InstitutionalCouncilAggregator:
             w_momentum = self.w_momentum
             w_pattern = self.w_pattern
             w_volume = self.w_volume
+            # Six-slot split: REVERSION's own weight. Flag OFF → 0.0, so every
+            # sum below is arithmetically identical to today's five-slot maths.
+            _six_slot = bool(
+                (getattr(_composite_state, "phase_config", {}) or {}).get(
+                    "six_slot_judges_enabled", False
+                )
+            )
+            w_reversion = self.w_reversion if _six_slot else 0.0
 
             consensus_regime = (
                 governor_data.get("consensus_regime", "NEUTRAL")
@@ -1380,17 +1399,23 @@ class InstitutionalCouncilAggregator:
                 w_momentum = 0.75  # ✨ Balanced momentum points
                 w_structure = 1.5  # ✨ Standard structure weight
                 w_pattern = 0.75  # ✨ Balanced pattern weight
+                # Six-slot split: REVERSION trims with MOMENTUM in an ambiguous
+                # regime. SLIGHTLY means the CONTEXT is less trustworthy — every
+                # judge reading that context gets trimmed. Leaving REVERSION at
+                # full weight while MOMENTUM drops would quietly make reversal
+                # the loudest voice exactly when the picture is least clear.
+                if _six_slot:
+                    w_reversion = 0.75
                 if self.detailed_logging:
                     logger.info(
                         f"[COUNCIL] ⚖️ DYNAMIC WEIGHTS APPLIED: {consensus_regime}"
                     )
 
-            # Pass 4H context and composite_state (Livermore) from governor_data.
+            # Pass 4H context (Livermore) from governor_data.
             # composite_state is built by the LSM companion PerformanceWeightedAggregator
             # in main.py before the council aggregator is called — without it, MR strategy
             # always falls back to LEGACY(warmup) mode and Phase 3A/3B gates never fire.
             df_4h = governor_data.get("df_4h") if governor_data else None
-            _composite_state = (governor_data or {}).get("composite_state")
 
             if self.s_mean_reversion:
                 try:
@@ -1487,6 +1512,7 @@ class InstitutionalCouncilAggregator:
                 "momentum": 0.0,
                 "pattern": 0.0,
                 "volume": 0.0,
+                "reversion": 0.0,   # Six-slot split: REVERSION's own slot
             }
             buy_explanations = []
 
@@ -1497,6 +1523,7 @@ class InstitutionalCouncilAggregator:
                 "momentum": 0.0,
                 "pattern": 0.0,
                 "volume": 0.0,
+                "reversion": 0.0,   # Six-slot split: REVERSION's own slot
             }
             sell_explanations = []
 
@@ -1568,29 +1595,55 @@ class InstitutionalCouncilAggregator:
                 "tier3_shadow_enabled", False
             )
 
+            # Brain Rebuild Part 5.2 (Judge Bars): each judge's cascade
+            # (if X: return; elif Y: return; ...) is replaced by an
+            # accumulating "bar" (buy += fraction*weight per independently
+            # true piece of evidence) when this flag is on. Cascade methods
+            # are kept alongside the new _bar_* methods as the emergency
+            # revert path — flag OFF must stay byte-identical to today.
+            _bars_on = bool(
+                (getattr(_composite_state, "phase_config", {}) or {}).get(
+                    "judge_bars_enabled", False
+                )
+            )
+
             # Run all judges for both directions
-            _old_buy_trend, _old_sell_trend, _old_trend_exp = self._judge_trend_bidirectional_legacy(
-                df, is_bull, w_trend, consensus_regime, governor_data=governor_data
-            )
-            _new_buy_trend, _new_sell_trend, _new_trend_exp = self._judge_trend_bidirectional(
-                df, is_bull, w_trend, ema_signal=ema_signal, ema_conf=ema_conf,
-                tf_signal=tf_signal, tf_conf=tf_conf,
-                consensus_regime=consensus_regime, governor_data=governor_data
-            )
-            buy_scores["trend"], sell_scores["trend"], trend_exp = (
-                (_old_buy_trend, _old_sell_trend, _old_trend_exp) if _tier3_shadow_mode
-                else (_new_buy_trend, _new_sell_trend, _new_trend_exp)
-            )
+            if _bars_on:
+                buy_scores["trend"], sell_scores["trend"], trend_exp = self._bar_trend(
+                    df, w_trend, ema_signal, ema_conf, tf_signal, tf_conf,
+                    governor_data=governor_data,
+                )
+            else:
+                _old_buy_trend, _old_sell_trend, _old_trend_exp = self._judge_trend_bidirectional_legacy(
+                    df, is_bull, w_trend, consensus_regime, governor_data=governor_data
+                )
+                _new_buy_trend, _new_sell_trend, _new_trend_exp = self._judge_trend_bidirectional(
+                    df, is_bull, w_trend, ema_signal=ema_signal, ema_conf=ema_conf,
+                    tf_signal=tf_signal, tf_conf=tf_conf,
+                    consensus_regime=consensus_regime, governor_data=governor_data
+                )
+                buy_scores["trend"], sell_scores["trend"], trend_exp = (
+                    (_old_buy_trend, _old_sell_trend, _old_trend_exp) if _tier3_shadow_mode
+                    else (_new_buy_trend, _new_sell_trend, _new_trend_exp)
+                )
             buy_explanations.append(trend_exp["buy"])
             sell_explanations.append(trend_exp["sell"])
 
             # Pass breakout flag and ADX to adaptive judges
-            buy_scores["structure"], sell_scores["structure"], structure_exp = (
-                self._judge_structure_bidirectional(
-                    df, is_breakout_mode, w_structure, adx, governor_data=governor_data,
-                    rt_buy=_rt_buy, rt_sell=_rt_sell,
+            if _bars_on:
+                buy_scores["structure"], sell_scores["structure"], structure_exp = (
+                    self._bar_structure(
+                        df, w_structure, governor_data=governor_data,
+                        rt_buy=_rt_buy, rt_sell=_rt_sell,
+                    )
                 )
-            )
+            else:
+                buy_scores["structure"], sell_scores["structure"], structure_exp = (
+                    self._judge_structure_bidirectional(
+                        df, is_breakout_mode, w_structure, adx, governor_data=governor_data,
+                        rt_buy=_rt_buy, rt_sell=_rt_sell,
+                    )
+                )
             buy_explanations.append(structure_exp["buy"])
             sell_explanations.append(structure_exp["sell"])
 
@@ -1616,59 +1669,112 @@ class InstitutionalCouncilAggregator:
                     f"[MOMENTUM] MTF regime='{consensus_regime}' but local ADX={adx:.1f} > {ADX_TRENDING_THRESHOLD} "
                     f"— overriding to trend-aligned momentum judge"
                 )
-            if is_breakout_mode or is_trending_regime:
-                # Brain Rebuild Part 5.1: _judge_momentum_bidirectional_legacy
-                # is a thin delegate to the same implementation (Part 2.2's
-                # proposed rewrite matched what was already live — see its
-                # docstring), so there's nothing to gain from calling the
-                # expensive momentum logic twice per cycle here; both sides
-                # of the shadow flag are the same result by construction.
-                momentum_result = self._judge_momentum_bidirectional(
-                    df,
-                    is_bull,
-                    is_breakout_mode,
-                    w_momentum,
-                    adx,
-                    governor_data=governor_data,
-                )
-                buy_scores["momentum"], sell_scores["momentum"], momentum_exp = momentum_result
-
-                # FIX (MR-reachability): is_trending_regime routes every
-                # trending-regime cycle to the momentum judge, which is correct
-                # for TREND continuation (that's what this split was built to
-                # fix — see its own comment above: the reversion judge's RSI
-                # check was wrong for continuation setups). But it has a side
-                # effect nobody designed for: _judge_reversion_bidirectional —
-                # the ONLY place mr_signal/mr_conf ever turn into score — never
-                # runs here, so MR's reversal read (including Unit 2's
-                # rebound-short) is silently discarded whenever a NATURAL_
-                # REBOUND/RETRACEMENT bounce happens to sit inside a 4H regime
-                # classified as trending, which is the common case, not the
-                # exception. Continuation and reversal are alternate hypotheses
-                # about the same directional question, not additive evidence,
-                # so when flagged, let the reversion judge also read against
-                # the SAME weight budget (w_momentum) and take whichever side
-                # reads stronger — never both, so this cannot inflate score
-                # beyond what a single judge could already produce alone.
-                _pc_mrreach = getattr(_composite_state, "phase_config", {}) or {}
-                if _pc_mrreach.get("mr_reversal_scoring_in_trend_enabled", False) and mr_signal != 0:
-                    _rev_buy, _rev_sell, _rev_exp = self._judge_reversion_bidirectional(
-                        df, w_momentum, governor_data=governor_data,
-                        mr_signal=mr_signal, mr_conf=mr_conf,
+            # ── Six-slot split: both judges score, every cycle ──────────────
+            # Bar 2 (REVERSION) is only reachable through this branch — its
+            # weight (w_reversion) is 0.0 whenever _six_slot is off (File 2),
+            # so there's nothing for a bar-mode reversion score to be worth
+            # computing in the legacy five-slot path below.
+            if _six_slot:
+                if _bars_on:
+                    buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
+                        self._bar_momentum(df, w_momentum, is_bull, adx, governor_data=governor_data)
                     )
-                    if _rev_buy > buy_scores["momentum"]:
-                        buy_scores["momentum"] = _rev_buy
-                        momentum_exp["buy"] = _rev_exp["buy"]
-                    if _rev_sell > sell_scores["momentum"]:
-                        sell_scores["momentum"] = _rev_sell
-                        momentum_exp["sell"] = _rev_exp["sell"]
+                    buy_scores["reversion"], sell_scores["reversion"], reversion_exp = (
+                        self._bar_reversion(
+                            df, w_reversion, governor_data=governor_data,
+                            mr_signal=mr_signal, mr_conf=mr_conf,
+                        )
+                    )
+                else:
+                    buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
+                        self._judge_momentum_bidirectional(
+                            df, is_bull, is_breakout_mode, w_momentum, adx,
+                            governor_data=governor_data,
+                        )
+                    )
+                    buy_scores["reversion"], sell_scores["reversion"], reversion_exp = (
+                        self._judge_reversion_bidirectional(
+                            df, w_reversion, governor_data=governor_data,
+                            mr_signal=mr_signal, mr_conf=mr_conf,
+                        )
+                    )
+                buy_explanations.append(reversion_exp["buy"])
+                sell_explanations.append(reversion_exp["sell"])
             else:
-                buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
-                    self._judge_reversion_bidirectional(
-                        df, w_momentum, governor_data=governor_data,
-                        mr_signal=mr_signal, mr_conf=mr_conf,
-                    )
-                )
+                # Legacy five-slot path — unchanged, byte-identical to today
+                # when _bars_on is False.
+                if is_breakout_mode or is_trending_regime:
+                    # Brain Rebuild Part 5.1: _judge_momentum_bidirectional_legacy
+                    # is a thin delegate to the same implementation (Part 2.2's
+                    # proposed rewrite matched what was already live — see its
+                    # docstring), so there's nothing to gain from calling the
+                    # expensive momentum logic twice per cycle here; both sides
+                    # of the shadow flag are the same result by construction.
+                    if _bars_on:
+                        momentum_result = self._bar_momentum(
+                            df, w_momentum, is_bull, adx, governor_data=governor_data
+                        )
+                    else:
+                        momentum_result = self._judge_momentum_bidirectional(
+                            df,
+                            is_bull,
+                            is_breakout_mode,
+                            w_momentum,
+                            adx,
+                            governor_data=governor_data,
+                        )
+                    buy_scores["momentum"], sell_scores["momentum"], momentum_exp = momentum_result
+
+                    # FIX (MR-reachability): is_trending_regime routes every
+                    # trending-regime cycle to the momentum judge, which is correct
+                    # for TREND continuation (that's what this split was built to
+                    # fix — see its own comment above: the reversion judge's RSI
+                    # check was wrong for continuation setups). But it has a side
+                    # effect nobody designed for: _judge_reversion_bidirectional —
+                    # the ONLY place mr_signal/mr_conf ever turn into score — never
+                    # runs here, so MR's reversal read (including Unit 2's
+                    # rebound-short) is silently discarded whenever a NATURAL_
+                    # REBOUND/RETRACEMENT bounce happens to sit inside a 4H regime
+                    # classified as trending, which is the common case, not the
+                    # exception. Continuation and reversal are alternate hypotheses
+                    # about the same directional question, not additive evidence,
+                    # so when flagged, let the reversion judge also read against
+                    # the SAME weight budget (w_momentum) and take whichever side
+                    # reads stronger — never both, so this cannot inflate score
+                    # beyond what a single judge could already produce alone.
+                    _pc_mrreach = getattr(_composite_state, "phase_config", {}) or {}
+                    if _pc_mrreach.get("mr_reversal_scoring_in_trend_enabled", False) and mr_signal != 0:
+                        if _bars_on:
+                            _rev_buy, _rev_sell, _rev_exp = self._bar_reversion(
+                                df, w_momentum, governor_data=governor_data,
+                                mr_signal=mr_signal, mr_conf=mr_conf,
+                            )
+                        else:
+                            _rev_buy, _rev_sell, _rev_exp = self._judge_reversion_bidirectional(
+                                df, w_momentum, governor_data=governor_data,
+                                mr_signal=mr_signal, mr_conf=mr_conf,
+                            )
+                        if _rev_buy > buy_scores["momentum"]:
+                            buy_scores["momentum"] = _rev_buy
+                            momentum_exp["buy"] = _rev_exp["buy"]
+                        if _rev_sell > sell_scores["momentum"]:
+                            sell_scores["momentum"] = _rev_sell
+                            momentum_exp["sell"] = _rev_exp["sell"]
+                else:
+                    if _bars_on:
+                        buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
+                            self._bar_reversion(
+                                df, w_momentum, governor_data=governor_data,
+                                mr_signal=mr_signal, mr_conf=mr_conf,
+                            )
+                        )
+                    else:
+                        buy_scores["momentum"], sell_scores["momentum"], momentum_exp = (
+                            self._judge_reversion_bidirectional(
+                                df, w_momentum, governor_data=governor_data,
+                                mr_signal=mr_signal, mr_conf=mr_conf,
+                            )
+                        )
 
             buy_explanations.append(momentum_exp["buy"])
             sell_explanations.append(momentum_exp["sell"])
@@ -1677,17 +1783,27 @@ class InstitutionalCouncilAggregator:
             # thin delegate (see its docstring — Part 2.3 changed upstream
             # institutional_pattern computation, not this judge), so no
             # duplicate call needed here either.
-            buy_scores["pattern"], sell_scores["pattern"], pattern_exp = (
-                self._judge_pattern_bidirectional(
-                    df, w_pattern, governor_data=governor_data
+            if _bars_on:
+                buy_scores["pattern"], sell_scores["pattern"], pattern_exp = (
+                    self._bar_pattern(df, w_pattern, governor_data=governor_data)
                 )
-            )
+            else:
+                buy_scores["pattern"], sell_scores["pattern"], pattern_exp = (
+                    self._judge_pattern_bidirectional(
+                        df, w_pattern, governor_data=governor_data
+                    )
+                )
             buy_explanations.append(pattern_exp["buy"])
             sell_explanations.append(pattern_exp["sell"])
 
-            buy_scores["volume"], sell_scores["volume"], volume_exp = (
-                self._judge_volume_bidirectional(df, w_volume, governor_data=governor_data)
-            )
+            if _bars_on:
+                buy_scores["volume"], sell_scores["volume"], volume_exp = (
+                    self._bar_volume(df, w_volume, governor_data=governor_data)
+                )
+            else:
+                buy_scores["volume"], sell_scores["volume"], volume_exp = (
+                    self._judge_volume_bidirectional(df, w_volume, governor_data=governor_data)
+                )
             buy_explanations.append(volume_exp["buy"])
             sell_explanations.append(volume_exp["sell"])
 
@@ -2317,7 +2433,11 @@ class InstitutionalCouncilAggregator:
             # cycle. Comparing raw totals against thresholds implicitly assumed
             # against a fixed 5.0 would silently drift the moment a future
             # weight change stops summing to 5.0 — compare percentages instead.
-            _achievable_max = w_trend + w_structure + w_momentum + w_pattern + w_volume
+            # w_reversion is 0.0 when the flag is off → arithmetically identical
+            # to the five-weight sum in legacy mode.
+            _achievable_max = (
+                w_trend + w_structure + w_momentum + w_pattern + w_volume + w_reversion
+            )
 
             # Part 4.1 (Brain Rebuild): correlation discount. Judges sharing
             # an underlying enrichment source (JUDGE_SOURCE_REGISTRY, Part
@@ -2333,8 +2453,11 @@ class InstitutionalCouncilAggregator:
 
             _buy_score_pct  = (buy_total  * _buy_scale  / _achievable_max) if _achievable_max > 0 else 0.0
             _sell_score_pct = (sell_total * _sell_scale / _achievable_max) if _achievable_max > 0 else 0.0
-            _buy_required_pct  = _buy_threshold  / 5.0
-            _sell_required_pct = _sell_threshold / 5.0
+            # The hardcoded 5.0 assumed the weights always sum to 5.0 — true by
+            # coincidence in five slots, false the moment a sixth weight exists.
+            _rq_denom = _achievable_max if _achievable_max > 0 else 5.0
+            _buy_required_pct  = _buy_threshold  / _rq_denom
+            _sell_required_pct = _sell_threshold / _rq_denom
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
             _sell_clears = _sell_score_pct >= _sell_required_pct
 
@@ -3188,6 +3311,7 @@ class InstitutionalCouncilAggregator:
                     "momentum": _judge_scores_src.get("momentum", 0.0),
                     "pattern": _judge_scores_src.get("pattern", 0.0),
                     "volume": _judge_scores_src.get("volume", 0.0),
+                    "reversion": _judge_scores_src.get("reversion", 0.0),
                 },
                 "buy_scores": buy_scores,
                 "sell_scores": sell_scores,
@@ -3228,6 +3352,7 @@ class InstitutionalCouncilAggregator:
                     "momentum":  w_momentum,
                     "pattern":   w_pattern,
                     "volume":    w_volume,
+                    "reversion": w_reversion,
                 },
                 "governor_data": governor_data,
                 "livermore_state_1h": (
@@ -3505,6 +3630,72 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[TREND-LEGACY] Error: {e}")
             return 0.0, 0.0, {"buy": "TREND: Error", "sell": "TREND: Error"}
 
+    def _bar_trend(self, df, weight, ema_signal, ema_conf, tf_signal, tf_conf,
+                   governor_data=None):
+        """
+        TREND bar (judge_bars_enabled). Proof-first: an unproven driver signal
+        caps at 0.45 of the bar. Proven continuation is the larger share —
+        that is the strategy expressed as arithmetic rather than hoped for.
+        """
+        cs = (governor_data or {}).get("composite_state") if governor_data else None
+        def _g(a, d=None):
+            if cs is None: return d
+            return cs.get(a, d) if isinstance(cs, dict) else getattr(cs, a, d)
+
+        buy = sell = 0.0
+        buy_parts, sell_parts = [], []
+
+        # ── Segment 1: proof of continuation (0.40) ──────────────────
+        if _g("brc_confirmed", False) and _g("brc_kind", None) == "TF_CONT":
+            _d = int(_g("brc_direction", 0) or 0)
+            if _d == 1:
+                buy += 0.40 * weight; buy_parts.append("proof")
+            elif _d == -1:
+                sell += 0.40 * weight; sell_parts.append("proof")
+
+        # ── Segment 2: driver signal (0.45) ──────────────────────────
+        _tf_drives = bool((_g("phase_config", {}) or {}).get(
+            "tf_drives_trend_judge_enabled", False))
+        _sig, _conf, _name = (
+            (tf_signal, tf_conf, "TF") if _tf_drives else (ema_signal, ema_conf, "EMA")
+        )
+        if _sig == 1:
+            buy += 0.45 * weight * _conf; buy_parts.append(f"{_name}({_conf:.2f})")
+        elif _sig == -1:
+            sell += 0.45 * weight * _conf; sell_parts.append(f"{_name}({_conf:.2f})")
+
+        # ── Modifiers: capped multipliers, applied after accumulation ──
+        _lsm = _g("livermore_state_1h", None)
+        _bull = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+        _bear = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+        if buy > 0 and _lsm in _bull:
+            buy = min(buy * 1.15, weight); buy_parts.append("livermore")
+        if sell > 0 and _lsm in _bear:
+            sell = min(sell * 1.15, weight); sell_parts.append("livermore")
+
+        if _g("slopes_aligned", False):
+            if buy >= sell and buy > 0:
+                buy = min(buy * 1.10, weight); buy_parts.append("slopes")
+            elif sell > 0:
+                sell = min(sell * 1.10, weight); sell_parts.append("slopes")
+
+        if _g("conviction_dying", False):
+            _cd_dir = getattr(self, "phase_config", {}).get(
+                "conviction_dying_directional_enabled", False)
+            if _cd_dir and _lsm == "NATURAL_REBOUND":
+                buy *= 0.75
+                if buy > 0: buy_parts.append("-dying")
+            else:
+                buy *= 0.75; sell *= 0.75
+                if buy > 0: buy_parts.append("-dying")
+                if sell > 0: sell_parts.append("-dying")
+
+        buy, sell = min(buy, weight), min(sell, weight)
+        return buy, sell, {
+            "buy":  f"TREND BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+            "sell": f"TREND SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+        }
+
     def _judge_trend_bidirectional(
         self,
         df: pd.DataFrame,
@@ -3584,6 +3775,96 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[TREND] Error: {e}")
             return 0.0, 0.0, {"buy": "TREND: Error", "sell": "TREND: Error"}
 
+    def _bar_structure(self, df, weight, governor_data=None,
+                       rt_buy=None, rt_sell=None):
+        """
+        STRUCTURE bar (judge_bars_enabled). Accumulates instead of cascading —
+        a break AT a proven level, near a ladder line, with a sweep, now
+        outscores a bare break. Under the old cascade all four scored
+        identically.
+        """
+        cs = (governor_data or {}).get("composite_state") if governor_data else None
+        def _g(a, d=None):
+            if cs is None: return d
+            return cs.get(a, d) if isinstance(cs, dict) else getattr(cs, a, d)
+
+        buy = sell = 0.0
+        buy_parts, sell_parts = [], []
+
+        # ── 1. Directional break (0.30) — F1 ─────────────────────────
+        if _g("bos_bullish", False) and not _g("failed_breakout", False):
+            buy += 0.30 * weight; buy_parts.append("BOS")
+        if _g("bos_bearish", False):
+            sell += 0.30 * weight; sell_parts.append("BOS")
+        if _g("failed_breakout", False):
+            sell += 0.30 * weight; sell_parts.append("failed-breakout")
+
+        # ── 2. Proven level + defense (0.22) — F2/F3 ─────────────────
+        _def = float(_g("defense_strength", 0.0) or 0.0)
+        if _g("level_defended", False):
+            _lvl = 0.22 * weight * (0.5 + 0.5 * min(max(_def, 0.0), 1.0))
+            _close = float(df["close"].iloc[-1]) if len(df) else 0.0
+            _ref = _g("nearby_4h_level", None)
+            if _ref is not None:
+                if _close >= float(_ref):
+                    buy += _lvl; buy_parts.append(f"defended({_def:.2f})")
+                else:
+                    sell += _lvl; sell_parts.append(f"defended({_def:.2f})")
+
+        # ── 3. Zone position — the ladder (0.18) ─────────────────────
+        _dist = _g("activity_ladder_dist_atr", None)
+        _side = _g("activity_ladder_side", None)
+        if _dist is not None and float(_dist) < 1.0:
+            _prox = 0.18 * weight * (1.0 - min(float(_dist), 1.0))
+            _lo_t = int(_g("zone_4h_current_lower_tests", 0) or 0)
+            _up_t = int(_g("zone_4h_current_upper_tests", 0) or 0)
+            if _side == "BELOW":
+                buy += _prox * (1.0 + min(_lo_t * 0.05, 0.20))
+                buy_parts.append(f"ladder({_dist:.2f}ATR,t{_lo_t})")
+            elif _side == "ABOVE":
+                sell += _prox * (1.0 + min(_up_t * 0.05, 0.20))
+                sell_parts.append(f"ladder({_dist:.2f}ATR,t{_up_t})")
+
+        # ── 4. Sweep (0.15) ──────────────────────────────────────────
+        _sweep = int(_g("sweep_direction", 0) or 0)
+        if _sweep == 1:
+            buy += 0.15 * weight; buy_parts.append("spring")
+        elif _sweep == -1:
+            sell += 0.15 * weight; sell_parts.append("upthrust")
+
+        # ── 5. CHoCH existence (0.08) — F4, symmetric ────────────────
+        if _g("choch_detected", False):
+            buy += 0.08 * weight; sell += 0.08 * weight
+            buy_parts.append("choch"); sell_parts.append("choch")
+
+        # ── 6. VWAP proximity (0.07) ─────────────────────────────────
+        _vwap = _g("vwap_price", None)
+        _vd = _g("distance_to_vwap_atr", None)
+        if _vwap and _vd is not None and float(_vd) < 0.5 and len(df):
+            _c = float(df["close"].iloc[-1])
+            if _c > float(_vwap):
+                buy += 0.07 * weight; buy_parts.append("vwap-support")
+            else:
+                sell += 0.07 * weight; sell_parts.append("vwap-resistance")
+
+        # ── Retest tier: multiplicative, not additive ────────────────
+        _bt = rt_buy.retest_type if rt_buy is not None else None
+        _st = rt_sell.retest_type if rt_sell is not None else None
+        if buy > 0:
+            if _bt == "WICK": buy = min(buy * 1.15, weight); buy_parts.append("wick")
+            elif _bt == "CHASE_HARD": buy *= 0.30; buy_parts.append("chase-hard")
+            elif _bt == "CHASE_SOFT": buy *= 0.70; buy_parts.append("chase-soft")
+        if sell > 0:
+            if _st == "WICK": sell = min(sell * 1.15, weight); sell_parts.append("wick")
+            elif _st == "CHASE_HARD": sell *= 0.30; sell_parts.append("chase-hard")
+            elif _st == "CHASE_SOFT": sell *= 0.70; sell_parts.append("chase-soft")
+
+        buy, sell = min(buy, weight), min(sell, weight)
+        return buy, sell, {
+            "buy":  f"STRUCT BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+            "sell": f"STRUCT SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+        }
+
     def _judge_structure_bidirectional(
         self,
         df: pd.DataFrame,
@@ -3624,7 +3905,8 @@ class InstitutionalCouncilAggregator:
                         return cs.get(attr, default)
                     return getattr(cs, attr, default)
 
-                bos_detected = bool(_cs("bos_detected", False))
+                bos_bullish = bool(_cs("bos_bullish", False))
+                bos_bearish = bool(_cs("bos_bearish", False))
                 choch_detected = bool(_cs("choch_detected", False))
                 level_defended = bool(_cs("level_defended", False))
                 rej_at_level = bool(_cs("rejection_at_level", False))
@@ -3634,13 +3916,25 @@ class InstitutionalCouncilAggregator:
                 is_bearish_regime = bool((governor_data or {}).get("is_bearish", False))  # Brain rebuild Part 1.1
 
                 # ── BUY scoring ───────────────────────────────────────────────
+                # F1: read the DIRECTIONAL break. bos_detected is True for a
+                # break either way, so a bearish break was crediting the buy
+                # side. The board already records which way it went.
                 if (
-                    bos_detected
+                    bos_bullish
                     and (is_bullish_regime or is_breakout_mode)
                     and not failed_breakout
                 ):
-                    buy_score = weight
-                    buy_exp = f"STRUCT BUY: ✅ BOS confirmed ({weight:.1f})"
+                    # F2: fold defense into the break itself. A break AT a
+                    # proven, defended level is stronger evidence than a break
+                    # in open air — the old cascade scored them identically
+                    # because `elif level_defended` was unreachable once BOS won.
+                    _f2_defense = float(_cs("defense_strength", 0.0) or 0.0)
+                    _f2_bonus = 0.15 * weight * min(max(_f2_defense, 0.0), 1.0)
+                    buy_score = min(weight, weight * 0.85 + _f2_bonus)
+                    buy_exp = (
+                        f"STRUCT BUY: ✅ Bullish BOS ({buy_score:.2f})"
+                        + (f" +defended({_f2_defense:.2f})" if _f2_defense > 0 else " (open air)")
+                    )
                 elif level_defended:
                     # Scale credit to defense strength when available.
                     # Previously all level defenses got the same 0.7× credit
@@ -3688,8 +3982,17 @@ class InstitutionalCouncilAggregator:
 
                 # ── SELL scoring ──────────────────────────────────────────────
                 if failed_breakout:
-                    sell_score = weight
-                    sell_exp = f"STRUCT SELL: ✅ Failed breakout ({weight:.1f})"
+                    # F2 (SELL mirror): fold defense into the break itself,
+                    # same logic as BUY's bos_bullish branch — failed_breakout
+                    # is this side's equivalent "the break just happened" flat-
+                    # weight case, so it gets the same proven-level treatment.
+                    _f2_defense_s = float(_cs("defense_strength", 0.0) or 0.0)
+                    _f2_bonus_s = 0.15 * weight * min(max(_f2_defense_s, 0.0), 1.0)
+                    sell_score = min(weight, weight * 0.85 + _f2_bonus_s)
+                    sell_exp = (
+                        f"STRUCT SELL: ✅ Failed breakout ({sell_score:.2f})"
+                        + (f" +defended({_f2_defense_s:.2f})" if _f2_defense_s > 0 else " (open air)")
+                    )
                 elif rej_at_level:
                     sell_score = weight * 0.7
                     sell_exp = f"STRUCT SELL: ⚠️ Rejected at level ({sell_score:.1f})"
@@ -3718,16 +4021,17 @@ class InstitutionalCouncilAggregator:
                 if sweep_direction == -1 and sell_score < weight:
                     sell_score = min(sell_score + 0.3 * weight, weight)
                     sell_exp += " +upthrust"
-                # Change of character in bull regime = potential top
-                if choch_detected and is_bullish_regime:
-                    sell_score = min(sell_score + 0.3 * weight, weight)
-                    sell_exp += " +CHoCH"
-                # Brain rebuild Part 1.1: the mirror case was simply missing —
-                # CHoCH in a bearish regime = potential bottom, a bullish
-                # reversal warning, but nothing here ever scored it.
-                if choch_detected and is_bearish_regime:
-                    buy_score = min(buy_score + 0.3 * weight, weight)
-                    buy_exp += " +CHoCH"
+                # F4: CHoCH as existence, not direction. A change of character
+                # is a structural fact — STRUCTURE's job. What it MEANS
+                # directionally is the reversal thesis, which belongs to
+                # REVERSION. Small, symmetric credit to both sides so this
+                # judge reports the fact without arguing the case.
+                if choch_detected:
+                    _f4 = 0.08 * weight
+                    buy_score = min(buy_score + _f4, weight)
+                    sell_score = min(sell_score + _f4, weight)
+                    buy_exp += " +CHoCH(structure)"
+                    sell_exp += " +CHoCH(structure)"
 
                 # A7: Outside bar — engulfs the prior bar's full range, a
                 # volatility-expansion/reversal tell. composite_state only
@@ -4186,6 +4490,121 @@ class InstitutionalCouncilAggregator:
             logger.error(f"[MOMENTUM-LEGACY] Error: {e}", exc_info=True)
             return 0.0, 0.0, {"buy": "MOM: Error", "sell": "MOM: Error"}
 
+    def _bar_momentum(self, df, weight, is_bull, adx, governor_data=None):
+        """
+        MOMENTUM bar (judge_bars_enabled). Four named segments accumulate
+        instead of cascading: ADX-scaled base (0.45), RSI zone (0.25),
+        divergence (0.20/0.13 regular/hidden — M1: always reachable, no
+        Super-Cycle early return), MACD (0.10, M2: x weight). The
+        conviction_dying/vpd_diverging/cvd_trend enrichment below is kept
+        exactly as the cascade computes it, applied as a post-accumulation
+        modifier.
+
+        NOTE (flagged, not silently omitted): the cascade's ADX-slope regime
+        modifier (RISING_FAST/RISING/FALLING/FALLING_FAST deltas) and its
+        Livermore-aware reinterpretation are NOT ported here — the spec's
+        four-segment table doesn't name them, and replicating that block
+        faithfully needs more design time than this pass covers. Flag is off
+        by default; review this gap with Desire before enabling.
+        """
+        cs = (governor_data or {}).get("composite_state") if governor_data else None
+        def _g(a, d=None):
+            if cs is None: return d
+            return cs.get(a, d) if isinstance(cs, dict) else getattr(cs, a, d)
+
+        buy = sell = 0.0
+        buy_parts, sell_parts = [], []
+
+        _adx_for_gate = adx
+        try:
+            _df4 = (governor_data or {}).get("df_4h")
+            if _df4 is not None and len(_df4) >= 14:
+                _adx_4h = float(ta.ADX(
+                    _df4["high"].values, _df4["low"].values, _df4["close"].values,
+                    timeperiod=14,
+                )[-1])
+                if not np.isnan(_adx_4h):
+                    _adx_for_gate = max(adx, _adx_4h)
+        except Exception:
+            pass
+
+        # ── Segment 1: ADX-scaled base (0.45) ─────────────────────────
+        _adx_scale = min(_adx_for_gate / 32.0, 1.0)
+        if _adx_scale > 0:
+            if is_bull:
+                buy += 0.45 * weight * _adx_scale; buy_parts.append(f"adx({_adx_scale:.2f})")
+            else:
+                sell += 0.45 * weight * _adx_scale; sell_parts.append(f"adx({_adx_scale:.2f})")
+
+        features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+        rsi = float(features_mr.iloc[-1].get("rsi", 50)) if not features_mr.empty else 50.0
+
+        # ── Segment 2: RSI zone confirmation (0.25) ───────────────────
+        if rsi > 50:
+            buy += 0.25 * weight; buy_parts.append(f"rsi({rsi:.0f})")
+        elif rsi < 50:
+            sell += 0.25 * weight; sell_parts.append(f"rsi({rsi:.0f})")
+
+        # ── Segment 3: divergence (0.20 regular / 0.13 hidden) ────────
+        # M1: always reachable — no Super-Cycle early return gates this off.
+        div_res = self.divergence_detector.analyze(df)
+        if div_res.type == "BULLISH":
+            buy += 0.20 * weight; buy_parts.append("divergence")
+        elif div_res.type == "BEARISH":
+            sell += 0.20 * weight; sell_parts.append("divergence")
+        elif div_res.type == "HIDDEN_BULLISH":
+            buy += 0.13 * weight; buy_parts.append("hidden-div")
+        elif div_res.type == "HIDDEN_BEARISH":
+            sell += 0.13 * weight; sell_parts.append("hidden-div")
+
+        # ── Segment 4: MACD (0.10) — M2: x weight ─────────────────────
+        if self.config["macd_confirmation"] and not features_mr.empty:
+            macd = features_mr.iloc[-1].get("macd", 0)
+            macd_signal = features_mr.iloc[-1].get("macd_signal", 0)
+            if macd > macd_signal:
+                buy += 0.10 * weight; buy_parts.append("macd")
+            elif macd < macd_signal:
+                sell += 0.10 * weight; sell_parts.append("macd")
+
+        # ── Enrichment: kept exactly as the cascade computes it ───────
+        if cs:
+            conviction_dying = bool(_g("conviction_dying", False))
+            vpd_diverging = bool(_g("vpd_diverging", False))
+            cvd_trend = 0 if bool(_g("cvd_stale", False)) else int(_g("cvd_trend", 0) or 0)
+
+            if conviction_dying:
+                penalty = 0.20 * weight
+                _cd_dir = getattr(self, "phase_config", {}).get(
+                    "conviction_dying_directional_enabled", False
+                )
+                _lsm_1h = _g("livermore_state_1h", None)
+                if _cd_dir and _lsm_1h == "NATURAL_REBOUND":
+                    buy = max(0.0, buy - penalty)
+                    if buy > 0: buy_parts.append("-dying")
+                else:
+                    buy = max(0.0, buy - penalty)
+                    sell = max(0.0, sell - penalty)
+                    if buy > 0: buy_parts.append("-dying")
+                    if sell > 0: sell_parts.append("-dying")
+
+            if vpd_diverging:
+                div_penalty = 0.15 * weight
+                if is_bull:
+                    buy = max(0.0, buy - div_penalty); buy_parts.append("-vpd_div")
+                else:
+                    sell = max(0.0, sell - div_penalty); sell_parts.append("-vpd_div")
+
+            if cvd_trend > 0:
+                buy = min(buy + 0.15 * weight, weight); buy_parts.append("cvd")
+            elif cvd_trend < 0:
+                sell = min(sell + 0.15 * weight, weight); sell_parts.append("cvd")
+
+        buy, sell = min(buy, weight), min(sell, weight)
+        return buy, sell, {
+            "buy":  f"MOM BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+            "sell": f"MOM SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+        }
+
     def _judge_momentum_bidirectional(
         self,
         df: pd.DataFrame,
@@ -4241,7 +4660,19 @@ class InstitutionalCouncilAggregator:
             except Exception as _adx4_err:
                 logger.debug(f"[MOMENTUM] 4H ADX lookup failed (non-blocking): {_adx4_err}")
 
+            # M1: computed here (only needs df) so the Super-Cycle branch below
+            # can reach it too — it used to return before this ever ran, making
+            # exhaustion divergence unreachable exactly when it matters most.
+            div_res = self.divergence_detector.analyze(df)
+
             if _adx_for_gate > 32:
+                # M1: was an early return, which meant MOMENTUM stopped
+                # measuring momentum in exactly the conditions where
+                # exhaustion matters — the divergence engine below never ran.
+                # Score the super-cycle read, let divergence cut it if it
+                # opposes, then return — deliberately not falling through to
+                # the RSI-rescore/MACD/enrichment pipeline below, none of
+                # which were ever part of the Super-Cycle design.
                 buy_score = weight if is_bull else 0.0
                 sell_score = weight if not is_bull else 0.0
                 buy_exp = (
@@ -4254,6 +4685,15 @@ class InstitutionalCouncilAggregator:
                     if not is_bull
                     else "MOM SELL: ❌ Dead in Bull Super-Cycle"
                 )
+                # M1: divergence against a super-cycle read is the exhaustion
+                # tell this judge exists to catch. Cap the cut so a single
+                # divergence can't fully erase a genuine strong trend.
+                if div_res.type == "BEARISH" and buy_score > 0:
+                    buy_score *= 0.60
+                    buy_exp += " -divergence(exhaustion)"
+                elif div_res.type == "BULLISH" and sell_score > 0:
+                    sell_score *= 0.60
+                    sell_exp += " -divergence(exhaustion)"
                 return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
             features_mr = self.s_mean_reversion.generate_features(df.tail(100))
@@ -4267,8 +4707,8 @@ class InstitutionalCouncilAggregator:
             buy_exp = f"MOM BUY: ❌ No credit - RSI {rsi:.1f}"
             sell_exp = f"MOM SELL: ❌ No credit - RSI {rsi:.1f}"
 
-            # ✨ NEW: RSI Divergence Engine
-            div_res = self.divergence_detector.analyze(df)
+            # ✨ RSI Divergence Engine — div_res computed earlier (M1), before
+            # the Super-Cycle gate, so it's already available here unchanged.
             if div_res.type != "NONE":
                 if div_res.type == "BULLISH":
                     buy_score = min(buy_score + 0.3 * weight, weight)
@@ -4309,11 +4749,14 @@ class InstitutionalCouncilAggregator:
                 macd_signal = features_mr.iloc[-1].get("macd_signal", 0)
 
                 if buy_score > 0 and macd > macd_signal:
-                    buy_score = min(buy_score + 0.2, weight)
+                    # M2: was a raw +0.2 added to a score measured in units of
+                    # weight — the same evidence was worth 20% at weight=1.0
+                    # but 27% at weight=0.75, for no reason. Scale by weight.
+                    buy_score = min(buy_score + 0.2 * weight, weight)
                     buy_exp += " +MACD"
 
                 if sell_score > 0 and macd < macd_signal:
-                    sell_score = min(sell_score + 0.2, weight)
+                    sell_score = min(sell_score + 0.2 * weight, weight)
                     sell_exp += " +MACD"
 
             # ── Phase 3B: CompositeState momentum enrichment ───────────────────
@@ -4499,6 +4942,86 @@ class InstitutionalCouncilAggregator:
         """
         return self._judge_pattern_bidirectional(df, weight, governor_data=governor_data)
 
+    def _bar_pattern(
+        self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
+    ) -> Tuple[float, float, Dict]:
+        """
+        PATTERN bar (judge_bars_enabled). Four segments accumulate instead of
+        cascading: Accumulation/Distribution (0.35), Compression/coiled (0.30),
+        EMA-50 six-state incl. P2's EMA_ABOVE/EMA_BELOW (0.25), squeeze
+        strength (0.10, independent of the compression segment — a continuous
+        coiling-tightness read rather than the discrete COMPRESSION/coiled
+        flags). Compression and EMA-50 segments are not mutually exclusive
+        with Accumulation/Distribution the way the cascade's early-returns
+        were, since a market can show institutional accumulation AND sit
+        above its EMA-50 at the same time.
+        """
+        try:
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
+
+            def _g(attr, default=None):
+                if cs is None:
+                    return default
+                return cs.get(attr, default) if isinstance(cs, dict) else getattr(cs, attr, default)
+
+            buy = 0.0
+            sell = 0.0
+            buy_parts, sell_parts = [], []
+
+            # ── Segment 1: Accumulation / Distribution (0.35) ──────────────
+            inst_pattern = _g("institutional_pattern", None)
+            if inst_pattern == "ACCUMULATION":
+                buy += 0.35 * weight
+                buy_parts.append("accumulation")
+            elif inst_pattern == "DISTRIBUTION":
+                sell += 0.35 * weight
+                sell_parts.append("distribution")
+
+            # ── Segment 2: Compression / coiled (0.30) ──────────────────────
+            _coiled = bool(_g("coiled_spring", False))
+            _is_compression = inst_pattern in ("COMPRESSION", "CONSOLIDATION")
+            if _coiled or _is_compression:
+                _c_amt = 0.30 * weight * 0.5
+                buy += _c_amt
+                sell += _c_amt
+                _c_label = "compression" if _is_compression else "coiled_spring"
+                buy_parts.append(_c_label)
+                sell_parts.append(_c_label)
+
+            # ── Segment 3: EMA-50 six-state, incl. P2 (0.25) ────────────────
+            _ema50_status = _g("ema_50_status", "UNTESTED")
+            _ema50_reclass = _g("ema_50_reclassified", None)
+            if _ema50_status == "DEFENDED" and _ema50_reclass == "SUPPORT":
+                buy += 0.25 * weight
+                buy_parts.append("ema50_defended_support")
+            elif _ema50_status == "BROKEN":
+                sell += 0.25 * weight
+                sell_parts.append("ema50_broken")
+            elif _ema50_status == "EMA_ABOVE":
+                buy += 0.25 * weight
+                buy_parts.append("ema_above")
+            elif _ema50_status == "EMA_BELOW":
+                sell += 0.25 * weight
+                sell_parts.append("ema_below")
+
+            # ── Segment 4: squeeze strength (0.10) ──────────────────────────
+            _sq_strength = float(_g("squeeze_strength", 0.0) or 0.0)
+            if _sq_strength > 0:
+                _sq_amt = 0.10 * weight * min(max(_sq_strength, 0.0), 1.0)
+                buy += _sq_amt
+                sell += _sq_amt
+                buy_parts.append(f"squeeze({_sq_strength:.2f})")
+                sell_parts.append(f"squeeze({_sq_strength:.2f})")
+
+            buy, sell = min(buy, weight), min(sell, weight)
+            return buy, sell, {
+                "buy": f"PATTERN BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+                "sell": f"PATTERN SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+            }
+        except Exception as e:
+            logger.error(f"[PATTERN bar] Error: {e}")
+            return 0.0, 0.0, {"buy": "PATTERN: Error", "sell": "PATTERN: Error"}
+
     def _judge_pattern_bidirectional(
         self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
     ) -> Tuple[float, float, Dict]:
@@ -4609,6 +5132,17 @@ class InstitutionalCouncilAggregator:
             elif _ema50_status == "BROKEN":
                 sell_score = min(weight, sell_score + weight * 0.4)
                 sell_exp += " +ema50_broken"
+            elif _ema50_status == "EMA_ABOVE":
+                # P2: the board publishes six EMA-50 states; this judge only
+                # reacted to DEFENDED/BROKEN, so on a trending market — no
+                # squeeze, no tight range, just riding above/below the EMA —
+                # PATTERN scored zero. These two are genuine directional
+                # structure.
+                buy_score = min(buy_score + 0.30 * weight, weight)
+                buy_exp += " +EMA_ABOVE(trend-ride)"
+            elif _ema50_status == "EMA_BELOW":
+                sell_score = min(sell_score + 0.30 * weight, weight)
+                sell_exp += " +EMA_BELOW(trend-ride)"
 
             return (buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp})
 
@@ -4642,6 +5176,103 @@ class InstitutionalCouncilAggregator:
             sell_score = min(sell_score + _total * weight, weight)
             sell_exp += f" +bear_divergence(dedicated={_div_bonus:.2f}, Livermore+{_lsm_topup:.2f})"
         return buy_score, sell_score, buy_exp, sell_exp
+
+    def _bar_volume(
+        self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
+    ) -> Tuple[float, float, Dict]:
+        """
+        VOLUME bar (judge_bars_enabled). Segments accumulate instead of
+        cascading: volume ratio for BTC / spread ratio for MT5 CFDs (0.45),
+        absorption exhaustion directional (0.20), order-book wall BTC-only
+        (0.10 — scaled down from the cascade's 0.20 to fit the bar's fixed
+        fraction table), vpd_diverging as an x0.70 modifier applied to the
+        running subtotal (mirrors the cascade's own ordering — before the
+        divergence bonus, not after), and OBV divergence + Livermore top-up
+        via the existing _apply_volume_divergence_bonus helper (0.10 base +
+        0.10/0.15 top-up = 0.20/0.25, same tiers as the cascade).
+        """
+        try:
+            cs = (governor_data or {}).get("composite_state") if governor_data else None
+
+            def _g(attr, default=None):
+                if cs is None:
+                    return default
+                return cs.get(attr, default) if isinstance(cs, dict) else getattr(cs, attr, default)
+
+            buy_parts, sell_parts = [], []
+            _is_mt5 = self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY"]
+
+            # ── Segment 1: volume ratio (BTC) / spread ratio (MT5) — 0.45 ──
+            if _is_mt5:
+                _spread_ratio = float(_g("spread_ratio", 1.0) or 1.0)
+                if _spread_ratio >= 2.5:
+                    tag, _base_frac = "SPIKE", 0.0
+                elif _spread_ratio >= 1.5:
+                    tag, _base_frac = "ELEVATED", 0.45 * (2.5 - _spread_ratio) / 1.0
+                else:
+                    tag, _base_frac = "NORMAL", 0.45
+                buy = sell = weight * _base_frac
+                buy_parts.append(f"spread({tag},{_spread_ratio:.1f}x)")
+                sell_parts.append(f"spread({tag},{_spread_ratio:.1f}x)")
+            else:
+                if "volume" not in df.columns:
+                    return 0.0, 0.0, {"buy": "VOL: No data", "sell": "VOL: No data"}
+                volume_ma_period = self.config["volume_ma_period"]
+                current_volume = df["volume"].iloc[-1]
+                volume_ma = df["volume"].rolling(volume_ma_period).mean().iloc[-1]
+                vol_ratio = current_volume / volume_ma if volume_ma > 0 else 1.0
+                if vol_ratio >= 1.5:
+                    tag, _base_frac = "STRONG", 0.45
+                elif vol_ratio > 1.0:
+                    tag, _base_frac = "PARTIAL", 0.45 * (vol_ratio - 1.0) / 0.5
+                else:
+                    tag, _base_frac = "BELOW_AVG", 0.0
+                buy = sell = weight * _base_frac
+                buy_parts.append(f"vol({tag},{vol_ratio:.1f}x)")
+                sell_parts.append(f"vol({tag},{vol_ratio:.1f}x)")
+
+            # ── Segment 2: absorption exhaustion, directional (0.20) ────────
+            _absorption = bool(_g("absorption_detected", False))
+            if _absorption and len(df) >= 5:
+                _push_was_up = df["close"].iloc[-1] > df["close"].iloc[-5]
+                if _push_was_up:
+                    sell += 0.20 * weight
+                    sell_parts.append("absorption(up-exhausted)")
+                else:
+                    buy += 0.20 * weight
+                    buy_parts.append("absorption(down-exhausted)")
+
+            # ── Segment 3: order-book wall, BTC-only (0.10) ─────────────────
+            if not _is_mt5:
+                _ob_wall = bool(_g("order_book_wall_detected", False))
+                if _ob_wall:
+                    buy += 0.10 * weight
+                    sell += 0.10 * weight
+                    buy_parts.append("ob_wall")
+                    sell_parts.append("ob_wall")
+
+            # ── vpd_diverging modifier (x0.70) — before the divergence bonus ──
+            if bool(_g("vpd_diverging", False)):
+                buy *= 0.70
+                sell *= 0.70
+                buy_parts.append("-vpd_diverging")
+                sell_parts.append("-vpd_diverging")
+
+            # ── Segment 4: OBV divergence + Livermore top-up (0.10/0.20/0.25) ──
+            buy, sell, _be, _se = self._apply_volume_divergence_bonus(buy, sell, "", "", cs, weight)
+            if bool(_g("bullish_divergence", False)):
+                buy_parts.append("bull_divergence")
+            if bool(_g("bearish_divergence", False)):
+                sell_parts.append("bear_divergence")
+
+            buy, sell = min(buy, weight), min(sell, weight)
+            return buy, sell, {
+                "buy":  f"VOL BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+                "sell": f"VOL SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+            }
+        except Exception as e:
+            logger.error(f"[VOLUME bar] Error: {e}")
+            return 0.0, 0.0, {"buy": "VOL: Error", "sell": "VOL: Error"}
 
     def _judge_volume_bidirectional(
         self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None
@@ -4764,6 +5395,56 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.error(f"[VOLUME] Error: {e}")
             return 0.0, 0.0, {"buy": "VOL: Error", "sell": "VOL: Error"}
+
+    def _bar_reversion(self, df, weight, governor_data=None,
+                       mr_signal=0, mr_conf=0.0):
+        """
+        REVERSION bar (judge_bars_enabled). Mirrors TREND — equal rigor, both
+        directions.
+
+        The proof segment fires ONLY when mr_signal == 0. MR Mode 1 already
+        requires BRV, which validates the same sweep-and-close on the same
+        anchor BRC uses — so scoring both would pay twice for one event.
+        Gating on mr_signal == 0 makes the segment mean something new:
+        the proof completed, but MR's own entry gates did not clear.
+        """
+        cs = (governor_data or {}).get("composite_state") if governor_data else None
+        def _g(a, d=None):
+            if cs is None: return d
+            return cs.get(a, d) if isinstance(cs, dict) else getattr(cs, a, d)
+
+        buy = sell = 0.0
+        buy_parts, sell_parts = [], []
+        _lsm = _g("livermore_state_1h", None)
+
+        # ── Segment 1: MR signal (0.45) ──────────────────────────────
+        if _lsm == "NATURAL_RETRACEMENT" and mr_signal == 1:
+            buy += min(0.45 * weight * mr_conf, 0.45 * weight)
+            buy_parts.append(f"mr({mr_conf:.2f})")
+        elif _lsm == "NATURAL_REBOUND" and mr_signal == -1:
+            sell += min(0.45 * weight * mr_conf, 0.45 * weight)
+            sell_parts.append(f"mr({mr_conf:.2f})")
+
+        # ── Segment 2: proof of reversal (0.40) — only if MR stayed silent ──
+        if mr_signal == 0 and _g("brc_confirmed", False) and _g("brc_kind", None) == "MR_REV":
+            _d = int(_g("brc_direction", 0) or 0)
+            if _d == 1:
+                buy += 0.40 * weight; buy_parts.append("proof(mr-silent)")
+            elif _d == -1:
+                sell += 0.40 * weight; sell_parts.append("proof(mr-silent)")
+
+        # ── Segment 3: CHoCH direction (0.15) ────────────────────────
+        # F4 gave STRUCTURE the existence; the direction lives here.
+        if _g("choch_bullish", False):
+            buy += 0.15 * weight; buy_parts.append("choch")
+        elif _g("choch_bearish", False):
+            sell += 0.15 * weight; sell_parts.append("choch")
+
+        buy, sell = min(buy, weight), min(sell, weight)
+        return buy, sell, {
+            "buy":  f"REV BUY: {buy:.2f} [{'+'.join(buy_parts) or 'none'}]",
+            "sell": f"REV SELL: {sell:.2f} [{'+'.join(sell_parts) or 'none'}]",
+        }
 
     def _judge_reversion_bidirectional(
         self, df: pd.DataFrame, weight: float, governor_data: Optional[Dict] = None,

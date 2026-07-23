@@ -1977,6 +1977,14 @@ class VeteranTradeManager:
         if getattr(_cs, "bearish_divergence" if is_long else "bullish_divergence", False):
             signals_fired.append("momentum divergence against position")
 
+        # X1: the trajectory tracker declares a setup dead on real evidence
+        # (Livermore state flip, failed breakout, opposing BOS). Nothing read
+        # it. If the setup that justified this position has died, that is a
+        # genuine signal against the position.
+        if getattr(_cs, "setup_died", False):
+            _death = getattr(_cs, "setup_death_reason", "unknown")
+            signals_fired.append(f"setup invalidated ({_death})")
+
         # A3: sweep_detected consumer — a liquidity sweep (stop-hunt wick)
         # against the position's direction. Distinct from the per-tick trail
         # tighten in check_exit (which reacts to sweep_direction alone); this

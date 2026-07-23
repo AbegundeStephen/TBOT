@@ -1478,6 +1478,8 @@
     "mr_reversal_scoring_in_trend_enabled": false,
     "tf_brc_gate_enabled": false,
     "mr_mode2_brc_gate_enabled": false,
-    "independent_fire_brc_gate_enabled": false
+    "independent_fire_brc_gate_enabled": false,
+    "six_slot_judges_enabled": false,
+    "judge_bars_enabled": false
   }
 }
