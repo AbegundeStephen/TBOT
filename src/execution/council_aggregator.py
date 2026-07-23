@@ -754,11 +754,39 @@ class InstitutionalCouncilAggregator:
         risking more than they stood to make — R:R is a property of the
         instrument, not the direction. trade_type is kept in the signature
         for other logic that may use it; it no longer affects this check.
+
+        Fix 6c-2 (first_tp_mult bug, flag-gated): first_tp_mult defaulted to
+        a hardcoded 1.5 for every asset, and the one call site never
+        overrides it — so this gate always assumed the first partial exit
+        pays 1.5R. VTM's real first partial target is
+        assets.<ASSET>.risk.partial_targets[0] (an ATR multiple, not a risk
+        multiple), and the real stop distance is a different ATR multiple
+        (or a zone-based line entirely) — for GOLD (partial_targets[0]=1.2,
+        atr_multiplier=2.5) the real first exit only pays 1.2/2.5 = 0.48R,
+        not 1.5R.
+
+        This is NOT enabled unconditionally: with the real per-asset
+        numbers, only BTC's configured stop/TP structure clears min_rr
+        (1.5) — GOLD/USTEC/EURUSD/EURJPY/USOIL/GBPAUD all fall well under
+        it even using the full size-weighted average across all three
+        partials (0.81-1.12R vs required 1.3-1.5R), because they're built
+        as tight-first-scale-out/wide-stop structures. Deriving the real
+        number here would permanently block those six assets until min_rr
+        is recalibrated per asset — a strategy-level decision, not a
+        one-line fix — so this stays behind profit_gate_real_tp_mult_enabled
+        (default False) until that recalibration happens. OFF keeps
+        today's hardcoded-1.5 behavior byte-identical.
         """
         try:
             risk = abs(entry - stop_loss)
             if risk <= 0:
                 return True
+
+            _risk_cfg_tp = getattr(self, "risk_config", {}) or {}
+            if getattr(self, "phase_config", {}).get("profit_gate_real_tp_mult_enabled", False):
+                _partial_targets = _risk_cfg_tp.get("partial_targets") or []
+                if _partial_targets:
+                    first_tp_mult = (float(_partial_targets[0]) * atr_fast) / risk
 
             expected_reward = risk * first_tp_mult
             min_required = 0.5 * atr_fast

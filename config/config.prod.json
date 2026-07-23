@@ -1480,6 +1480,7 @@
     "mr_mode2_brc_gate_enabled": false,
     "independent_fire_brc_gate_enabled": false,
     "six_slot_judges_enabled": false,
-    "judge_bars_enabled": false
+    "judge_bars_enabled": false,
+    "profit_gate_real_tp_mult_enabled": false
   }
 }
