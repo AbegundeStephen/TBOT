@@ -1457,10 +1457,13 @@
     "gate3_shadow_enabled": false,
     "gate3_d4_extension_enabled": true,
     "disagreement_gate_shadow_enabled": false,
-    "mr_rebound_short_enabled": false,
+    "mr_rebound_short_enabled": true,
     "mr_vetoes_as_dampeners_enabled": false,
     "tf_drives_trend_judge_enabled": false,
     "ema_confirmer_mode_enabled": false,
-    "mr_reversal_scoring_in_trend_enabled": false
+    "mr_reversal_scoring_in_trend_enabled": false,
+    "tf_brc_gate_enabled": false,
+    "mr_mode2_brc_gate_enabled": false,
+    "independent_fire_brc_gate_enabled": false
   }
 }
