@@ -46,6 +46,14 @@ class CompositeState:
     choch_bullish: bool = False  # higher low — bullish reversal warning
     bos_bullish: bool = False    # higher high — uptrend continuing
     bos_bearish: bool = False    # lower low — downtrend continuing
+    # ── Break-Retest-Close (BRC) completed-proof state — OBSERVATION ONLY ──
+    # Set True on the bar the full break→retest→strict-close-through completes.
+    # Matches BRV's window (8 bars, per Fix 0) and strict-close rule.
+    # Reference: Livermore anchor for MR-origin (CHoCH), swing for TF-origin (BOS).
+    brc_confirmed: bool = False           # three beats completed this bar
+    brc_direction: int = 0                # +1 long / -1 short
+    brc_kind: Optional[str] = None        # "TF_CONT" (BOS) / "MR_REV" (CHoCH)
+    brc_tier: Optional[str] = None        # RetestEngine tier if available
     nearby_4h_level:   Optional[float] = None
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
     # ── Route B: confirmation anchors ──
