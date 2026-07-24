@@ -65,6 +65,12 @@ class CompositeStateBuilder:
         # TRAJECTORY (Plan 1B): per-asset live-setup memory. None = no setup.
         # Shape when active: {"kind","dir","age","born_compression","last_compression"}
         self._active_setup = {}
+        # main.py invokes _build_composite_state twice per ~5min trading cycle
+        # per asset (_update_asset_signal's recording pass, then trade_asset's
+        # execution pass) against the same closed candle. Tracks the last
+        # candle timestamp the trajectory state machine actually advanced for,
+        # so the redundant call republishes instead of re-rolling age/death/birth.
+        self._traj_last_processed_ts = {}
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
         self._prev_compression = {}
@@ -971,79 +977,100 @@ class CompositeStateBuilder:
             _UP = {"MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"}
             _DOWN = {"MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND"}
 
-            # ---- STEP 1: age + energy-trend an existing setup ----------
-            if _cur is not None:
-                _cur["age"] = int(_cur.get("age", 0)) + 1
-                _prev_comp = float(_cur.get("last_compression", _comp))
-                if _comp > _prev_comp + 0.05:
-                    _cur["energy"] = "BUILDING"
-                elif _comp < _prev_comp - 0.05:
-                    _cur["energy"] = "FADING"
-                else:
-                    _cur["energy"] = "HOLDING"
-                _cur["last_compression"] = _comp
+            # main.py builds composite_state twice per ~5min cycle per asset
+            # (_update_asset_signal's recording pass, then trade_asset's
+            # execution pass) against the same closed candle. Without this
+            # guard, Steps 1-3 below re-roll age/death/birth on the redundant
+            # call — same candle, same deterministic bos/choch/failed_breakout
+            # inputs, but ~2x the intended chances per hour for a death
+            # condition to fire, and age incrementing twice as fast as real
+            # bars. A setup now only advances once per NEW closed candle;
+            # a repeat call on the same candle just republishes step 4 as-is.
+            _candle_ts = df.index[-1] if df is not None and len(df) else None
+            _already_processed = (
+                _candle_ts is not None
+                and self._traj_last_processed_ts.get(_asset) == _candle_ts
+            )
 
-            # ---- STEP 2: evidence-based death check --------------------
-            # A setup dies when the tape invalidates it. Order: master
-            # backstop first (state flip), then setup-specific evidence.
-            _death_reason = None
-            if _cur is not None:
-                _born_state = _cur.get("born_state")
-                _dir = int(_cur.get("dir", 0))
-                # (a) MASTER BACKSTOP — Livermore 1H state transitioned away
-                #     from the context the setup was born into.
-                if _born_state is not None and _lsm_now != _born_state:
-                    # Only kill if the new state flips the directional context
-                    # (a benign retracement within the same trend shouldn't
-                    # necessarily kill it, but a cross to the opposite camp does).
-                    _born_up = _born_state in _UP
-                    _now_up = _lsm_now in _UP
-                    _now_down = _lsm_now in _DOWN
-                    if (_born_up and _now_down) or ((not _born_up) and _now_up):
-                        _death_reason = "LSM_STATE_FLIP"
-                # (b) SETUP-SPECIFIC — a failed breakout against the setup.
-                if _death_reason is None and getattr(state, "failed_breakout", False):
-                    _death_reason = "FAILED_BREAKOUT"
-                # (c) STRUCTURE-AGAINST — a directional structure break the
-                #     opposite way (long setup sees bearish BOS, or vice versa).
-                if _death_reason is None:
-                    if _dir == 1 and getattr(state, "bos_bearish", False):
-                        _death_reason = "OPPOSING_BOS"
-                    elif _dir == -1 and getattr(state, "bos_bullish", False):
-                        _death_reason = "OPPOSING_BOS"
+            if not _already_processed:
+                # ---- STEP 1: age + energy-trend an existing setup ------
+                if _cur is not None:
+                    _cur["age"] = int(_cur.get("age", 0)) + 1
+                    _prev_comp = float(_cur.get("last_compression", _comp))
+                    if _comp > _prev_comp + 0.05:
+                        _cur["energy"] = "BUILDING"
+                    elif _comp < _prev_comp - 0.05:
+                        _cur["energy"] = "FADING"
+                    else:
+                        _cur["energy"] = "HOLDING"
+                    _cur["last_compression"] = _comp
 
-            if _cur is not None and _death_reason is not None:
-                state.setup_died = True
-                state.setup_death_reason = _death_reason
-                self._active_setup[_asset] = None
-                _cur = None
+                # ---- STEP 2: evidence-based death check ----------------
+                # A setup dies when the tape invalidates it. Order: master
+                # backstop first (state flip), then setup-specific evidence.
+                _death_reason = None
+                if _cur is not None:
+                    _born_state = _cur.get("born_state")
+                    _dir = int(_cur.get("dir", 0))
+                    # (a) MASTER BACKSTOP — Livermore 1H state transitioned
+                    #     away from the context the setup was born into.
+                    if _born_state is not None and _lsm_now != _born_state:
+                        # Only kill if the new state flips the directional
+                        # context (a benign retracement within the same trend
+                        # shouldn't necessarily kill it, but a cross to the
+                        # opposite camp does).
+                        _born_up = _born_state in _UP
+                        _now_up = _lsm_now in _UP
+                        _now_down = _lsm_now in _DOWN
+                        if (_born_up and _now_down) or ((not _born_up) and _now_up):
+                            _death_reason = "LSM_STATE_FLIP"
+                    # (b) SETUP-SPECIFIC — a failed breakout against the setup.
+                    if _death_reason is None and getattr(state, "failed_breakout", False):
+                        _death_reason = "FAILED_BREAKOUT"
+                    # (c) STRUCTURE-AGAINST — a directional structure break
+                    #     the opposite way (long setup sees bearish BOS, or
+                    #     vice versa).
+                    if _death_reason is None:
+                        if _dir == 1 and getattr(state, "bos_bearish", False):
+                            _death_reason = "OPPOSING_BOS"
+                        elif _dir == -1 and getattr(state, "bos_bullish", False):
+                            _death_reason = "OPPOSING_BOS"
 
-            # ---- STEP 3: birth check (only if nothing is alive) --------
-            if _cur is None:
-                _born = None
-                # TF setup is born at the BREAK (BOS), either direction.
-                if getattr(state, "bos_bullish", False):
-                    _born = {"kind": "TF_CONT", "dir": 1}
-                elif getattr(state, "bos_bearish", False):
-                    _born = {"kind": "TF_CONT", "dir": -1}
-                # MR setup is born at the CHANGE OF CHARACTER (CHoCH) — the
-                # earliest anomaly. CHoCH takes precedence when both appear
-                # in a way that implies a reversal is starting.
-                if getattr(state, "choch_bullish", False):
-                    _born = {"kind": "MR_REV", "dir": 1}
-                elif getattr(state, "choch_bearish", False):
-                    _born = {"kind": "MR_REV", "dir": -1}
+                if _cur is not None and _death_reason is not None:
+                    state.setup_died = True
+                    state.setup_death_reason = _death_reason
+                    self._active_setup[_asset] = None
+                    _cur = None
 
-                if _born is not None:
-                    _born.update({
-                        "age": 0,
-                        "born_state": _lsm_now,
-                        "born_compression": _comp,
-                        "last_compression": _comp,
-                        "energy": "HOLDING",
-                    })
-                    self._active_setup[_asset] = _born
-                    _cur = _born
+                # ---- STEP 3: birth check (only if nothing is alive) ----
+                if _cur is None:
+                    _born = None
+                    # TF setup is born at the BREAK (BOS), either direction.
+                    if getattr(state, "bos_bullish", False):
+                        _born = {"kind": "TF_CONT", "dir": 1}
+                    elif getattr(state, "bos_bearish", False):
+                        _born = {"kind": "TF_CONT", "dir": -1}
+                    # MR setup is born at the CHANGE OF CHARACTER (CHoCH) —
+                    # the earliest anomaly. CHoCH takes precedence when both
+                    # appear in a way that implies a reversal is starting.
+                    if getattr(state, "choch_bullish", False):
+                        _born = {"kind": "MR_REV", "dir": 1}
+                    elif getattr(state, "choch_bearish", False):
+                        _born = {"kind": "MR_REV", "dir": -1}
+
+                    if _born is not None:
+                        _born.update({
+                            "age": 0,
+                            "born_state": _lsm_now,
+                            "born_compression": _comp,
+                            "last_compression": _comp,
+                            "energy": "HOLDING",
+                        })
+                        self._active_setup[_asset] = _born
+                        _cur = _born
+
+                if _candle_ts is not None:
+                    self._traj_last_processed_ts[_asset] = _candle_ts
 
             # ---- STEP 4: publish readouts ------------------------------
             if _cur is not None:
