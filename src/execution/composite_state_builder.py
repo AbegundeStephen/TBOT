@@ -986,7 +986,17 @@ class CompositeStateBuilder:
             # condition to fire, and age incrementing twice as fast as real
             # bars. A setup now only advances once per NEW closed candle;
             # a repeat call on the same candle just republishes step 4 as-is.
-            _candle_ts = df.index[-1] if df is not None and len(df) else None
+            #
+            # df's index isn't reliably a real timestamp across callers: the
+            # live path (data_manager.clean_data) sets a datetime index, but
+            # backtest.py builds df straight from backtrader buffers with a
+            # plain RangeIndex and the timestamp as its own column instead.
+            # Prefer that column when present so the guard doesn't key off a
+            # constant index value and freeze the tracker after the first bar.
+            if df is not None and len(df):
+                _candle_ts = df["timestamp"].iloc[-1] if "timestamp" in df.columns else df.index[-1]
+            else:
+                _candle_ts = None
             _already_processed = (
                 _candle_ts is not None
                 and self._traj_last_processed_ts.get(_asset) == _candle_ts
