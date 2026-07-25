@@ -135,7 +135,7 @@
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
         "min_sl_pct": 0.006,
-        "min_rr": 1.5,
+        "min_rr": 1.0,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -218,7 +218,7 @@
         "runner_trail_atr_multiplier": 1.0,
         "min_stop_atr_mult": 2.0,
         "min_sl_pct": 0.0035,
-        "min_rr": 1.5,
+        "min_rr": 0.48,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -299,7 +299,7 @@
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 1.0,
         "min_sl_pct": 0.0025,
-        "min_rr": 1.5,
+        "min_rr": 0.67,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -381,7 +381,7 @@
         "runner_trail_atr_multiplier": 1.5,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0015,
-        "min_rr": 1.5,
+        "min_rr": 0.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -463,7 +463,7 @@
         "runner_trail_atr_multiplier": 1.5,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0012,
-        "min_rr": 1.5,
+        "min_rr": 0.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -547,7 +547,7 @@
         "runner_trail_atr_multiplier": 1.0,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0055,
-        "min_rr": 1.5,
+        "min_rr": 0.48,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -630,7 +630,7 @@
         "runner_trail_atr_multiplier": 1.5,
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0025,
-        "min_rr": 1.3,
+        "min_rr": 0.5,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
           "main_stop_add": 0.3,
@@ -1481,6 +1481,6 @@
     "independent_fire_brc_gate_enabled": false,
     "six_slot_judges_enabled": false,
     "judge_bars_enabled": false,
-    "profit_gate_real_tp_mult_enabled": false
+    "profit_gate_real_tp_mult_enabled": true
   }
 }
