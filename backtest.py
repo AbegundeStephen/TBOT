@@ -681,7 +681,10 @@ class MLStrategy(bt.Strategy):
                 asset_type=self.asset_key,
                 config=confidence_config,
                 ai_validator=self.ai_validator if self.params.use_ai_validation else None,
-                enable_detailed_logging=False,
+                # Build 2 Item 3: judge score explanations only reach the log
+                # when this is True — needed to verify what the 24 judge
+                # fixes across Build 1/2 are actually doing bar-to-bar.
+                enable_detailed_logging=True,
                 use_macro_governor=self.params.use_macro_governor,
                 use_gatekeeper=self.params.use_gatekeeper,
             )
@@ -695,7 +698,7 @@ class MLStrategy(bt.Strategy):
                 config=confidence_config,
                 ai_validator=self.ai_validator if self.params.use_ai_validation else None,
                 enable_ai_circuit_breaker=True,
-                enable_detailed_logging=False,
+                enable_detailed_logging=True,
                 strong_signal_bypass_threshold=self.params.ai_strong_signal_bypass,
                 use_macro_governor=self.params.use_macro_governor,
                 use_gatekeeper=self.params.use_gatekeeper,

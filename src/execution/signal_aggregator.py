@@ -3431,13 +3431,44 @@ class PerformanceWeightedAggregator:
                         if _ind_pc.get("independent_fire_brc_gate_enabled", False):
                             _brc_ok_i = bool(_ind_get("brc_confirmed", False))
                             _brc_dir_i = int(_ind_get("brc_direction", 0) or 0)
-                            if not (_brc_ok_i and _brc_dir_i == best_signal):
+                            _brc_kind_i = _ind_get("brc_kind", None)
+                            _brc_age_i = int(_ind_get("brc_age", 0) or 0)
+                            _brc_max_age_i = int(_ind_pc.get("brc_max_age_solo", 20))
+
+                            # Build 2: a solo fire must carry the proof kind that
+                            # matches the engine firing it.
+                            #   TF trades continuation -> needs TF_CONT
+                            #   MR trades reversal     -> needs MR_REV
+                            #   EMA is a pure confirmer with no thesis of its own.
+                            #     A confirmer cannot originate a trade — there is
+                            #     nothing for it to confirm when it fires alone —
+                            #     so it has no valid solo proof and is blocked.
+                            _required_kind = {
+                                "TF": "TF_CONT",
+                                "MR": "MR_REV",
+                            }.get(best_name)
+
+                            if _required_kind is None:
+                                logger.info(
+                                    "[INDEPENDENT] %s: %s solo fire suppressed — "
+                                    "confirmer engines cannot originate a trade "
+                                    "under the proof gate.",
+                                    self.asset_type, best_name,
+                                )
+                                candidates = []
+                            elif not (
+                                _brc_ok_i
+                                and _brc_kind_i == _required_kind
+                                and _brc_dir_i == best_signal
+                                and _brc_age_i <= _brc_max_age_i
+                            ):
                                 logger.info(
                                     "[INDEPENDENT] %s: %s solo fire suppressed — no "
-                                    "break-retest-close proof (brc_confirmed=%s "
-                                    "brc_direction=%s vs signal=%+d).",
-                                    self.asset_type, best_name, _brc_ok_i,
-                                    _brc_dir_i, best_signal,
+                                    "fresh %s proof (brc_confirmed=%s brc_kind=%s "
+                                    "brc_direction=%s brc_age=%s max=%s vs signal=%+d).",
+                                    self.asset_type, best_name, _required_kind,
+                                    _brc_ok_i, _brc_kind_i, _brc_dir_i,
+                                    _brc_age_i, _brc_max_age_i, best_signal,
                                 )
                                 candidates = []
                         # ─────────────────────────────────────────────────────

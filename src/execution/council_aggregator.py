@@ -66,7 +66,12 @@ class InstitutionalCouncilAggregator:
         ema_strategy,
         asset_type: str = "BTC",
         ai_validator=None,
-        enable_detailed_logging: bool = False,
+        # Build 2 Item 3: was False. Every judge writes an explanation of its
+        # score, but none of it reached the log because this default gated
+        # all of it off — 24 judge fixes shipped with only one provably
+        # visible in logs. Callers that explicitly pass a value (main.py's
+        # secondary/hybrid construction sites) are unaffected either way.
+        enable_detailed_logging: bool = True,
         # Council thresholds
         trend_aligned_threshold: float = 3.0,
         counter_trend_threshold: float = 3.5,
@@ -3120,7 +3125,11 @@ class InstitutionalCouncilAggregator:
                 # barely passed the threshold still get rejected. Lowered to 0.55
                 # so the score threshold (3.0) is the authoritative gate.
                 min_quality_threshold = 0.55
-                signal_quality = total_score / 5.0
+                # Build 2: was a hardcoded 5.0 — correct only while the weights
+                # summed to 5.0. With a sixth judge the ceiling moves, so quality
+                # must be measured against the real achievable maximum.
+                _sq_denom = _achievable_max if _achievable_max > 0 else 5.0
+                signal_quality = total_score / _sq_denom
 
                 if total_score < required_score:
                     logger.info(
@@ -3181,7 +3190,9 @@ class InstitutionalCouncilAggregator:
                 self.stats["avg_score_on_hold"].append(total_score)
 
             # Calculate signal quality
-            base_quality = min(total_score / 5.0, 1.0)
+            # Build 2: same hardcoded-5.0 problem as above.
+            _bq_denom = _achievable_max if _achievable_max > 0 else 5.0
+            base_quality = min(total_score / _bq_denom, 1.0)
             if signal != 0:
                 judge_agreement = sum(1 for s in chosen_scores.values() if s > 0) / len(
                     chosen_scores
