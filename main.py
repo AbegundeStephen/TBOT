@@ -4542,11 +4542,12 @@ class TradingBot:
         is_open = MarketHours.should_trade(asset_name)
         if not is_open:
             # Use the correct market type so the log message matches the asset.
-            # USTEC is a US equity index; passing "forex" produced the misleading
-            # "[MARKET] USTEC: Forex/Gold market is OPEN" message even when the
-            # US market was closed and should_trade correctly returned False.
+            # USTEC now trades USOIL's near-continuous forex-style schedule
+            # (should_trade() routes it to is_forex_market_open()), so it gets
+            # the "forex" wording here too — labeling it "stocks" would print
+            # a message describing the old NYSE-hours gate it no longer uses.
             _mkt_log_type = (
-                "stocks" if asset_name_upper in ("USTEC", "US100", "NAS100", "SPX")
+                "stocks" if asset_name_upper in ("US100", "NAS100", "SPX")
                 else "forex"
             )
             status, message = MarketHours.get_market_status(_mkt_log_type)
