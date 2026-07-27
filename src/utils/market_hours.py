@@ -306,10 +306,17 @@ class MarketHours:
             return True
 
         if asset_type in ["gold", "xauusd", "forex", "eur", "gbp", "usd", "usoil",
-                          "eurusd", "eurjpy", "gbpusd", "gbpaud", "usdjpy"]:
+                          "eurusd", "eurjpy", "gbpusd", "gbpaud", "usdjpy",
+                          "ustec", "nas100", "us100"]:
+            # USTEC moved here from the "stocks" bucket on request: it was
+            # gating on the actual NYSE cash-session clock (9:30am-4pm ET,
+            # ~14:30-21:00 UTC — mid-afternoon Nigerian time), the same
+            # narrow window as any other US stock. USOIL/forex/gold instead
+            # use the near-continuous Exness broker schedule (Sun 22:00 GMT
+            # - Fri 22:00 GMT), which is the session USTEC should match.
             return MarketHours.is_forex_market_open()
 
-        if asset_type in ["stocks", "spy", "qqq", "aapl", "ustec", "nas100", "us100"]:
+        if asset_type in ["stocks", "spy", "qqq", "aapl"]:
             return MarketHours.is_us_stock_market_open()
         
         # Default to forex hours for unknown assets
@@ -352,11 +359,6 @@ class MarketHours:
         # GBPAUD: best during London/Sydney overlap + London session.
         # Spreads blow out in late NY/Asian hours.
         "GBPAUD": [(0, 17)],
-        # Indices and commodities: US session driven.
-        # Upper bound is 22 (not 21) so winter close at 21:00 UTC (4pm EST)
-        # isn't clipped by the < comparison. should_trade() remains the
-        # binding gate — it closes at the actual market close regardless.
-        "USTEC":  [(13, 22)],
         # USOIL: data-derived from data/raw/USOILm_1h.csv hourly volume
         # (40%-of-peak threshold), not the FX-style copy-paste this used to be.
         # Peak vol ~12.7k @ 13:00 UTC. Vol drops to 5.1k (40% of peak) by hour 6
@@ -364,6 +366,11 @@ class MarketHours:
         # side — the old (7,21) window missed real hour-6 activity and let
         # entries through during the low-liquidity hour-20 tail. Reviewed 2026-06-16.
         "USOIL":  [(6, 20)],
+        # USTEC: matched to USOIL's window on request (was (13,22) — a US
+        # cash-session-driven window that, combined with should_trade()'s old
+        # stocks-bucket routing, meant USTEC only opened around mid-afternoon
+        # Nigerian time). Now trades the same session as USOIL.
+        "USTEC":  [(6, 20)],
         # BTC: 24/7 but enforce a minimum liquidity window
         "BTC":    [(0, 24)],  # no restriction by default
     }
