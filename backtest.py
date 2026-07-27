@@ -928,6 +928,19 @@ class MLStrategy(bt.Strategy):
                 except Exception as _cs_err:
                     logger.debug(f"[LSM companion] composite_state build failed: {_cs_err}")
 
+            # Council's SESSION LIQUIDITY PENALTY reads datetime.utcnow() — the
+            # real wall clock, not this bar's simulated time — so in a backtest
+            # it silently applies (or doesn't) the same +0.5 penalty to every
+            # single bar based on whatever hour it happens to be when the run
+            # is started, rather than varying per historical bar as it should.
+            # Per-request: skip that block entirely in backtests so every bar
+            # gets an equal shot at the strategy instead of an accidental,
+            # constant, wrong-clock penalty. Live is unaffected — this marker
+            # is only ever set here.
+            if governor_data is None:
+                governor_data = {}
+            governor_data["is_backtest"] = True
+
             # ── Exit logic for open positions (real VTM) ─────────────────────
             # on_new_bar grows VTM's own high/low/close arrays and bars_in_trade
             # — update_with_current_price does neither, so skipping on_new_bar
@@ -1011,6 +1024,19 @@ class MLStrategy(bt.Strategy):
                     size = self._calculate_position_size()
                     if size > 0:
                         side_str = "long" if signal == 1 else "short"
+                        # Council mode: get_aggregated_signal's own details dict
+                        # never carries trade_type (unlike PerformanceWeighted's,
+                        # set above at signal-generation time) — main.py derives
+                        # it post-hoc from livermore_state_1h (main.py trade_asset
+                        # ~4933). Without this, every council-mode backtest trade
+                        # silently defaulted to VTM's "TREND" parameter default,
+                        # regardless of what state it actually entered in.
+                        if self._agg_is_council and _cs is not None:
+                            _lsm1h = getattr(_cs, "livermore_state_1h", None)
+                            if _lsm1h in ("MAIN_UP", "MAIN_DOWN"):
+                                details["trade_type"] = "TREND"
+                            elif _lsm1h is not None:
+                                details["trade_type"] = "REVERSION"
                         signal_details = {**details, "composite_state": _cs_dict}
                         try:
                             self.trade_manager = VeteranTradeManager(
@@ -1035,7 +1061,7 @@ class MLStrategy(bt.Strategy):
                                 f"{'🟢 BUY ' if signal == 1 else '🔴 SELL'} @ ${current_price:.5f}  "
                                 f"SL=${self.trade_manager.initial_stop_loss:.5f}  "
                                 f"TP={self.trade_manager.take_profit_levels}  "
-                                f"size={size:.6f} | {details.get('reasoning','')}"
+                                f"size={size:.6f} type={details.get('trade_type', 'TREND')} | {details.get('reasoning','')}"
                             )
 
             else:
