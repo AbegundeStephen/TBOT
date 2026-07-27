@@ -595,12 +595,37 @@ class TrendFollowingStrategy(BaseStrategy):
                     if isinstance(composite_state, dict)
                     else getattr(composite_state, "brc_direction", 0)
                 )
-                if not (_brc_ok and _brc_dir == signal):
+                # Build 2: require the CONTINUATION proof specifically. A reversal
+                # proof (MR_REV) is evidence the trend is TURNING — it must not
+                # green-light a continuation entry. TF trades BOS -> retest ->
+                # close; that is what TF_CONT means.
+                _brc_kind = (
+                    composite_state.get("brc_kind", None)
+                    if isinstance(composite_state, dict)
+                    else getattr(composite_state, "brc_kind", None)
+                )
+                # Build 2: and require it to be reasonably fresh. 20 is
+                # deliberately permissive for now so the age distribution shows
+                # up in the logs and the real limit can be set from evidence.
+                _brc_age = (
+                    composite_state.get("brc_age", 0)
+                    if isinstance(composite_state, dict)
+                    else getattr(composite_state, "brc_age", 0)
+                )
+                _brc_max_age = int(_pc.get("brc_max_age_tf", 20))
+                if not (
+                    _brc_ok
+                    and _brc_kind == "TF_CONT"
+                    and _brc_dir == signal
+                    and _brc_age <= _brc_max_age
+                ):
                     if not silent:
                         logger.info(
-                            "[TF] %s: signal=%+d suppressed — no break-retest-close "
-                            "proof (brc_confirmed=%s brc_direction=%s).",
-                            getattr(self, "name", "TF"), signal, _brc_ok, _brc_dir,
+                            "[TF] %s: signal=%+d suppressed — no fresh CONTINUATION "
+                            "proof (brc_confirmed=%s brc_kind=%s brc_direction=%s "
+                            "brc_age=%s max=%s).",
+                            getattr(self, "name", "TF"), signal, _brc_ok,
+                            _brc_kind, _brc_dir, _brc_age, _brc_max_age,
                         )
                     return 0, 0.0
 

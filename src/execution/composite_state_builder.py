@@ -71,6 +71,9 @@ class CompositeStateBuilder:
         # candle timestamp the trajectory state machine actually advanced for,
         # so the redundant call republishes instead of re-rolling age/death/birth.
         self._traj_last_processed_ts = {}
+        # Build 2: per-asset BRC proof memory — {ref, first_ts, last_ts, age}.
+        # Tracks a single continuously-confirmed proof so brc_age counts bars.
+        self._brc_memory = {}
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
         self._prev_compression = {}
@@ -1178,15 +1181,66 @@ class CompositeStateBuilder:
                         _closed_through = _brc_close < _brc_ref
 
                     if _retested and _closed_through:
+                        # ── Build 2: age the proof in BARS ────────────────────
+                        # Same proof at the same reference across several bars is
+                        # ONE proof getting older, not several proofs. A different
+                        # reference means a genuinely new proof — reset to 0.
+                        #
+                        # df.index[-1] is NOT reliably the bar timestamp across
+                        # callers: the live path (data_manager.clean_data) sets a
+                        # datetime index, but backtest.py builds df straight from
+                        # backtrader buffers with a plain RangeIndex and the
+                        # timestamp as its own column instead (same footgun as
+                        # the earlier trajectory-tracker double-invocation fix in
+                        # this same file). Prefer that column when present.
+                        try:
+                            _bar_ts = (
+                                df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                                else df.index[-1]
+                            )
+                        except Exception:
+                            _bar_ts = None
+
+                        _mem = self._brc_memory.get(self.asset_type)
+
+                        if _mem is None or _mem.get("ref") != _brc_ref:
+                            # New proof at a new level.
+                            _age = 0
+                            _first_ts = _bar_ts
+                        elif _bar_ts is not None and _bar_ts != _mem.get("last_ts"):
+                            # Same proof, but a NEW bar has closed — it ages by 1.
+                            _age = int(_mem.get("age", 0)) + 1
+                            _first_ts = _mem.get("first_ts")
+                        else:
+                            # Same proof, same bar — another cycle within the bar.
+                            # Do NOT age. This is the ~22x-per-bar case.
+                            _age = int(_mem.get("age", 0))
+                            _first_ts = _mem.get("first_ts")
+
+                        self._brc_memory[self.asset_type] = {
+                            "ref": _brc_ref,
+                            "first_ts": _first_ts,
+                            "last_ts": _bar_ts,
+                            "age": _age,
+                        }
+
                         state.brc_confirmed = True
                         state.brc_direction = _brc_dir
                         state.brc_kind = _brc_kind
                         state.brc_tier = None
+                        state.brc_age = _age
+                        state.brc_first_confirmed_ts = _first_ts
+
                         logger.info(
                             "[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g "
-                            "(strict close-through, 8-bar retest)",
-                            self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close,
+                            "age=%d bar(s) (strict close-through, 8-bar retest)",
+                            self.asset_type, _brc_kind, _brc_dir, _brc_ref,
+                            _brc_close, _age,
                         )
+                    else:
+                        # Proof condition no longer holds — forget it. If it
+                        # re-forms later that is a NEW proof starting at age 0.
+                        self._brc_memory.pop(self.asset_type, None)
         except Exception as _brc_err:
             logger.debug("[BRC] compute error (non-blocking): %s", _brc_err)
 

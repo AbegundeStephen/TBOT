@@ -842,11 +842,28 @@ class MeanReversionStrategy(BaseStrategy):
                 )
                 _brc_ok2 = getattr(composite_state, "brc_confirmed", False)
                 _brc_dir2 = getattr(composite_state, "brc_direction", 0)
-                if not (_brc_ok2 and _intended_dir != 0 and _brc_dir2 == _intended_dir):
+                # Build 2: require the REVERSAL proof specifically. A continuation
+                # proof (TF_CONT) is evidence the trend is HOLDING — it must not
+                # authorise a counter-trend entry. Mode 2 trades CHoCH -> retest
+                # -> close; that is what MR_REV means.
+                _brc_kind2 = getattr(composite_state, "brc_kind", None)
+                # Build 2: and require freshness. A reversal caught several bars
+                # late is not a reversal — it is a chase.
+                _brc_age2 = int(getattr(composite_state, "brc_age", 0) or 0)
+                _brc_max_age2 = int(_pc2.get("brc_max_age_mr", 20))
+                if not (
+                    _brc_ok2
+                    and _brc_kind2 == "MR_REV"
+                    and _intended_dir != 0
+                    and _brc_dir2 == _intended_dir
+                    and _brc_age2 <= _brc_max_age2
+                ):
                     logger.info(
-                        "[MR Mode2] %s: no break-retest-close proof dir=%+d "
-                        "(brc_confirmed=%s brc_direction=%s) — full-proof gate holds.",
-                        self.asset, _intended_dir, _brc_ok2, _brc_dir2,
+                        "[MR Mode2] %s: no fresh REVERSAL proof dir=%+d "
+                        "(brc_confirmed=%s brc_kind=%s brc_direction=%s "
+                        "brc_age=%s max=%s) — full-proof gate holds.",
+                        self.asset, _intended_dir, _brc_ok2, _brc_kind2,
+                        _brc_dir2, _brc_age2, _brc_max_age2,
                     )
                     return 0, 0.0
                 logger.info(

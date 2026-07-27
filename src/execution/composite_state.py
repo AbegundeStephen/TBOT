@@ -54,6 +54,11 @@ class CompositeState:
     brc_direction: int = 0                # +1 long / -1 short
     brc_kind: Optional[str] = None        # "TF_CONT" (BOS) / "MR_REV" (CHoCH)
     brc_tier: Optional[str] = None        # RetestEngine tier if available
+    # Build 2: how old the proof is, in BARS (not cycles). 0 = completed on this
+    # bar. The bot recomputes ~22x per 1H bar, so this must key off the bar
+    # timestamp — a naive per-cycle increment would age a proof 22x per hour.
+    brc_age: int = 0
+    brc_first_confirmed_ts: Optional[object] = None
     nearby_4h_level:   Optional[float] = None
     nearby_4h_level_2: Optional[float] = None   # Second nearest 4H structural level
     # ── Route B: confirmation anchors ──
