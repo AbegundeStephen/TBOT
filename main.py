@@ -2437,11 +2437,23 @@ class TradingBot:
                 except Exception:
                     pass
 
-                _MR_SILENT_STATES = {"NATURAL_REBOUND"}   # hard veto always zeroes MR
+                # Unit 2 changed NATURAL_REBOUND from "MR silent" to "MR shorts
+                # the rebound". When the flag is ON, MR has a directional view
+                # here (even if this specific cycle's mode conditions didn't
+                # confirm it), so an opposing TF/EMA signal should face the
+                # normal counter-MR gate raise, same as any other structural
+                # state. Only treat it as silent when OFF, matching the
+                # original hard-veto premise this set was built for.
+                _rebound_short_on = bool(
+                    self.config.get("phase_config", {}).get("mr_rebound_short_enabled", False)
+                )
+                _MR_SILENT_STATES = set() if _rebound_short_on else {"NATURAL_REBOUND"}
                 _MR_ACTIVE_STATES = {
                     "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT", "SECONDARY_REBOUND",
                     "MAIN_UP", "MAIN_DOWN",
                 }
+                if _rebound_short_on:
+                    _MR_ACTIVE_STATES.add("NATURAL_REBOUND")
 
                 if _lsm_1h_state in _MR_SILENT_STATES:
                     # MR is intentionally forbidden in this state — no gate raise.
@@ -2470,6 +2482,11 @@ class TradingBot:
                     # mode was requiring less than it asks for secondary states.
                     _MR_LEAN_LONG_PERF  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT", "MAIN_DOWN"}
                     _MR_LEAN_SHORT_PERF = {"SECONDARY_REBOUND", "MAIN_UP"}
+                    # Unit 2: NATURAL_REBOUND now leans SHORT too, same as its
+                    # SECONDARY_REBOUND/MAIN_UP siblings, once MR actually has
+                    # a directional view there.
+                    if _rebound_short_on:
+                        _MR_LEAN_SHORT_PERF = _MR_LEAN_SHORT_PERF | {"NATURAL_REBOUND"}
                     _is_main_state_perf = _lsm_1h_state in ("MAIN_UP", "MAIN_DOWN")
                     _perf_lean_conflict = (
                         (signal == -1 and _lsm_1h_state in _MR_LEAN_LONG_PERF)
