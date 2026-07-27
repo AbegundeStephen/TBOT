@@ -2177,12 +2177,21 @@ class PerformanceWeightedAggregator:
             # directional hour of the FX session. Blocking it kills best entries.
             # The stop-hunt data that justified this block was from USTEC/GOLD.
             # ═══════════════════════════════════════════════════════════════
+            # Same wall-clock-vs-bar-time issue as council_aggregator.py's
+            # identical block: _dt.utcnow().hour is the real clock, not this
+            # bar's simulated time, so a backtest either blocks every bar or
+            # none of them depending on what real hour the run starts at.
+            # Skip in backtests (backtest.py sets governor_data["is_backtest"]).
             _hour_utc = _dt.utcnow().hour
-            if _hour_utc == 13 and self.asset_type in (
-                "USTEC",
-                "GOLD",
-                "USOIL",
-                "GBPAUD",
+            if (
+                not (governor_data or {}).get("is_backtest", False)
+                and _hour_utc == 13
+                and self.asset_type in (
+                    "USTEC",
+                    "GOLD",
+                    "USOIL",
+                    "GBPAUD",
+                )
             ):
                 logger.info(
                     f"[SESSION] ⏸️ NY open hour block — no new entries for {self.asset_type}"

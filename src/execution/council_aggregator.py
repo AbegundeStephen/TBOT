@@ -1215,16 +1215,28 @@ class InstitutionalCouncilAggregator:
         # best liquidity hour). USOIL and GBPAUD added: same stop-hunting
         # behaviour as GOLD/USTEC at NY open (53% WR, -21% P&L in that hour).
         # ════════════════════════════════════════════════════════════════════
+        # Same wall-clock-vs-bar-time issue as the SESSION LIQUIDITY PENALTY
+        # below: _dt.utcnow().hour is the real clock, not this bar's simulated
+        # time, so in a backtest it doesn't vary per bar — it either blocks
+        # every single bar or none of them, depending on what real hour the
+        # run happens to start at. This one is a hard block (not just a score
+        # penalty), so an accidental match is much more damaging: it silently
+        # zeroed 100% of a GOLD backtest run started at 13:xx UTC. Skip in
+        # backtests, same as the session penalty.
         _hour_utc = _dt.utcnow().hour
-        if _hour_utc == 13 and self.asset_type in (
-            "USTEC",
-            "US100",
-            "NAS100",
-            "GOLD",
-            "XAUUSD",
-            "USOIL",
-            "OIL",
-            "GBPAUD",
+        if (
+            not (governor_data or {}).get("is_backtest", False)
+            and _hour_utc == 13
+            and self.asset_type in (
+                "USTEC",
+                "US100",
+                "NAS100",
+                "GOLD",
+                "XAUUSD",
+                "USOIL",
+                "OIL",
+                "GBPAUD",
+            )
         ):
             logger.info(
                 f"[COUNCIL] ⏸️ NY open hour block — no new entries for {self.asset_type}"
@@ -2914,72 +2926,82 @@ class InstitutionalCouncilAggregator:
 
                 # C. SESSION LIQUIDITY PENALTY (Extended to all MT5 Assets)
                 try:
-                    from src.utils.market_hours import MarketHours
-
-                    _hour_utc_s = _dt.utcnow().hour
-
-                    # 1. BTC (Binance) is 24/7 - only check for global liquidity lows
-                    if "BTC" in self.asset_type:
-                        session_quality = MarketHours.get_btc_session_quality()
-                        if session_quality == "LOW":
-                            required_score += 0.5
-                            logger.info(
-                                f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}"
-                            )
-
-                    # 2. MT5/Exness Assets - Apply Session Penalties
-                    #
-                    # NOTE: This used to hardcode its own hour ranges per asset,
-                    # duplicating (and drifting from) MarketHours.PREFERRED_SESSIONS
-                    # in market_hours.py. Found 2026-06-16: OIL here was stuck at a
-                    # stale "13-19 UTC" guess while market_hours.py had been updated
-                    # to the data-derived (6,20) window — the same asset/cycle could
-                    # be judged in-session by one gate and off-session by this one.
-                    # Now delegates to MarketHours so there's a single source of
-                    # truth; only the category-matching (which canonical key this
-                    # asset maps to) stays local, since self.asset_type spelling
-                    # varies (e.g. "GOLD" vs "XAUUSD").
+                    # This reads datetime.utcnow() — real wall-clock time, not the
+                    # bar's own simulated time — so in a backtest it doesn't vary per
+                    # historical bar at all; it applies (or doesn't) the same penalty
+                    # to every bar based on whatever hour the run happened to start
+                    # at. backtest.py sets governor_data["is_backtest"] so every bar
+                    # gets an equal shot at the strategy instead of that accidental,
+                    # wrong-clock penalty. Live trading never sets this marker.
+                    if (governor_data or {}).get("is_backtest", False):
+                        pass
                     else:
-                        is_off_session = False
-                        asset = self.asset_type.upper()
+                        from src.utils.market_hours import MarketHours
 
-                        _session_key = None
-                        if any(
-                            x in asset
-                            for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")
-                        ):
-                            # Each FX pair has its own window in PREFERRED_SESSIONS;
-                            # use the exact pair if recognized, else fall back to
-                            # the generic EURUSD window.
-                            _session_key = (
-                                asset
-                                if asset in MarketHours.PREFERRED_SESSIONS
-                                else "EURUSD"
-                            )
-                        elif "GOLD" in asset or "XAU" in asset:
-                            _session_key = "GOLD"
-                        elif any(
-                            x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")
-                        ):
-                            _session_key = "USTEC"
-                        elif "OIL" in asset:
-                            _session_key = "USOIL"
+                        _hour_utc_s = _dt.utcnow().hour
 
-                        if _session_key and not MarketHours.is_preferred_session(
-                            _session_key
-                        ):
-                            is_off_session = True
-                            _window = MarketHours.PREFERRED_SESSIONS.get(_session_key)
-                            logger.info(
-                                f"[SESSION] ⚠️ {_session_key} off-session "
-                                f"({_hour_utc_s}:00 UTC, window={_window})"
-                            )
+                        # 1. BTC (Binance) is 24/7 - only check for global liquidity lows
+                        if "BTC" in self.asset_type:
+                            session_quality = MarketHours.get_btc_session_quality()
+                            if session_quality == "LOW":
+                                required_score += 0.5
+                                logger.info(
+                                    f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}"
+                                )
 
-                        if is_off_session:
-                            required_score += 0.5
-                            logger.info(
-                                f"[SESSION] Required score +0.5 → {required_score:.1f}"
-                            )
+                        # 2. MT5/Exness Assets - Apply Session Penalties
+                        #
+                        # NOTE: This used to hardcode its own hour ranges per asset,
+                        # duplicating (and drifting from) MarketHours.PREFERRED_SESSIONS
+                        # in market_hours.py. Found 2026-06-16: OIL here was stuck at a
+                        # stale "13-19 UTC" guess while market_hours.py had been updated
+                        # to the data-derived (6,20) window — the same asset/cycle could
+                        # be judged in-session by one gate and off-session by this one.
+                        # Now delegates to MarketHours so there's a single source of
+                        # truth; only the category-matching (which canonical key this
+                        # asset maps to) stays local, since self.asset_type spelling
+                        # varies (e.g. "GOLD" vs "XAUUSD").
+                        else:
+                            is_off_session = False
+                            asset = self.asset_type.upper()
+
+                            _session_key = None
+                            if any(
+                                x in asset
+                                for x in ("EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")
+                            ):
+                                # Each FX pair has its own window in PREFERRED_SESSIONS;
+                                # use the exact pair if recognized, else fall back to
+                                # the generic EURUSD window.
+                                _session_key = (
+                                    asset
+                                    if asset in MarketHours.PREFERRED_SESSIONS
+                                    else "EURUSD"
+                                )
+                            elif "GOLD" in asset or "XAU" in asset:
+                                _session_key = "GOLD"
+                            elif any(
+                                x in asset for x in ("USTEC", "US100", "NAS", "US30", "SPX")
+                            ):
+                                _session_key = "USTEC"
+                            elif "OIL" in asset:
+                                _session_key = "USOIL"
+
+                            if _session_key and not MarketHours.is_preferred_session(
+                                _session_key
+                            ):
+                                is_off_session = True
+                                _window = MarketHours.PREFERRED_SESSIONS.get(_session_key)
+                                logger.info(
+                                    f"[SESSION] ⚠️ {_session_key} off-session "
+                                    f"({_hour_utc_s}:00 UTC, window={_window})"
+                                )
+
+                            if is_off_session:
+                                required_score += 0.5
+                                logger.info(
+                                    f"[SESSION] Required score +0.5 → {required_score:.1f}"
+                                )
 
                 except Exception as e:
                     logger.warning(f"[SESSION] Gate calculation failed: {e}")
