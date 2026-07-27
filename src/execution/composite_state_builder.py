@@ -657,6 +657,11 @@ class CompositeStateBuilder:
                     snap1 = self._livermore_1h.update(_close1, _atr1)
                     state.livermore_state_1h = snap1.state
                     state.livermore_state_age_1h = snap1.state_age
+                    # BRC-FIX: 1H-native natural anchors, for BRC's MR_REV
+                    # reference (born off a 1H CHoCH — the 4H anchor above
+                    # has no timing relationship to that event).
+                    state.livermore_anchor_natural_high_1h = snap1.anchor_natural_high
+                    state.livermore_anchor_natural_low_1h = snap1.anchor_natural_low
 
             except Exception as _lsm_err:
                 logger.debug(
@@ -1124,10 +1129,35 @@ class CompositeStateBuilder:
             if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 9:
                 _brc_ref = None
                 if _brc_kind == "MR_REV":
+                    # BRC-FIX: MR_REV is born off a 1H CHoCH, so its retest
+                    # reference must be the 1H-native anchor. The plain
+                    # livermore_anchor_natural_low/high fields are 4H-only
+                    # (populated from snap4) and have no timing relationship
+                    # to a 1H reversal — reading them here was validating the
+                    # setup against the wrong timeframe's anchor, which is
+                    # frequently None (whenever the 4H machine sits in
+                    # MAIN_UP/MAIN_DOWN) regardless of what's really happening
+                    # on the 1H tape that actually birthed this setup.
                     _brc_ref = (
-                        getattr(state, "livermore_anchor_natural_low", None) if _brc_dir == 1
-                        else getattr(state, "livermore_anchor_natural_high", None)
+                        getattr(state, "livermore_anchor_natural_low_1h", None) if _brc_dir == 1
+                        else getattr(state, "livermore_anchor_natural_high_1h", None)
                     )
+                    # BRC-FIX Part B: graceful-degradation fallback. The 1H
+                    # anchor above is still None for setups born while the 1H
+                    # Livermore state itself is already in MAIN_UP/MAIN_DOWN
+                    # (the natural anchor genuinely doesn't exist yet there —
+                    # verified this is a real, residual ~2.5-5% of MR_REV
+                    # checks even after the 1H-anchor fix). Rather than stay
+                    # silent, fall back to the nearest structural level (the
+                    # 4H swing TF_CONT already uses) — not a perfect proxy for
+                    # a reversal's broken level, but a sane "closest structural
+                    # level" so BRC still gets a reasonable reference instead
+                    # of a permanent no-op for this minority of setups.
+                    if _brc_ref is None or float(_brc_ref) <= 0:
+                        _brc_ref = (
+                            getattr(state, "last_swing_low_4h", None) if _brc_dir == 1
+                            else getattr(state, "last_swing_high_4h", None)
+                        )
                 elif _brc_kind == "TF_CONT":
                     _brc_ref = (
                         getattr(state, "last_swing_high_4h", None) if _brc_dir == 1

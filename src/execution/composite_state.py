@@ -163,6 +163,14 @@ class CompositeState:
     livermore_anchor_main_down_min: Optional[float] = None
     livermore_anchor_natural_high: Optional[float] = None
     livermore_anchor_natural_low: Optional[float] = None
+    # BRC-FIX (Desire's BRC/stale-state investigation, Issue 1): the plain
+    # livermore_anchor_natural_high/low above are 4H-only (populated from
+    # snap4) — but MR_REV setups are born off a 1H CHoCH, so BRC's retest
+    # check was validating a 1H-triggered reversal against a 4H anchor that
+    # has no timing relationship to it. These are the real 1H counterparts,
+    # from the 1H Livermore instance (snap1), for BRC's MR_REV reference.
+    livermore_anchor_natural_high_1h: Optional[float] = None
+    livermore_anchor_natural_low_1h: Optional[float] = None
     livermore_state_age_4h: int = 0
     livermore_state_age_1h: int = 0
     livermore_dual_confirmation: bool = False

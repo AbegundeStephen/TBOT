@@ -1104,7 +1104,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         State routing:
           NATURAL_RETRACEMENT   → Mode 1 (Pullback Completion, LONG only)
-          NATURAL_REBOUND       → zero  (MR silent zone; LONGs blocked by Phase 2 HVL)
+          NATURAL_REBOUND       → Mode 1 SHORT if mr_rebound_short_enabled else 0
           SECONDARY_RETRACEMENT → Mode 2 (Counter-Trend, LONG)
           SECONDARY_REBOUND     → Mode 2 (Counter-Trend, SHORT)
           MAIN_UP               → hold (Mode 3 removed, Fix 2c)
@@ -1121,21 +1121,36 @@ class MeanReversionStrategy(BaseStrategy):
             if composite_state is not None:
                 lsm_state = getattr(composite_state, "livermore_state_1h", None)
 
+            # Issue 3 (BRC/stale-state investigation): these labels used to
+            # hardcode NATURAL_REBOUND as "SILENT_ZONE" regardless of Unit 2's
+            # flag, even though the routing below actually fires a real SHORT
+            # there when the flag is on — the label was lying about what the
+            # bot just did, costing real debugging time. Made flag-aware so
+            # the log matches the true routing decision.
+            _rebound_on = bool(
+                (getattr(composite_state, "phase_config", {}) or {}).get(
+                    "mr_rebound_short_enabled", False
+                )
+            ) if composite_state is not None else False
+
             # ── MR routing diagnostic (Issue 2 Step 1 — always visible at INFO) ──
             _mode_label = {
                 "NATURAL_RETRACEMENT":   "Mode1(Pullback/LONG)",
-                "NATURAL_REBOUND":       "SILENT_ZONE",
+                "NATURAL_REBOUND":       "Mode1(Rebound/SHORT)" if _rebound_on else "SILENT_ZONE",
                 "SECONDARY_RETRACEMENT": "Mode2(Counter/LONG)",
                 "SECONDARY_REBOUND":     "Mode2(Counter/SHORT)",
-                "MAIN_UP":               "HOLD(Mode3 removed)",
-                "MAIN_DOWN":             "HOLD(Mode3 removed)",
+                "MAIN_UP":               "HOLD(no-fade)",
+                "MAIN_DOWN":             "HOLD(no-fade)",
             }
             # Plain-English what's-actually-happening line, added 2026-06-23 so the
             # GATE line is self-explanatory without needing to know the codebase.
             # Cosmetic only — does not affect routing/decision logic below.
             _mode_desc = {
                 "NATURAL_RETRACEMENT":   "buying the pullback in an uptrend (needs Wyckoff spring)",
-                "NATURAL_REBOUND":       "silent zone — no MR setup, longs blocked",
+                "NATURAL_REBOUND":       (
+                    "shorting the rebound in a downtrend (needs Wyckoff upthrust)" if _rebound_on
+                    else "silent zone — no MR setup, longs blocked"
+                ),
                 "SECONDARY_RETRACEMENT": "counter-trend LONG — fading a deep pullback, expecting a bounce",
                 "SECONDARY_REBOUND":     "counter-trend SHORT — fading a deep bounce, expecting reversion down",
                 "MAIN_UP":               "Mode 3 (climax fade) removed — fires without proof, holding",
