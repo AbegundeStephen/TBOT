@@ -3376,6 +3376,13 @@ class InstitutionalCouncilAggregator:
                 },
                 "buy_scores": buy_scores,
                 "sell_scores": sell_scores,
+                # Build 2 Item 3: per-judge explanation strings for BOTH sides,
+                # not just the side that won — "explanations" below only ever
+                # carries one side (or both concatenated on a HOLD), which
+                # can't sit next to the BUY/SELL scorecard the way a reader
+                # would expect. _log_decision_bidirectional reads these.
+                "buy_explanations": buy_explanations,
+                "sell_explanations": sell_explanations,
                 "buy_total": buy_total,
                 "sell_total": sell_total,
                 # Part 5.2/5.3 (Brain Rebuild): legacy trend reference, for
@@ -5701,6 +5708,14 @@ class InstitutionalCouncilAggregator:
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
             logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
 
+        # Build 2 Item 3: each judge writes an explanation of its own score
+        # (e.g. "STRUCT BUY: ✅ Bullish BOS (1.28) +defended(0.62)"), but
+        # nothing ever printed it — only the numeric bars above. Without this,
+        # 24 judge fixes shipped and exactly one was provable from the logs.
+        if self.detailed_logging:
+            for _exp in details.get("buy_explanations", []) or []:
+                logger.info(f"  {_exp}")
+
         logger.info(f"")
         _sell_rounded = {j: round(s, 2) for j, s in details["sell_scores"].items()}
         logger.info(f"SELL SCORECARD (Total: {sum(_sell_rounded.values()):.2f}/{_ceiling:.1f}):")
@@ -5709,6 +5724,10 @@ class InstitutionalCouncilAggregator:
             pct = (score / max_score * 100) if max_score > 0 else 0
             bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
             logger.info(f"  {judge.upper():12s} [{bar}] {score:.2f}/{max_score:.1f}")
+
+        if self.detailed_logging:
+            for _exp in details.get("sell_explanations", []) or []:
+                logger.info(f"  {_exp}")
 
         logger.info(f"")
         logger.info(f"DECISION: {details['decision_type']}")
