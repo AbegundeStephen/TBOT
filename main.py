@@ -2464,48 +2464,23 @@ class TradingBot:
                     )
                 elif _lsm_1h_state in _MR_ACTIVE_STATES:
                     # MR had a structural context but mode conditions weren't met.
-                    # Direction-aware raise, mirroring the council aggregator's MR
-                    # lean-conflict gate (council_aggregator.py, fixed 2026-06-16):
-                    #   • Opposite to MR's lean, secondary/natural state → 0.60
-                    #   • Opposite to MR's lean, MAIN_UP/MAIN_DOWN        → 0.70
-                    #     (MAIN states are a more extreme overextension — same
-                    #     rationale as the council gate's 1.5-vs-0.5 bump split.)
-                    #   • Same direction as MR's lean, or no clear lean  → 0.45
+                    # A modest raise is still appropriate — MR was in play, just
+                    # didn't confirm this cycle.
                     #
-                    # FIX 2026-06-16: MAIN_UP/MAIN_DOWN used to be absent from both
-                    # lean sets below, so an opposite-lean MAIN conflict silently
-                    # fell into the generic "conditions unmet" branch and got the
-                    # SMALLER 0.45 raise — the same class of inversion bug just
-                    # fixed in council_aggregator.py's bump, but unfixed here until
-                    # now. Found via a live USOIL/USTEC comparison: council mode
-                    # now requires the bigger bump for MAIN states; performance
-                    # mode was requiring less than it asks for secondary states.
-                    _MR_LEAN_LONG_PERF  = {"SECONDARY_RETRACEMENT", "NATURAL_RETRACEMENT", "MAIN_DOWN"}
-                    _MR_LEAN_SHORT_PERF = {"SECONDARY_REBOUND", "MAIN_UP"}
-                    # Unit 2: NATURAL_REBOUND now leans SHORT too, same as its
-                    # SECONDARY_REBOUND/MAIN_UP siblings, once MR actually has
-                    # a directional view there.
-                    if _rebound_short_on:
-                        _MR_LEAN_SHORT_PERF = _MR_LEAN_SHORT_PERF | {"NATURAL_REBOUND"}
-                    _is_main_state_perf = _lsm_1h_state in ("MAIN_UP", "MAIN_DOWN")
-                    _perf_lean_conflict = (
-                        (signal == -1 and _lsm_1h_state in _MR_LEAN_LONG_PERF)
-                        or (signal == +1 and _lsm_1h_state in _MR_LEAN_SHORT_PERF)
+                    # Build 3: this used to escalate further (0.60/0.70) when MR's
+                    # Livermore lean opposed the council's direction — the same
+                    # lean-conflict tax council_aggregator.py's own gate applied,
+                    # removed there in favour of the ownership rule (an engine
+                    # must propose a side before it can fire; the opposing side
+                    # can't fire at all, so there's nothing left to tax). This
+                    # performance-mode copy is now dead weight for the same
+                    # reason — removed rather than left to duplicate a mechanism
+                    # that no longer exists on the council path.
+                    min_quality = 0.45
+                    logger.info(
+                        f"[PERFORMANCE] {asset_name}: MR conditions unmet "
+                        f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
                     )
-                    if _perf_lean_conflict:
-                        min_quality = 0.70 if _is_main_state_perf else 0.60
-                        logger.warning(
-                            f"[PERFORMANCE] {asset_name}: MR lean conflict "
-                            f"(LSM={_lsm_1h_state}, signal={'SELL' if signal == -1 else 'BUY'}) "
-                            f"— gate: 0.28 → {min_quality:.2f} "
-                            f"({'MAIN-state' if _is_main_state_perf else 'secondary'}-lean)"
-                        )
-                    else:
-                        min_quality = 0.45
-                        logger.info(
-                            f"[PERFORMANCE] {asset_name}: MR conditions unmet "
-                            f"(Livermore={_lsm_1h_state}) — gate: 0.28 → 0.45"
-                        )
                 else:
                     # No Livermore state (warmup/legacy) — full raise, MR has no opinion.
                     min_quality = 0.60
@@ -5567,9 +5542,6 @@ class TradingBot:
                     elif "Opposite Trend" in _dt:
                         block_source = "Opposite Trend Veto"
                         block_reason = "TF signal strongly opposes council direction"
-                    elif "MR lean conflict" in _dt:
-                        block_source = "MR Lean Conflict"
-                        block_reason = _dt.replace("HOLD (", "").rstrip(")")
                     elif "BLOCKED" in _dt and "(" in _dt:
                         # Generic council early-return block — extract label from parens
                         block_source = _dt.split("(", 1)[-1].rstrip(")")
