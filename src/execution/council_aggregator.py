@@ -2506,6 +2506,77 @@ class InstitutionalCouncilAggregator:
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
             _sell_clears = _sell_score_pct >= _sell_required_pct
 
+            # ══════════════════════════════════════════════════════════════
+            # BUILD 3: OWNERSHIP RULE
+            # A side can only fire if a signal ENGINE proposed it. The four
+            # evidence judges (STRUCTURE, MOMENTUM, PATTERN, VOLUME) confirm
+            # or deny a thesis — they cannot originate one. Without this they
+            # can clear the threshold alone (they max at 3.5 vs a 3.20 bar),
+            # producing entries with no BOS, no retest and no close-through.
+            #
+            # EMA is excluded deliberately: it is a pure confirmer with no
+            # thesis of its own, so it cannot own a cycle.
+            # ══════════════════════════════════════════════════════════════
+            _buy_has_thesis  = (tf_signal == 1)  or (mr_signal == 1)
+            _sell_has_thesis = (tf_signal == -1) or (mr_signal == -1)
+
+            # Two engines pointing opposite ways is a genuine conflict, not a
+            # close call to be settled by adding up scores. Sit it out — this
+            # mirrors the existing ambiguous_both_sides_cleared precedent.
+            _opposing_theses = (
+                (tf_signal == 1 and mr_signal == -1)
+                or (tf_signal == -1 and mr_signal == 1)
+            )
+
+            # Capture what WOULD have fired, before the gate closes it, so the
+            # shadow engine can still track the outcome (Item 2 below).
+            _ownership_intended = 0
+            if _buy_clears and not _sell_clears:
+                _ownership_intended = 1
+            elif _sell_clears and not _buy_clears:
+                _ownership_intended = -1
+            _ownership_blocked_reason = ""
+
+            if _opposing_theses:
+                if _buy_clears or _sell_clears:
+                    _ownership_blocked_reason = "thesis_conflict"
+                    logger.info(
+                        "[COUNCIL] %s: HOLD — opposing theses (TF=%+d, MR=%+d). "
+                        "Two engines disagree; not arbitrating by score.",
+                        self.asset_type, tf_signal, mr_signal,
+                    )
+                _buy_clears = False
+                _sell_clears = False
+            else:
+                # Thesis required, AND the owning side must outscore the other.
+                # A thesis whose own evidence points the other way is not a trade.
+                _buy_ok  = _buy_has_thesis  and (buy_total > sell_total)
+                _sell_ok = _sell_has_thesis and (sell_total > buy_total)
+
+                if _buy_clears and not _buy_ok:
+                    _ownership_blocked_reason = (
+                        "no_thesis_backing" if not _buy_has_thesis else "outvoted"
+                    )
+                    logger.info(
+                        "[COUNCIL] %s: BUY killed — %s (TF=%+d MR=%+d, "
+                        "buy=%.2f vs sell=%.2f).",
+                        self.asset_type, _ownership_blocked_reason,
+                        tf_signal, mr_signal, buy_total, sell_total,
+                    )
+                if _sell_clears and not _sell_ok:
+                    _ownership_blocked_reason = (
+                        "no_thesis_backing" if not _sell_has_thesis else "outvoted"
+                    )
+                    logger.info(
+                        "[COUNCIL] %s: SELL killed — %s (TF=%+d MR=%+d, "
+                        "sell=%.2f vs buy=%.2f).",
+                        self.asset_type, _ownership_blocked_reason,
+                        tf_signal, mr_signal, sell_total, buy_total,
+                    )
+
+                _buy_clears  = _buy_clears  and _buy_ok
+                _sell_clears = _sell_clears and _sell_ok
+
             # 3. Regime/Livermore disagreement: full-cycle HOLD only under the
             #    Gate Tier 3.3 emergency brake (disagreement_gate_shadow_enabled=True).
             #    Default path already applied the graduated threshold bump above and
@@ -2524,6 +2595,12 @@ class InstitutionalCouncilAggregator:
             # the Structure judge — the one reading price location directly —
             # break the tie; if it doesn't lean either way, this is genuine
             # ambiguity and the right answer is to wait, not guess.
+            #
+            # Build 3: the ownership rule above requires the firing side to
+            # outscore the other (buy_total > sell_total or vice versa), so
+            # both flags being True here can no longer happen — this branch
+            # is unreachable. Left in place: an exact tie now means neither
+            # clears (HOLD), the same outcome this branch already produced.
             elif _buy_clears and _sell_clears:
                 _price_action_leans_buy  = buy_scores.get("structure", 0) > sell_scores.get("structure", 0)
                 _price_action_leans_sell = sell_scores.get("structure", 0) > buy_scores.get("structure", 0)
@@ -2562,8 +2639,12 @@ class InstitutionalCouncilAggregator:
                     -1, sell_total, _sell_threshold, sell_scores
                 )
 
-            # Capture initial consensus before penalties and vetos
-            original_signal = signal
+            # Capture initial consensus before penalties and vetos.
+            # Build 3: when the ownership rule kills a side, `signal` is already
+            # 0 here — so surface the intended direction instead. main.py uses
+            # original_signal to decide whether to open a shadow position, and
+            # a silent block would leave the rule permanently unmeasured.
+            original_signal = signal if signal != 0 else _ownership_intended
 
             # ── Council fix #4: CONVICTION MARGIN (flag-gated, default 0.0) ──────
             # Audit §12C.4: the decision uses one side's absolute total and ignores
@@ -3202,140 +3283,34 @@ class InstitutionalCouncilAggregator:
             signal_quality = base_quality * (0.8 + 0.2 * judge_agreement)
             signal_quality = min(signal_quality, 1.0)
 
-            # ── MR lean conflict gate ────────────────────────────────────────────
-            # When MR's Livermore routing wanted to go the OPPOSITE direction but
-            # was blocked by a mode gate (returned 0, 0.0), the council needs higher
-            # conviction before going against MR's structural read.
-            #
-            # Root cause of USOIL June-2026 loss: SECONDARY_RETRACEMENT→MR lean LONG,
-            # council SELL scored exactly 3.50 (threshold=3.50) → trade executed.
-            # Price went up; the bounce MR identified was real.
-            #
-            # Root cause of BTC June-2026 loss: MAIN_UP → MR Mode3 (climax fade/SHORT).
-            # No reversal candle found so MR returned 0, but price WAS overextended.
-            # Council scored BUY 4.0 (trend+structure+momentum all max, zero pattern/volume)
-            # and entered long at the top of an overextended leg → hit stop loss.
-            # The prior comment "council going WITH the trend is correct" was wrong:
-            # MAIN_UP means the leg is already extended; MR failing to find a reversal
-            # candle means "not yet" for the fade, NOT "safe to buy."
-            #
-            # States and conflict bumps:
-            #   SECONDARY_RETRACEMENT → MR leans LONG  → council SELL needs +0.5
-            #   NATURAL_RETRACEMENT   → MR leans LONG  → council SELL needs +0.5
-            #   SECONDARY_REBOUND     → MR leans SHORT → council BUY  needs +0.5
-            #   MAIN_UP               → MR leans SHORT → council BUY  needs +1.5
-            #   MAIN_DOWN             → MR leans LONG  → council SELL needs +1.5
-            # Excluded: NATURAL_REBOUND (MR silent by design).
-            # The +1.5 bump for MAIN states (vs +0.5 for secondary) reflects that
-            # MAIN_UP/DOWN represents a more extreme overextension — only truly
-            # exceptional council scores (≥ base + 1.5) justify going with the trend.
-            # Mode-driven (phase_config.council_mr_lean_mode):
-            #   "off"    → gate skipped entirely. The council still consumes the
-            #              Livermore read directly elsewhere (livermore_state_1h is
-            #              used by the trend-judge confirmation, lifecycle guard, and
-            #              regime-disagreement gate), so removing THIS veto does not
-            #              blind the council to structure.
-            #   "strict" → legacy hard veto (bumps 1.5 MAIN / 0.5 secondary).
-            #   "soft"   → relaxed bumps from phase_config (default 0.25 / 0.0).
-            # Read from _composite_state (live phase_config), NOT self.config (preset,
-            # never carries phase_config → always {}). Until now "soft" worked only
-            # because its code defaults happened to match config; the tunable bumps
-            # were ignored. This makes config-driven tuning actually take effect.
-            _pc_mrlean = getattr(_composite_state, "phase_config", {}) or {}
-            _mr_lean_mode = (
-                str(_pc_mrlean.get("council_mr_lean_mode", "soft")).strip().lower()
-            )
-            if (
-                _mr_lean_mode != "off"
-                and signal != 0
-                and not (
-                    (mr_signal == 1 and signal == 1) or (mr_signal == -1 and signal == -1)
+            # Build 3: attribute an ownership-rule block so main.py's shadow
+            # engine can see it instead of it reading as a plain, unexplained
+            # HOLD. Without this, original_signal correctly carries the
+            # intended direction (see above) but nothing tells main.py WHY
+            # signal is 0, and the block goes permanently unmeasured.
+            if signal == 0 and _ownership_blocked_reason:
+                decision_type = f"BLOCKED (Ownership Rule: {_ownership_blocked_reason})"
+                reasoning = (
+                    f"Ownership rule: {_ownership_blocked_reason}. "
+                    f"TF={tf_signal:+d} MR={mr_signal:+d} "
+                    f"buy={buy_total:.2f} sell={sell_total:.2f}."
                 )
-            ):
-                _lsm_lean = (
-                    getattr(_composite_state, "livermore_state_1h", None)
-                    if _composite_state
-                    else None
-                )
-                _MR_LEAN_LONG = {
-                    "SECONDARY_RETRACEMENT",
-                    "NATURAL_RETRACEMENT",
-                    "MAIN_DOWN",
-                }
-                _MR_LEAN_SHORT = {"SECONDARY_REBOUND", "NATURAL_REBOUND", "MAIN_UP"}
-                _lean_conflict = (signal == -1 and _lsm_lean in _MR_LEAN_LONG) or (
-                    signal == +1 and _lsm_lean in _MR_LEAN_SHORT
-                )
-                if _lean_conflict:
-                    _lean_dir = "LONG" if _lsm_lean in _MR_LEAN_LONG else "SHORT"
-                    _council_dir = "SELL" if signal == -1 else "BUY"
-                    # Use fixed base threshold (trend_aligned_threshold), not the
-                    # already-adjusted required_score — prevents lifecycle and other
-                    # adjustments from stacking and compounding the raise.
-                    # MAIN states get a larger bump: price is more overextended and
-                    # the historical failure rate is higher (observed June-2026).
-                    # FIX 2026-06-16 (first pass): swapped from inverted (0.0 for
-                    # MAIN, 0.50 for non-MAIN) to (0.50 for MAIN, 0.0 for non-MAIN).
-                    # FIX 2026-06-16 (second pass): first pass only fixed which side
-                    # got a bump, not the magnitudes — the comment block above (see
-                    # "States and conflict bumps") documents a 0.5 / 1.5 split, not
-                    # 0.0 / 0.5. Caught live: USTEC MAIN_UP conflict scored 4.25,
-                    # cleared the old 3.5 bar (3.0+0.5) and executed, but would have
-                    # failed the documented 4.5 bar (3.0+1.5). Now matches the spec.
-                    _is_main_state = _lsm_lean in ("MAIN_UP", "MAIN_DOWN")
-                    if _mr_lean_mode == "strict":
-                        # Legacy hard-veto bumps (pre-2026-06-24 behaviour).
-                        _bump = 1.50 if _is_main_state else 0.50
-                    else:
-                        # "soft" (default): relaxed, tunable bumps. Funnel+shadow soak
-                        # (6/20-6/24) showed the +1.5 MAIN bump (bar = 2.75+1.5 = 4.25)
-                        # blocking GOLD/USOIL/BTC trend signals scoring 4.0-4.3 that the
-                        # shadow engine forward-tracked as winners. Default 0.25 MAIN
-                        # keeps a light structural caution without amputating them.
-                        _bump = (
-                            float(_pc_mrlean.get("council_mr_lean_bump_main", 0.25))
-                            if _is_main_state
-                            else float(
-                                _pc_mrlean.get("council_mr_lean_bump_secondary", 0.0)
-                            )
-                        )
-                    # Item 2.12: soften when Structure judge already drove the
-                    # signal — Structure independently re-confirms a defended
-                    # level/BOS, so this conflict gate is largely re-asking the
-                    # same question Structure already answered. When Trend or
-                    # Momentum drove it instead, keep the bump at full strength —
-                    # that IS a genuine second opinion against MR's lean.
-                    _driven_by_structure = chosen_scores.get("structure", 0) > (
-                        0.6 * total_score if total_score else 0
-                    )
-                    if _driven_by_structure:
-                        _bump = _bump * 0.3
-                    _conflict_req = min(self.trend_aligned_threshold + _bump, 5.0)
-                    if total_score < _conflict_req:
-                        logger.warning(
-                            f"[COUNCIL] 🛑 MR lean conflict: LSM={_lsm_lean} → MR leans "
-                            f"{_lean_dir} but council wants {_council_dir}. "
-                            f"Score {total_score:.2f} < {_conflict_req:.2f} "
-                            f"(bump={_bump:+.1f}, main_state={_is_main_state}) — signal blocked."
-                        )
-                        signal = 0
-                        signal_quality = 0.0
-                        decision_type = f"HOLD (MR lean conflict — {_lsm_lean})"
-                    elif _bump == 0.0:
-                        # No threshold elevation actually occurred (bump=0) — saying
-                        # "cleared elevated bar" here is misleading since there was
-                        # nothing to clear. Log the conflict as noted, not resolved.
-                        logger.info(
-                            f"[COUNCIL] LSM={_lsm_lean} noted — MR leans {_lean_dir} "
-                            f"vs council {_council_dir}, no threshold bump configured "
-                            f"for this state — deferred to downstream Livermore gate."
-                        )
-                    else:
-                        logger.info(
-                            f"[COUNCIL] ⚠️ MR lean conflict: LSM={_lsm_lean} → MR leans "
-                            f"{_lean_dir} vs council {_council_dir} — cleared elevated bar "
-                            f"{total_score:.2f} ≥ {_conflict_req:.2f} (bump={_bump:+.1f})."
-                        )
+
+            # ── MR lean conflict gate: REMOVED (Build 3) ──────────────────
+            # This raised required_score when the council's direction opposed
+            # MR's Livermore lean — a tax on trading against MR, tuned to
+            # 1.5, then 0.25, then effectively 0.0 for secondary states.
+            #
+            # The ownership rule above replaces it structurally: the opposing
+            # side can no longer fire at all, so there is no bar to price.
+            #
+            # The two losses this gate was built on are both covered, harder:
+            #   USOIL Jun2026 — MR leaned LONG, council took SELL at exactly
+            #     threshold, price rose. Under ownership: MR had no signal, so
+            #     no owner on the sell side → HOLD.
+            #   BTC Jun2026 — MAIN_UP, MR wanted to fade, council bought 4.0
+            #     at the top of an extended leg, stopped out. Same → HOLD.
+            # ──────────────────────────────────────────────────────────────
 
             # Enhance reasoning with specific bonuses
             main_reasoning = (
