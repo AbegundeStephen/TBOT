@@ -907,16 +907,30 @@ class MeanReversionStrategy(BaseStrategy):
             logger.info(f"[MR Mode2] {self.asset}: ADX={adx_val:.1f} ≥ {adx_max} (need <{adx_max}) → 0")
             return 0, 0.0
 
-        # ── 4 of 4 optional conditions ────────────────────────────────────
-        opt_count = self._count_optional(features, direction)
-        min_opt   = int(cfg["optional_min_count"])   # 4
+        # ── 2 of 4 optional conditions ────────────────────────────────────
+        # Same bug _check_bb_contraction's own docstring documents fixing for
+        # Mode 1 (2026-07-14): bb_contraction/ma_proximity default to
+        # evaluating the CURRENT bar, but a real reversal's own recovery
+        # routinely carries price past the "stretched" zone within 1-3 bars
+        # of the CHoCH that started it — same self-defeating pattern as
+        # Mode 1's spring bar, just never ported here. setup_age (bars since
+        # the CHoCH that birthed this setup) is the equivalent of Mode 1's
+        # spring_bar_idx — evaluate at the CHoCH bar, not wherever price has
+        # since run to.
+        _choch_bar_idx = -1 - int(getattr(composite_state, "setup_age", 0) or 0)
+        opt_count = self._count_optional(
+            features, direction,
+            exclude_bar_idx=_choch_bar_idx, eval_bar_idx=_choch_bar_idx,
+        )
+        min_opt   = int(cfg["optional_min_count"])   # 2
         if opt_count < min_opt:
-            _vc = self._check_vol_contraction(features, direction)
+            _vc = self._check_vol_contraction(features, direction, exclude_bar_idx=_choch_bar_idx)
             _hd = self._check_hidden_divergence(features, direction)
-            _bc = self._check_bb_contraction(features, direction)
-            _mp = self._check_ma_proximity(features, direction)
+            _bc = self._check_bb_contraction(features, direction, eval_bar_idx=_choch_bar_idx)
+            _mp = self._check_ma_proximity(features, direction, eval_bar_idx=_choch_bar_idx)
             logger.info(
-                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need all {min_opt}) → 0 "
+                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need {min_opt} of 4, "
+                f"eval@CHoCH bar idx={_choch_bar_idx}) → 0 "
                 f"[vol={'✓' if _vc else '✗'} "
                 f"hdiv={'✓' if _hd else '✗'} "
                 f"bbc={'✓' if _bc else '✗'} "

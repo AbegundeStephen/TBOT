@@ -5486,10 +5486,15 @@ class InstitutionalCouncilAggregator:
         _lsm = _g("livermore_state_1h", None)
 
         # ── Segment 1: MR signal (0.45) ──────────────────────────────
-        if _lsm == "NATURAL_RETRACEMENT" and mr_signal == 1:
+        # Reads both of MR's reversal states, not just Mode 1's — Mode 2's
+        # SECONDARY_RETRACEMENT/REBOUND is a real, proof-gated reversal call
+        # too (same fix as the cascade _judge_reversion_bidirectional).
+        _lean_long = _lsm in ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+        _lean_short = _lsm in ("NATURAL_REBOUND", "SECONDARY_REBOUND")
+        if _lean_long and mr_signal == 1:
             buy += min(0.45 * weight * mr_conf, 0.45 * weight)
             buy_parts.append(f"mr({mr_conf:.2f})")
-        elif _lsm == "NATURAL_REBOUND" and mr_signal == -1:
+        elif _lean_short and mr_signal == -1:
             sell += min(0.45 * weight * mr_conf, 0.45 * weight)
             sell_parts.append(f"mr({mr_conf:.2f})")
 
@@ -5526,9 +5531,16 @@ class InstitutionalCouncilAggregator:
         sell_total by a standalone "MR Direct Routing" block (Item 8.1,
         removed) OUTSIDE the judge-weight system, while this judge slot
         independently scored its own unrelated RSI-extreme-cross check. MR is
-        directionally authoritative only in its primary Livermore states
-        (NATURAL_RETRACEMENT = long spring, NATURAL_REBOUND = short spring);
-        outside those states its signal isn't scored here at all.
+        directionally authoritative in both its reversal states: Mode 1's
+        primary Livermore states (NATURAL_RETRACEMENT = long spring,
+        NATURAL_REBOUND = short spring) and Mode 2's secondary states
+        (SECONDARY_RETRACEMENT = long, SECONDARY_REBOUND = short —
+        counter-trend, deeper correction). Originally only Mode 1's states
+        were read here; Mode 2 is a real reversal call too and was being
+        silently dropped on the floor whenever it fired, leaving this judge
+        scoring 0.00 even on cycles where MR's own strategy had a confirmed,
+        proof-gated signal. Outside all four of these states MR's signal
+        isn't scored here at all.
         """
         cs = (governor_data or {}).get("composite_state") if governor_data else None
         # composite_state may be a CompositeState dataclass or a dict (same
@@ -5543,13 +5555,15 @@ class InstitutionalCouncilAggregator:
         else:
             lsm_1h = getattr(cs, "livermore_state_1h", None)
         buy_score, sell_score = 0.0, 0.0
-        if lsm_1h == "NATURAL_RETRACEMENT" and mr_signal == 1:
+        _lean_long = lsm_1h in ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+        _lean_short = lsm_1h in ("NATURAL_REBOUND", "SECONDARY_REBOUND")
+        if _lean_long and mr_signal == 1:
             buy_score = min(mr_conf * weight, weight)
-        elif lsm_1h == "NATURAL_REBOUND" and mr_signal == -1:
+        elif _lean_short and mr_signal == -1:
             sell_score = min(mr_conf * weight, weight)
         return buy_score, sell_score, {
-            "buy": f"REV BUY: {'✅' if buy_score else '❌'} MR confidence {mr_conf:.2f} ({buy_score:.2f})",
-            "sell": f"REV SELL: {'✅' if sell_score else '❌'} MR confidence {mr_conf:.2f} ({sell_score:.2f})",
+            "buy": f"REV BUY: {'✅' if buy_score else '❌'} MR confidence {mr_conf:.2f} ({buy_score:.2f}) [{lsm_1h}]",
+            "sell": f"REV SELL: {'✅' if sell_score else '❌'} MR confidence {mr_conf:.2f} ({sell_score:.2f}) [{lsm_1h}]",
         }
 
     # ========================================================================
