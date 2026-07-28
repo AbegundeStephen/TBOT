@@ -1023,6 +1023,21 @@ class CompositeStateBuilder:
                         _cur["energy"] = "HOLDING"
                     _cur["last_compression"] = _comp
 
+                    # Item 4: the retest window BRC checks is the 8 candles
+                    # before the current one (iloc[-9:-1]) — once a setup is
+                    # older than that, the candle where it could have retested
+                    # has slid out of the window and can never be seen again,
+                    # even though nothing here kills the setup for being old.
+                    # Logged once per setup, not every cycle.
+                    if _cur["age"] > 8 and not _cur.get("_past_window_logged"):
+                        _cur["_past_window_logged"] = True
+                        logger.info(
+                            "[SETUP-PAST-PROOF-WINDOW] %s: %s dir=%+d age=%d — "
+                            "older than the 8-candle retest window, can no "
+                            "longer confirm via BRC unless it re-forms.",
+                            self.asset_type, _cur.get("kind"), _cur.get("dir"), _cur["age"],
+                        )
+
                 # ---- STEP 2: evidence-based death check ----------------
                 # A setup dies when the tape invalidates it. Order: master
                 # backstop first (state flip), then setup-specific evidence.
@@ -1060,22 +1075,52 @@ class CompositeStateBuilder:
                     self._active_setup[_asset] = None
                     _cur = None
 
-                # ---- STEP 3: birth check (only if nothing is alive) ----
-                if _cur is None:
-                    _born = None
-                    # TF setup is born at the BREAK (BOS), either direction.
-                    if getattr(state, "bos_bullish", False):
-                        _born = {"kind": "TF_CONT", "dir": 1}
-                    elif getattr(state, "bos_bearish", False):
-                        _born = {"kind": "TF_CONT", "dir": -1}
-                    # MR setup is born at the CHANGE OF CHARACTER (CHoCH) —
-                    # the earliest anomaly. CHoCH takes precedence when both
-                    # appear in a way that implies a reversal is starting.
-                    if getattr(state, "choch_bullish", False):
-                        _born = {"kind": "MR_REV", "dir": 1}
-                    elif getattr(state, "choch_bearish", False):
-                        _born = {"kind": "MR_REV", "dir": -1}
+                # ---- STEP 3: birth check ---------------------------------
+                # Findings-doc Section 7, items 1-3: compute the candidate
+                # birth regardless of slot occupancy, so a dual BOS+CHoCH
+                # signal and a blocked birth (slot full) can both be observed
+                # — observation only, no behaviour change. The candidate is
+                # only ever actually applied to self._active_setup when the
+                # slot is empty (_cur is None), exactly as before.
+                _bos_candidate = None
+                if getattr(state, "bos_bullish", False):
+                    _bos_candidate = {"kind": "TF_CONT", "dir": 1}
+                elif getattr(state, "bos_bearish", False):
+                    _bos_candidate = {"kind": "TF_CONT", "dir": -1}
+                _choch_candidate = None
+                # MR setup is born at the CHANGE OF CHARACTER (CHoCH) — the
+                # earliest anomaly. CHoCH takes precedence when both appear
+                # in a way that implies a reversal is starting.
+                if getattr(state, "choch_bullish", False):
+                    _choch_candidate = {"kind": "MR_REV", "dir": 1}
+                elif getattr(state, "choch_bearish", False):
+                    _choch_candidate = {"kind": "MR_REV", "dir": -1}
 
+                _born = _bos_candidate
+                if _choch_candidate is not None:
+                    _born = _choch_candidate
+
+                # Item 1: both a BOS and a CHoCH fired on this candle.
+                if _bos_candidate is not None and _choch_candidate is not None:
+                    logger.info(
+                        "[SETUP-DUAL-SIGNAL] %s: BOS wanted %s dir=%+d, CHoCH wanted "
+                        "%s dir=%+d — CHoCH wins (recorded as %s dir=%+d).",
+                        self.asset_type,
+                        _bos_candidate["kind"], _bos_candidate["dir"],
+                        _choch_candidate["kind"], _choch_candidate["dir"],
+                        _born["kind"], _born["dir"],
+                    )
+                    # Item 3: the overwrite didn't just change kind, it
+                    # reversed direction — call that out specifically rather
+                    # than leaving it folded into the dual-signal line above.
+                    if _bos_candidate["dir"] != _choch_candidate["dir"]:
+                        logger.warning(
+                            "[SETUP-DIRECTION-FLIP] %s: BOS pointed dir=%+d, CHoCH "
+                            "overwrite flipped it to dir=%+d — same candle.",
+                            self.asset_type, _bos_candidate["dir"], _choch_candidate["dir"],
+                        )
+
+                if _cur is None:
                     if _born is not None:
                         _born.update({
                             "age": 0,
@@ -1086,6 +1131,16 @@ class CompositeStateBuilder:
                         })
                         self._active_setup[_asset] = _born
                         _cur = _born
+                elif _born is not None:
+                    # Item 2: a setup wanted to be born but the slot was
+                    # occupied — this birth never happens, and nothing else
+                    # in the codebase records that it was ever attempted.
+                    logger.info(
+                        "[SETUP-BIRTH-BLOCKED] %s: wanted %s dir=%+d, slot held by "
+                        "%s dir=%+d (age=%s).",
+                        self.asset_type, _born["kind"], _born["dir"],
+                        _cur.get("kind"), _cur.get("dir"), _cur.get("age"),
+                    )
 
                 if _candle_ts is not None:
                     self._traj_last_processed_ts[_asset] = _candle_ts
@@ -1237,7 +1292,42 @@ class CompositeStateBuilder:
                             self.asset_type, _brc_kind, _brc_dir, _brc_ref,
                             _brc_close, _age,
                         )
+                        # Item 6: every one of the CONFIRMED lines above is a
+                        # per-candle count — the same proof re-confirms on
+                        # every candle it still holds. age==0 is the candle a
+                        # distinct proof first completed; age>0 is a repeat of
+                        # one already counted. Tagged separately so distinct
+                        # proof count and re-confirmation count can be told
+                        # apart without re-deriving it from the CONFIRMED line.
+                        if _age == 0:
+                            logger.info(
+                                "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g — new proof.",
+                                self.asset_type, _brc_kind, _brc_dir, _brc_ref,
+                            )
+                        else:
+                            logger.debug(
+                                "[PROOF-REPEAT] %s: %s dir=%+d ref=%.5g age=%d — "
+                                "re-confirmation of an already-counted proof.",
+                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _age,
+                            )
                     else:
+                        # Item 5: retested but the strict close-through failed
+                        # — how close did it get? A close 0.01% short of the
+                        # reference and a close 2% short are the same "no" in
+                        # the CONFIRMED/not-CONFIRMED count, but very different
+                        # near-misses.
+                        if _retested and not _closed_through:
+                            _gap = (
+                                (_brc_ref - _brc_close) if _brc_dir == 1
+                                else (_brc_close - _brc_ref)
+                            )
+                            _gap_pct = (_gap / _brc_ref * 100.0) if _brc_ref else 0.0
+                            logger.debug(
+                                "[PROOF-NEAR-MISS] %s: %s dir=%+d retested but no "
+                                "close-through — close=%.5g ref=%.5g gap=%.5g (%.3f%%).",
+                                self.asset_type, _brc_kind, _brc_dir,
+                                _brc_close, _brc_ref, _gap, _gap_pct,
+                            )
                         # Proof condition no longer holds — forget it. If it
                         # re-forms later that is a NEW proof starting at age 0.
                         self._brc_memory.pop(self.asset_type, None)
