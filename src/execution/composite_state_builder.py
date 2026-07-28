@@ -1072,6 +1072,11 @@ class CompositeStateBuilder:
                 if _cur is not None and _death_reason is not None:
                     state.setup_died = True
                     state.setup_death_reason = _death_reason
+                    logger.info(
+                        "[MEASURE-8.4-DEATH] %s: kind=%s dir=%+d age_at_death=%s reason=%s",
+                        self.asset_type, _cur.get("kind"), _cur.get("dir"),
+                        _cur.get("age"), _death_reason,
+                    )
                     self._active_setup[_asset] = None
                     _cur = None
 
@@ -1235,6 +1240,31 @@ class CompositeStateBuilder:
                         _retested = any(h >= _brc_ref for h in _brc_win_high)
                         _closed_through = _brc_close < _brc_ref
 
+                    # Measurement 8.7: window index i (0..7) is "9-i bars ago"
+                    # (index 0 = iloc[-9] = 9 bars ago, index 7 = iloc[-2] = 2
+                    # bars ago). setup_age bars have passed since birth, so a
+                    # window bar is PRE-BIRTH (predates the setup that owns
+                    # this reference) whenever (9-i) > setup_age. Only checked
+                    # when retested, to see whether the touch that satisfied
+                    # it happened before the setup existed.
+                    if _retested:
+                        _age_for_check = int(getattr(state, "setup_age", 0) or 0)
+                        _win = _brc_win_low if _brc_dir == 1 else _brc_win_high
+                        _touch_idxs = [
+                            i for i, v in enumerate(_win)
+                            if (v <= _brc_ref if _brc_dir == 1 else v >= _brc_ref)
+                        ]
+                        _all_pre_birth = all((9 - i) > _age_for_check for i in _touch_idxs)
+                        _any_pre_birth = any((9 - i) > _age_for_check for i in _touch_idxs)
+                        if _any_pre_birth:
+                            logger.debug(
+                                "[MEASURE-8.7-PRE-BIRTH-RETEST] %s: kind=%s dir=%+d "
+                                "setup_age=%d touch_idxs=%s all_pre_birth=%s — at "
+                                "least one qualifying touch predates this setup's birth.",
+                                self.asset_type, _brc_kind, _brc_dir,
+                                _age_for_check, _touch_idxs, _all_pre_birth,
+                            )
+
                     if _retested and _closed_through:
                         # ── Build 2: age the proof in BARS ────────────────────
                         # Same proof at the same reference across several bars is
@@ -1300,9 +1330,12 @@ class CompositeStateBuilder:
                         # proof count and re-confirmation count can be told
                         # apart without re-deriving it from the CONFIRMED line.
                         if _age == 0:
+                            # Measurement 8.6: ts+close logged so forward return
+                            # can be computed post-hoc against the historical
+                            # series (entry = this close, direction = _brc_dir).
                             logger.info(
-                                "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g — new proof.",
-                                self.asset_type, _brc_kind, _brc_dir, _brc_ref,
+                                "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s — new proof.",
+                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts,
                             )
                         else:
                             logger.debug(

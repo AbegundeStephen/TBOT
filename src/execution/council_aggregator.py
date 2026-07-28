@@ -2506,6 +2506,18 @@ class InstitutionalCouncilAggregator:
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
             _sell_clears = _sell_score_pct >= _sell_required_pct
 
+            # Measurement 8.8: funnel stage before the ownership rule gets a
+            # chance to touch either flag — the count Section 8.8 needs to
+            # know how much ownership itself is removing vs. how much never
+            # even reached the threshold.
+            if _buy_clears or _sell_clears:
+                logger.info(
+                    "[MEASURE-8.8-CLEARED-THRESHOLD] %s: buy_clears=%s sell_clears=%s "
+                    "tf_signal=%+d mr_signal=%+d buy=%.2f sell=%.2f",
+                    self.asset_type, _buy_clears, _sell_clears,
+                    tf_signal, mr_signal, buy_total, sell_total,
+                )
+
             # ══════════════════════════════════════════════════════════════
             # BUILD 3: OWNERSHIP RULE
             # A side can only fire if a signal ENGINE proposed it. The four
@@ -2517,6 +2529,14 @@ class InstitutionalCouncilAggregator:
             # EMA is excluded deliberately: it is a pure confirmer with no
             # thesis of its own, so it cannot own a cycle.
             # ══════════════════════════════════════════════════════════════
+            # Measurement 8.8: stage 1 of the funnel — every cycle, regardless
+            # of whether anything clears, so "signal generated" has a real
+            # denominator to compare against the cleared/ownership/executed
+            # counts downstream.
+            logger.debug(
+                "[MEASURE-8.8-SIGNAL] %s: tf_signal=%+d mr_signal=%+d",
+                self.asset_type, tf_signal, mr_signal,
+            )
             _buy_has_thesis  = (tf_signal == 1)  or (mr_signal == 1)
             _sell_has_thesis = (tf_signal == -1) or (mr_signal == -1)
 
