@@ -74,6 +74,13 @@ class CompositeStateBuilder:
         # Build 2: per-asset BRC proof memory — {ref, first_ts, last_ts, age}.
         # Tracks a single continuously-confirmed proof so brc_age counts bars.
         self._brc_memory = {}
+        # Measurement 8.2: {asset: {(kind, dir, ref_rounded): first_retest_ts}}.
+        # Tracks how long a retest waits for its close-through independent of
+        # the trajectory's own 8-candle window and independent of whether the
+        # official setup object survives that long — a level can keep getting
+        # retested by successive short-lived reborn setups long after the
+        # specific setup that first retested it has died.
+        self._retest_memory = {}
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
         self._prev_compression = {}
@@ -1239,6 +1246,46 @@ class CompositeStateBuilder:
                     else:
                         _retested = any(h >= _brc_ref for h in _brc_win_high)
                         _closed_through = _brc_close < _brc_ref
+
+                    # Measurement 8.2: how many bars actually elapse between
+                    # the first retest and the eventual close-through, unbound
+                    # by the 8-candle window the live gate uses — buckets the
+                    # 1,136-style "retested, no close-through" candles into
+                    # never-closes / closed-late / closed-in-window-but-missed.
+                    try:
+                        _rt_key = (self.asset_type, _brc_kind, _brc_dir, round(_brc_ref, 2))
+                        _rt_mem = self._retest_memory.get(self.asset_type, {})
+                        if _retested and not _closed_through:
+                            if _rt_key not in _rt_mem:
+                                _rt_first_ts = (
+                                    df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                                    else df.index[-1]
+                                )
+                                _rt_mem[_rt_key] = _rt_first_ts
+                                self._retest_memory[self.asset_type] = _rt_mem
+                        elif _closed_through and _rt_key in _rt_mem:
+                            _rt_first_ts = _rt_mem.pop(_rt_key)
+                            _rt_close_ts = (
+                                df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                                else df.index[-1]
+                            )
+                            try:
+                                _bar_gap = int(
+                                    (pd.Timestamp(_rt_close_ts) - pd.Timestamp(_rt_first_ts))
+                                    / pd.Timedelta(hours=1)
+                                )
+                            except Exception:
+                                _bar_gap = None
+                            logger.info(
+                                "[MEASURE-8.2-RETEST-TO-CLOSE] %s: kind=%s dir=%+d "
+                                "ref=%.5g bar_gap=%s (bucket=%s)",
+                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _bar_gap,
+                                ("WITHIN_WINDOW" if _bar_gap is not None and _bar_gap <= 8
+                                 else "LATE_CLOSE" if _bar_gap is not None else "UNKNOWN"),
+                            )
+                            self._retest_memory[self.asset_type] = _rt_mem
+                    except Exception as _m82_err:
+                        logger.debug("[MEASURE-8.2] error (non-blocking): %s", _m82_err)
 
                     # Measurement 8.7: window index i (0..7) is "9-i bars ago"
                     # (index 0 = iloc[-9] = 9 bars ago, index 7 = iloc[-2] = 2
