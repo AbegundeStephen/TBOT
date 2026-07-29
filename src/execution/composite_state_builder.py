@@ -81,6 +81,15 @@ class CompositeStateBuilder:
         # retested by successive short-lived reborn setups long after the
         # specific setup that first retested it has died.
         self._retest_memory = {}
+        # Once-per-candle dedup for the PROOF-* and S1-STRUCTURE observation
+        # logs. This builder runs ~23x per 1H candle (twice per 5-min cycle),
+        # so an ungated log line fires ~23 times for one real event — the same
+        # cycles-vs-candles trap brc_age was built to avoid. Keyed (asset, tag).
+        self._brc_log_ts = {}
+        # Part C: break-anchored retest memory. Keyed on the REFERENCE LEVEL,
+        # not the setup object — the setup churns (median life 1 bar) but the
+        # level it broke does not. {asset: {"ref", "last_ts", "bars"}}
+        self._brc_break_ts = {}
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
         self._prev_compression = {}
@@ -1071,10 +1080,23 @@ class CompositeStateBuilder:
                     #     the opposite way (long setup sees bearish BOS, or
                     #     vice versa).
                     if _death_reason is None:
-                        if _dir == 1 and getattr(state, "bos_bearish", False):
-                            _death_reason = "OPPOSING_BOS"
-                        elif _dir == -1 and getattr(state, "bos_bullish", False):
-                            _death_reason = "OPPOSING_BOS"
+                        # S1: inside a trend, a break against the setup now
+                        # surfaces as the opposing CHoCH rather than an opposing
+                        # BOS. Without this the setup outlives its own
+                        # invalidation. Separate reason string so the two cases
+                        # stay distinguishable, and so nothing matching on
+                        # "OPPOSING_BOS" changes meaning. Verified by grep:
+                        # those were the only two occurrences in the repo.
+                        if _dir == 1:
+                            if getattr(state, "bos_bearish", False):
+                                _death_reason = "OPPOSING_BOS"
+                            elif getattr(state, "choch_bearish", False):
+                                _death_reason = "OPPOSING_CHOCH"
+                        elif _dir == -1:
+                            if getattr(state, "bos_bullish", False):
+                                _death_reason = "OPPOSING_BOS"
+                            elif getattr(state, "choch_bullish", False):
+                                _death_reason = "OPPOSING_CHOCH"
 
                 if _cur is not None and _death_reason is not None:
                     state.setup_died = True
@@ -1196,7 +1218,9 @@ class CompositeStateBuilder:
             _brc_dir    = int(getattr(state, "setup_dir", 0) or 0)
             _brc_kind   = getattr(state, "setup_kind", None)
 
-            if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 9:
+            # Part C: window widened 8 -> 28 candles, so the data floor moves
+            # with it. Miss this and the whole block silently never runs.
+            if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 29:
                 _brc_ref = None
                 if _brc_kind == "MR_REV":
                     # BRC-FIX: MR_REV is born off a 1H CHoCH, so its retest
@@ -1237,14 +1261,66 @@ class CompositeStateBuilder:
                 if _brc_ref is not None and float(_brc_ref) > 0:
                     _brc_ref = float(_brc_ref)
                     _brc_close = float(df["close"].iloc[-1])
-                    _brc_win_high = df["high"].iloc[-9:-1].values
-                    _brc_win_low  = df["low"].iloc[-9:-1].values
 
+                    # df.index[-1] is NOT reliably the bar timestamp across
+                    # callers: the live path (data_manager.clean_data) sets a
+                    # datetime index, but backtest.py builds df straight from
+                    # backtrader buffers with a plain RangeIndex and the
+                    # timestamp as its own column instead (same footgun as
+                    # the earlier trajectory-tracker double-invocation fix in
+                    # this same file). Prefer that column when present.
+                    # Computed here, above the window slicing and the 8.2/8.7
+                    # measurement blocks, because Part C's break memory below
+                    # needs it immediately.
+                    try:
+                        _bar_ts = (
+                            df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                            else df.index[-1]
+                        )
+                    except Exception:
+                        _bar_ts = None
+
+                    # ── Part C: break-anchored retest ordering ──────────────
+                    # Keyed on the reference LEVEL, not the setup object. The
+                    # setup churns (median life 1 bar); the level it broke does
+                    # not. A new reference means a new break — start the clock.
+                    # The same reference means the same break still standing,
+                    # however many times the tracker reset in between.
+                    _bt = self._brc_break_ts.get(self.asset_type)
+                    if _bt is None or _bt.get("ref") != _brc_ref:
+                        self._brc_break_ts[self.asset_type] = {
+                            "ref": _brc_ref, "last_ts": _bar_ts, "bars": 0
+                        }
+                    elif _bar_ts is not None and _bar_ts != _bt.get("last_ts"):
+                        # A new candle closed — the break is one bar older.
+                        _bt["bars"] = int(_bt.get("bars", 0)) + 1
+                        _bt["last_ts"] = _bar_ts
+                    _bars_since_break = int(
+                        self._brc_break_ts[self.asset_type].get("bars", 0)
+                    )
+
+                    # Window widened 8 -> 28 candles (seven 4H bars' worth of
+                    # hourly candles) so a 4H level has room to be retested.
+                    _WIN = 28
+                    _brc_win_high = df["high"].iloc[-(_WIN + 1):-1].values
+                    _brc_win_low  = df["low"].iloc[-(_WIN + 1):-1].values
+
+                    # Window position i maps to (WIN - i) bars ago: i=0 is the
+                    # oldest bar in the window, i=WIN-1 is one bar back. A touch
+                    # is POST-BREAK only when it is more recent than the break
+                    # itself — strictly, so the break candle's own wick never
+                    # counts as its own retest.
                     if _brc_dir == 1:
-                        _retested = any(l <= _brc_ref for l in _brc_win_low)
+                        _retested = any(
+                            (v <= _brc_ref) and ((_WIN - i) < _bars_since_break)
+                            for i, v in enumerate(_brc_win_low)
+                        )
                         _closed_through = _brc_close > _brc_ref
                     else:
-                        _retested = any(h >= _brc_ref for h in _brc_win_high)
+                        _retested = any(
+                            (v >= _brc_ref) and ((_WIN - i) < _bars_since_break)
+                            for i, v in enumerate(_brc_win_high)
+                        )
                         _closed_through = _brc_close < _brc_ref
 
                     # Measurement 8.2: how many bars actually elapse between
@@ -1287,29 +1363,33 @@ class CompositeStateBuilder:
                     except Exception as _m82_err:
                         logger.debug("[MEASURE-8.2] error (non-blocking): %s", _m82_err)
 
-                    # Measurement 8.7: window index i (0..7) is "9-i bars ago"
-                    # (index 0 = iloc[-9] = 9 bars ago, index 7 = iloc[-2] = 2
-                    # bars ago). setup_age bars have passed since birth, so a
-                    # window bar is PRE-BIRTH (predates the setup that owns
-                    # this reference) whenever (9-i) > setup_age. Only checked
-                    # when retested, to see whether the touch that satisfied
-                    # it happened before the setup existed.
-                    if _retested:
-                        _age_for_check = int(getattr(state, "setup_age", 0) or 0)
-                        _win = _brc_win_low if _brc_dir == 1 else _brc_win_high
-                        _touch_idxs = [
-                            i for i, v in enumerate(_win)
-                            if (v <= _brc_ref if _brc_dir == 1 else v >= _brc_ref)
-                        ]
-                        _all_pre_birth = all((9 - i) > _age_for_check for i in _touch_idxs)
-                        _any_pre_birth = any((9 - i) > _age_for_check for i in _touch_idxs)
-                        if _any_pre_birth:
-                            logger.debug(
-                                "[MEASURE-8.7-PRE-BIRTH-RETEST] %s: kind=%s dir=%+d "
-                                "setup_age=%d touch_idxs=%s all_pre_birth=%s — at "
-                                "least one qualifying touch predates this setup's birth.",
+                    # MEASURE-8.7 — now a regression check on the ordering fix
+                    # above rather than a survey. Counts every touch of the
+                    # reference in the window and splits pre-break from
+                    # post-break. Before this build ~90% of touches were
+                    # pre-break and all of them counted; now only post-break
+                    # touches can satisfy _retested. pre_break should stay high
+                    # (the market really does touch these levels beforehand)
+                    # while retested=True should now only ever appear alongside
+                    # post_break > 0. If it does not, the filter is not working.
+                    _touch_src = _brc_win_low if _brc_dir == 1 else _brc_win_high
+                    _touch_idxs = [
+                        i for i, v in enumerate(_touch_src)
+                        if (v <= _brc_ref if _brc_dir == 1 else v >= _brc_ref)
+                    ]
+                    if _touch_idxs:
+                        _pre_break  = [i for i in _touch_idxs if (_WIN - i) >= _bars_since_break]
+                        _post_break = [i for i in _touch_idxs if (_WIN - i) <  _bars_since_break]
+                        _k = (self.asset_type, "ORDERING")
+                        if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
+                            self._brc_log_ts[_k] = _bar_ts
+                            logger.info(
+                                "[MEASURE-8.7-ORDERING] %s: kind=%s dir=%+d "
+                                "bars_since_break=%d touches=%d pre_break=%d "
+                                "post_break=%d retested=%s",
                                 self.asset_type, _brc_kind, _brc_dir,
-                                _age_for_check, _touch_idxs, _all_pre_birth,
+                                _bars_since_break, len(_touch_idxs),
+                                len(_pre_break), len(_post_break), _retested,
                             )
 
                     if _retested and _closed_through:
@@ -1317,22 +1397,6 @@ class CompositeStateBuilder:
                         # Same proof at the same reference across several bars is
                         # ONE proof getting older, not several proofs. A different
                         # reference means a genuinely new proof — reset to 0.
-                        #
-                        # df.index[-1] is NOT reliably the bar timestamp across
-                        # callers: the live path (data_manager.clean_data) sets a
-                        # datetime index, but backtest.py builds df straight from
-                        # backtrader buffers with a plain RangeIndex and the
-                        # timestamp as its own column instead (same footgun as
-                        # the earlier trajectory-tracker double-invocation fix in
-                        # this same file). Prefer that column when present.
-                        try:
-                            _bar_ts = (
-                                df["timestamp"].iloc[-1] if "timestamp" in df.columns
-                                else df.index[-1]
-                            )
-                        except Exception:
-                            _bar_ts = None
-
                         _mem = self._brc_memory.get(self.asset_type)
 
                         if _mem is None or _mem.get("ref") != _brc_ref:
@@ -1377,19 +1441,28 @@ class CompositeStateBuilder:
                         # proof count and re-confirmation count can be told
                         # apart without re-deriving it from the CONFIRMED line.
                         if _age == 0:
+                            # Once per closed candle: age stays 0 for every
+                            # repeat call within the same candle, so an ungated
+                            # line logs one proof ~23 times live.
                             # Measurement 8.6: ts+close logged so forward return
                             # can be computed post-hoc against the historical
                             # series (entry = this close, direction = _brc_dir).
-                            logger.info(
-                                "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s — new proof.",
-                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts,
-                            )
+                            _k = (self.asset_type, "DISTINCT")
+                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
+                                self._brc_log_ts[_k] = _bar_ts
+                                logger.info(
+                                    "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s — new proof.",
+                                    self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts,
+                                )
                         else:
-                            logger.debug(
-                                "[PROOF-REPEAT] %s: %s dir=%+d ref=%.5g age=%d — "
-                                "re-confirmation of an already-counted proof.",
-                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _age,
-                            )
+                            _k = (self.asset_type, "REPEAT")
+                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
+                                self._brc_log_ts[_k] = _bar_ts
+                                logger.info(
+                                    "[PROOF-REPEAT] %s: %s dir=%+d ref=%.5g age=%d — "
+                                    "re-confirmation of an already-counted proof.",
+                                    self.asset_type, _brc_kind, _brc_dir, _brc_ref, _age,
+                                )
                     else:
                         # Item 5: retested but the strict close-through failed
                         # — how close did it get? A close 0.01% short of the
@@ -1402,12 +1475,15 @@ class CompositeStateBuilder:
                                 else (_brc_close - _brc_ref)
                             )
                             _gap_pct = (_gap / _brc_ref * 100.0) if _brc_ref else 0.0
-                            logger.debug(
-                                "[PROOF-NEAR-MISS] %s: %s dir=%+d retested but no "
-                                "close-through — close=%.5g ref=%.5g gap=%.5g (%.3f%%).",
-                                self.asset_type, _brc_kind, _brc_dir,
-                                _brc_close, _brc_ref, _gap, _gap_pct,
-                            )
+                            _k = (self.asset_type, "NEARMISS")
+                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
+                                self._brc_log_ts[_k] = _bar_ts
+                                logger.info(
+                                    "[PROOF-NEAR-MISS] %s: %s dir=%+d retested but no "
+                                    "close-through — close=%.5g ref=%.5g gap=%.5g (%.3f%%).",
+                                    self.asset_type, _brc_kind, _brc_dir,
+                                    _brc_close, _brc_ref, _gap, _gap_pct,
+                                )
                         # Proof condition no longer holds — forget it. If it
                         # re-forms later that is a NEW proof starting at age 0.
                         self._brc_memory.pop(self.asset_type, None)
@@ -1680,22 +1756,80 @@ class CompositeStateBuilder:
                     if len(swing_lows) >= 2:
                         break
 
-            # ── CHoCH / BOS classification — both directions independent ────
-            if len(swing_highs) >= 2:
-                if swing_highs[0] > swing_highs[1]:
-                    state.bos_detected = True    # Higher high — trend continuing
-                    state.bos_bullish = True
-                elif swing_highs[0] < swing_highs[1]:
-                    state.choch_detected = True  # Lower high — reversal warning
-                    state.choch_bearish = True
+            # ── CHoCH / BOS classification ──────────────────────────────────
+            # S1: a break of structure CONTINUES the prevailing trend; a change
+            # of character OPPOSES it. The old code made both calls without ever
+            # asking what the trend was, so a healthy uptrend (higher high +
+            # higher low) set bos_bullish AND choch_bullish on the same candle —
+            # and the birth logic downstream lets CHoCH overwrite BOS. Every
+            # trending candle was therefore recorded as a reversal. Measured:
+            # 3,490 of 5,874 GOLD candles.
+            _hh = len(swing_highs) >= 2 and swing_highs[0] > swing_highs[1]
+            _lh = len(swing_highs) >= 2 and swing_highs[0] < swing_highs[1]
+            _ll = len(swing_lows)  >= 2 and swing_lows[0]  < swing_lows[1]
+            _hl = len(swing_lows)  >= 2 and swing_lows[0]  > swing_lows[1]
 
-            if len(swing_lows) >= 2:
-                if swing_lows[0] < swing_lows[1]:
-                    state.bos_detected = True    # Lower low — downtrend continuing
+            # Trend source: the Livermore 1H MACHINE, not
+            # state.livermore_state_1h. This is not a preference — that field
+            # is written later in _build_composite_state than this method
+            # runs, so it is still None here. Reading it would return None on
+            # every call and silently disable the entire fix.
+            _UP   = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _DOWN = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            _lsm_state = None
+            try:
+                if self._livermore_1h is not None:
+                    _lsm_state = self._livermore_1h.snapshot().state
+            except Exception:
+                _lsm_state = None
+
+            if _lsm_state in _UP:
+                _trend = 1
+            elif _lsm_state in _DOWN:
+                _trend = -1
+            else:
+                # Fallback for warm-up: the swings describe the trend
+                # themselves. Both feet stepping up = uptrend.
+                _trend = 1 if (_hh and _hl) else (-1 if (_lh and _ll) else 0)
+
+            if _trend == 1:
+                # Uptrend. A higher high continues it. A lower high or a lower
+                # low opposes it — that is the change of character.
+                if _hh:
+                    state.bos_detected = True
+                    state.bos_bullish = True
+                if _lh or _ll:
+                    state.choch_detected = True
+                    state.choch_bearish = True
+            elif _trend == -1:
+                # Downtrend. A lower low continues it.
+                if _ll:
+                    state.bos_detected = True
                     state.bos_bearish = True
-                elif swing_lows[0] > swing_lows[1]:
-                    state.choch_detected = True  # Higher low — reversal warning
+                if _hh or _hl:
+                    state.choch_detected = True
                     state.choch_bullish = True
+            # _trend == 0: no established trend, so no directional structural
+            # call. A range's swings are noise, not a break and not a reversal.
+
+            # Once per closed candle — this method runs ~23x per candle.
+            try:
+                _s1_ts = (
+                    df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                    else df.index[-1]
+                )
+            except Exception:
+                _s1_ts = None
+            _k = (self.asset_type, "S1")
+            if _s1_ts is not None and self._brc_log_ts.get(_k) != _s1_ts:
+                self._brc_log_ts[_k] = _s1_ts
+                logger.info(
+                    "[S1-STRUCTURE] %s: trend=%+d (lsm=%s) hh=%s lh=%s ll=%s hl=%s "
+                    "-> bos_bull=%s bos_bear=%s choch_bull=%s choch_bear=%s",
+                    self.asset_type, _trend, _lsm_state, _hh, _lh, _ll, _hl,
+                    state.bos_bullish, state.bos_bearish,
+                    state.choch_bullish, state.choch_bearish,
+                )
 
         except Exception as e:
             logger.error(
