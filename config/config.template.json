@@ -887,7 +887,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.0,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -911,7 +911,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -935,7 +935,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -959,7 +959,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -983,7 +983,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -1007,7 +1007,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
@@ -1031,7 +1031,7 @@
         "use_4h_context": true,
         "require_4h_alignment": false,
         "h4_trend_weight": 1.5,
-        "h4_counter_penalty": 0.3,
+        "h4_counter_penalty": 1.5,
         "model_params": {
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
