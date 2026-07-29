@@ -237,8 +237,15 @@ class InstitutionalCouncilAggregator:
         # ── Gold / Precious Metals ─────────────────────────────────────────────
         if "GOLD" in a or "XAU" in a:
             return {
-                "rsi_bullish_zone": (35, 47),
-                "rsi_bearish_zone": (53, 65),
+                # Was (35,47)/(53,65) — the exact mirror of every other asset's
+                # bullish/bearish zone pattern (upper band = bullish, lower band
+                # = bearish everywhere else). Currently dead config — neither
+                # _judge_momentum_bidirectional nor its _legacy twin reads these
+                # zone keys (both use a flat rsi>50/rsi<50 split) — but fixed
+                # for correctness/hygiene so it isn't a landmine if momentum
+                # scoring is ever wired back to these keys.
+                "rsi_bullish_zone": (53, 65),
+                "rsi_bearish_zone": (35, 47),
                 "rsi_oversold_bonus": 25,
                 "rsi_overbought_bonus": 75,
                 "volume_ma_period": 20,
