@@ -1,0 +1,6 @@
+2026-07-30 12:22:56,762 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] BTC: kind=TF_CONT dir=+1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
+2026-07-30 12:22:56,959 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] GOLD: kind=TF_CONT dir=+1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
+2026-07-30 12:22:57,119 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] USTEC: kind=MR_REV dir=+1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
+2026-07-30 12:22:57,264 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] USOIL: kind=MR_REV dir=+1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
+2026-07-30 12:22:57,450 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] GBPAUD: kind=TF_CONT dir=-1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
+2026-07-30 12:22:57,613 - src.execution.composite_state_builder - INFO - [MEASURE-8.7-ORDERING] GBPUSD: kind=MR_REV dir=+1 bars_since_break=0 touches=28 pre_break=28 post_break=0 retested=False
