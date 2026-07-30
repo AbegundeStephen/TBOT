@@ -188,6 +188,16 @@ class LivermoreStateMachine:
             self.update(float(row["close"]), float(row["atr"]))
         return self.snapshot()
 
+    # States where each natural anchor is a LIVE level rather than a leftover.
+    # _nl_confirmed (the pullback floor) is only cleared on the MAIN_UP ->
+    # NATURAL_RETRACEMENT transition, so once price breaks it and the machine
+    # moves to the downside states it keeps reporting a floor that no longer
+    # exists — measured live at 5%+ from price. This mirrors the rule the zone
+    # ladder store already follows: a level that breaks flips role, loses its
+    # earned test history, and stops being surfaced until it re-earns one.
+    _LOW_LIVE_STATES  = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+    _HIGH_LIVE_STATES = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+
     def snapshot(self) -> LivermoreSnapshot:
         """Return current state as an immutable snapshot."""
         return LivermoreSnapshot(
@@ -197,8 +207,14 @@ class LivermoreStateMachine:
             dual_confirmation= self._state in ("MAIN_UP", "MAIN_DOWN"),
             anchor_main_up_max   = self._main_up_max,
             anchor_main_down_min = self._main_down_min,
-            anchor_natural_high  = self._nh_confirmed,
-            anchor_natural_low   = self._nl_confirmed,
+            anchor_natural_high  = (
+                self._nh_confirmed
+                if self._state in self._HIGH_LIVE_STATES else None
+            ),
+            anchor_natural_low   = (
+                self._nl_confirmed
+                if self._state in self._LOW_LIVE_STATES else None
+            ),
         )
 
     @property
