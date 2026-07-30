@@ -121,6 +121,7 @@ class CompositeStateBuilder:
         self._livermore_1h = None
         self._livermore_warmed = False
         self._livermore_last_4h_ts = None  # deduplicate 4H bar updates
+        self._livermore_last_1h_ts = None  # deduplicate 1H bar updates
         try:
             import json as _json
 
@@ -666,15 +667,32 @@ class CompositeStateBuilder:
                     state.is_silent_zone = snap4.is_silent_zone
 
                 # ── 1H update ────────────────────────────────────────────────
+                # Mirrors the 4H guard above. This builder runs ~23x per 1H
+                # candle (twice per 5-min cycle), and LivermoreStateMachine.update()
+                # is documented as "Process one closed bar" — it has no same-bar
+                # guard of its own. Calling it 23x per bar defeats the
+                # dual_confirm mechanism entirely: _pending_down/_pending_up
+                # reach dual_confirm (2) on the SECOND call of the same candle,
+                # so one bar triggers a MAIN transition the design requires two
+                # consecutive bars to trigger. state_age was inflated ~23x by
+                # the same path.
                 if df is not None and len(df) >= 15:
-                    _atr1_series = _atr14_lsm(df)
-                    _atr1 = (
-                        float(_atr1_series.iloc[-1])
-                        if not np.isnan(_atr1_series.iloc[-1])
-                        else 0.0
+                    _1h_ts = (
+                        df["timestamp"].iloc[-1] if "timestamp" in df.columns
+                        else df.index[-1]
                     )
-                    _close1 = float(df["close"].iloc[-1])
-                    snap1 = self._livermore_1h.update(_close1, _atr1)
+                    if _1h_ts != self._livermore_last_1h_ts:
+                        _atr1_series = _atr14_lsm(df)
+                        _atr1 = (
+                            float(_atr1_series.iloc[-1])
+                            if not np.isnan(_atr1_series.iloc[-1])
+                            else 0.0
+                        )
+                        _close1 = float(df["close"].iloc[-1])
+                        snap1 = self._livermore_1h.update(_close1, _atr1)
+                        self._livermore_last_1h_ts = _1h_ts
+                    else:
+                        snap1 = self._livermore_1h.snapshot()
                     state.livermore_state_1h = snap1.state
                     state.livermore_state_age_1h = snap1.state_age
                     # BRC-FIX: 1H-native natural anchors, for BRC's MR_REV
@@ -1248,6 +1266,20 @@ class CompositeStateBuilder:
                     # a reversal's broken level, but a sane "closest structural
                     # level" so BRC still gets a reasonable reference instead
                     # of a permanent no-op for this minority of setups.
+                    # Tier 2: the zone ladder. Fix 2 makes the 1H anchor return
+                    # None whenever the level it represents has been broken, so
+                    # this path now carries far more traffic than the ~2.5-5%
+                    # it did before. The ladder is the right second choice —
+                    # it already flips role on break, resets test counts, and
+                    # only surfaces levels with tests >= 1, so it can never
+                    # hand back a level the market has already invalidated.
+                    if _brc_ref is None or float(_brc_ref) <= 0:
+                        _brc_ref = (
+                            getattr(state, "zone_4h_current_lower", None) if _brc_dir == 1
+                            else getattr(state, "zone_4h_current_upper", None)
+                        )
+                    # Tier 3: raw 4H swing. Untested and role-blind — last
+                    # resort only, kept so BRC degrades rather than going silent.
                     if _brc_ref is None or float(_brc_ref) <= 0:
                         _brc_ref = (
                             getattr(state, "last_swing_low_4h", None) if _brc_dir == 1
@@ -1280,6 +1312,27 @@ class CompositeStateBuilder:
                         )
                     except Exception:
                         _bar_ts = None
+
+                    # How far is the reference from price? A level several
+                    # percent away is not a live retest candidate — it is a
+                    # leftover. This is the signature that exposed the stale
+                    # anchor (USOIL ref=87.811 vs close=83.10, 5.4%). Log only
+                    # — no gate. If this still shows large gaps after Fix 2,
+                    # something else is producing stale references.
+                    try:
+                        _ref_dist_pct = abs(_brc_close - _brc_ref) / _brc_ref * 100.0
+                        if _ref_dist_pct > 2.0:
+                            _k = (self.asset_type, "REFDIST")
+                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
+                                self._brc_log_ts[_k] = _bar_ts
+                                logger.info(
+                                    "[REF-DISTANCE] %s: kind=%s dir=%+d ref=%.5g "
+                                    "close=%.5g dist=%.2f%% — reference far from price.",
+                                    self.asset_type, _brc_kind, _brc_dir,
+                                    _brc_ref, _brc_close, _ref_dist_pct,
+                                )
+                    except Exception:
+                        pass
 
                     # ── Part C: break-anchored retest ordering ──────────────
                     # Keyed on the reference LEVEL, not the setup object. The
