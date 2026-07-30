@@ -22,6 +22,7 @@ ENV/
 
 work_summary*
 output.txt*
+diag.txt*
 
 # Models & Data
 models/*.pkl
