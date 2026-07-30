@@ -90,6 +90,7 @@ class CompositeStateBuilder:
         # not the setup object — the setup churns (median life 1 bar) but the
         # level it broke does not. {asset: {"ref", "last_ts", "bars"}}
         self._brc_break_ts = {}
+        logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
         self._prev_compression = {}
