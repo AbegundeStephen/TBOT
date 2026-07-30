@@ -1361,7 +1361,7 @@ class CompositeStateBuilder:
                             )
                             self._retest_memory[self.asset_type] = _rt_mem
                     except Exception as _m82_err:
-                        logger.debug("[MEASURE-8.2] error (non-blocking): %s", _m82_err)
+                        logger.warning("[MEASURE-8.2] error (non-blocking): %s", _m82_err)
 
                     # MEASURE-8.7 — now a regression check on the ordering fix
                     # above rather than a survey. Counts every touch of the
@@ -1377,7 +1377,7 @@ class CompositeStateBuilder:
                         i for i, v in enumerate(_touch_src)
                         if (v <= _brc_ref if _brc_dir == 1 else v >= _brc_ref)
                     ]
-                    if _touch_idxs:
+                    if True:  # TEMP diagnostic — log every evaluation
                         _pre_break  = [i for i in _touch_idxs if (_WIN - i) >= _bars_since_break]
                         _post_break = [i for i in _touch_idxs if (_WIN - i) <  _bars_since_break]
                         _k = (self.asset_type, "ORDERING")
@@ -1488,7 +1488,7 @@ class CompositeStateBuilder:
                         # re-forms later that is a NEW proof starting at age 0.
                         self._brc_memory.pop(self.asset_type, None)
         except Exception as _brc_err:
-            logger.debug("[BRC] compute error (non-blocking): %s", _brc_err)
+            logger.warning("[BRC] compute error (non-blocking): %s", _brc_err)
 
         state.sanitise()
         return state
