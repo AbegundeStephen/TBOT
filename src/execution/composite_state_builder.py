@@ -1006,7 +1006,9 @@ class CompositeStateBuilder:
 
         # ═══════════════════════════════════════════════════════════════
         # TRAJECTORY LAYER (Plan 1B) — track a setup across cycles.
-        # Observation-only: writes setup_* readouts, consumed by nobody yet.
+        # Writes setup_* readouts. CONSUMED: BRC reads setup_active/kind/dir
+        # every cycle; X1 wired setup_died into VTM's alert layer. The
+        # "consumed by nobody" note dates from Plan 1B and is no longer true.
         # Reads activity_compression + bos/choch fields set earlier this
         # method. Fail-safe: on error, no setup is tracked this cycle.
         # ═══════════════════════════════════════════════════════════════
@@ -1149,9 +1151,24 @@ class CompositeStateBuilder:
                 elif getattr(state, "choch_bearish", False):
                     _choch_candidate = {"kind": "MR_REV", "dir": -1}
 
-                _born = _bos_candidate
-                if _choch_candidate is not None:
-                    _born = _choch_candidate
+                # S2: continuation wins when both fire. A higher high and a
+                # higher low on the same candle inside an uptrend is one move
+                # described two ways — the pullback ended and the trend pushed
+                # on. Nothing reversed. Labelling it MR_REV routes a good setup
+                # to the engine behind six mandatory gates (one signal in 5,544
+                # candles) while TF, which can act on it, gets nothing.
+                # Desire's decision, 30 Jul.
+                _born = _choch_candidate
+                if _bos_candidate is not None:
+                    _born = _bos_candidate
+                if _bos_candidate is not None and _choch_candidate is not None:
+                    logger.info(
+                        "[S2-DUAL] %s: bos(%s dir=%+d) + choch(%s dir=%+d) "
+                        "-> continuation wins",
+                        self.asset_type,
+                        _bos_candidate.get("kind"), _bos_candidate.get("dir"),
+                        _choch_candidate.get("kind"), _choch_candidate.get("dir"),
+                    )
 
                 # Item 1: both a BOS and a CHoCH fired on this candle.
                 if _bos_candidate is not None and _choch_candidate is not None:
@@ -1241,6 +1258,7 @@ class CompositeStateBuilder:
             # with it. Miss this and the whole block silently never runs.
             if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 29:
                 _brc_ref = None
+                _brc_tier_used = None
                 if _brc_kind == "MR_REV":
                     # BRC-FIX: MR_REV is born off a 1H CHoCH, so its retest
                     # reference must be the 1H-native anchor. The plain
@@ -1255,6 +1273,7 @@ class CompositeStateBuilder:
                         getattr(state, "livermore_anchor_natural_low_1h", None) if _brc_dir == 1
                         else getattr(state, "livermore_anchor_natural_high_1h", None)
                     )
+                    _brc_tier_used = "ANCHOR_1H"
                     # BRC-FIX Part B: graceful-degradation fallback. The 1H
                     # anchor above is still None for setups born while the 1H
                     # Livermore state itself is already in MAIN_UP/MAIN_DOWN
@@ -1278,6 +1297,7 @@ class CompositeStateBuilder:
                             getattr(state, "zone_4h_current_lower", None) if _brc_dir == 1
                             else getattr(state, "zone_4h_current_upper", None)
                         )
+                        _brc_tier_used = "ZONE_LADDER"
                     # Tier 3: raw 4H swing. Untested and role-blind — last
                     # resort only, kept so BRC degrades rather than going silent.
                     if _brc_ref is None or float(_brc_ref) <= 0:
@@ -1285,11 +1305,30 @@ class CompositeStateBuilder:
                             getattr(state, "last_swing_low_4h", None) if _brc_dir == 1
                             else getattr(state, "last_swing_high_4h", None)
                         )
+                        _brc_tier_used = "SWING_4H"
                 elif _brc_kind == "TF_CONT":
+                    # S2: equal rigor. MR_REV had three reference tiers and
+                    # TF_CONT had one — the raw untested 4H swing, which is
+                    # exactly what MR_REV demotes to last resort. When that
+                    # swing is None the guard below skips the entire proof
+                    # block silently, which is a live candidate for why zero
+                    # clean TF_CONT proofs exist across five assets.
+                    # Tier 1: the swing that was actually broken.
                     _brc_ref = (
                         getattr(state, "last_swing_high_4h", None) if _brc_dir == 1
                         else getattr(state, "last_swing_low_4h", None)
                     )
+                    _brc_tier_used = "SWING_4H"
+                    # Tier 2: the zone ladder — tested, role-correct, and it
+                    # flips role on break so it cannot return an invalidated
+                    # level. A continuation breaks UP through resistance, so
+                    # the level it retests is the upper zone edge.
+                    if _brc_ref is None or float(_brc_ref) <= 0:
+                        _brc_ref = (
+                            getattr(state, "zone_4h_current_upper", None) if _brc_dir == 1
+                            else getattr(state, "zone_4h_current_lower", None)
+                        )
+                        _brc_tier_used = "ZONE_LADDER"
 
                 if _brc_ref is not None and float(_brc_ref) > 0:
                     _brc_ref = float(_brc_ref)
@@ -1477,7 +1516,7 @@ class CompositeStateBuilder:
                         state.brc_confirmed = True
                         state.brc_direction = _brc_dir
                         state.brc_kind = _brc_kind
-                        state.brc_tier = None
+                        state.brc_tier = _brc_tier_used
                         state.brc_age = _age
                         state.brc_first_confirmed_ts = _first_ts
 
@@ -1505,8 +1544,8 @@ class CompositeStateBuilder:
                             if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
                                 self._brc_log_ts[_k] = _bar_ts
                                 logger.info(
-                                    "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s — new proof.",
-                                    self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts,
+                                    "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s tier=%s — new proof.",
+                                    self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts, _brc_tier_used,
                                 )
                         else:
                             _k = (self.asset_type, "REPEAT")
@@ -1823,13 +1862,24 @@ class CompositeStateBuilder:
             _ll = len(swing_lows)  >= 2 and swing_lows[0]  < swing_lows[1]
             _hl = len(swing_lows)  >= 2 and swing_lows[0]  > swing_lows[1]
 
-            # Trend source: the Livermore 1H MACHINE, not
-            # state.livermore_state_1h. This is not a preference — that field
-            # is written later in _build_composite_state than this method
-            # runs, so it is still None here. Reading it would return None on
-            # every call and silently disable the entire fix.
-            _UP   = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-            _DOWN = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+            # S2: BOS and CHoCH answer DIFFERENT questions, and S1 collapsed
+            # them onto one variable.
+            #   BOS   — is the PARENT TREND continuing?
+            #   CHoCH — is the CURRENT LEG turning?
+            # In MAIN_UP these agree (parent up, leg up), which is why S1
+            # looked correct when tested there. In the four non-MAIN states
+            # they point opposite ways: NATURAL_RETRACEMENT is an UP parent
+            # with a DOWN leg, so a higher low there is the leg turning — the
+            # bullish change of character that composite_state.py documents as
+            # "higher low — bullish reversal warning" and that Mode 2's own
+            # gate comment names as its exhaustion signal. S1 made it
+            # unreachable in every _UP state.
+            #
+            # Read the MACHINE, not state.livermore_state_1h — that field is
+            # written later in _build_composite_state than this method runs,
+            # so it is still None here.
+            _PARENT_UP = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+            _LEG_UP    = ("MAIN_UP", "NATURAL_REBOUND", "SECONDARY_REBOUND")
             _lsm_state = None
             try:
                 if self._livermore_1h is not None:
@@ -1837,34 +1887,42 @@ class CompositeStateBuilder:
             except Exception:
                 _lsm_state = None
 
-            if _lsm_state in _UP:
-                _trend = 1
-            elif _lsm_state in _DOWN:
-                _trend = -1
+            if _lsm_state in _PARENT_UP:
+                _parent_up = True
+                _leg_up = _lsm_state in _LEG_UP
+                _known = True
+            elif _lsm_state in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND"):
+                _parent_up = False
+                _leg_up = _lsm_state in _LEG_UP
+                _known = True
             else:
-                # Fallback for warm-up: the swings describe the trend
-                # themselves. Both feet stepping up = uptrend.
-                _trend = 1 if (_hh and _hl) else (-1 if (_lh and _ll) else 0)
+                # Warm-up fallback: the swings describe both. Both feet
+                # stepping up = up parent and up leg, and vice versa.
+                if _hh and _hl:
+                    _parent_up, _leg_up, _known = True, True, True
+                elif _lh and _ll:
+                    _parent_up, _leg_up, _known = False, False, True
+                else:
+                    _parent_up, _leg_up, _known = False, False, False
 
-            if _trend == 1:
-                # Uptrend. A higher high continues it. A lower high or a lower
-                # low opposes it — that is the change of character.
-                if _hh:
+            if _known:
+                # ── BOS: the parent trend continuing ──────────────────────
+                if _parent_up and _hh:
                     state.bos_detected = True
                     state.bos_bullish = True
-                if _lh or _ll:
-                    state.choch_detected = True
-                    state.choch_bearish = True
-            elif _trend == -1:
-                # Downtrend. A lower low continues it.
-                if _ll:
+                elif (not _parent_up) and _ll:
                     state.bos_detected = True
                     state.bos_bearish = True
-                if _hh or _hl:
+
+                # ── CHoCH: the current leg turning ────────────────────────
+                if _leg_up and (_lh or _ll):
+                    state.choch_detected = True
+                    state.choch_bearish = True
+                elif (not _leg_up) and (_hl or _hh):
                     state.choch_detected = True
                     state.choch_bullish = True
-            # _trend == 0: no established trend, so no directional structural
-            # call. A range's swings are noise, not a break and not a reversal.
+            # _known False: no established structure. A range's swings are
+            # noise, not a break and not a reversal.
 
             # Once per closed candle — this method runs ~23x per candle.
             try:
@@ -1878,9 +1936,11 @@ class CompositeStateBuilder:
             if _s1_ts is not None and self._brc_log_ts.get(_k) != _s1_ts:
                 self._brc_log_ts[_k] = _s1_ts
                 logger.info(
-                    "[S1-STRUCTURE] %s: trend=%+d (lsm=%s) hh=%s lh=%s ll=%s hl=%s "
-                    "-> bos_bull=%s bos_bear=%s choch_bull=%s choch_bear=%s",
-                    self.asset_type, _trend, _lsm_state, _hh, _lh, _ll, _hl,
+                    "[S2-STRUCTURE] %s: lsm=%s parent_up=%s leg_up=%s known=%s "
+                    "hh=%s lh=%s ll=%s hl=%s -> bos_bull=%s bos_bear=%s "
+                    "choch_bull=%s choch_bear=%s",
+                    self.asset_type, _lsm_state, _parent_up, _leg_up, _known,
+                    _hh, _lh, _ll, _hl,
                     state.bos_bullish, state.bos_bearish,
                     state.choch_bullish, state.choch_bearish,
                 )
