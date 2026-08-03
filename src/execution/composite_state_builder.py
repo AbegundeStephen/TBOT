@@ -1119,6 +1119,22 @@ class CompositeStateBuilder:
                             elif getattr(state, "choch_bullish", False):
                                 _death_reason = "OPPOSING_CHOCH"
 
+                    # (d) EXPIRED — the setup can no longer satisfy its own
+                    #     proof standard. BRC's retest window is 28 candles;
+                    #     once the break is further back than that, no touch
+                    #     inside the window can be post-break, so the proof is
+                    #     unreachable by arithmetic and the setup is occupying
+                    #     the only slot for nothing.
+                    #     Confirmed absent before this fix: the only death
+                    #     conditions were LSM_STATE_FLIP, FAILED_BREAKOUT and
+                    #     OPPOSING_BOS/CHOCH — none of which need ever fire
+                    #     inside a single Livermore camp. BTC reached age=6 on
+                    #     3 Aug holding the slot with no proof completing.
+                    if _death_reason is None:
+                        _max_age = 28
+                        if int(_cur.get("age", 0)) > _max_age:
+                            _death_reason = "EXPIRED_PROOF_WINDOW"
+
                 if _cur is not None and _death_reason is not None:
                     state.setup_died = True
                     state.setup_death_reason = _death_reason
@@ -1174,7 +1190,7 @@ class CompositeStateBuilder:
                 if _bos_candidate is not None and _choch_candidate is not None:
                     logger.info(
                         "[SETUP-DUAL-SIGNAL] %s: BOS wanted %s dir=%+d, CHoCH wanted "
-                        "%s dir=%+d — CHoCH wins (recorded as %s dir=%+d).",
+                        "%s dir=%+d — continuation wins (recorded as %s dir=%+d).",
                         self.asset_type,
                         _bos_candidate["kind"], _bos_candidate["dir"],
                         _choch_candidate["kind"], _choch_candidate["dir"],
@@ -1184,9 +1200,10 @@ class CompositeStateBuilder:
                     # reversed direction — call that out specifically rather
                     # than leaving it folded into the dual-signal line above.
                     if _bos_candidate["dir"] != _choch_candidate["dir"]:
-                        logger.warning(
-                            "[SETUP-DIRECTION-FLIP] %s: BOS pointed dir=%+d, CHoCH "
-                            "overwrite flipped it to dir=%+d — same candle.",
+                        logger.info(
+                            "[SETUP-DUAL-OPPOSED] %s: BOS pointed dir=%+d, CHoCH "
+                            "pointed dir=%+d — opposite directions on one candle; "
+                            "continuation taken.",
                             self.asset_type, _bos_candidate["dir"], _choch_candidate["dir"],
                         )
 
@@ -1522,7 +1539,8 @@ class CompositeStateBuilder:
 
                         logger.info(
                             "[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g "
-                            "age=%d bar(s) (strict close-through, 8-bar retest)",
+                            "age=%d bar(s) (strict close-through, 28-bar "
+                            "break-anchored retest)",
                             self.asset_type, _brc_kind, _brc_dir, _brc_ref,
                             _brc_close, _age,
                         )

@@ -2487,9 +2487,42 @@ class InstitutionalCouncilAggregator:
             # weight change stops summing to 5.0 — compare percentages instead.
             # w_reversion is 0.0 when the flag is off → arithmetically identical
             # to the five-weight sum in legacy mode.
+            # F1: a judge whose engine was suppressed upstream cannot score
+            # this cycle, so its weight is not achievable and must not sit in
+            # the denominator. w_reversion already drops to 0.0 when the
+            # six-slot FLAG is off (line ~1442) — this extends the same honesty
+            # to a slot that is enabled but structurally dead right now.
+            #
+            # Measured 3 Aug: BTC reported 1.69/6.0 with TREND and REVERSION
+            # both at 0.00 because TF and MR were suppressed. The real ceiling
+            # was 3.5 against a bar of 4.20 — unreachable, and the log made it
+            # look like a near miss. This is the same finding recorded on
+            # 29 Jun ("3.5 effective max vs 3.65 required") and never fixed.
+            _tf_dead = (tf_signal == 0) or (float(tf_conf or 0.0) <= 0.0)
+            _mr_dead = (mr_signal == 0) or (float(mr_conf or 0.0) <= 0.0)
+
             _achievable_max = (
-                w_trend + w_structure + w_momentum + w_pattern + w_volume + w_reversion
+                (0.0 if _tf_dead else w_trend)
+                + w_structure
+                + w_momentum
+                + w_pattern
+                + w_volume
+                + (0.0 if _mr_dead else w_reversion)
             )
+            # Floor: never let the denominator collapse to a value that makes
+            # every percentage meaningless. The four always-live judges are the
+            # true minimum ceiling.
+            _achievable_max = max(
+                _achievable_max, w_structure + w_momentum + w_pattern + w_volume
+            )
+
+            if _tf_dead or _mr_dead:
+                logger.info(
+                    "[CEILING] %s: TF_dead=%s MR_dead=%s → achievable_max=%.2f "
+                    "(full weights would be %.2f)",
+                    self.asset_type, _tf_dead, _mr_dead, _achievable_max,
+                    w_trend + w_structure + w_momentum + w_pattern + w_volume + w_reversion,
+                )
 
             # Part 4.1 (Brain Rebuild): correlation discount. Judges sharing
             # an underlying enrichment source (JUDGE_SOURCE_REGISTRY, Part
@@ -3238,6 +3271,30 @@ class InstitutionalCouncilAggregator:
                 # must be measured against the real achievable maximum.
                 _sq_denom = _achievable_max if _achievable_max > 0 else 5.0
                 signal_quality = total_score / _sq_denom
+
+                # F2: the bar must never exceed what this cycle can actually
+                # score. Six independent raises can stack (lifecycle +0.75,
+                # governor +0.5, wick trap +0.4, low session +0.5, off-session
+                # +0.5, SLIGHTLY_COUNTER) — each caps itself, none caps the
+                # total, and none checks it against the ceiling. On 3 Aug that
+                # produced a 4.20 bar against a 3.5 reachable maximum on BTC
+                # and 4.30 against 3.5 on USTEC: arithmetically impossible
+                # cycles that the log reported as near misses.
+                #
+                # The strategy grants the brain a -0.25..+0.75 range over the
+                # bar — structural power, not the power to make a cycle
+                # unwinnable. 0.85 leaves a genuine margin the judges must
+                # earn while removing impossibility.
+                _bar_cap = 0.85 * _achievable_max
+                if required_score > _bar_cap:
+                    logger.info(
+                        "[THRESHOLD-CAP] %s: required %.2f exceeded 85%% of "
+                        "achievable %.2f — capped to %.2f. Raises that stacked "
+                        "past the ceiling: %.2f",
+                        self.asset_type, required_score, _achievable_max,
+                        _bar_cap, required_score - _bar_cap,
+                    )
+                    required_score = _bar_cap
 
                 if total_score < required_score:
                     logger.info(
