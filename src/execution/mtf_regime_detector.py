@@ -302,13 +302,49 @@ class MultiTimeFrameRegimeDetector:
             if df.index[-1] >= _floor:
                 df = df.iloc[:-1]
 
-        # Cache the result to CSV so subsequent cycles skip the API call
+        # Cache the result to CSV so subsequent cycles skip the API call.
+        # M2: MERGE with whatever's already on disk instead of overwriting --
+        # this fetch is intentionally a short lookback (60/120/500 days) for
+        # regime-detection purposes, but data/raw/{symbol}_{tf}.csv is the
+        # SAME file historical_updater.py maintains with a much longer
+        # history (365/730/1095 days). A blind overwrite here silently
+        # truncated that history back down to this method's short window on
+        # every cycle the API-fallback path ran -- the actual cause of the
+        # recurring "1H data shrunk to ~2 months" issue seen repeatedly this
+        # session (confirmed: backtest.py never hits this path, it uses its
+        # own BacktestGovernor stub -- only the live bot's regime detector
+        # does, on every cycle the CSV cache was judged stale).
         if not df.empty:
             try:
                 csv_file = Path(f"data/raw/{symbol}_{timeframe_str}.csv")
                 csv_file.parent.mkdir(parents=True, exist_ok=True)
-                df.to_csv(csv_file, index=True, index_label="timestamp")
-                logger.info(f"[CSV] ✓ Saved {len(df)} bars → {csv_file}")
+                combined = df
+                if csv_file.exists():
+                    try:
+                        existing = pd.read_csv(csv_file)
+                        _date_col = None
+                        for col in ["date", "timestamp", "time", "datetime"]:
+                            if col in existing.columns:
+                                _date_col = col
+                                break
+                        if _date_col:
+                            existing[_date_col] = pd.to_datetime(
+                                existing[_date_col], utc=True, errors="coerce"
+                            )
+                            existing = existing.dropna(subset=[_date_col])
+                            existing = existing.set_index(_date_col)
+                            existing.index.name = "timestamp"
+                            combined = pd.concat([existing, df])
+                            combined = combined[~combined.index.duplicated(keep="last")]
+                            combined = combined.sort_index()
+                    except Exception as _merge_err:
+                        logger.warning(
+                            f"[CSV] Could not merge existing {csv_file}, "
+                            f"writing fetched window only: {_merge_err}"
+                        )
+                        combined = df
+                combined.to_csv(csv_file, index=True, index_label="timestamp")
+                logger.info(f"[CSV] ✓ Saved {len(combined)} bars → {csv_file}")
             except Exception as _save_err:
                 logger.warning(f"[CSV] Could not save cache for {symbol} {timeframe_str}: {_save_err}")
 
