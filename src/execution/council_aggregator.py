@@ -1660,6 +1660,17 @@ class InstitutionalCouncilAggregator:
             )
 
             # Run all judges for both directions
+            # M2: _old_buy_trend/_old_sell_trend are only ever computed in the
+            # `else` (bars-off) branch below, via the legacy judge -- but both
+            # are read unconditionally later (score_history's
+            # legacy_reference_buy/sell_scores, and details'
+            # legacy_reference_buy/sell_trend), which raised
+            # UnboundLocalError on every cycle in production whenever
+            # judge_bars_enabled=True. Pre-bound to None so both branches are
+            # safe; None correctly signals "the legacy trend judge did not
+            # run this cycle" for the bars-on case.
+            _old_buy_trend = None
+            _old_sell_trend = None
             if _bars_on:
                 buy_scores["trend"], sell_scores["trend"], trend_exp = self._bar_trend(
                     df, w_trend, ema_signal, ema_conf, tf_signal, tf_conf,
