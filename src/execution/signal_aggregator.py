@@ -653,6 +653,14 @@ class PerformanceWeightedAggregator:
         self._cs_builder._livermore_last_4h_ts = value
 
     @property
+    def _livermore_last_1h_ts(self):
+        return self._cs_builder._livermore_last_1h_ts
+
+    @_livermore_last_1h_ts.setter
+    def _livermore_last_1h_ts(self, value):
+        self._cs_builder._livermore_last_1h_ts = value
+
+    @property
     def phase_config(self):
         """Discovered during relocation (not in the original plan):
         _build_composite_state reads getattr(self, "phase_config", {}) as its
