@@ -3067,6 +3067,12 @@ class TradingBot:
             _old_livermore_ts  = None
             _old_lsm_warmed    = False
             _old_perf_for_lsm  = None
+            # C3: only the four Livermore fields were carried across a preset
+            # change. The live setup, the confirmed proof and the break clock
+            # were destroyed every time — on 3 Aug five assets switched preset
+            # inside one second. A preset changes THRESHOLDS; it does not
+            # change what price did, so structural memory must survive it.
+            _old_builder_state = {}
             if isinstance(current_aggregator, dict) and current_aggregator.get("mode") == "hybrid":
                 _old_perf_for_lsm = current_aggregator.get("performance")
             elif isinstance(current_aggregator, dict) and current_aggregator.get("mode") == "council":
@@ -3080,6 +3086,24 @@ class TradingBot:
                 _old_livermore_1h = _old_perf_for_lsm._livermore_1h
                 _old_livermore_ts = getattr(_old_perf_for_lsm, "_livermore_last_4h_ts", None)
                 _old_lsm_warmed   = True
+                # C3: reach through to the BUILDER, not the shell. Most of
+                # these have no property forwarder on the aggregator, so
+                # getattr on the shell would silently return nothing.
+                _old_cs = getattr(_old_perf_for_lsm, "_cs_builder", None)
+                if _old_cs is not None:
+                    for _f in (
+                        "_active_setup", "_brc_memory", "_brc_break_ts",
+                        "_retest_memory", "_structure_levels", "_zone_levels",
+                        "_prev_compression", "_traj_last_processed_ts",
+                        "_livermore_last_1h_ts", "_brc_log_ts",
+                        "_squeeze_was_active", "_spread_history",
+                    ):
+                        if hasattr(_old_cs, _f):
+                            _old_builder_state[_f] = getattr(_old_cs, _f)
+                    logger.info(
+                        "[C3] %s: captured %d structural state fields before "
+                        "preset reinit", asset_name, len(_old_builder_state),
+                    )
 
             # Force hybrid if config says so OR state says so
             if global_mode == "hybrid" or is_hybrid_state:
@@ -3149,6 +3173,16 @@ class TradingBot:
                         f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
                         f"for {asset_name}"
                     )
+                    # C3: restore structural memory onto the NEW builder.
+                    _new_cs = getattr(perf_agg, "_cs_builder", None)
+                    if _new_cs is not None and _old_builder_state:
+                        for _f, _v in _old_builder_state.items():
+                            setattr(_new_cs, _f, _v)
+                        logger.info(
+                            "[C3] %s: preserved %d structural state fields "
+                            "across preset change (hybrid path)",
+                            asset_name, len(_old_builder_state),
+                        )
 
                 # Fix 1 (hybrid auto-preset reinit): same as initial setup path.
                 _pc = self.config.get("phase_config", {})
@@ -3219,6 +3253,16 @@ class TradingBot:
                         f"[AUTO PRESET] ✓ Livermore state transferred to council LSM companion "
                         f"for {asset_name}"
                     )
+                    # C3: restore structural memory onto the NEW builder.
+                    _new_cs = getattr(lsm_companion, "_cs_builder", None)
+                    if _new_cs is not None and _old_builder_state:
+                        for _f, _v in _old_builder_state.items():
+                            setattr(_new_cs, _f, _v)
+                        logger.info(
+                            "[C3] %s: preserved %d structural state fields "
+                            "across preset change (council companion path)",
+                            asset_name, len(_old_builder_state),
+                        )
                 self.aggregators[asset_name] = {
                     "council":  new_aggregator,
                     "livermore": lsm_companion,
@@ -3262,6 +3306,16 @@ class TradingBot:
                         f"[AUTO PRESET] ✓ Livermore state transferred to new perf agg "
                         f"for {asset_name}"
                     )
+                    # C3: restore structural memory onto the NEW builder.
+                    _new_cs = getattr(new_aggregator, "_cs_builder", None)
+                    if _new_cs is not None and _old_builder_state:
+                        for _f, _v in _old_builder_state.items():
+                            setattr(_new_cs, _f, _v)
+                        logger.info(
+                            "[C3] %s: preserved %d structural state fields "
+                            "across preset change (performance path)",
+                            asset_name, len(_old_builder_state),
+                        )
                 # Fix 1 (performance auto-preset reinit): same gap as hybrid/council
                 # reinit paths above — without this, the refreshed aggregator reads
                 # phase_config as {} via getattr(self, "phase_config", {}).

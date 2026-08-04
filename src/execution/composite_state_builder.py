@@ -223,6 +223,13 @@ class CompositeStateBuilder:
                 _df1 = df_1h.copy()
                 _df1["atr"] = _atr14(_df1)
                 self._livermore_1h.update_from_series(_df1)
+                # C4: mirror the 4H handling above. Without this the 1H dedup
+                # guard compares a real timestamp against None on the first
+                # live call and reprocesses the final warm-start candle —
+                # defeating the guard at exactly the boundary it protects.
+                self._livermore_last_1h_ts = (
+                    _df1.index[-1] if not _df1.empty else None
+                )
                 snap1 = self._livermore_1h.snapshot()
                 logger.info(
                     "[Livermore] %s 1H warm-start complete | state=%s age=%d bars",
