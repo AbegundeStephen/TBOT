@@ -420,10 +420,33 @@ class CompositeStateBuilder:
                 if state.squeeze_active and state.inside_bar:
                     state.coiled_spring = True
 
+                # D1: detect BOTH directions. The original test — poked above a
+                # recent high, closed back below — is an upside rejection and
+                # therefore bearish. `state.failed_breakout` keeps that exact
+                # meaning so every existing consumer is unaffected; the two new
+                # fields carry the direction for the trajectory death check.
                 _recent_high = df["high"].iloc[-4:-1].max()
+                _recent_low  = df["low"].iloc[-4:-1].min()
+
                 if _curr_h > _recent_high and _curr_c < _recent_high:
-                    state.failed_breakout = True
-                    logger.info(f"[SIGNAL] {self.asset_type}: failed_breakout=True")
+                    state.failed_breakout = True            # unchanged meaning
+                    state.failed_breakout_bearish = True
+                    logger.info(
+                        "[SIGNAL] %s: failed_breakout=True (BEARISH — poked "
+                        "above %.5g, closed %.5g)",
+                        self.asset_type, _recent_high, _curr_c,
+                    )
+
+                if _curr_l < _recent_low and _curr_c > _recent_low:
+                    # The mirror case: a downside rejection. This has never
+                    # been detected anywhere in the codebase, so no setup could
+                    # ever die from a failed breakdown against it.
+                    state.failed_breakout_bullish = True
+                    logger.info(
+                        "[SIGNAL] %s: failed_breakout=True (BULLISH — poked "
+                        "below %.5g, closed %.5g)",
+                        self.asset_type, _recent_low, _curr_c,
+                    )
         except Exception:
             pass
 
@@ -1101,9 +1124,30 @@ class CompositeStateBuilder:
                         _now_down = _lsm_now in _DOWN
                         if (_born_up and _now_down) or ((not _born_up) and _now_up):
                             _death_reason = "LSM_STATE_FLIP"
-                    # (b) SETUP-SPECIFIC — a failed breakout against the setup.
-                    if _death_reason is None and getattr(state, "failed_breakout", False):
-                        _death_reason = "FAILED_BREAKOUT"
+                    # (b) SETUP-SPECIFIC — a failed breakout AGAINST the setup.
+                    #     D1: this comment always said "against the setup" but
+                    #     the code never checked _dir, so an upside rejection
+                    #     killed short setups it actually confirms — and no
+                    #     setup could die on a downside rejection at all,
+                    #     because that case was never detected.
+                    #     A long dies on an upside rejection; a short dies on a
+                    #     downside one. Fall back to the legacy field only when
+                    #     neither directional flag is set, so behaviour is
+                    #     unchanged on any path that has not been updated.
+                    if _death_reason is None:
+                        _fb_bear = getattr(state, "failed_breakout_bearish", False)
+                        _fb_bull = getattr(state, "failed_breakout_bullish", False)
+                        if _dir == 1 and _fb_bear:
+                            _death_reason = "FAILED_BREAKOUT"
+                        elif _dir == -1 and _fb_bull:
+                            _death_reason = "FAILED_BREAKOUT"
+                        elif not _fb_bear and not _fb_bull and getattr(
+                            state, "failed_breakout", False
+                        ):
+                            # Legacy safety net: should not trigger once Edit 2
+                            # is in, since the bearish flag is set alongside
+                            # failed_breakout on the same line.
+                            _death_reason = "FAILED_BREAKOUT"
                     # (c) STRUCTURE-AGAINST — a directional structure break
                     #     the opposite way (long setup sees bearish BOS, or
                     #     vice versa).

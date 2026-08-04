@@ -102,6 +102,14 @@ class CompositeState:
     inside_bar: bool = False
     outside_bar: bool = False
     failed_breakout: bool = False
+    # D1: failed_breakout is BEARISH-ONLY by construction — it detects a poke
+    # above a recent high that closes back below. There was no bullish
+    # equivalent, and the trajectory death check applied it to setups of BOTH
+    # directions, so an upside rejection killed short setups it actually
+    # confirms. These two carry the direction; `failed_breakout` above keeps
+    # its exact original meaning and value for all eleven other consumers.
+    failed_breakout_bearish: bool = False   # poked above a high, closed below
+    failed_breakout_bullish: bool = False   # poked below a low, closed above
     ema_50_status: str = "UNTESTED"
     ema_50_reclassified: Optional[str] = None
     absorption_detected: bool = False
