@@ -3589,9 +3589,20 @@ class InstitutionalCouncilAggregator:
             return signal, details
 
         except Exception as e:
-            logger.error(f"[COUNCIL] Error: {e}", exc_info=True)
+            # C2: this handler converts any crash into a clean HOLD, which is
+            # indistinguishable from a deliberate decision on the dashboard and
+            # in the log. The C1 UnboundLocalError ran for hours on every asset
+            # before it was spotted, and only by accident. Make it unmistakable.
+            logger.error(
+                "\n" + "=" * 70 + "\n"
+                "[COUNCIL] SCORING CRASHED for %s — this HOLD is a FAILURE, "
+                "not a decision.\nNo judge scores are valid for this cycle.\n"
+                "Error: %s\n" + "=" * 70,
+                getattr(self, "asset_type", "?"), e, exc_info=True,
+            )
             return 0, {
                 "error": str(e),
+                "council_crashed": True,
                 "timestamp": timestamp,
                 "signal": 0,
                 "total_score": 0.0,
