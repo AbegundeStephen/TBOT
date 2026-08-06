@@ -3092,7 +3092,9 @@ class TradingBot:
                 _old_cs = getattr(_old_perf_for_lsm, "_cs_builder", None)
                 if _old_cs is not None:
                     for _f in (
-                        "_active_setup", "_brc_memory", "_brc_break_ts",
+                        "_active_setup", "_active_setup_mr",
+                        "_brc_memory", "_brc_memory_mr",
+                        "_brc_break_ts", "_brc_break_ts_mr",
                         "_retest_memory", "_structure_levels", "_zone_levels",
                         "_prev_compression", "_traj_last_processed_ts",
                         "_livermore_last_1h_ts", "_brc_log_ts",

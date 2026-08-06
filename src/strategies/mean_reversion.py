@@ -917,7 +917,11 @@ class MeanReversionStrategy(BaseStrategy):
         # the CHoCH that birthed this setup) is the equivalent of Mode 1's
         # spring_bar_idx — evaluate at the CHoCH bar, not wherever price has
         # since run to.
-        _choch_bar_idx = -1 - int(getattr(composite_state, "setup_age", 0) or 0)
+        # E2: this wants bars-since-the-CHoCH specifically -- an inherently
+        # MR-lane concept. The unsuffixed setup_age now prefers the TF lane
+        # when both are live, which would silently evaluate at the wrong
+        # bar if a TF_CONT setup happens to also be alive this cycle.
+        _choch_bar_idx = -1 - int(getattr(composite_state, "setup_age_mr", 0) or 0)
         opt_count = self._count_optional(
             features, direction,
             exclude_bar_idx=_choch_bar_idx, eval_bar_idx=_choch_bar_idx,

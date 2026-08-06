@@ -292,6 +292,23 @@ class CompositeState:
     setup_died: bool = False
     setup_death_reason: Optional[str] = None
 
+    # E2: MR_REV lane, tracked independently from the TF_CONT setup above.
+    # The unsuffixed setup_* fields keep publishing (preferring the TF lane
+    # when both are live) for the twelve existing consumers that have no
+    # concept of lanes.
+    setup_active_mr: bool = False
+    setup_kind_mr: Optional[str] = None
+    setup_dir_mr: int = 0
+    setup_age_mr: int = 0
+    setup_energy_trend_mr: Optional[str] = None
+
+    # E3: a post-break candle closed through the reference by more than
+    # tolerance — not a retest, a failed level. Log-visibility field; the
+    # actual kill routes through CompositeStateBuilder._retest_failed_pending
+    # (see composite_state_builder.py) since this field can't be read back
+    # in the same call it's set in.
+    retest_failed: bool = False
+
     def sanitise(self) -> None:
         """
         NaN guard. Call after all fields populated, before any downstream read.

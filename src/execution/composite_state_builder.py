@@ -64,7 +64,23 @@ class CompositeStateBuilder:
         self._squeeze_was_active = {}
         # TRAJECTORY (Plan 1B): per-asset live-setup memory. None = no setup.
         # Shape when active: {"kind","dir","age","born_compression","last_compression"}
-        self._active_setup = {}
+        # E2: one slot per KIND. A continuation and a reversal are different
+        # theses about the same market; both can legitimately be alive and the
+        # council decides between them. The tracker should not pre-empt that by
+        # letting whichever was born first block the other.
+        self._active_setup = {}        # TF_CONT lane — NAME KEPT: C3's state
+                                       # capture in main.py references it by
+                                       # this exact string.
+        self._active_setup_mr = {}     # MR_REV lane
+        self._brc_memory_mr = {}       # MR lane proof memory
+        self._brc_break_ts_mr = {}     # MR lane break clock
+        # E3: cross-cycle handoff for the RETEST_FAILED kill. The BRC block
+        # (which detects a failed retest) runs after the trajectory block
+        # within the same _build_composite_state call, so a same-cycle
+        # state.retest_failed read in trajectory would never see it. BRC
+        # writes here; trajectory pops (consumes) it the following cycle.
+        # Keyed (asset, setup_kind) so it targets the correct lane.
+        self._retest_failed_pending = {}
         # main.py invokes _build_composite_state twice per ~5min trading cycle
         # per asset (_update_asset_signal's recording pass, then trade_asset's
         # execution pass) against the same closed candle. Tracks the last
@@ -1044,7 +1060,6 @@ class CompositeStateBuilder:
         # ═══════════════════════════════════════════════════════════════
         try:
             _asset = self.asset_type
-            _cur = self._active_setup.get(_asset)   # None or dict
             _lsm_now = getattr(state, "livermore_state_1h", None)
             _comp = float(getattr(state, "activity_compression", 0.0) or 0.0)
 
@@ -1077,7 +1092,32 @@ class CompositeStateBuilder:
                 and self._traj_last_processed_ts.get(_asset) == _candle_ts
             )
 
-            if not _already_processed:
+            # E2: birth candidates computed once, shared between lanes. The
+            # TF lane may only be born from _bos_candidate; the MR lane may
+            # only be born from _choch_candidate. There is no overwrite left
+            # to resolve — both are independent theses about the same market,
+            # both get tracked, and it's the council's job to arbitrate
+            # between them, not the tracker's.
+            _bos_candidate = None
+            if getattr(state, "bos_bullish", False):
+                _bos_candidate = {"kind": "TF_CONT", "dir": 1}
+            elif getattr(state, "bos_bearish", False):
+                _bos_candidate = {"kind": "TF_CONT", "dir": -1}
+            _choch_candidate = None
+            if getattr(state, "choch_bullish", False):
+                _choch_candidate = {"kind": "MR_REV", "dir": 1}
+            elif getattr(state, "choch_bearish", False):
+                _choch_candidate = {"kind": "MR_REV", "dir": -1}
+
+            def _process_lane(_store, _candidate):
+                """One lane's STEP 1 (age) -> STEP 2 (death) -> STEP 3
+                (birth), unchanged from the pre-E2 single-lane logic except
+                that birth is restricted to the one candidate this lane owns.
+                Closes over _asset/_lsm_now/_comp/_UP/_DOWN/state from the
+                enclosing scope -- all identical for both lanes in one cycle.
+                """
+                _cur = _store.get(_asset)
+
                 # ---- STEP 1: age + energy-trend an existing setup ------
                 if _cur is not None:
                     _cur["age"] = int(_cur.get("age", 0)) + 1
@@ -1115,25 +1155,12 @@ class CompositeStateBuilder:
                     # (a) MASTER BACKSTOP — Livermore 1H state transitioned
                     #     away from the context the setup was born into.
                     if _born_state is not None and _lsm_now != _born_state:
-                        # Only kill if the new state flips the directional
-                        # context (a benign retracement within the same trend
-                        # shouldn't necessarily kill it, but a cross to the
-                        # opposite camp does).
                         _born_up = _born_state in _UP
                         _now_up = _lsm_now in _UP
                         _now_down = _lsm_now in _DOWN
                         if (_born_up and _now_down) or ((not _born_up) and _now_up):
                             _death_reason = "LSM_STATE_FLIP"
                     # (b) SETUP-SPECIFIC — a failed breakout AGAINST the setup.
-                    #     D1: this comment always said "against the setup" but
-                    #     the code never checked _dir, so an upside rejection
-                    #     killed short setups it actually confirms — and no
-                    #     setup could die on a downside rejection at all,
-                    #     because that case was never detected.
-                    #     A long dies on an upside rejection; a short dies on a
-                    #     downside one. Fall back to the legacy field only when
-                    #     neither directional flag is set, so behaviour is
-                    #     unchanged on any path that has not been updated.
                     if _death_reason is None:
                         _fb_bear = getattr(state, "failed_breakout_bearish", False)
                         _fb_bull = getattr(state, "failed_breakout_bullish", False)
@@ -1144,21 +1171,34 @@ class CompositeStateBuilder:
                         elif not _fb_bear and not _fb_bull and getattr(
                             state, "failed_breakout", False
                         ):
-                            # Legacy safety net: should not trigger once Edit 2
-                            # is in, since the bearish flag is set alongside
-                            # failed_breakout on the same line.
                             _death_reason = "FAILED_BREAKOUT"
-                    # (c) STRUCTURE-AGAINST — a directional structure break
-                    #     the opposite way (long setup sees bearish BOS, or
-                    #     vice versa).
+                    # (c) E3: the retest itself broke the level instead of
+                    #     holding it. A real breakout earns its retest; one
+                    #     that closes back through was never a breakout.
+                    #
+                    #     NOT read from state.retest_failed: this method
+                    #     builds a brand-new CompositeState() every call
+                    #     (line ~265), and the BRC block that would set that
+                    #     field runs LATER in this same method (~line 1282)
+                    #     than this trajectory layer (~line 1047) — BRC
+                    #     itself depends on trajectory's setup_active/kind/dir
+                    #     output, so the order can't be reversed. Reading
+                    #     state.retest_failed here would always see the
+                    #     unset default and this death condition would be
+                    #     permanently dead code. Consumed instead from a
+                    #     cross-cycle store BRC writes to when it detects a
+                    #     failed retest — popped so it fires once, one cycle
+                    #     after BRC detects it (the same one-cycle lag
+                    #     LSM_STATE_FLIP-style checks don't have, but
+                    #     FAILED_BREAKOUT etc. don't need to, since they read
+                    #     fields set earlier in the same call).
+                    if _death_reason is None and self._retest_failed_pending.pop(
+                        (_asset, _cur.get("kind")), False
+                    ):
+                        _death_reason = "RETEST_FAILED"
+                    # (d) SETUP-SPECIFIC — a structure break against the
+                    #     setup (long setup sees bearish BOS, or vice versa).
                     if _death_reason is None:
-                        # S1: inside a trend, a break against the setup now
-                        # surfaces as the opposing CHoCH rather than an opposing
-                        # BOS. Without this the setup outlives its own
-                        # invalidation. Separate reason string so the two cases
-                        # stay distinguishable, and so nothing matching on
-                        # "OPPOSING_BOS" changes meaning. Verified by grep:
-                        # those were the only two occurrences in the repo.
                         if _dir == 1:
                             if getattr(state, "bos_bearish", False):
                                 _death_reason = "OPPOSING_BOS"
@@ -1169,18 +1209,8 @@ class CompositeStateBuilder:
                                 _death_reason = "OPPOSING_BOS"
                             elif getattr(state, "choch_bullish", False):
                                 _death_reason = "OPPOSING_CHOCH"
-
-                    # (d) EXPIRED — the setup can no longer satisfy its own
-                    #     proof standard. BRC's retest window is 28 candles;
-                    #     once the break is further back than that, no touch
-                    #     inside the window can be post-break, so the proof is
-                    #     unreachable by arithmetic and the setup is occupying
-                    #     the only slot for nothing.
-                    #     Confirmed absent before this fix: the only death
-                    #     conditions were LSM_STATE_FLIP, FAILED_BREAKOUT and
-                    #     OPPOSING_BOS/CHOCH — none of which need ever fire
-                    #     inside a single Livermore camp. BTC reached age=6 on
-                    #     3 Aug holding the slot with no proof completing.
+                    # (e) EXPIRED — the setup can no longer satisfy its own
+                    #     proof standard within BRC's 28-candle window.
                     if _death_reason is None:
                         _max_age = 28
                         if int(_cur.get("age", 0)) > _max_age:
@@ -1194,102 +1224,65 @@ class CompositeStateBuilder:
                         self.asset_type, _cur.get("kind"), _cur.get("dir"),
                         _cur.get("age"), _death_reason,
                     )
-                    self._active_setup[_asset] = None
+                    _store[_asset] = None
                     _cur = None
 
                 # ---- STEP 3: birth check ---------------------------------
-                # Findings-doc Section 7, items 1-3: compute the candidate
-                # birth regardless of slot occupancy, so a dual BOS+CHoCH
-                # signal and a blocked birth (slot full) can both be observed
-                # — observation only, no behaviour change. The candidate is
-                # only ever actually applied to self._active_setup when the
-                # slot is empty (_cur is None), exactly as before.
-                _bos_candidate = None
-                if getattr(state, "bos_bullish", False):
-                    _bos_candidate = {"kind": "TF_CONT", "dir": 1}
-                elif getattr(state, "bos_bearish", False):
-                    _bos_candidate = {"kind": "TF_CONT", "dir": -1}
-                _choch_candidate = None
-                # MR setup is born at the CHANGE OF CHARACTER (CHoCH) — the
-                # earliest anomaly. CHoCH takes precedence when both appear
-                # in a way that implies a reversal is starting.
-                if getattr(state, "choch_bullish", False):
-                    _choch_candidate = {"kind": "MR_REV", "dir": 1}
-                elif getattr(state, "choch_bearish", False):
-                    _choch_candidate = {"kind": "MR_REV", "dir": -1}
-
-                # S2: continuation wins when both fire. A higher high and a
-                # higher low on the same candle inside an uptrend is one move
-                # described two ways — the pullback ended and the trend pushed
-                # on. Nothing reversed. Labelling it MR_REV routes a good setup
-                # to the engine behind six mandatory gates (one signal in 5,544
-                # candles) while TF, which can act on it, gets nothing.
-                # Desire's decision, 30 Jul.
-                _born = _choch_candidate
-                if _bos_candidate is not None:
-                    _born = _bos_candidate
-                if _bos_candidate is not None and _choch_candidate is not None:
-                    logger.info(
-                        "[S2-DUAL] %s: bos(%s dir=%+d) + choch(%s dir=%+d) "
-                        "-> continuation wins",
-                        self.asset_type,
-                        _bos_candidate.get("kind"), _bos_candidate.get("dir"),
-                        _choch_candidate.get("kind"), _choch_candidate.get("dir"),
-                    )
-
-                # Item 1: both a BOS and a CHoCH fired on this candle.
-                if _bos_candidate is not None and _choch_candidate is not None:
-                    logger.info(
-                        "[SETUP-DUAL-SIGNAL] %s: BOS wanted %s dir=%+d, CHoCH wanted "
-                        "%s dir=%+d — continuation wins (recorded as %s dir=%+d).",
-                        self.asset_type,
-                        _bos_candidate["kind"], _bos_candidate["dir"],
-                        _choch_candidate["kind"], _choch_candidate["dir"],
-                        _born["kind"], _born["dir"],
-                    )
-                    # Item 3: the overwrite didn't just change kind, it
-                    # reversed direction — call that out specifically rather
-                    # than leaving it folded into the dual-signal line above.
-                    if _bos_candidate["dir"] != _choch_candidate["dir"]:
-                        logger.info(
-                            "[SETUP-DUAL-OPPOSED] %s: BOS pointed dir=%+d, CHoCH "
-                            "pointed dir=%+d — opposite directions on one candle; "
-                            "continuation taken.",
-                            self.asset_type, _bos_candidate["dir"], _choch_candidate["dir"],
-                        )
-
+                # E2: this lane may only be born from the one candidate it
+                # owns (TF lane <- _bos_candidate, MR lane <- _choch_candidate).
+                # No overwrite between kinds any more — nothing to resolve.
                 if _cur is None:
-                    if _born is not None:
-                        _born.update({
+                    if _candidate is not None:
+                        _new_setup = dict(_candidate)
+                        _new_setup.update({
                             "age": 0,
                             "born_state": _lsm_now,
                             "born_compression": _comp,
                             "last_compression": _comp,
                             "energy": "HOLDING",
                         })
-                        self._active_setup[_asset] = _born
-                        _cur = _born
-                elif _born is not None:
-                    # Item 2: a setup wanted to be born but the slot was
-                    # occupied — this birth never happens, and nothing else
-                    # in the codebase records that it was ever attempted.
+                        _store[_asset] = _new_setup
+                        _cur = _new_setup
+                elif _candidate is not None:
+                    # Item 2: a setup wanted to be born but this lane's slot
+                    # was occupied.
                     logger.info(
                         "[SETUP-BIRTH-BLOCKED] %s: wanted %s dir=%+d, slot held by "
                         "%s dir=%+d (age=%s).",
-                        self.asset_type, _born["kind"], _born["dir"],
+                        self.asset_type, _candidate["kind"], _candidate["dir"],
                         _cur.get("kind"), _cur.get("dir"), _cur.get("age"),
                     )
 
+                return _cur
+
+            if not _already_processed:
+                _cur = _process_lane(self._active_setup, _bos_candidate)
+                _cur_mr = _process_lane(self._active_setup_mr, _choch_candidate)
                 if _candle_ts is not None:
                     self._traj_last_processed_ts[_asset] = _candle_ts
+            else:
+                _cur = self._active_setup.get(_asset)
+                _cur_mr = self._active_setup_mr.get(_asset)
 
             # ---- STEP 4: publish readouts ------------------------------
-            if _cur is not None:
+            # MR lane gets its own suffixed fields.
+            if _cur_mr is not None:
+                state.setup_active_mr = True
+                state.setup_kind_mr = _cur_mr.get("kind")
+                state.setup_dir_mr = int(_cur_mr.get("dir", 0))
+                state.setup_age_mr = int(_cur_mr.get("age", 0))
+                state.setup_energy_trend_mr = _cur_mr.get("energy")
+
+            # E2: twelve existing consumers read the unsuffixed setup_*
+            # fields with no concept of lanes. Prefer the TF lane when both
+            # are live, exactly as the doc requires.
+            _pub = _cur if _cur is not None else _cur_mr
+            if _pub is not None:
                 state.setup_active = True
-                state.setup_kind = _cur.get("kind")
-                state.setup_dir = int(_cur.get("dir", 0))
-                state.setup_age = int(_cur.get("age", 0))
-                state.setup_energy_trend = _cur.get("energy")
+                state.setup_kind = _pub.get("kind")
+                state.setup_dir = int(_pub.get("dir", 0))
+                state.setup_age = int(_pub.get("age", 0))
+                state.setup_energy_trend = _pub.get("energy")
 
             self._prev_compression[_asset] = _comp
         except Exception as _traj_err:
@@ -1471,18 +1464,62 @@ class CompositeStateBuilder:
                     # is POST-BREAK only when it is more recent than the break
                     # itself — strictly, so the break candle's own wick never
                     # counts as its own retest.
+                    # E3: a retest is the level HOLDING, judged on the CLOSE.
+                    # The previous version tested the low only, so a wick
+                    # rejection and a full breakdown were the same event.
+                    #
+                    # Tolerance is ATR-scaled, never a fixed number: 50 points
+                    # is 0.17% on USTEC, 0.08% on BTC, 1.5% on GOLD, 60% on
+                    # USOIL and 4300% on EURUSD. _atr is the shared ATR(14)
+                    # computed at the top of this method.
+                    _tol = 0.15 * float(_atr or 0.0)
+                    _win_close = df["close"].iloc[-(_WIN + 1):-1].values
+
+                    _retest_failed = False
                     if _brc_dir == 1:
+                        # Touched the level, and closed back above it (or
+                        # within tolerance below).
                         _retested = any(
-                            (v <= _brc_ref) and ((_WIN - i) < _bars_since_break)
-                            for i, v in enumerate(_brc_win_low)
+                            (_lo <= _brc_ref)
+                            and (_cl > _brc_ref - _tol)
+                            and ((_WIN - i) < _bars_since_break)
+                            for i, (_lo, _cl) in enumerate(
+                                zip(_brc_win_low, _win_close)
+                            )
+                        )
+                        # E3 kill: a post-break candle CLOSED through the level
+                        # by more than tolerance. Not a retest — a break the
+                        # other way. The thesis is dead.
+                        _retest_failed = any(
+                            (_cl < _brc_ref - _tol)
+                            and ((_WIN - i) < _bars_since_break)
+                            for i, _cl in enumerate(_win_close)
                         )
                         _closed_through = _brc_close > _brc_ref
                     else:
                         _retested = any(
-                            (v >= _brc_ref) and ((_WIN - i) < _bars_since_break)
-                            for i, v in enumerate(_brc_win_high)
+                            (_hi >= _brc_ref)
+                            and (_cl < _brc_ref + _tol)
+                            and ((_WIN - i) < _bars_since_break)
+                            for i, (_hi, _cl) in enumerate(
+                                zip(_brc_win_high, _win_close)
+                            )
+                        )
+                        _retest_failed = any(
+                            (_cl > _brc_ref + _tol)
+                            and ((_WIN - i) < _bars_since_break)
+                            for i, _cl in enumerate(_win_close)
                         )
                         _closed_through = _brc_close < _brc_ref
+
+                    if _retest_failed:
+                        state.retest_failed = True
+                        # E3/E2: hand off to the trajectory block, which runs
+                        # before this block within the same call and so can't
+                        # read state.retest_failed same-cycle (see the E3
+                        # comment in the trajectory death-check). Keyed by
+                        # kind so it targets whichever lane owns this proof.
+                        self._retest_failed_pending[(self.asset_type, _brc_kind)] = True
 
                     # Measurement 8.2: how many bars actually elapse between
                     # the first retest and the eventual close-through, unbound
@@ -1552,6 +1589,32 @@ class CompositeStateBuilder:
                                 _bars_since_break, len(_touch_idxs),
                                 len(_pre_break), len(_post_break), _retested,
                             )
+
+                    # E4: the RUNNER — a pullback that never reaches the level.
+                    # Only evaluated when the normal retest did not qualify.
+                    if not _retested and not _retest_failed and _bars_since_break >= 3:
+                        _wl = list(_brc_win_low); _wh = list(_brc_win_high)
+                        _wc = list(_win_close)
+                        _n = len(_wc)
+                        for _i in range(1, _n - 1):
+                            if (_WIN - _i) >= _bars_since_break:
+                                continue                      # pre-break
+                            if _brc_dir == 1:
+                                _pre_high = max(_wh[:_i]) if _i else None
+                                _pull_ok = _wl[_i] > _brc_ref  # held above
+                                _recover = any(
+                                    _c > _pre_high for _c in _wc[_i + 1:]
+                                ) if _pre_high is not None else False
+                            else:
+                                _pre_low = min(_wl[:_i]) if _i else None
+                                _pull_ok = _wh[_i] < _brc_ref
+                                _recover = any(
+                                    _c < _pre_low for _c in _wc[_i + 1:]
+                                ) if _pre_low is not None else False
+                            if _pull_ok and _recover:
+                                _retested = True
+                                _brc_tier_used = "RUNNER"
+                                break
 
                     if _retested and _closed_through:
                         # ── Build 2: age the proof in BARS ────────────────────
@@ -1975,7 +2038,25 @@ class CompositeStateBuilder:
                     _parent_up, _leg_up, _known = False, False, False
 
             if _known:
-                # ── BOS: the parent trend continuing ──────────────────────
+                # E1: the PARENT TREND selects the label for BOTH flags. A
+                # break agreeing with the parent is the trend continuing (BOS);
+                # a break against it is the character changing (CHoCH). The leg
+                # is the evidence we read the break through — it must not
+                # decide the sign.
+                #
+                # Previously BOS keyed off the parent but CHoCH keyed off the
+                # leg. Where the two disagree — an uptrend in a pullback — that
+                # gave the wrong answer:
+                #   GBPAUD 5 Aug: parent_up=True leg_up=False hh=True ll=True
+                #     old -> choch_BULLISH (1989 fired on _hh alone; the lower
+                #            low was never examined)
+                #     new -> choch_BEARISH
+                #   BTC 5 Aug: parent_up=True leg_up=False lh=True ll=True
+                #     old -> NOTHING (all four branches fell through)
+                #     new -> choch_bearish
+                # Measured: 12 live evaluations, 4 defective, 3 wrong-sign.
+                #
+                # BOS — the parent trend continuing.
                 if _parent_up and _hh:
                     state.bos_detected = True
                     state.bos_bullish = True
@@ -1983,13 +2064,13 @@ class CompositeStateBuilder:
                     state.bos_detected = True
                     state.bos_bearish = True
 
-                # ── CHoCH: the current leg turning ────────────────────────
-                if _leg_up and (_lh or _ll):
-                    state.choch_detected = True
-                    state.choch_bearish = True
-                elif (not _leg_up) and (_hl or _hh):
+                # CHoCH — a break AGAINST the parent trend.
+                if (not _parent_up) and (_hh or _hl):
                     state.choch_detected = True
                     state.choch_bullish = True
+                elif _parent_up and (_lh or _ll):
+                    state.choch_detected = True
+                    state.choch_bearish = True
             # _known False: no established structure. A range's swings are
             # noise, not a break and not a reversal.
 
