@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -370,6 +370,7 @@ class CompositeStateBuilder:
             state.zone_4h_current_lower_type = _v4["current_lower_type"]
             state.zone_4h_outer_high = _v4["outer_high"]
             state.zone_4h_outer_low = _v4["outer_low"]
+            state.zone_ladder_4h = self.get_zone_ladder(self.asset_type, "4H")
 
         if _df_1d is not None:
             self._update_zone_levels(self.asset_type, _df_1d, "1D", _atr_now, _price_now)
@@ -2427,6 +2428,37 @@ class CompositeStateBuilder:
             _out["current_lower_type"] = _d.get("type")
 
         return _out
+
+    def get_zone_ladder(self, asset, tf: str, extended: bool = False) -> List[dict]:
+        """Full zone ladder for charting -- every level with real history,
+        not just the single nearest upper/lower _build_zone_view narrows
+        down to. Same filter criteria (time window, tf-visibility, tests>=1)
+        so a chart and the live scoring fields never disagree about which
+        levels are "real". Sorted highest price first.
+
+        tf="4H" -> 4H levels only. tf="1D" -> 4H and 1D levels together
+        (the same "1D sees 4H's lines" rule _build_zone_view uses).
+        """
+        import time as _time
+        _now = _time.time()
+        _days = 180 if extended else 90
+        _window = _days * 24 * 3600
+        _visible = "4H" if tf == "4H" else None
+
+        _cands = [
+            {
+                "price": lvl["price"],
+                "type": lvl.get("type"),
+                "tests": lvl.get("tests", 0),
+                "role_flipped_at": lvl.get("role_flipped_at"),
+            }
+            for lvl in self._zone_levels.get(asset, [])
+            if (_now - lvl.get("first_seen", _now)) < _window
+            and (_visible is None or lvl["tf"] == _visible)
+            and lvl.get("tests", 0) >= 1
+        ]
+        _cands.sort(key=lambda l: l["price"], reverse=True)
+        return _cands
 
     # ── E.3: MA Defense Validator ─────────────────────────────────────────
 

@@ -233,6 +233,11 @@ class CompositeState:
     zone_4h_outer_high: Optional[float] = None    # body-only max over window
     zone_4h_outer_low: Optional[float] = None     # body-only min over window
     zone_4h_extended: bool = False                # True = 180d/5-zone view
+    # Full ladder for charting — every 4H/1D level that's earned at least one
+    # real test, not just the single nearest upper/lower the fields above
+    # narrow down to. Each entry: {"price", "type", "tests", "role_flipped_at"}.
+    # Populated alongside zone_4h_current_* in _build_composite_state.
+    zone_ladder_4h: List[Dict] = field(default_factory=list)
 
     # ── Zone ladder: 1D tier ──
     zone_1d_current_upper: Optional[float] = None
