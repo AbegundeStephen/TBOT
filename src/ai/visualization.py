@@ -117,7 +117,7 @@ class AIVisualizationGenerator:
 
             # AI Validation summary
             ax_ai = fig.add_subplot(gs[3, 1])
-            self._plot_ai_validation(ax_ai, details)
+            self._plot_ai_validation(ax_ai, details, current_price)
 
             # Add title with timestamp ( No unicode emoji)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -208,16 +208,19 @@ class AIVisualizationGenerator:
             # Plot candlesticks manually (more reliable than mplfinance)
             self._plot_candlesticks(ax, df_plot)
 
-            # Pattern overlay — PAT-4: removed
-            ai_details = details.get("ai_validation", {})
-
-            # Show support/resistance levels
-            if isinstance(ai_details, dict):
-                sr_details = ai_details.get("sr_analysis", {})
-                if isinstance(sr_details, dict) and sr_details.get("near_sr_level"):
-                    nearest_level = sr_details.get("nearest_level", current_price)
-                    level_type = sr_details.get("level_type", "Unknown")
-
+            # Nearest real zone-ladder level, not the legacy sr_analysis
+            # heuristic -- same composite_state.zone_4h_current_upper/lower
+            # the S/R panel and live scoring both read.
+            _cs = details.get("composite_state") if isinstance(details, dict) else None
+            if isinstance(_cs, dict):
+                _upper = _cs.get("zone_4h_current_upper")
+                _lower = _cs.get("zone_4h_current_lower")
+                _candidates = [
+                    (abs(lvl - current_price), lvl, "Resistance" if lvl >= current_price else "Support")
+                    for lvl in (_upper, _lower) if lvl is not None
+                ]
+                if _candidates:
+                    _, nearest_level, level_type = min(_candidates, key=lambda c: c[0])
                     ax.axhline(
                         y=nearest_level,
                         color="orange",
@@ -350,228 +353,17 @@ class AIVisualizationGenerator:
         self, ax, df_4h: pd.DataFrame, current_price: float, details: Dict
     ):
         """
-        Plot Support/Resistance levels as trend chart with overlaid S/R lines
+        Plot Support/Resistance levels -- the real zone ladder
+        (_structure_levels/_zone_levels, role-flip and test-count tracked),
+        the same levels the BRC proof pipeline actually scores against.
+        The legacy ai_validation.sr_analysis heuristic panel this used to
+        fall back to has been removed entirely -- it drew a different,
+        older S/R system than the one live trading reads, so a fallback to
+        it was worse than an honest empty state.
         """
-        # The real zone ladder (_structure_levels/_zone_levels, with role-flip
-        # and test-count tracking) is a DIFFERENT, newer system than the
-        # ai_validation.sr_analysis path below -- the one this session's BRC
-        # proof pipeline (S2/M1/Build E's ZONE_LADDER tier) actually reads.
-        # Prefer it when composite_state carries it; fall back to the legacy
-        # path unchanged when it doesn't (older cached details, or the
-        # composite_state build failed upstream).
         _cs = details.get("composite_state") if isinstance(details, dict) else None
-        _ladder = (_cs or {}).get("zone_ladder_4h") if isinstance(_cs, dict) else None
-        if _ladder:
-            self._plot_real_zone_ladder(ax, df_4h, current_price, _ladder, _cs)
-            return
-
-        try:
-            # ✅ FIX: Defensive extraction of AI details
-            ai_details = details.get("ai_validation", {})
-
-            # Handle both dict and string formats
-            if isinstance(ai_details, str):
-                ax.text(
-                    0.5,
-                    0.5,
-                    f"AI Status: {ai_details}",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title(
-                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
-                )
-                return
-
-            # If dict is empty or no SR data
-            if not ai_details or not isinstance(ai_details, dict):
-                ax.text(
-                    0.5,
-                    0.5,
-                    "AI Validation: Not Available",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title(
-                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
-                )
-                return
-
-            # Extract SR analysis
-            sr_analysis = ai_details.get("sr_analysis", {})
-
-            if not sr_analysis or not sr_analysis.get("levels"):
-                ax.text(
-                    0.5,
-                    0.5,
-                    "No S/R Levels Found",
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-                ax.set_title(
-                    "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
-                )
-                return
-
-            # Check if we have 4H dataframe
-            if df_4h is None or len(df_4h) == 0:
-                # Fallback to bar chart if no 4H data
-                self._plot_sr_levels_bars(ax, sr_analysis, current_price)
-                return
-
-            levels = sr_analysis.get("levels", [])
-
-            # Take last 60 candles for clarity
-            df_plot = df_4h.tail(60).copy()
-
-            if len(df_plot) < 10:
-                # Not enough data, use bar chart
-                self._plot_sr_levels_bars(ax, sr_analysis, current_price)
-                return
-
-            # Plot price line (close prices)
-            x_range = range(len(df_plot))
-            closes = df_plot["close"].values
-
-            # Main price line
-            ax.plot(
-                x_range,
-                closes,
-                color="cyan",
-                linewidth=2,
-                alpha=0.8,
-                label="4H Close",
-                zorder=5,
-            )
-
-            # Fill between high/low for context
-            highs = df_plot["high"].values
-            lows = df_plot["low"].values
-            ax.fill_between(x_range, lows, highs, color="gray", alpha=0.15, zorder=1)
-
-            # Get price range for visualization
-            price_min = df_plot[["high", "low"]].values.min()
-            price_max = df_plot[["high", "low"]].values.max()
-            price_range = price_max - price_min
-            buffer = price_range * 0.1
-
-            # Plot S/R levels as horizontal lines
-            for level in levels:
-                # Only show levels within visible range
-                if price_min - buffer <= level <= price_max + buffer:
-                    if level < current_price:
-                        # Support
-                        ax.axhline(
-                            y=level,
-                            color="lime",
-                            linestyle="--",
-                            linewidth=2,
-                            alpha=0.7,
-                            label=f"Support: ${level:,.2f}",
-                            zorder=3,
-                        )
-                    else:
-                        # Resistance
-                        ax.axhline(
-                            y=level,
-                            color="red",
-                            linestyle="--",
-                            linewidth=2,
-                            alpha=0.7,
-                            label=f"Resistance: ${level:,.2f}",
-                            zorder=3,
-                        )
-
-            # Mark current price with prominent line
-            ax.axhline(
-                y=current_price,
-                color="white",
-                linestyle="-",
-                linewidth=2.5,
-                alpha=0.9,
-                label=f"Current: ${current_price:,.2f}",
-                zorder=10,
-            )
-
-            # Mark nearest level if available
-            if sr_analysis.get("near_sr_level"):
-                nearest = sr_analysis.get("nearest_level")
-                if nearest and price_min - buffer <= nearest <= price_max + buffer:
-                    level_type = sr_analysis.get("level_type", "Level")
-                    ax.axhline(
-                        y=nearest,
-                        color="orange",
-                        linestyle=":",
-                        linewidth=3,
-                        alpha=0.9,
-                        label=f"Nearest {level_type}: ${nearest:,.2f}",
-                        zorder=8,
-                    )
-
-                    # Highlight zone around nearest level
-                    zone_size = price_range * 0.01  # 1% zone
-                    ax.axhspan(
-                        nearest - zone_size,
-                        nearest + zone_size,
-                        color="orange",
-                        alpha=0.15,
-                        zorder=2,
-                    )
-
-            # Set axis limits
-            ax.set_xlim(-1, len(df_plot))
-            ax.set_ylim(price_min - buffer, price_max + buffer)
-
-            # Labels and styling
-            ax.set_xlabel("4H Candles (Recent 60)", fontsize=10)
-            ax.set_ylabel("Price ($)", fontsize=10)
-            ax.set_title(
-                "4H S/R Analysis - Analyst View", fontsize=11, fontweight="bold"
-            )
-            ax.legend(loc="best", fontsize=8, framealpha=0.9)
-            ax.grid(True, alpha=0.3, which="both")
-
-            # Add distance info box
-            distance_pct = sr_analysis.get("distance_pct", 0)
-            if isinstance(distance_pct, (int, float)) and distance_pct > 0:
-                level_type = sr_analysis.get("level_type", "Level")
-                info_text = (
-                    f"Distance to {level_type}: {distance_pct:.2f}%\n"
-                    f"Total levels found: {len(levels)}"
-                )
-                ax.text(
-                    0.02,
-                    0.98,
-                    info_text,
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    fontsize=9,
-                    bbox=dict(
-                        boxstyle="round",
-                        facecolor="black",
-                        edgecolor="orange",
-                        alpha=0.8,
-                        linewidth=2,
-                    ),
-                )
-
-        except Exception as e:
-            logger.error(f"[VIZ] S/R plot error: {e}", exc_info=True)
-            ax.text(
-                0.5,
-                0.5,
-                f"Error displaying S/R levels",
-                ha="center",
-                va="center",
-                fontsize=10,
-            )
-            ax.set_title(
-                "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
-            )
+        _ladder = (_cs or {}).get("zone_ladder_4h", []) if isinstance(_cs, dict) else []
+        self._plot_real_zone_ladder(ax, df_4h, current_price, _ladder, _cs)
 
     def _plot_real_zone_ladder(
         self, ax, df_4h: pd.DataFrame, current_price: float,
@@ -579,8 +371,7 @@ class AIVisualizationGenerator:
     ):
         """Plot the REAL zone ladder -- _structure_levels/_zone_levels, the
         role-flip/test-count-tracked levels this session's BRC proof
-        pipeline (ZONE_LADDER tier) actually reads. Distinct from the legacy
-        ai_validation.sr_analysis levels _plot_sr_levels falls back to.
+        pipeline (ZONE_LADDER tier) actually reads.
         """
         try:
             if df_4h is not None and len(df_4h) >= 10:
@@ -634,7 +425,10 @@ class AIVisualizationGenerator:
             ax.set_xlabel("4H Candles (Recent 60)", fontsize=10)
             ax.set_ylabel("Price", fontsize=10)
             ax.set_title("Zone Ladder (4H) — role/test-tracked", fontsize=11, fontweight="bold")
-            ax.legend(loc="best", fontsize=7, framealpha=0.9)
+            # Fixed corner, not "best" -- "best" kept picking upper-left,
+            # the same corner as the info box below, so the two boxes
+            # overlapped whenever the price line left that corner empty.
+            ax.legend(loc="lower right", fontsize=7, framealpha=0.9)
             ax.grid(True, alpha=0.3, which="both")
 
             _upper = (composite_state or {}).get("zone_4h_current_upper")
@@ -655,60 +449,6 @@ class AIVisualizationGenerator:
             logger.error(f"[VIZ] Zone ladder plot error: {e}", exc_info=True)
             ax.text(0.5, 0.5, "Error displaying zone ladder", ha="center", va="center", fontsize=10)
             ax.set_title("Zone Ladder (4H)", fontsize=11, fontweight="bold")
-
-    def _plot_sr_levels_bars(self, ax, sr_analysis: Dict, current_price: float):
-        """
-        Fallback: Plot S/R levels as horizontal bars (original method)
-        Used when 4H dataframe is not available
-        """
-        try:
-            levels = sr_analysis.get("levels", [])
-            levels_sorted = sorted(levels)
-
-            # Create horizontal bar chart
-            y_positions = range(len(levels_sorted))
-            colors = []
-
-            for level in levels_sorted:
-                if level < current_price:
-                    colors.append("lime")  # Support
-                else:
-                    colors.append("red")  # Resistance
-
-            ax.barh(
-                y_positions, levels_sorted, color=colors, alpha=0.7, edgecolor="white"
-            )
-
-            # Mark current price
-            ax.axvline(
-                x=current_price,
-                color="white",
-                linestyle="--",
-                linewidth=2,
-                label=f"Current: ${current_price:,.2f}",
-            )
-
-            # Mark nearest level
-            if sr_analysis.get("near_sr_level"):
-                nearest = sr_analysis.get("nearest_level")
-                if nearest:
-                    ax.axvline(
-                        x=nearest,
-                        color="orange",
-                        linestyle="--",
-                        linewidth=2,
-                        label=f"Nearest: ${nearest:,.2f}",
-                    )
-
-            ax.set_yticks(y_positions)
-            ax.set_yticklabels([f"L{i+1}" for i in y_positions])
-            ax.set_xlabel("Price Level ($)", fontsize=10)
-            ax.set_title("4H S/R Levels (Bar View)", fontsize=11, fontweight="bold")
-            ax.legend(loc="best", fontsize=8)
-            ax.grid(True, alpha=0.3, axis="x")
-
-        except Exception as e:
-            logger.error(f"[VIZ] S/R bar plot error: {e}")
 
     def _plot_pattern_analysis(self, ax, df: pd.DataFrame, details: Dict):
         """PAT-4: pattern module removed — no-op stub kept for call-site compatibility."""
@@ -835,7 +575,7 @@ class AIVisualizationGenerator:
             logger.error(f"[VIZ] Signal breakdown error: {e}", exc_info=True)
             ax.text(0.5, 0.5, f"Breakdown Error: {str(e)}", ha="center", va="center")
 
-    def _plot_ai_validation(self, ax, details: Dict):
+    def _plot_ai_validation(self, ax, details: Dict, current_price: float = None):
         """
         AI validation summary with comprehensive data display
         """
@@ -934,25 +674,36 @@ class AIVisualizationGenerator:
 
             summary_lines.append("")
 
-            # S/R Analysis Section
-            sr_analysis = ai_details.get("sr_analysis", {})
-            if sr_analysis and sr_analysis.get("near_sr_level"):
-                level_type = sr_analysis.get("level_type", "Level").upper()
-                nearest = sr_analysis.get("nearest_level")
-                distance = sr_analysis.get("distance_pct")
-                total_levels = sr_analysis.get("total_levels_found", 0)
+            # Zone Ladder Section — real _zone_levels (role-flip/test-count
+            # tracked), the same levels the BRC proof pipeline scores
+            # against, not the legacy sr_analysis heuristic.
+            _cs = details.get("composite_state") if isinstance(details, dict) else None
+            _ladder = (_cs or {}).get("zone_ladder_4h", []) if isinstance(_cs, dict) else []
+            _candidates = []
+            if isinstance(_cs, dict):
+                _upper = _cs.get("zone_4h_current_upper")
+                _lower = _cs.get("zone_4h_current_lower")
+                for lvl in (_upper, _lower):
+                    if lvl is not None:
+                        _dist = (
+                            abs(lvl - current_price) / current_price * 100
+                            if current_price else None
+                        )
+                        _candidates.append((lvl, "RESISTANCE" if lvl >= (current_price or lvl) else "SUPPORT", _dist))
 
-                summary_lines.append(f"[S/R ANALYSIS]")
-                summary_lines.append(f"  Near {level_type}:  ${nearest:,.2f}")
+            summary_lines.append(f"[ZONE LADDER]")
+            if _candidates:
+                nearest, level_type, distance = min(
+                    _candidates, key=lambda c: c[2] if c[2] is not None else float("inf")
+                )
+                summary_lines.append(f"  Near {level_type}:  ${nearest:,.4g}")
                 if distance is not None:
                     summary_lines.append(f"  Distance:   {distance:.2f}%")
-                summary_lines.append(f"  Total Levels: {total_levels}")
+                summary_lines.append(f"  Total Levels: {len(_ladder)}")
             else:
-                summary_lines.append(f"[S/R ANALYSIS]")
                 summary_lines.append(f"  Status: No nearby levels")
-                total_levels = sr_analysis.get("total_levels_found", 0)
-                if total_levels > 0:
-                    summary_lines.append(f"  ({total_levels} levels found)")
+                if _ladder:
+                    summary_lines.append(f"  ({len(_ladder)} levels found)")
 
             summary_lines.append("")
 
