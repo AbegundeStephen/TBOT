@@ -1424,6 +1424,33 @@ class InstitutionalCouncilAggregator:
             # off it before the original derivation point.
             _composite_state = (governor_data or {}).get("composite_state")
 
+            # E5: no proof, no scoring. The strategy is passive by default —
+            # the council does not convene without a completed break → retest
+            # → close on the board. Skip the DECISION; keep the LOG.
+            _e5_proof = bool(getattr(_composite_state, "brc_confirmed", False)) \
+                if _composite_state is not None else False
+            if not _e5_proof:
+                logger.info(
+                    "[NO-PROOF] %s: no completed break-retest-close — council "
+                    "not convened. TF lane=%s dir=%s age=%s | MR lane=%s "
+                    "dir=%s age=%s",
+                    self.asset_type,
+                    getattr(_composite_state, "setup_kind", None),
+                    getattr(_composite_state, "setup_dir", None),
+                    getattr(_composite_state, "setup_age", None),
+                    getattr(_composite_state, "setup_kind_mr", None),
+                    getattr(_composite_state, "setup_dir_mr", None),
+                    getattr(_composite_state, "setup_age_mr", None),
+                )
+                return 0, {
+                    "signal": 0,
+                    "reasoning": "HOLD (no proof — council not convened)",
+                    "no_proof": True,
+                    "total_score": 0.0,
+                    "signal_quality": 0.0,
+                    "timestamp": timestamp,
+                }
+
             # ================================================================
             # ⚖️ DYNAMIC COUNCIL WEIGHTS (Phase 4)
             # ================================================================
@@ -2512,13 +2539,22 @@ class InstitutionalCouncilAggregator:
             _tf_dead = (tf_signal == 0) or (float(tf_conf or 0.0) <= 0.0)
             _mr_dead = (mr_signal == 0) or (float(mr_conf or 0.0) <= 0.0)
 
+            # E5b: a continuation trade is judged by continuation evidence.
+            # REVERSION is silent on a TF_CONT proof because it is the wrong
+            # question, not because the evidence was weak. Counting its weight
+            # inflates the denominator and makes an impossible cycle read as a
+            # near miss. Measured 5 Aug: EURUSD scored 2.70 with the ceiling
+            # printed at 5.00 — REVERSION's 1.00 was never available, so the
+            # honest ceiling was 4.00.
+            # E5a guarantees brc_kind is set here: no proof, no convening.
+            _proof_kind = getattr(_composite_state, "brc_kind", None)
+            _trend_relevant = (_proof_kind == "TF_CONT") and not _tf_dead
+            _rev_relevant   = (_proof_kind == "MR_REV")  and not _mr_dead
+
             _achievable_max = (
-                (0.0 if _tf_dead else w_trend)
-                + w_structure
-                + w_momentum
-                + w_pattern
-                + w_volume
-                + (0.0 if _mr_dead else w_reversion)
+                (w_trend if _trend_relevant else 0.0)
+                + w_structure + w_momentum + w_pattern + w_volume
+                + (w_reversion if _rev_relevant else 0.0)
             )
             # Floor: never let the denominator collapse to a value that makes
             # every percentage meaningless. The four always-live judges are the
@@ -2527,11 +2563,11 @@ class InstitutionalCouncilAggregator:
                 _achievable_max, w_structure + w_momentum + w_pattern + w_volume
             )
 
-            if _tf_dead or _mr_dead:
+            if _tf_dead or _mr_dead or not (_trend_relevant and _rev_relevant):
                 logger.info(
-                    "[CEILING] %s: TF_dead=%s MR_dead=%s → achievable_max=%.2f "
-                    "(full weights would be %.2f)",
-                    self.asset_type, _tf_dead, _mr_dead, _achievable_max,
+                    "[CEILING] %s: TF_dead=%s MR_dead=%s proof_kind=%s → "
+                    "achievable_max=%.2f (full weights would be %.2f)",
+                    self.asset_type, _tf_dead, _mr_dead, _proof_kind, _achievable_max,
                     w_trend + w_structure + w_momentum + w_pattern + w_volume + w_reversion,
                 )
 
