@@ -2,7 +2,7 @@
 """
 AI Decision Visualization System -
 Generates detailed charts showing:
-- Candlestick patterns with 15min data
+- Candlestick patterns with 1H data
 - Support/Resistance levels from 4H analysis
 - Pattern detection overlays
 - AI validation decisions
@@ -73,7 +73,7 @@ class AIVisualizationGenerator:
 
         Args:
             asset_name: Asset symbol (BTC/GOLD)
-            df_15min: 15-minute candle data (for pattern detection)
+            df_15min: primary-timeframe candle data (1H — every asset's config.json timeframe is H1; the param name is legacy)
             df_4h: 4-hour candle data (for S/R analysis)
             signal: Final aggregated signal (-1, 0, 1)
             details: Signal details from aggregator
@@ -172,7 +172,7 @@ class AIVisualizationGenerator:
     def _plot_main_chart(
         self, ax, df: pd.DataFrame, asset_name: str, current_price: float, details: Dict
     ):
-        """Plot main 15min candlestick chart with overlays"""
+        """Plot main 1H candlestick chart with overlays"""
         try:
             # Make a copy to avoid modifying original
             df = df.copy()
@@ -185,7 +185,7 @@ class AIVisualizationGenerator:
             else:
                 # Create synthetic date index
                 df["date"] = pd.date_range(
-                    end=datetime.now(), periods=len(df), freq="15min"
+                    end=datetime.now(), periods=len(df), freq="1h"
                 )
 
             # Limit to last 100 candles for clarity
@@ -201,7 +201,7 @@ class AIVisualizationGenerator:
                     fontsize=12,
                 )
                 ax.set_title(
-                    f"{asset_name} - 15min Candlesticks", fontsize=12, fontweight="bold"
+                    f"{asset_name} - 1H Candlesticks", fontsize=12, fontweight="bold"
                 )
                 return
 
@@ -292,7 +292,7 @@ class AIVisualizationGenerator:
                     )
 
             ax.set_title(
-                f"{asset_name} - 15min Candlesticks (Last 100 candles)",
+                f"{asset_name} - 1H Candlesticks (Last 100 candles)",
                 fontsize=12,
                 fontweight="bold",
             )
@@ -374,7 +374,8 @@ class AIVisualizationGenerator:
         pipeline (ZONE_LADDER tier) actually reads.
         """
         try:
-            if df_4h is not None and len(df_4h) >= 10:
+            _have_4h = df_4h is not None and len(df_4h) >= 10
+            if _have_4h:
                 df_plot = df_4h.tail(60).copy()
                 x_range = range(len(df_plot))
                 closes = df_plot["close"].values
@@ -397,16 +398,26 @@ class AIVisualizationGenerator:
 
             # Each level: role-colored (resistance=red, support=lime), line
             # weight and alpha scale with test count so a level that's earned
-            # real history reads as more significant than a fresh one.
+            # real history reads as more significant than a fresh one. Zone
+            # band width is the REAL dedup tolerance stored at the level's
+            # creation time (composite_state_builder._update_zone_levels) --
+            # not a cosmetic guess. Levels created before that field existed
+            # get width=0 and fall back to a thin line, honestly.
             for lvl in ladder:
                 price = lvl["price"]
                 if not (price_min - buffer <= price <= price_max + buffer):
                     continue
                 tests = int(lvl.get("tests", 0) or 0)
+                width = float(lvl.get("zone_width", 0) or 0)
                 is_resistance = lvl.get("type") == "swing_high"
                 color = "red" if is_resistance else "lime"
                 role_label = "Resistance" if is_resistance else "Support"
                 flipped = " (flipped)" if lvl.get("role_flipped_at") else ""
+                if width > 0:
+                    ax.axhspan(
+                        price - width, price + width, color=color,
+                        alpha=min(0.10 + 0.03 * tests, 0.30), zorder=2,
+                    )
                 ax.axhline(
                     y=price, color=color, linestyle="--",
                     linewidth=min(1.0 + 0.5 * tests, 3.5),
@@ -414,6 +425,49 @@ class AIVisualizationGenerator:
                     label=f"{role_label}{flipped}: ${price:,.4g} ({tests}x)",
                     zorder=3,
                 )
+
+            # Real trendlines -- connect the two most recent swing highs
+            # (resistance trendline) and the two most recent swing lows
+            # (support trendline) actually present in this visible 4H
+            # window, using the same 3-bar-fractal definition of a swing
+            # point _update_zone_levels uses. Computed fresh from the
+            # plotted candles, not read from a stored/fabricated source --
+            # skipped entirely if the window doesn't have two of a kind.
+            if _have_4h and len(df_plot) >= 5:
+                def _swings(arr, is_high):
+                    pts = []
+                    for i in range(2, len(arr) - 2):
+                        if is_high and arr[i] > arr[i - 1] and arr[i] > arr[i + 1]:
+                            pts.append((i, arr[i]))
+                        elif not is_high and arr[i] < arr[i - 1] and arr[i] < arr[i + 1]:
+                            pts.append((i, arr[i]))
+                    return pts
+
+                _last_x = len(df_plot) - 1
+                _high_swings = _swings(highs, True)
+                _low_swings = _swings(lows, False)
+
+                if len(_high_swings) >= 2:
+                    (x1, y1), (x2, y2) = _high_swings[-2], _high_swings[-1]
+                    if x2 > x1:
+                        slope = (y2 - y1) / (x2 - x1)
+                        y_end = y2 + slope * (_last_x - x2)
+                        ax.plot(
+                            [x1, _last_x], [y1, y_end], color="orange",
+                            linestyle="-", linewidth=1.6, alpha=0.85,
+                            label="Trendline (highs)", zorder=6,
+                        )
+
+                if len(_low_swings) >= 2:
+                    (x1, y1), (x2, y2) = _low_swings[-2], _low_swings[-1]
+                    if x2 > x1:
+                        slope = (y2 - y1) / (x2 - x1)
+                        y_end = y2 + slope * (_last_x - x2)
+                        ax.plot(
+                            [x1, _last_x], [y1, y_end], color="dodgerblue",
+                            linestyle="-", linewidth=1.6, alpha=0.85,
+                            label="Trendline (lows)", zorder=6,
+                        )
 
             ax.axhline(
                 y=current_price, color="white", linestyle="-", linewidth=2.5,
@@ -857,7 +911,7 @@ class TelegramChartSender:
 
         Args:
             asset_name: Asset symbol
-            df_15min: 15-minute data
+            df_15min: primary-timeframe data (1H)
             df_4h: 4-hour data
             signal: Final signal
             details: Signal details
