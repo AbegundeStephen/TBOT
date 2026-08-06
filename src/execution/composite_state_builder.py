@@ -2336,6 +2336,11 @@ class CompositeStateBuilder:
                         "last_test": _now,
                         "role_flipped_at": None,
                         "_last_dist_atr": 99,
+                        # Real dedup tolerance at creation time -- lets
+                        # charting draw an honest zone band (price ± width)
+                        # instead of a single line, without fabricating a
+                        # width that wasn't actually used to define the level.
+                        "zone_width": float(_tol),
                     })
             if _lows[i] < _lows[i - 1] and _lows[i] < _lows[i + 1]:
                 if not any(
@@ -2351,6 +2356,7 @@ class CompositeStateBuilder:
                         "last_test": _now,
                         "role_flipped_at": None,
                         "_last_dist_atr": 99,
+                        "zone_width": float(_tol),
                     })
 
         # ── Test counting with hysteresis — copied from :1725.
@@ -2451,6 +2457,9 @@ class CompositeStateBuilder:
                 "type": lvl.get("type"),
                 "tests": lvl.get("tests", 0),
                 "role_flipped_at": lvl.get("role_flipped_at"),
+                # 0 for levels created before zone_width existed -- charting
+                # falls back to a thin line for those, not a fabricated band.
+                "zone_width": lvl.get("zone_width", 0.0),
             }
             for lvl in self._zone_levels.get(asset, [])
             if (_now - lvl.get("first_seen", _now)) < _window
