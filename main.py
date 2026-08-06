@@ -84,7 +84,6 @@ from src.portfolio.hedging_support import (
 )
 
 
-import pickle
 
 # Import Telegram bot
 from src.telegram import TradingTelegramBot, SignalMonitoringIntegration
@@ -950,48 +949,16 @@ class TradingBot:
             logger.info("Initializing AI Layer...")
             logger.info("=" * 70)
 
-            models_dir = Path("models/ai")
-
-            # Check if model files exist
-            model_path = models_dir / "sniper_dual_timeframe_v1.weights.h5"
-            mapping_path = models_dir / "sniper_dual_timeframe_v1_mapping.pkl"
-            config_path = models_dir / "sniper_dual_timeframe_v1_config.pkl"
-
-            if not model_path.exists():
-                logger.error(f"[AI] Model not found: {model_path}")
-                logger.error("[AI] Please run: python train_dual_timeframe.py")
-                logger.warning("[AI] AI layer will be DISABLED")
-                return False
-
-            # Load pattern mapping
-            try:
-                with open(mapping_path, "rb") as f:
-                    pattern_map = pickle.load(f)
-
-                logger.info(f"[AI] Loaded {len(pattern_map)} patterns")
-
-                # Ensure noise class exists
-                if "Noise" not in pattern_map:
-                    logger.warning("[AI] Adding missing 'Noise' class")
-                    pattern_map["Noise"] = 0
-                    with open(mapping_path, "wb") as f:
-                        pickle.dump(pattern_map, f)
-
-            except Exception as e:
-                logger.error(f"[AI] Pattern mapping error: {e}")
-                return False
-
-            # Load config
-            try:
-                with open(config_path, "rb") as f:
-                    config = pickle.load(f)
-
-                logger.info(f"[AI] Model: {config.get('model_version', 'unknown')}")
-                logger.info(f"[AI] Accuracy: {config.get('val_accuracy', 0):.2%}")
-
-            except Exception as e:
-                logger.warning(f"[AI] Config warning: {e}")
-                config = {"num_classes": len(pattern_map)}
+            # Sniper's weights/mapping/config files used to be loaded here and
+            # a missing file made this whole function bail out with `return
+            # False` -- taking analyst, ai_validator, and (downstream)
+            # chart_sender down with it. Sniper is disconnected (Phase 0B)
+            # and HybridSignalValidator ignores pattern_id_map entirely
+            # (hardcodes self.pattern_id_map = {} -- see hybrid_validator.py),
+            # so nothing here was ever using what that file provided. A
+            # missing, unused model file was blocking /chart and AI
+            # validation on any machine without it.
+            pattern_map = {}
 
             # Initialize Analyst (4H)
             try:
@@ -1046,7 +1013,7 @@ class TradingBot:
             logger.info("=" * 70)
             logger.info("✅ AI Layer READY")
             logger.info("  Analyst:   4H S/R detection")
-            logger.info("  Sniper:    15min patterns")
+            logger.info("  Sniper:    DISCONNECTED (Phase 0B)")
             logger.info(
                 f"  Status:    {'ENABLED' if self.params.use_ai_validation else 'DISABLED'}"
             )
