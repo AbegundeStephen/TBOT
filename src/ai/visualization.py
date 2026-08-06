@@ -352,6 +352,19 @@ class AIVisualizationGenerator:
         """
         Plot Support/Resistance levels as trend chart with overlaid S/R lines
         """
+        # The real zone ladder (_structure_levels/_zone_levels, with role-flip
+        # and test-count tracking) is a DIFFERENT, newer system than the
+        # ai_validation.sr_analysis path below -- the one this session's BRC
+        # proof pipeline (S2/M1/Build E's ZONE_LADDER tier) actually reads.
+        # Prefer it when composite_state carries it; fall back to the legacy
+        # path unchanged when it doesn't (older cached details, or the
+        # composite_state build failed upstream).
+        _cs = details.get("composite_state") if isinstance(details, dict) else None
+        _ladder = (_cs or {}).get("zone_ladder_4h") if isinstance(_cs, dict) else None
+        if _ladder:
+            self._plot_real_zone_ladder(ax, df_4h, current_price, _ladder, _cs)
+            return
+
         try:
             # ✅ FIX: Defensive extraction of AI details
             ai_details = details.get("ai_validation", {})
@@ -559,6 +572,89 @@ class AIVisualizationGenerator:
             ax.set_title(
                 "4H Support/Resistance Analysis", fontsize=11, fontweight="bold"
             )
+
+    def _plot_real_zone_ladder(
+        self, ax, df_4h: pd.DataFrame, current_price: float,
+        ladder: List[Dict], composite_state: Optional[Dict],
+    ):
+        """Plot the REAL zone ladder -- _structure_levels/_zone_levels, the
+        role-flip/test-count-tracked levels this session's BRC proof
+        pipeline (ZONE_LADDER tier) actually reads. Distinct from the legacy
+        ai_validation.sr_analysis levels _plot_sr_levels falls back to.
+        """
+        try:
+            if df_4h is not None and len(df_4h) >= 10:
+                df_plot = df_4h.tail(60).copy()
+                x_range = range(len(df_plot))
+                closes = df_plot["close"].values
+                highs = df_plot["high"].values
+                lows = df_plot["low"].values
+                ax.plot(x_range, closes, color="cyan", linewidth=2, alpha=0.8,
+                         label="4H Close", zorder=5)
+                ax.fill_between(x_range, lows, highs, color="gray", alpha=0.15, zorder=1)
+                price_min = float(df_plot[["high", "low"]].values.min())
+                price_max = float(df_plot[["high", "low"]].values.max())
+            else:
+                # No 4H data to plot candles against -- still show the ladder
+                # itself, scaled to the levels and current price.
+                x_range = range(2)
+                prices = [l["price"] for l in ladder] + [current_price]
+                price_min, price_max = min(prices), max(prices)
+
+            price_range = max(price_max - price_min, 1e-9)
+            buffer = price_range * 0.1
+
+            # Each level: role-colored (resistance=red, support=lime), line
+            # weight and alpha scale with test count so a level that's earned
+            # real history reads as more significant than a fresh one.
+            for lvl in ladder:
+                price = lvl["price"]
+                if not (price_min - buffer <= price <= price_max + buffer):
+                    continue
+                tests = int(lvl.get("tests", 0) or 0)
+                is_resistance = lvl.get("type") == "swing_high"
+                color = "red" if is_resistance else "lime"
+                role_label = "Resistance" if is_resistance else "Support"
+                flipped = " (flipped)" if lvl.get("role_flipped_at") else ""
+                ax.axhline(
+                    y=price, color=color, linestyle="--",
+                    linewidth=min(1.0 + 0.5 * tests, 3.5),
+                    alpha=min(0.5 + 0.1 * tests, 0.95),
+                    label=f"{role_label}{flipped}: ${price:,.4g} ({tests}x)",
+                    zorder=3,
+                )
+
+            ax.axhline(
+                y=current_price, color="white", linestyle="-", linewidth=2.5,
+                alpha=0.9, label=f"Current: ${current_price:,.4g}", zorder=10,
+            )
+
+            ax.set_xlim(-1, max(len(x_range) - 1, 1))
+            ax.set_ylim(price_min - buffer, price_max + buffer)
+            ax.set_xlabel("4H Candles (Recent 60)", fontsize=10)
+            ax.set_ylabel("Price", fontsize=10)
+            ax.set_title("Zone Ladder (4H) — role/test-tracked", fontsize=11, fontweight="bold")
+            ax.legend(loc="best", fontsize=7, framealpha=0.9)
+            ax.grid(True, alpha=0.3, which="both")
+
+            _upper = (composite_state or {}).get("zone_4h_current_upper")
+            _lower = (composite_state or {}).get("zone_4h_current_lower")
+            info_text = (
+                f"Ladder levels: {len(ladder)}\n"
+                f"Nearest above: {_upper:,.4g}" if _upper is not None else "Nearest above: none"
+            )
+            if _lower is not None:
+                info_text += f"\nNearest below: {_lower:,.4g}"
+            ax.text(
+                0.02, 0.98, info_text, transform=ax.transAxes, va="top", ha="left",
+                fontsize=9,
+                bbox=dict(boxstyle="round", facecolor="black", edgecolor="orange",
+                          alpha=0.8, linewidth=2),
+            )
+        except Exception as e:
+            logger.error(f"[VIZ] Zone ladder plot error: {e}", exc_info=True)
+            ax.text(0.5, 0.5, "Error displaying zone ladder", ha="center", va="center", fontsize=10)
+            ax.set_title("Zone Ladder (4H)", fontsize=11, fontweight="bold")
 
     def _plot_sr_levels_bars(self, ax, sr_analysis: Dict, current_price: float):
         """

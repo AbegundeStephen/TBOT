@@ -2950,12 +2950,33 @@ class TradingTelegramBot:
                                 and asset_name in self.trading_bot._current_regime_data
                             ):
                                 mtf_regime = self.trading_bot._current_regime_data[asset_name]
+                            # Ladder chart: build composite_state fresh off this
+                            # command's own df_15/df_4h, same call main.py's live
+                            # loop makes (council has no Livermore state of its
+                            # own -- the companion carries it), so /chart's zone
+                            # ladder reflects the data actually being charted
+                            # rather than whatever the last live cycle cached.
+                            _lsm_comp = agg.get("livermore")
+                            _cs = None
+                            if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
+                                try:
+                                    _cs = _lsm_comp._build_composite_state(
+                                        df_15.copy(), df_4, mtf_regime
+                                    )
+                                    mtf_regime["composite_state"] = _cs
+                                except Exception as _cs_err:
+                                    logger.debug(
+                                        "[CHART CMD] composite_state build failed for %s: %s",
+                                        asset_name, _cs_err,
+                                    )
                             sig, det = agg["council"].get_aggregated_signal(
                                 df_15.copy(),
                                 current_regime=mtf_regime.get("regime", "NEUTRAL"),
                                 is_bull_market=mtf_regime.get("is_bull", False),
                                 governor_data=mtf_regime,
                             )
+                            if _cs is not None and hasattr(_cs, "to_dict"):
+                                det["composite_state"] = _cs.to_dict()
                         else:
                             # Single-mode aggregator (council or performance object)
                             mtf_regime = {}
