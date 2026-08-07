@@ -324,18 +324,39 @@ class InstitutionalCouncilAggregator:
         logger.info(f"   3. MOMENTUM   ({self.w_momentum:.1f} pt)  - RSI + MACD")
         logger.info(f"   4. PATTERN    ({self.w_pattern:.1f} pt)  - Wyckoff structure")
         logger.info(f"   5. VOLUME     ({self.w_volume:.1f} pt)  - Volume confirmation")
+        if bool(self.config.get("six_slot_judges_enabled", False)):
+            logger.info(
+                f"   6. REVERSION  ({self.w_reversion:.1f} pt)  - MR-lane structural reversal"
+            )
         logger.info("")
-        _configured_ceiling = (
-            self.w_trend + self.w_structure + self.w_momentum
-            + self.w_pattern + self.w_volume
+        # H1-CORRECTED: this banner prints at construction, before any proof
+        # exists, so it cannot know the per-cycle ceiling. The runtime ceiling
+        # (_achievable_max) drops w_trend on an MR_REV proof and w_reversion on
+        # a TF_CONT proof, because a judge answering the wrong question should
+        # not inflate the denominator. Asserting any single number here is
+        # therefore wrong on some cycles — the old 5.0 was wrong on every
+        # MR_REV cycle. Print both bounds instead and point at the truth.
+        _six_slot_banner = bool(self.config.get("six_slot_judges_enabled", False))
+        _always_live = (
+            self.w_structure + self.w_momentum + self.w_pattern + self.w_volume
         )
+        _ceiling_tf = _always_live + self.w_trend
+        _ceiling_mr = _always_live + (
+            self.w_reversion if _six_slot_banner else 0.0
+        )
+        _configured_ceiling = max(_ceiling_tf, _ceiling_mr)
         logger.info("   DECISION RULES (Bidirectional):")
         logger.info(
-            f"   • Trend-aligned:  ≥ {self.trend_aligned_threshold:.1f} / {_configured_ceiling:.1f} "
-            f"(sum of judge weights above, not a fixed 5.0)"
+            f"   - Trend-aligned:  >= {self.trend_aligned_threshold:.1f}"
         )
         logger.info(
-            f"   • Counter-trend:  ≥ {self.counter_trend_threshold:.1f} / {_configured_ceiling:.1f}"
+            f"   - Counter-trend:  >= {self.counter_trend_threshold:.1f}"
+        )
+        logger.info(
+            f"   - Ceiling is per-cycle: {_ceiling_tf:.1f} on a TF_CONT proof, "
+            f"{_ceiling_mr:.1f} on an MR_REV proof "
+            f"(always-live judges = {_always_live:.1f}). "
+            f"The live value prints as [CEILING] when the council convenes."
         )
         logger.info("")
         logger.info(
@@ -2562,6 +2583,58 @@ class InstitutionalCouncilAggregator:
             _achievable_max = max(
                 _achievable_max, w_structure + w_momentum + w_pattern + w_volume
             )
+
+            # ── H2: SCORING SYMMETRY ────────────────────────────────────────
+            # E5b removed the irrelevant judge's WEIGHT from the denominator
+            # above but left its SCORE in the numerator. buy_total was summed
+            # at ~:2127, long before _rev_relevant existed, so this is the
+            # first point in the method where the correction can be applied.
+            #
+            # Without it:
+            #   TF_CONT proof -> denominator 5.0, numerator may include
+            #                    REVERSION up to 1.0  => 120% reachable
+            #   MR_REV  proof -> denominator 4.5, numerator may include
+            #                    TREND up to 1.5      => 133% reachable
+            #
+            # A judge answering the wrong question must not score, exactly as
+            # it must not inflate the ceiling. Equal rigor, both directions.
+            logger.debug(
+                "[H2-DIAG] %s: proof_kind=%s trend_relevant=%s rev_relevant=%s "
+                "trend_scores=(%.2f,%.2f) rev_scores=(%.2f,%.2f)",
+                self.asset_type, _proof_kind, _trend_relevant, _rev_relevant,
+                float(buy_scores.get("trend", 0.0) or 0.0),
+                float(sell_scores.get("trend", 0.0) or 0.0),
+                float(buy_scores.get("reversion", 0.0) or 0.0),
+                float(sell_scores.get("reversion", 0.0) or 0.0),
+            )
+            _h2_removed = []
+            if not _trend_relevant:
+                _h2_t_buy = float(buy_scores.get("trend", 0.0) or 0.0)
+                _h2_t_sell = float(sell_scores.get("trend", 0.0) or 0.0)
+                if _h2_t_buy or _h2_t_sell:
+                    buy_total = max(0.0, buy_total - _h2_t_buy)
+                    sell_total = max(0.0, sell_total - _h2_t_sell)
+                    _h2_removed.append(
+                        f"TREND(buy={_h2_t_buy:.2f},sell={_h2_t_sell:.2f})"
+                    )
+            if not _rev_relevant:
+                _h2_r_buy = float(buy_scores.get("reversion", 0.0) or 0.0)
+                _h2_r_sell = float(sell_scores.get("reversion", 0.0) or 0.0)
+                if _h2_r_buy or _h2_r_sell:
+                    buy_total = max(0.0, buy_total - _h2_r_buy)
+                    sell_total = max(0.0, sell_total - _h2_r_sell)
+                    _h2_removed.append(
+                        f"REVERSION(buy={_h2_r_buy:.2f},sell={_h2_r_sell:.2f})"
+                    )
+            if _h2_removed:
+                logger.info(
+                    "[H2-SYMMETRY] %s: proof_kind=%s — removed irrelevant judge "
+                    "score(s) from numerator: %s | buy_total=%.2f sell_total=%.2f "
+                    "ceiling=%.2f",
+                    self.asset_type, _proof_kind, ", ".join(_h2_removed),
+                    buy_total, sell_total, _achievable_max,
+                )
+            # ── END H2 ──────────────────────────────────────────────────────
 
             if _tf_dead or _mr_dead or not (_trend_relevant and _rev_relevant):
                 logger.info(
