@@ -3780,6 +3780,19 @@ class InstitutionalCouncilAggregator:
         )
         if not isinstance(details.get("ai_validation"), dict):
             details["ai_validation"] = self._build_ai_validation_stub(signal, details)
+
+        # H1: 16 of 18 early-return veto paths build a minimal details dict and
+        # omit these two keys. visualization.py then falls back to "UNKNOWN"
+        # and "performance", so every chart drawn from an early return reported
+        # the wrong engine and no regime — including E5's no-proof path, which
+        # currently fires on every cycle. Same wrapper pattern as the
+        # ai_validation stub above: fill only when absent, so any path that
+        # already sets them is left untouched.
+        if not details.get("regime"):
+            details["regime"] = current_regime
+        if not details.get("aggregator_mode"):
+            details["aggregator_mode"] = "council"
+
         return signal, details
 
     # ========================================================================

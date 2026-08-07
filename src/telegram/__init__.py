@@ -628,7 +628,7 @@ class TradingTelegramBot:
                     # SL from VTM if available
                     vtm = getattr(position, "trade_manager", None)
                     sl  = vtm.current_stop_loss if vtm else getattr(position, "stop_loss", None)
-                    sl_str = f"  SL <code>${sl:,.2f}</code>" if sl else ""
+                    sl_str = f"  SL <code>{self._fmt_px(sl)}</code>" if sl else ""
 
                     msg += (
                         f"  {side_icon} <b>{html.escape(asset)}</b> {side} "
@@ -822,6 +822,31 @@ class TradingTelegramBot:
             except Exception as chunk_err:
                 logger.error(f"[TG] Chunk {i+1}/{len(chunks)} send error: {chunk_err}")
 
+    @staticmethod
+    def _fmt_px(value) -> str:
+        """H1: price formatting that survives FX.
+
+        2dp turns GBPAUD 1.90983 into 1.91 — unreadable for verifying a stop.
+        Decimals scale with magnitude, so metals, indices and crypto are
+        unchanged and only sub-10 instruments gain precision.
+
+        No currency prefix: the figure is in the instrument's QUOTE currency,
+        which is not USD for cross pairs — GBPAUD is quoted in AUD. The
+        instrument name already appears in every message that uses this.
+        """
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        a = abs(v)
+        if a >= 1000:
+            return f"{v:,.2f}"
+        if a >= 100:
+            return f"{v:,.3f}"
+        if a >= 10:
+            return f"{v:,.4f}"
+        return f"{v:,.5f}"
+
     async def cmd_brain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handle /brain command - Visualizes the MTF Governor and Asymmetric Engine State
@@ -917,7 +942,7 @@ class TradingTelegramBot:
                         val = sig["signal"]
                         sig_icon = "📈 BUY" if val == 1 else "📉 SELL" if val == -1 else "⚪ HOLD"
                         sig_price = sig["price"]
-                        sig_line = f"{sig_icon} @ <code>${sig_price:,.2f}</code>  <i>[{ts_str}]</i>"
+                        sig_line = f"{sig_icon} @ <code>{self._fmt_px(sig_price)}</code>  <i>[{ts_str}]</i>"
 
                         quality = sig.get("quality", 0) or 0
                         q_filled = int(quality * 10)
@@ -929,7 +954,7 @@ class TradingTelegramBot:
                             c_score = sig.get("council_score") or 0
                             c_decision = sig.get("council_decision", "N/A")
                             engine_line = (
-                                f"  Engine    : <code>COUNCIL</code>  score <b>{c_score:.2f}/5.0</b>"
+                                f"  Engine    : <code>COUNCIL</code>  score <b>{c_score:.2f}</b>"
                                 f"  <i>{html.escape(str(c_decision))}</i>\n"
                             )
                         else:
@@ -1065,7 +1090,7 @@ class TradingTelegramBot:
                 pnl_sign = "+" if pnl >= 0 else ""
 
                 msg += f"{side_icon} <b>{html.escape(asset)} {side}</b>\n"
-                msg += f"  Entry   : <code>${entry:,.2f}</code>\n"
+                msg += f"  Entry   : <code>{self._fmt_px(entry)}</code>\n"
                 msg += f"  Current : <code>${current:,.2f}</code>\n"
                 msg += f"  P&amp;L    : {pnl_icon} <code>{pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)</code>\n"
                 msg += f"  Qty     : {qty:.6g}\n"
@@ -1085,9 +1110,9 @@ class TradingTelegramBot:
                     lock_icon = "🔒" if vtm.profit_locked else "🔓"
                     runner_icon = "🏃" if vtm.runner_activated else "—"
 
-                    msg += f"  SL      : <code>${sl:,.2f}</code> ({sl_pct:.2f}% away)\n"
+                    msg += f"  SL      : <code>{self._fmt_px(sl)}</code> ({sl_pct:.2f}% away)\n"
                     if tp:
-                        msg += f"  TP      : <code>${tp:,.2f}</code> ({tp_pct:.2f}% away)\n"
+                        msg += f"  TP      : <code>{self._fmt_px(tp)}</code> ({tp_pct:.2f}% away)\n"
                     else:
                         msg += f"  TP      : all targets hit — runner active\n"
                     msg += f"  Lock    : {lock_icon} | Runner: {runner_icon} | Bars: {vtm.bars_in_trade}\n"
@@ -1174,10 +1199,10 @@ class TradingTelegramBot:
                     msg += f"📍 Current: ${(vtm_status.get('current_price') or 0.0):,.2f}\n"
                     _sl_price = vtm_status.get('stop_loss') or 0.0
                     _sl_dist  = vtm_status.get('distance_to_sl_pct') or 0.0
-                    msg += f"🛑 SL: ${_sl_price:,.2f} ({_sl_dist:+.2f}%)\n"
+                    msg += f"🛑 SL: {self._fmt_px(_sl_price)} ({_sl_dist:+.2f}%)\n"
                     _tp_price = vtm_status.get('take_profit') or 0.0
                     _tp_dist  = vtm_status.get('distance_to_tp_pct') or 0.0
-                    _tp_label = f"${_tp_price:,.2f} ({_tp_dist:+.2f}%)" if _tp_price else "none set"
+                    _tp_label = f"{self._fmt_px(_tp_price)} ({_tp_dist:+.2f}%)" if _tp_price else "none set"
                     msg += f"🎯 TP: {_tp_label}\n"
                     msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
                     
@@ -2480,7 +2505,7 @@ class TradingTelegramBot:
                     mode = sig.get("aggregator_mode", "performance")
                     regime = sig.get("regime", "N/A") or "N/A"
 
-                    msg += f"  <code>[{ts}]</code> {sig_icon} @ <code>${price:,.2f}</code>\n"
+                    msg += f"  <code>[{ts}]</code> {sig_icon} @ <code>{self._fmt_px(price)}</code>\n"
 
                     if mode == "council":
                         score = sig.get("council_score") or 0
@@ -3130,7 +3155,7 @@ class TradingTelegramBot:
                         else "📉 SELL" if signal_val == -1 else " HOLD"
                     )
 
-                    msg += f"\n*{ts}* - *{sig_icon}* @ `${price:,.2f}`\n"
+                    msg += f"\n*{ts}* - *{sig_icon}* @ `{self._fmt_px(price)}`\n"
 
                     # Hybrid-aware output
                     mode = sig.get("aggregator_mode", "performance")
@@ -3309,14 +3334,14 @@ class TradingTelegramBot:
                 f"{side_icon} *Trade Opened: {asset}*\n\n"
                 f"⚙️ Type: {type_str}\n"
                 f"📊 Side: {side.upper()}\n"
-                f"💵 Entry: ${price:,.2f}\n"
+                f"💵 Entry: {self._fmt_px(price)}\n"
                 f"💰 Size: ${size:,.2f}\n\n"
             )
 
             # Add SL info if available
             if sl and sl > 0:
                 msg += (
-                    f"🛑 Stop Loss: ${sl:,.2f}\n"
+                    f"🛑 Stop Loss: {self._fmt_px(sl)}\n"
                     f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n"
                 )
             else:
@@ -3339,7 +3364,7 @@ class TradingTelegramBot:
             # Add TP info if available
             if tp and tp > 0:
                 msg += (
-                    f"🎯 Take Profit: ${tp:,.2f}\n"
+                    f"🎯 Take Profit: {self._fmt_px(tp)}\n"
                     f"   └─ Target: {tp_distance_pct:.2f}% (${tp_profit_usd:.2f})\n\n"
                 )
             else:
@@ -3737,7 +3762,7 @@ class TradingTelegramBot:
                     ps   = "+" if pnl >= 0 else ""
                     vtm  = getattr(position, "trade_manager", None)
                     sl   = vtm.current_stop_loss if vtm else getattr(position, "stop_loss", None)
-                    sl_str = f"  SL <code>${sl:,.2f}</code>" if sl else ""
+                    sl_str = f"  SL <code>{self._fmt_px(sl)}</code>" if sl else ""
                     msg += (
                         f"  {side_icon} <b>{html.escape(asset)}</b> {side} "
                         f"{pi} <code>{ps}{pnl_pct:.2f}%</code>{sl_str}\n"
@@ -3852,8 +3877,8 @@ class TradingTelegramBot:
 
                 positions_msg += (
                     f"{side_icon} *{asset} - {side}*\n"
-                    f"📍 Entry: ${entry_price:,.2f}\n"
-                    f"💹 Current: ${current_price:,.2f}\n"
+                    f"📍 Entry: {self._fmt_px(entry_price)}\n"
+                    f"💹 Current: {self._fmt_px(current_price)}\n"
                     f"📦 Qty: {quantity:.6f}\n"
                     f"💰 Value: ${current_value:,.2f}\n"
                     f"{pnl_icon} P&L: {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
@@ -3951,7 +3976,7 @@ class TradingTelegramBot:
         quality_icon = "\u2605" if quality >= 0.65 else "\u2022"
 
         entry = (
-            f"  {timestamp} | {signal_icon} | ${price:,.2f}\n"
+            f"  {timestamp} | {signal_icon} | {self._fmt_px(price)}\n"
             f"    {regime} | Quality: {quality_icon} {quality:.2f}\n"
             f"    {reasoning}\n"
         )
