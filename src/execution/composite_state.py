@@ -288,6 +288,11 @@ class CompositeState:
     setup_active: bool = False
     setup_kind: Optional[str] = None          # "TF_CONT" | "MR_REV"
     setup_dir: int = 0                        # +1 long-side, -1 short-side
+    # F1: the structural level this setup was born against, frozen for life.
+    # Resolved once at birth so the death check can read it — BRC resolves it
+    # far too late in the method to be usable there.
+    setup_ref: Optional[float] = None
+    setup_ref_tier: Optional[str] = None       # ANCHOR_1H | ZONE_LADDER | SWING_4H
     # -- Age of the live setup in cycles (how many builds since it was born).
     setup_age: int = 0
     # -- Trajectory of the setup's supporting energy since birth:
@@ -304,6 +309,8 @@ class CompositeState:
     setup_active_mr: bool = False
     setup_kind_mr: Optional[str] = None
     setup_dir_mr: int = 0
+    setup_ref_mr: Optional[float] = None
+    setup_ref_tier_mr: Optional[str] = None
     setup_age_mr: int = 0
     setup_energy_trend_mr: Optional[str] = None
 
