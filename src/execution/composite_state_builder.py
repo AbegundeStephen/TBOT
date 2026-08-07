@@ -1161,18 +1161,96 @@ class CompositeStateBuilder:
                         _now_down = _lsm_now in _DOWN
                         if (_born_up and _now_down) or ((not _born_up) and _now_up):
                             _death_reason = "LSM_STATE_FLIP"
-                    # (b) SETUP-SPECIFIC — a failed breakout AGAINST the setup.
+                    # (b) F1 — the setup's OWN reference failed to hold.
+                    #
+                    #     Was: a 3-bar poke against ANY local high, global to
+                    #     the asset. 201 of 331 deaths, all at age 1-3. A
+                    #     setup born on 4H structure was dying to three bars
+                    #     of noise — and the pullback it died for is the
+                    #     retest it was waiting for.
+                    #
+                    #     Now: only a candle that CLOSES through this setup's
+                    #     own frozen level, by more than tolerance, against
+                    #     the setup's direction, kills it.
+                    #
+                    #     The rule is symmetric — equal rigor both ways:
+                    #       dir=+1 dies on a close below ref - tol
+                    #       dir=-1 dies on a close above ref + tol
+                    #
+                    #     Only candles that closed AFTER birth are examined.
+                    #     Reading the whole 28-bar window would re-introduce
+                    #     the pre-break contamination already fixed once.
+                    #     Age 0 is skipped: the candle that births a setup
+                    #     must not also be the candle that kills it.
                     if _death_reason is None:
-                        _fb_bear = getattr(state, "failed_breakout_bearish", False)
-                        _fb_bull = getattr(state, "failed_breakout_bullish", False)
-                        if _dir == 1 and _fb_bear:
-                            _death_reason = "FAILED_BREAKOUT"
-                        elif _dir == -1 and _fb_bull:
-                            _death_reason = "FAILED_BREAKOUT"
-                        elif not _fb_bear and not _fb_bull and getattr(
-                            state, "failed_breakout", False
-                        ):
-                            _death_reason = "FAILED_BREAKOUT"
+                        _f1_ref = _cur.get("ref")
+                        _f1_look = min(int(_cur.get("age", 0) or 0), 28)
+                        if _f1_ref is not None and _f1_look >= 1 and df is not None:
+                            try:
+                                _f1_tol = 0.15 * float(_atr or 0.0)
+                                # FIX (post-doc): age increments in STEP 1
+                                # before this runs, so at age=k exactly k new
+                                # candles have closed since birth -- the last
+                                # k rows of df, iloc[-k:]. The doc's original
+                                # iloc[-(k+1):-1] instead spans [birth,
+                                # birth+k-1]: it re-includes the birth candle
+                                # and drops the current one, the opposite of
+                                # "only candles that closed after birth" and
+                                # "the birth candle must not kill its own
+                                # setup" -- confirmed against a real GOLD
+                                # backtest: 92.5% of FAILED_BREAKOUT deaths
+                                # still landed at age_at_death=1 with the
+                                # original window, flat against the doc's own
+                                # "should rise well above 1-3" expectation.
+                                _f1_closes = df["close"].iloc[-_f1_look:].values
+                                if _dir == 1:
+                                    _f1_broke = bool(
+                                        (_f1_closes < (float(_f1_ref) - _f1_tol)).any()
+                                    )
+                                else:
+                                    _f1_broke = bool(
+                                        (_f1_closes > (float(_f1_ref) + _f1_tol)).any()
+                                    )
+                                if _f1_broke:
+                                    _death_reason = "FAILED_BREAKOUT"
+                                    if _f1_look == 1:
+                                        logger.debug(
+                                            "[F1-DIAG] %s: %s dir=%+d tier=%s "
+                                            "ref=%.5g tol=%.5g band=[%.5g,%.5g] "
+                                            "closes=%s",
+                                            self.asset_type, _cur.get("kind"),
+                                            _dir, _cur.get("ref_tier"),
+                                            float(_f1_ref), _f1_tol,
+                                            float(_f1_ref) - _f1_tol,
+                                            float(_f1_ref) + _f1_tol,
+                                            list(_f1_closes),
+                                        )
+                            except Exception as _f1_err:
+                                logger.debug(
+                                    "[F1] %s: anchored death check error: %s",
+                                    self.asset_type, _f1_err,
+                                )
+
+                    # (b2) F1 — STRUCTURE FAILED TO HOLD. The level this setup
+                    #      was born against has changed role since birth. A
+                    #      support that became resistance is no longer the
+                    #      level the thesis was built on, so there is nothing
+                    #      left to be right about.
+                    if _death_reason is None:
+                        _f1_born_role = _cur.get("ref_role")
+                        if _f1_born_role is not None:
+                            try:
+                                _f1_px = float(df["close"].iloc[-1])
+                            except Exception:
+                                _f1_px = None
+                            _f1_now_role = self._ref_role_at(
+                                _asset, _cur.get("ref"), _atr, _f1_px
+                            )
+                            if (
+                                _f1_now_role is not None
+                                and _f1_now_role != _f1_born_role
+                            ):
+                                _death_reason = "REF_ROLE_FLIPPED"
                     # (c) E3: the retest itself broke the level instead of
                     #     holding it. A real breakout earns its retest; one
                     #     that closes back through was never a breakout.
@@ -1234,16 +1312,55 @@ class CompositeStateBuilder:
                 # No overwrite between kinds any more — nothing to resolve.
                 if _cur is None:
                     if _candidate is not None:
-                        _new_setup = dict(_candidate)
-                        _new_setup.update({
-                            "age": 0,
-                            "born_state": _lsm_now,
-                            "born_compression": _comp,
-                            "last_compression": _comp,
-                            "energy": "HOLDING",
-                        })
-                        _store[_asset] = _new_setup
-                        _cur = _new_setup
+                        # F1: resolve the level NOW and keep it for life. A
+                        # setup with no level has no thesis — there is nothing
+                        # for price to prove or disprove — so it is refused,
+                        # loudly, rather than born blind.
+                        _f1_ref, _f1_tier = self._resolve_setup_reference(
+                            state, _candidate["kind"], int(_candidate["dir"])
+                        )
+                        if _f1_ref is None:
+                            logger.info(
+                                "[SETUP-REFUSED] %s: %s dir=%+d — no reference "
+                                "resolvable, no thesis. anchor_1h_lo=%s "
+                                "anchor_1h_hi=%s ladder_lo=%s ladder_hi=%s "
+                                "swing_lo=%s swing_hi=%s",
+                                self.asset_type, _candidate["kind"],
+                                int(_candidate["dir"]),
+                                getattr(state, "livermore_anchor_natural_low_1h", None),
+                                getattr(state, "livermore_anchor_natural_high_1h", None),
+                                getattr(state, "zone_4h_current_lower", None),
+                                getattr(state, "zone_4h_current_upper", None),
+                                getattr(state, "last_swing_low_4h", None),
+                                getattr(state, "last_swing_high_4h", None),
+                            )
+                        else:
+                            _f1_px = None
+                            try:
+                                _f1_px = float(df["close"].iloc[-1])
+                            except Exception:
+                                _f1_px = None
+                            _new_setup = dict(_candidate)
+                            _new_setup.update({
+                                "age": 0,
+                                "born_state": _lsm_now,
+                                "born_compression": _comp,
+                                "last_compression": _comp,
+                                "energy": "HOLDING",
+                                "ref": _f1_ref,
+                                "ref_tier": _f1_tier,
+                                "ref_role": self._ref_role_at(
+                                    _asset, _f1_ref, _atr, _f1_px
+                                ),
+                            })
+                            _store[_asset] = _new_setup
+                            _cur = _new_setup
+                            logger.info(
+                                "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s",
+                                self.asset_type, _new_setup["kind"],
+                                int(_new_setup["dir"]), _f1_ref, _f1_tier,
+                                _new_setup.get("ref_role"),
+                            )
                 elif _candidate is not None:
                     # Item 2: a setup wanted to be born but this lane's slot
                     # was occupied.
@@ -1273,6 +1390,8 @@ class CompositeStateBuilder:
                 state.setup_dir_mr = int(_cur_mr.get("dir", 0))
                 state.setup_age_mr = int(_cur_mr.get("age", 0))
                 state.setup_energy_trend_mr = _cur_mr.get("energy")
+                state.setup_ref_mr = _cur_mr.get("ref")               # F1
+                state.setup_ref_tier_mr = _cur_mr.get("ref_tier")     # F1
 
             # E2: twelve existing consumers read the unsuffixed setup_*
             # fields with no concept of lanes. Prefer the TF lane when both
@@ -1284,6 +1403,8 @@ class CompositeStateBuilder:
                 state.setup_dir = int(_pub.get("dir", 0))
                 state.setup_age = int(_pub.get("age", 0))
                 state.setup_energy_trend = _pub.get("energy")
+                state.setup_ref = _pub.get("ref")                     # F1
+                state.setup_ref_tier = _pub.get("ref_tier")           # F1
 
             self._prev_compression[_asset] = _comp
         except Exception as _traj_err:
@@ -1319,9 +1440,16 @@ class CompositeStateBuilder:
             # Part C: window widened 8 -> 28 candles, so the data floor moves
             # with it. Miss this and the whole block silently never runs.
             if _brc_active and _brc_dir != 0 and df is not None and len(df) >= 29:
-                _brc_ref = None
-                _brc_tier_used = None
-                if _brc_kind == "MR_REV":
+                # F1: prefer the reference frozen onto the setup at birth. The
+                # live re-resolution below is kept only as a fallback for
+                # setups that were already alive when F1 deployed and have no
+                # frozen ref, and for any future caller that skips the
+                # trajectory layer.
+                _brc_ref = getattr(state, "setup_ref", None)
+                _brc_tier_used = getattr(state, "setup_ref_tier", None)
+                if _brc_ref is not None and float(_brc_ref) > 0:
+                    pass
+                elif _brc_kind == "MR_REV":
                     # BRC-FIX: MR_REV is born off a 1H CHoCH, so its retest
                     # reference must be the 1H-native anchor. The plain
                     # livermore_anchor_natural_low/high fields are 4H-only
@@ -2434,6 +2562,78 @@ class CompositeStateBuilder:
             _out["current_lower_type"] = _d.get("type")
 
         return _out
+
+    def _resolve_setup_reference(self, state, kind: str, direction: int):
+        """F1: resolve the structural level a setup will be judged against.
+
+        This is the SAME three-tier logic BRC already uses, lifted out so it
+        can also run at BIRTH. BRC resolves the reference ~170 lines after the
+        death check runs, so the death check could never see it — the same
+        ordering trap E3 documented. Freezing at birth is the way round it.
+
+        Returns (ref, tier), or (None, None) when nothing resolves.
+        """
+        _ref = None
+        _tier = None
+        if kind == "MR_REV":
+            _ref = (
+                getattr(state, "livermore_anchor_natural_low_1h", None) if direction == 1
+                else getattr(state, "livermore_anchor_natural_high_1h", None)
+            )
+            _tier = "ANCHOR_1H"
+            if _ref is None or float(_ref) <= 0:
+                _ref = (
+                    getattr(state, "zone_4h_current_lower", None) if direction == 1
+                    else getattr(state, "zone_4h_current_upper", None)
+                )
+                _tier = "ZONE_LADDER"
+            if _ref is None or float(_ref) <= 0:
+                _ref = (
+                    getattr(state, "last_swing_low_4h", None) if direction == 1
+                    else getattr(state, "last_swing_high_4h", None)
+                )
+                _tier = "SWING_4H"
+        elif kind == "TF_CONT":
+            _ref = (
+                getattr(state, "last_swing_high_4h", None) if direction == 1
+                else getattr(state, "last_swing_low_4h", None)
+            )
+            _tier = "SWING_4H"
+            if _ref is None or float(_ref) <= 0:
+                _ref = (
+                    getattr(state, "zone_4h_current_upper", None) if direction == 1
+                    else getattr(state, "zone_4h_current_lower", None)
+                )
+                _tier = "ZONE_LADDER"
+        if _ref is None or float(_ref) <= 0:
+            return None, None
+        return float(_ref), _tier
+
+    def _ref_role_at(self, asset, ref_price, atr, current_price):
+        """F1: the role ('swing_high' / 'swing_low') of the tracked level
+        nearest to ref_price, or None if no tracked level sits within the
+        ladder's own dedup tolerance.
+
+        Reuses min(0.3*ATR, 0.4% of price) — the exact tolerance
+        _update_zone_levels uses to decide two prices are one level — so
+        "same level" means the same thing everywhere in the system.
+        """
+        try:
+            if ref_price is None or not atr or float(atr) <= 0:
+                return None
+            if current_price is None or float(current_price) <= 0:
+                return None
+            _tol = min(0.3 * float(atr), 0.004 * float(current_price))
+            _best = None
+            _bestd = None
+            for lvl in self._structure_levels.get(asset, []):
+                _d = abs(float(lvl["price"]) - float(ref_price))
+                if _d <= _tol and (_bestd is None or _d < _bestd):
+                    _bestd = _d
+                    _best = lvl.get("type")
+            return _best
+        except Exception:
+            return None
 
     def get_zone_ladder(self, asset, tf: str, extended: bool = False) -> List[dict]:
         """Full zone ladder for charting -- every level with real history,
