@@ -1312,19 +1312,29 @@ class CompositeStateBuilder:
                 # No overwrite between kinds any more — nothing to resolve.
                 if _cur is None:
                     if _candidate is not None:
+                        _f1_px = None
+                        try:
+                            _f1_px = float(df["close"].iloc[-1])
+                        except Exception:
+                            _f1_px = None
                         # F1: resolve the level NOW and keep it for life. A
                         # setup with no level has no thesis — there is nothing
                         # for price to prove or disprove — so it is refused,
-                        # loudly, rather than born blind.
+                        # loudly, rather than born blind. F1-FOLLOWUP: a tier
+                        # already invalidated by price (stale SWING_4H during
+                        # a fast move) is treated the same as missing —
+                        # refused or passed over, never frozen pre-broken.
                         _f1_ref, _f1_tier = self._resolve_setup_reference(
-                            state, _candidate["kind"], int(_candidate["dir"])
+                            state, _candidate["kind"], int(_candidate["dir"]),
+                            current_price=_f1_px, atr=_atr,
                         )
                         if _f1_ref is None:
                             logger.info(
-                                "[SETUP-REFUSED] %s: %s dir=%+d — no reference "
-                                "resolvable, no thesis. anchor_1h_lo=%s "
-                                "anchor_1h_hi=%s ladder_lo=%s ladder_hi=%s "
-                                "swing_lo=%s swing_hi=%s",
+                                "[SETUP-REFUSED] %s: %s dir=%+d — no usable "
+                                "reference (missing or already broken by "
+                                "price). anchor_1h_lo=%s anchor_1h_hi=%s "
+                                "ladder_lo=%s ladder_hi=%s swing_lo=%s "
+                                "swing_hi=%s price=%s",
                                 self.asset_type, _candidate["kind"],
                                 int(_candidate["dir"]),
                                 getattr(state, "livermore_anchor_natural_low_1h", None),
@@ -1333,13 +1343,9 @@ class CompositeStateBuilder:
                                 getattr(state, "zone_4h_current_upper", None),
                                 getattr(state, "last_swing_low_4h", None),
                                 getattr(state, "last_swing_high_4h", None),
+                                _f1_px,
                             )
                         else:
-                            _f1_px = None
-                            try:
-                                _f1_px = float(df["close"].iloc[-1])
-                            except Exception:
-                                _f1_px = None
                             _new_setup = dict(_candidate)
                             _new_setup.update({
                                 "age": 0,
@@ -2563,7 +2569,8 @@ class CompositeStateBuilder:
 
         return _out
 
-    def _resolve_setup_reference(self, state, kind: str, direction: int):
+    def _resolve_setup_reference(self, state, kind: str, direction: int,
+                                  current_price: float = None, atr: float = None):
         """F1: resolve the structural level a setup will be judged against.
 
         This is the SAME three-tier logic BRC already uses, lifted out so it
@@ -2571,43 +2578,84 @@ class CompositeStateBuilder:
         death check runs, so the death check could never see it — the same
         ordering trap E3 documented. Freezing at birth is the way round it.
 
-        Returns (ref, tier), or (None, None) when nothing resolves.
+        F1-FOLLOWUP: a tier is only accepted if price hasn't ALREADY moved
+        past it by more than the death check's own tolerance (0.15x ATR).
+        Without this, a stale SWING_4H reference (4H swings only update
+        every several 1H bars) gets resolved and frozen even though price
+        has already left it behind -- observed live in a real GOLD backtest:
+        TF_CONT setups reborn every single 1H bar during a sustained
+        decline, each one already several dollars past its own
+        just-resolved reference, dying at age_at_death=1 every time no
+        matter what the death-check window or tolerance is. That isn't a
+        setup dying to noise; it's a setup born with no real thesis left.
+        Falls through to the next tier instead of freezing a level price
+        has already invalidated; refuses (returns None) if every tier is
+        either missing or already broken.
+
+        Returns (ref, tier), or (None, None) when nothing usable resolves.
         """
-        _ref = None
-        _tier = None
+        def _usable(ref, tier):
+            if ref is None:
+                return False
+            try:
+                ref = float(ref)
+            except (TypeError, ValueError):
+                return False
+            if ref <= 0:
+                return False
+            if current_price is None or not atr or float(atr) <= 0:
+                return True  # can't check "already broken" -- accept as before
+            _tol = 0.15 * float(atr)
+            if direction == 1:
+                _ok = float(current_price) >= ref - _tol
+            else:
+                _ok = float(current_price) <= ref + _tol
+            if not _ok:
+                logger.debug(
+                    "[F1] %s: %s tier=%s ref=%.5g already broken at "
+                    "resolution (price=%.5g, tol=%.5g) -- trying next tier",
+                    self.asset_type, kind, tier, ref, float(current_price), _tol,
+                )
+            return _ok
+
         if kind == "MR_REV":
-            _ref = (
-                getattr(state, "livermore_anchor_natural_low_1h", None) if direction == 1
-                else getattr(state, "livermore_anchor_natural_high_1h", None)
-            )
-            _tier = "ANCHOR_1H"
-            if _ref is None or float(_ref) <= 0:
-                _ref = (
+            _candidates = [
+                (
+                    getattr(state, "livermore_anchor_natural_low_1h", None) if direction == 1
+                    else getattr(state, "livermore_anchor_natural_high_1h", None),
+                    "ANCHOR_1H",
+                ),
+                (
                     getattr(state, "zone_4h_current_lower", None) if direction == 1
-                    else getattr(state, "zone_4h_current_upper", None)
-                )
-                _tier = "ZONE_LADDER"
-            if _ref is None or float(_ref) <= 0:
-                _ref = (
+                    else getattr(state, "zone_4h_current_upper", None),
+                    "ZONE_LADDER",
+                ),
+                (
                     getattr(state, "last_swing_low_4h", None) if direction == 1
-                    else getattr(state, "last_swing_high_4h", None)
-                )
-                _tier = "SWING_4H"
+                    else getattr(state, "last_swing_high_4h", None),
+                    "SWING_4H",
+                ),
+            ]
         elif kind == "TF_CONT":
-            _ref = (
-                getattr(state, "last_swing_high_4h", None) if direction == 1
-                else getattr(state, "last_swing_low_4h", None)
-            )
-            _tier = "SWING_4H"
-            if _ref is None or float(_ref) <= 0:
-                _ref = (
+            _candidates = [
+                (
+                    getattr(state, "last_swing_high_4h", None) if direction == 1
+                    else getattr(state, "last_swing_low_4h", None),
+                    "SWING_4H",
+                ),
+                (
                     getattr(state, "zone_4h_current_upper", None) if direction == 1
-                    else getattr(state, "zone_4h_current_lower", None)
-                )
-                _tier = "ZONE_LADDER"
-        if _ref is None or float(_ref) <= 0:
-            return None, None
-        return float(_ref), _tier
+                    else getattr(state, "zone_4h_current_lower", None),
+                    "ZONE_LADDER",
+                ),
+            ]
+        else:
+            _candidates = []
+
+        for _ref, _tier in _candidates:
+            if _usable(_ref, _tier):
+                return float(_ref), _tier
+        return None, None
 
     def _ref_role_at(self, asset, ref_price, atr, current_price):
         """F1: the role ('swing_high' / 'swing_low') of the tracked level
