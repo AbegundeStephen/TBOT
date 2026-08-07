@@ -999,7 +999,32 @@ class CompositeStateBuilder:
                 _price = float(df["close"].iloc[-1])
             except Exception:
                 _price = None
-            _atr_prox = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+            # H1: the df handed to this builder does not always carry an "atr"
+            # column — it depends on whether a strategy ran and mutated the
+            # frame first. When absent this fell to 0.0, the guard below never
+            # passed, and the ladder silently reported "none" on 41 of 41
+            # logged cycles while zone_4h_current_upper/lower were populated
+            # the whole time (proven by tier=ZONE_LADDER resolving in
+            # [SETUP-BORN]). Fall back to the ATR already computed at the top
+            # of this method rather than giving up silently.
+            _atr_prox = 0.0
+            try:
+                if "atr" in df.columns:
+                    _atr_prox = float(df["atr"].iloc[-1])
+            except Exception:
+                _atr_prox = 0.0
+            if not _atr_prox or _atr_prox <= 0:
+                try:
+                    _atr_prox = float(_atr or 0.0)
+                except Exception:
+                    _atr_prox = 0.0
+            if _atr_prox <= 0:
+                logger.warning(
+                    "[LADDER] %s: no usable ATR (df_col=%s shared=%s) — "
+                    "ladder proximity and breakout-imminence both disabled "
+                    "this cycle.",
+                    self.asset_type, "atr" in df.columns, _atr,
+                )
             _up = getattr(state, "zone_4h_current_upper", None)
             _lo = getattr(state, "zone_4h_current_lower", None)
             if _price is not None and _atr_prox > 0:
