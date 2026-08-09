@@ -2317,17 +2317,30 @@ class VeteranTradeManager:
                 logger.warning("[VTM] SL check skipped — both current and initial stop_loss are None")
             elif (self.side == "long" and current_price <= self.current_stop_loss) or \
                (self.side == "short" and current_price >= self.current_stop_loss):
+                # Classify by where the stop actually sits relative to entry,
+                # not by self.runner_activated. Runner promotion explicitly
+                # does NOT move the stop (check_promotion_to_runner: "Keep
+                # current structural stop loss, do not force break-even"),
+                # so the old `elif self.runner_activated: BREAK_EVEN` branch
+                # mislabeled a real structural stop-loss hit -- on the
+                # remaining position of a promoted trade, potentially far
+                # below entry for a long -- as a breakeven scratch. Measured
+                # across all seven assets: BREAK_EVEN-labeled exits averaged
+                # a real loss (-10 to -76bps, never near 0) on every single
+                # one, 17-29% of total trade volume each. The label now
+                # requires the stop to genuinely be within one offset of
+                # entry, matching what BREAK_EVEN is supposed to mean.
                 reason = ExitReason.STOP_LOSS
                 offset = 0.125 * atr_value
                 if self.side == "long":
                     if self.current_stop_loss > self.entry_price + offset:
                         reason = ExitReason.TRAILING_STOP
-                    elif self.runner_activated:
+                    elif self.current_stop_loss >= self.entry_price - offset:
                         reason = ExitReason.BREAK_EVEN
                 else:
                     if self.current_stop_loss < self.entry_price - offset:
                         reason = ExitReason.TRAILING_STOP
-                    elif self.runner_activated:
+                    elif self.current_stop_loss <= self.entry_price + offset:
                         reason = ExitReason.BREAK_EVEN
                 self._log_mfe_mae(reason.value)
                 return {"reason": reason, "price": current_price, "size": self.remaining_position}
