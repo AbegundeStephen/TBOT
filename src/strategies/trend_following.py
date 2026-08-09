@@ -110,6 +110,16 @@ class TrendFollowingStrategy(BaseStrategy):
         self.adx_period = config.get("adx_period", 14)
         self.adx_threshold = config.get("adx_threshold", 20)
         self.require_adx = config.get("require_adx", False)
+        # Evidence (2026-07-30 correlation study, USTEC): entry-time ADX
+        # correlates NEGATIVELY with trade outcome (corr=-0.209; the ADX>=30
+        # bucket was 0/17 wins, its worst bucket) -- buying/selling an
+        # already-extended move right before it exhausts, not a healthy
+        # continuation. Per-asset opt-in, default None = no ceiling, no
+        # behavior change for any asset that doesn't set it. Live config.json
+        # already set max_adx_ceiling=30 for USTEC when this investigation's
+        # config half landed, but the code half (this read + the gate below)
+        # never followed -- the ceiling has been a silent no-op in production.
+        self.max_adx_ceiling = config.get("max_adx_ceiling", None)
 
         # 4H context parameters
         self.use_4h_context = config.get("use_4h_context", True)
@@ -575,6 +585,23 @@ class TrendFollowingStrategy(BaseStrategy):
         elif bearish_score >= self.min_score_threshold and bearish_score > bullish_score:
             signal = -1
             confidence = min(bearish_score / normalization_factor, 1.0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MAX ADX CEILING (per-asset opt-in, default off).
+        # Evidence (2026-07-30 correlation study, USTEC): entries taken when
+        # ADX is very high correlate NEGATIVELY with outcome (corr=-0.209;
+        # the ADX>=30 bucket was 0/17 wins, its single worst bucket) --
+        # consistent with buying/selling an already-extended move right
+        # before it exhausts, not a healthy continuation.
+        # ══════════════════════════════════════════════════════════════════
+        if signal != 0 and self.max_adx_ceiling is not None and latest["adx"] >= self.max_adx_ceiling:
+            if not silent:
+                logger.info(
+                    "[%s] signal=%+d suppressed — ADX %.1f >= ceiling %.1f "
+                    "(extended-move filter).",
+                    self.name, signal, latest["adx"], self.max_adx_ceiling,
+                )
+            signal, confidence = 0, 0.0
 
         # ══════════════════════════════════════════════════════════════════
         # TF-PROOF: break-retest-close HARD GATE.
