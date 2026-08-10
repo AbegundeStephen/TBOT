@@ -99,7 +99,21 @@ class BreakRetestValidator:
         # ── BULLISH RETEST ─────────────────────────────────────────────────
         # Used by Mode 1 (NATURAL_RETRACEMENT long spring)
         if lsm_state in ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"):
-            anchor = getattr(state, "livermore_anchor_natural_low", None)
+            # L1: lsm_state above is the 1H state, so the level this validates
+            # against must be the 1H-native anchor. The unsuffixed field is
+            # 4H-only (written from snap4) and is None whenever the 4H machine
+            # sits in MAIN_UP/MAIN_DOWN — which is most of the time. That made
+            # this gate fall through to the legacy path on a live 1H setup, for
+            # no reason connected to the 1H tape that birthed it.
+            # 4H kept as fallback: a real 4H level is better than none.
+            anchor = getattr(state, "livermore_anchor_natural_low_1h", None)
+            _l1_src = "1H"
+            if anchor is None or anchor <= 0:
+                anchor = getattr(state, "livermore_anchor_natural_low", None)
+                _l1_src = "4H-fallback"
+            if anchor is not None and anchor > 0:
+                logger.debug("[L1-BRV] bullish anchor=%s src=%s state=%s",
+                             anchor, _l1_src, lsm_state)
 
             if anchor is None or anchor <= 0:
                 # Anchor not confirmed yet — state machine hasn't locked the low
@@ -134,7 +148,15 @@ class BreakRetestValidator:
         # ── BEARISH RETEST ─────────────────────────────────────────────────
         # Used for NATURAL_REBOUND short setups
         elif lsm_state in ("NATURAL_REBOUND", "SECONDARY_REBOUND"):
-            anchor = getattr(state, "livermore_anchor_natural_high", None)
+            # L1: 1H question, 1H answer. See the bullish branch above.
+            anchor = getattr(state, "livermore_anchor_natural_high_1h", None)
+            _l1_src = "1H"
+            if anchor is None or anchor <= 0:
+                anchor = getattr(state, "livermore_anchor_natural_high", None)
+                _l1_src = "4H-fallback"
+            if anchor is not None and anchor > 0:
+                logger.debug("[L1-BRV] bearish anchor=%s src=%s state=%s",
+                             anchor, _l1_src, lsm_state)
 
             if anchor is None or anchor <= 0:
                 logger.debug(

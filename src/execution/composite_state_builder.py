@@ -747,6 +747,11 @@ class CompositeStateBuilder:
                     # has no timing relationship to that event).
                     state.livermore_anchor_natural_high_1h = snap1.anchor_natural_high
                     state.livermore_anchor_natural_low_1h = snap1.anchor_natural_low
+                    # L1: same reasoning as the BRC-FIX above, extended to the
+                    # MAIN anchors. Consumers that gate on the 1H state need a
+                    # 1H-native level; the 4H MAIN anchor is a different event.
+                    state.livermore_anchor_main_up_max_1h = snap1.anchor_main_up_max
+                    state.livermore_anchor_main_down_min_1h = snap1.anchor_main_down_min
 
                     # M1-PROBE-B: TEMPORARY. Remove after 48h.
                     # Livermore (closes + ATR watermarks) and the zone ladder

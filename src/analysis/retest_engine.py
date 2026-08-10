@@ -511,26 +511,62 @@ class RetestEngine:
         For a SHORT breakout: the level that was just broken to the downside.
         Falls back to nearby_4h_level if no anchor is available.
         """
+        # L1: `ls` is the 1H state, so each branch now asks the 1H machine for
+        # its level first and only falls back to the 4H anchor when the 1H has
+        # none. Previously one 1H question chose between four 4H answers.
+        # This file already gets the hierarchy right elsewhere (the CONTINUATION
+        # tier nests 1H consolidation inside a 4H MAIN leg) — this brings the
+        # anchor lookup into line with it.
         ls = getattr(state, "livermore_state_1h", None)
+
+        def _l1_pick(_f1h, _f4h):
+            _v = getattr(state, _f1h, None)
+            if _v is not None and _v > 0:
+                return _v, "1H"
+            _v = getattr(state, _f4h, None)
+            if _v is not None and _v > 0:
+                return _v, "4H-fallback"
+            return None, None
+
         if direction == 1:
             if ls in ("MAIN_UP", "NATURAL_RETRACEMENT"):
-                anchor = getattr(state, "livermore_anchor_main_up_max", None)
+                anchor, _src = _l1_pick(
+                    "livermore_anchor_main_up_max_1h",
+                    "livermore_anchor_main_up_max",
+                )
                 if anchor is not None:
+                    logger.debug("[L1-RETEST] long anchor=%s src=%s ls=%s",
+                                 anchor, _src, ls)
                     return anchor
             if ls == "SECONDARY_RETRACEMENT":
-                anchor = getattr(state, "livermore_anchor_natural_low", None)
+                anchor, _src = _l1_pick(
+                    "livermore_anchor_natural_low_1h",
+                    "livermore_anchor_natural_low",
+                )
                 if anchor is not None:
+                    logger.debug("[L1-RETEST] long anchor=%s src=%s ls=%s",
+                                 anchor, _src, ls)
                     return anchor
         elif direction == -1:
             if ls in ("MAIN_DOWN", "NATURAL_REBOUND"):
-                anchor = getattr(state, "livermore_anchor_main_down_min", None)
+                anchor, _src = _l1_pick(
+                    "livermore_anchor_main_down_min_1h",
+                    "livermore_anchor_main_down_min",
+                )
                 if anchor is not None:
+                    logger.debug("[L1-RETEST] short anchor=%s src=%s ls=%s",
+                                 anchor, _src, ls)
                     return anchor
             if ls == "SECONDARY_REBOUND":
-                anchor = getattr(state, "livermore_anchor_natural_high", None)
+                anchor, _src = _l1_pick(
+                    "livermore_anchor_natural_high_1h",
+                    "livermore_anchor_natural_high",
+                )
                 if anchor is not None:
+                    logger.debug("[L1-RETEST] short anchor=%s src=%s ls=%s",
+                                 anchor, _src, ls)
                     return anchor
-        # Final fallback
+        # Final fallback — unchanged
         return getattr(state, "nearby_4h_level", None)
 
     def _breakout_modifier(self, symbol: str, state, direction: int) -> float:
