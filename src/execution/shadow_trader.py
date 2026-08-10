@@ -88,6 +88,11 @@ class ShadowPosition:
     score_pct_of_max: float = 0.0    # total_score / achievable_max (Item 2.5)
     qualify_tag: str = ""            # plain-English score-margin label (Item 2.6)
     livermore_state_1h: str = ""
+    # K1: 4H is the context timeframe under the locked hierarchy. Recording
+    # only 1H captured the trigger and discarded the permission, so any model
+    # trained on this data cannot distinguish a pullback inside a 4H uptrend
+    # from one inside a 4H downtrend.
+    livermore_state_4h: str = ""
 
     regime_score: float = 0.0
     regime_name: str = "UNKNOWN"
@@ -465,6 +470,11 @@ class ShadowTradingEngine:
             _lsm_1h = _lsm_1h.value
         _lsm_1h = _lsm_1h or ""
 
+        _lsm_4h = signal_details.get("livermore_state_4h")
+        if hasattr(_lsm_4h, "value"):
+            _lsm_4h = _lsm_4h.value
+        _lsm_4h = _lsm_4h or ""
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
@@ -474,6 +484,7 @@ class ShadowTradingEngine:
             score_pct_of_max=_score_pct_of_max,
             qualify_tag=_qualify_tag,
             livermore_state_1h=_lsm_1h,
+            livermore_state_4h=_lsm_4h,
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),

@@ -4009,18 +4009,56 @@ class InstitutionalCouncilAggregator:
             buy_exp = f"TREND BUY: {'OK' if buy_score else 'NO'} {_drv_name} aligned ({buy_score:.2f})"
             sell_exp = f"TREND SELL: {'OK' if sell_score else 'NO'} {_drv_name} aligned ({sell_score:.2f})"
 
-            lv_1h = (governor_data or {}).get("composite_state")
-            lv_state = (
-                getattr(lv_1h, "livermore_state_1h", None)
-                if lv_1h and not isinstance(lv_1h, dict)
-                else (lv_1h.get("livermore_state_1h") if isinstance(lv_1h, dict) else None)
-            )
+            # K1: the Livermore bonus was keyed on the 1H state alone. TREND
+            # answers "what is the DOMINANT trend?" — a context question, and
+            # under the locked hierarchy context is 4H's job while 1H supplies
+            # timing. The 1H state flips several times a day, so a 1H-only read
+            # awards a trend bonus to a setup the 4H may not support at all.
+            #
+            # _judge_trend_bidirectional_legacy already requires 1H AND 4H to
+            # agree. The Part 2.1 rewrite of this function dropped the 4H half.
+            # This restores it, in the legacy's own shape.
+            _k1_cs = (governor_data or {}).get("composite_state")
+
+            def _k1_read(_field):
+                if _k1_cs is None:
+                    return None
+                if isinstance(_k1_cs, dict):
+                    return _k1_cs.get(_field)
+                return getattr(_k1_cs, _field, None)
+
+            lv_state = _k1_read("livermore_state_1h")
+            lv_state_4h = _k1_read("livermore_state_4h")
+            if hasattr(lv_state, "value"):
+                lv_state = lv_state.value
+            if hasattr(lv_state_4h, "value"):
+                lv_state_4h = lv_state_4h.value
+
             _bull_states = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
             _bear_states = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
-            if buy_score > 0 and lv_state in _bull_states:
+
+            _k1_agree_bull = lv_state in _bull_states and lv_state_4h in _bull_states
+            _k1_agree_bear = lv_state in _bear_states and lv_state_4h in _bear_states
+
+            if buy_score > 0 and _k1_agree_bull:
                 buy_score = min(buy_score * 1.15, weight)
-            if sell_score > 0 and lv_state in _bear_states:
+                buy_exp += f" [LSM 1H/4H agree: {lv_state}/{lv_state_4h}]"
+            elif buy_score > 0 and lv_state in _bull_states:
+                logger.info(
+                    "[K1-TREND] %s: 1H %s is bullish but 4H is %s — bonus "
+                    "withheld (context timeframe does not confirm).",
+                    self.asset_type, lv_state, lv_state_4h,
+                )
+
+            if sell_score > 0 and _k1_agree_bear:
                 sell_score = min(sell_score * 1.15, weight)
+                sell_exp += f" [LSM 1H/4H agree: {lv_state}/{lv_state_4h}]"
+            elif sell_score > 0 and lv_state in _bear_states:
+                logger.info(
+                    "[K1-TREND] %s: 1H %s is bearish but 4H is %s — bonus "
+                    "withheld (context timeframe does not confirm).",
+                    self.asset_type, lv_state, lv_state_4h,
+                )
 
             # A2: slopes_aligned bonus — re-added on top of the Part 2.1 raw
             # EMA-primary scoring (this was dropped from this function by
