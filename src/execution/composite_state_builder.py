@@ -748,6 +748,84 @@ class CompositeStateBuilder:
                     state.livermore_anchor_natural_high_1h = snap1.anchor_natural_high
                     state.livermore_anchor_natural_low_1h = snap1.anchor_natural_low
 
+                    # M1-PROBE-B: TEMPORARY. Remove after 48h.
+                    # Livermore (closes + ATR watermarks) and the zone ladder
+                    # (fractal pivots on highs/lows) are fully independent --
+                    # nothing in the codebase compares them. BRC treats them
+                    # as a fallback chain, not agreement. This measures how
+                    # often they converge, using the ladder's OWN dedup
+                    # tolerance as the definition of "same level".
+                    #
+                    # RELOCATED from the doc's original insertion point
+                    # (inside _update_structure, above [S2-STRUCTURE]) -- at
+                    # that point in the call sequence state.zone_4h_*/
+                    # zone_1d_*/livermore_anchor_* are all still their
+                    # CompositeState() dataclass defaults (None), because
+                    # _update_structure runs at :338, before the zone-ladder
+                    # update (:363-379) and before this Livermore block
+                    # (:707-749) that write them. Every field would have read
+                    # None every cycle there -- not measuring zero
+                    # convergence, measuring nothing. Moved here, directly
+                    # below where the last of the three data sources
+                    # (natural 1H anchors) is actually set, with its own
+                    # once-per-candle guard since it no longer inherits
+                    # [S2-STRUCTURE]'s (a different method that has already
+                    # returned by this point).
+                    try:
+                        _m1b_k = (self.asset_type, "M1B")
+                        if self._brc_log_ts.get(_m1b_k) != _1h_ts:
+                            self._brc_log_ts[_m1b_k] = _1h_ts
+                            _m1_px = float(df["close"].iloc[-1])
+                            _m1_atr = float(_atr1 or 0.0)
+                            _m1_tol = min(0.3 * _m1_atr, 0.004 * _m1_px) if _m1_atr > 0 else 0.0
+
+                            def _m1_gap(a, b):
+                                if a is None or b is None or _m1_atr <= 0:
+                                    return None
+                                return abs(float(a) - float(b)) / _m1_atr
+
+                            _a_lo = state.livermore_anchor_natural_low_1h
+                            _a_hi = state.livermore_anchor_natural_high_1h
+                            _a_up = state.livermore_anchor_main_up_max
+                            _a_dn = state.livermore_anchor_main_down_min
+                            _z4lo = state.zone_4h_current_lower
+                            _z4hi = state.zone_4h_current_upper
+                            _z1lo = state.zone_1d_current_lower
+                            _z1hi = state.zone_1d_current_upper
+
+                            _g_lo4 = _m1_gap(_a_lo, _z4lo)
+                            _g_hi4 = _m1_gap(_a_hi, _z4hi)
+                            _g_lo1 = _m1_gap(_a_lo, _z1lo)
+                            _g_hi1 = _m1_gap(_a_hi, _z1hi)
+                            _conv = [
+                                n for n, g in (
+                                    ("LO~4H", _g_lo4), ("HI~4H", _g_hi4),
+                                    ("LO~1D", _g_lo1), ("HI~1D", _g_hi1),
+                                )
+                                if g is not None and _m1_atr > 0 and (g * _m1_atr) <= _m1_tol
+                            ]
+
+                            logger.info(
+                                "[M1-CONVERGE] %s: lsm1h=%s price=%.5g atr=%.5g tol=%.5g | "
+                                "anchors lo=%s hi=%s up=%s dn=%s | "
+                                "zone4h lo=%s(%st) hi=%s(%st) | zone1d lo=%s hi=%s | "
+                                "gapATR lo4=%s hi4=%s lo1=%s hi1=%s | CONVERGED=%s",
+                                self.asset_type,
+                                state.livermore_state_1h,
+                                _m1_px, _m1_atr, _m1_tol,
+                                _a_lo, _a_hi, _a_up, _a_dn,
+                                _z4lo, getattr(state, "zone_4h_current_lower_tests", 0),
+                                _z4hi, getattr(state, "zone_4h_current_upper_tests", 0),
+                                _z1lo, _z1hi,
+                                None if _g_lo4 is None else round(_g_lo4, 2),
+                                None if _g_hi4 is None else round(_g_hi4, 2),
+                                None if _g_lo1 is None else round(_g_lo1, 2),
+                                None if _g_hi1 is None else round(_g_hi1, 2),
+                                ",".join(_conv) if _conv else "NONE",
+                            )
+                    except Exception as _e:
+                        logger.info("[M1-CONVERGE] %s: probe error: %s", self.asset_type, _e)
+
             except Exception as _lsm_err:
                 logger.debug(
                     "[Livermore] _build_composite_state update error: %s", _lsm_err
@@ -2245,6 +2323,26 @@ class CompositeStateBuilder:
             _k = (self.asset_type, "S1")
             if _s1_ts is not None and self._brc_log_ts.get(_k) != _s1_ts:
                 self._brc_log_ts[_k] = _s1_ts
+                # M1-PROBE-A: TEMPORARY. Remove after 48h.
+                # GOLD 7 Aug printed a clean higher high (12:00 h=4371.87 against a
+                # prior swing near 4272) and the detector reported lh=True. The
+                # fractal logic checks out by hand, so something is feeding it
+                # different numbers than the CSV shows. This prints the two values
+                # actually being compared.
+                try:
+                    logger.info(
+                        "[M1-SWING] %s: bars=%d last_close=%.5g last_high=%.5g "
+                        "swing_highs=%s swing_lows=%s min_depth=%.5g atr=%.5g "
+                        "hh=%s lh=%s ll=%s hl=%s",
+                        self.asset_type, len(df),
+                        float(df["close"].iloc[-1]), float(df["high"].iloc[-1]),
+                        [round(float(x), 5) for x in swing_highs[:2]],
+                        [round(float(x), 5) for x in swing_lows[:2]],
+                        _min_depth, float(_atr_raw or 0.0),
+                        _hh, _lh, _ll, _hl,
+                    )
+                except Exception as _e:
+                    logger.info("[M1-SWING] %s: probe error: %s", self.asset_type, _e)
                 logger.info(
                     "[S2-STRUCTURE] %s: lsm=%s parent_up=%s leg_up=%s known=%s "
                     "hh=%s lh=%s ll=%s hl=%s -> bos_bull=%s bos_bear=%s "
