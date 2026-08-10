@@ -184,6 +184,11 @@ class CompositeState:
     # from the 1H Livermore instance (snap1), for BRC's MR_REV reference.
     livermore_anchor_natural_high_1h: Optional[float] = None
     livermore_anchor_natural_low_1h: Optional[float] = None
+    # L1: 1H-native MAIN anchors. snap1 already computes these — they were
+    # simply never written to the board, so every consumer gating on the 1H
+    # state had to fall back to the 4H MAIN anchor.
+    livermore_anchor_main_up_max_1h: Optional[float] = None
+    livermore_anchor_main_down_min_1h: Optional[float] = None
     livermore_state_age_4h: int = 0
     livermore_state_age_1h: int = 0
     livermore_dual_confirmation: bool = False
