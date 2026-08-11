@@ -2425,7 +2425,39 @@ class CompositeStateBuilder:
                 #     new -> choch_bearish
                 # Measured: 12 live evaluations, 4 defective, 3 wrong-sign.
                 #
-                # BOS — the parent trend continuing.
+                # ── J1: LIVERMORE-GATED STRUCTURE ──────────────────────────
+                # Two defects fixed here, both measured on live data.
+                #
+                # 1. CHoCH fired on `_lh or _ll`. A lower high is what a
+                #    PULLBACK looks like — normal, not a character change.
+                #    Only the trend's own floor breaking (_ll in an uptrend)
+                #    counts. Confirmed live: NATURAL_RETRACEMENT with
+                #    hh=F lh=T ll=F hl=T — a HIGHER LOW, intact uptrend
+                #    structure — firing a bearish reversal. 4 of 24 post-M2
+                #    lines, mirrored 4 more times on NATURAL_REBOUND.
+                #
+                # 2. The state machine was overruled. `_parent_up and (_lh or
+                #    _ll)` is the literal definition of NATURAL_RETRACEMENT,
+                #    so every retracement fired choch_bearish — a short into a
+                #    live uptrend. Proven: EURUSD's state moved
+                #    NATURAL_RETRACEMENT -> MAIN_UP on 7 Aug 16:27 and the
+                #    label did not change.
+                #
+                # Livermore already grades counter-moves. NATURAL = normal,
+                # wait for the resumption. SECONDARY = abnormally deep, a
+                # reversal is on the table. Deferring to that is the
+                # constitution's "Livermore leads, mathematics confirms" made
+                # real rather than asserted.
+                #
+                # Measured effect: CHoCH firing 67% -> 14% (pre-M2, n=1017)
+                # and 71% -> 12% (post-M2, n=24). Both samples agree.
+                _J1_REVERSAL_STATES = (
+                    "SECONDARY_RETRACEMENT",
+                    "SECONDARY_REBOUND",
+                )
+                _j1_may_reverse = _lsm_state in _J1_REVERSAL_STATES
+
+                # BOS — the parent trend continuing. UNCHANGED.
                 if _parent_up and _hh:
                     state.bos_detected = True
                     state.bos_bullish = True
@@ -2433,13 +2465,32 @@ class CompositeStateBuilder:
                     state.bos_detected = True
                     state.bos_bearish = True
 
-                # CHoCH — a break AGAINST the parent trend.
-                if (not _parent_up) and (_hh or _hl):
+                # CHoCH — the parent trend's own structure breaking, AND the
+                # state machine agreeing the counter-move is abnormal.
+                if (not _parent_up) and _hh and _j1_may_reverse:
                     state.choch_detected = True
                     state.choch_bullish = True
-                elif _parent_up and (_lh or _ll):
+                elif _parent_up and _ll and _j1_may_reverse:
                     state.choch_detected = True
                     state.choch_bearish = True
+
+                # Tiebreak: an expanding range (higher high AND lower low) can
+                # satisfy both. The bot is passive by default and continuation
+                # is the lower-assumption read, so BOS wins and the reversal is
+                # suppressed. Logged, never silent.
+                if (state.bos_bullish or state.bos_bearish) and (
+                    state.choch_bullish or state.choch_bearish
+                ):
+                    logger.info(
+                        "[J1-AMBIGUOUS] %s: lsm=%s hh=%s lh=%s ll=%s hl=%s — "
+                        "BOS and CHoCH both satisfied (expanding range). "
+                        "BOS kept, CHoCH suppressed.",
+                        self.asset_type, _lsm_state, _hh, _lh, _ll, _hl,
+                    )
+                    state.choch_detected = False
+                    state.choch_bullish = False
+                    state.choch_bearish = False
+                # ── END J1 ────────────────────────────────────────────────
             # _known False: no established structure. A range's swings are
             # noise, not a break and not a reversal.
 
