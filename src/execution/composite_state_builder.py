@@ -820,8 +820,29 @@ class CompositeStateBuilder:
                             # that appears nowhere in nine days of bars. Matches the documented
                             # _nl_confirmed clearing regression (livermore_state_machine.py:190,
                             # measured at 5% when it was supposedly fixed).
+                            # N2 FOLLOWUP (2026-08-11): this check originally treated
+                            # SECONDARY_RETRACEMENT as an "up state" that must carry a
+                            # natural_low, and every non-up state (including
+                            # SECONDARY_REBOUND) as a "down state" that must carry a
+                            # natural_high. That matched the state machine's behavior
+                            # at the time N2 was written, but N2 itself is what
+                            # revealed why that behavior was wrong: SECONDARY_* is a
+                            # "this level already broke" state, and
+                            # livermore_state_machine.py was found to be publishing
+                            # the pre-break level as if it were still live (see
+                            # _LOW_LIVE_STATES/_HIGH_LIVE_STATES in that file for the
+                            # full writeup, and the fix that removed SECONDARY_* from
+                            # them). Once that fix landed, a None natural_low/high
+                            # during SECONDARY_* became the CORRECT reading, not a
+                            # staleness bug -- so this check must stop expecting one
+                            # there too, or it flags the fix's own intended output as
+                            # a fresh "MISSING" failure (confirmed: MISSING counts
+                            # jumped 113->663 on a GOLD backtest before this
+                            # follow-up, purely from SECONDARY_RETRACEMENT/REBOUND
+                            # cycles now correctly reporting None).
                             try:
-                                _n2_up = {"MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"}
+                                _n2_up = {"MAIN_UP", "NATURAL_RETRACEMENT"}
+                                _n2_down = {"MAIN_DOWN", "NATURAL_REBOUND"}
                                 _n2_s = getattr(state, "livermore_state_1h", None)
                                 _n2_px = float(df["close"].iloc[-1])
                                 _n2_lo = getattr(state, "livermore_anchor_natural_low_1h", None)
@@ -839,7 +860,7 @@ class CompositeStateBuilder:
                                             f"{(float(_n2_lo)-_n2_px)/_n2_px*100:+.1f}% vs price "
                                             f"(a LOW above PRICE)"
                                         )
-                                elif _n2_s is not None:
+                                elif _n2_s in _n2_down:
                                     if _n2_hi is None:
                                         _n2_bad.append("natural_high MISSING in down-state")
                                     elif float(_n2_hi) <= _n2_px:
@@ -848,6 +869,8 @@ class CompositeStateBuilder:
                                             f"{(float(_n2_hi)-_n2_px)/_n2_px*100:+.1f}% vs price "
                                             f"(a HIGH below PRICE)"
                                         )
+                                # SECONDARY_RETRACEMENT / SECONDARY_REBOUND: no check.
+                                # None is the correct, intended reading here now.
 
                                 if _n2_up_max is not None and float(_n2_up_max) <= _n2_px:
                                     _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} <= price")
