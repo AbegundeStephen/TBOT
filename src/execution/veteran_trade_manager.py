@@ -2343,7 +2343,37 @@ class VeteranTradeManager:
                     elif self.current_stop_loss <= self.entry_price + offset:
                         reason = ExitReason.BREAK_EVEN
                 self._log_mfe_mae(reason.value)
-                return {"reason": reason, "price": current_price, "size": self.remaining_position}
+                # Fill at the stop level itself, not current_price (the bar's
+                # close) -- a real stop order fires the moment price crosses
+                # it, it doesn't wait for the candle to close. On 1H bars
+                # current_price can sit meaningfully past the stop from
+                # ordinary intrabar movement, not a gap, and using it
+                # unconditionally understated every stop-triggered exit's
+                # realized price.
+                #
+                # No open price is tracked on this object (only high/low/
+                # close), so there's no signal available here to distinguish
+                # "touched the stop and closed nearby" from "gapped through
+                # it" -- an earlier version of this fix tried a
+                # max(stop, current_price) fallback intended to stay
+                # pessimistic on a real gap, but that's dead code: the
+                # branch above only enters when current_price is already on
+                # the bad side of the stop (<=  for longs, >= for shorts),
+                # so the fallback can mathematically never trigger. Filling
+                # at the stop level unconditionally is the standard
+                # backtesting convention for stop orders absent gap data,
+                # not a claim that gaps are being modeled.
+                #
+                # Confirmed backtest-only -- live trading never uses this
+                # returned price as the realized fill; the exchange handlers
+                # place a real broker order and fetch its authoritative fill
+                # price separately (e.g. binance_handler.py's
+                # _record_exchange_close), using this value only as the
+                # trigger/reason.
+                return {
+                    "reason": reason, "price": self.current_stop_loss,
+                    "size": self.remaining_position,
+                }
         except Exception as e:
             logger.error(f"[VTM] SL check error: {e}")
 
