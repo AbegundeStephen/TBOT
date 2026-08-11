@@ -2171,7 +2171,50 @@ class CompositeStateBuilder:
             lows_arr   = df["low"].values
             closes_arr = df["close"].values
 
-            _atr_raw   = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+            # M2: the df passed to _update_structure has no "atr" column — that
+            # column is added later by the strategies, and this method is called
+            # at ~line 338, well before they touch the frame. The probe measured
+            # min_depth=0 / atr=0 live, meaning the 0.3xATR depth filter that
+            # rejects shallow noise pivots has been rejecting NOTHING. Every
+            # 7-bar wiggle has been counting as a swing.
+            #
+            # Same missing-column defect H1 fixed in the ladder block (~:1002),
+            # which silently reported ladder=none on 41 of 41 logged cycles.
+            # This method cannot reach the shared _atr (different function, and
+            # it runs earlier), so ATR(14) is computed locally from df — Wilder
+            # true range, same definition used elsewhere in the system.
+            _atr_raw = 0.0
+            try:
+                if "atr" in df.columns:
+                    _atr_raw = float(df["atr"].iloc[-1])
+            except Exception:
+                _atr_raw = 0.0
+
+            if _atr_raw <= 0:
+                try:
+                    _h = df["high"].values[-15:]
+                    _l = df["low"].values[-15:]
+                    _c = df["close"].values[-15:]
+                    if len(_c) >= 15:
+                        _tr = []
+                        for _i in range(1, len(_c)):
+                            _tr.append(max(
+                                _h[_i] - _l[_i],
+                                abs(_h[_i] - _c[_i - 1]),
+                                abs(_l[_i] - _c[_i - 1]),
+                            ))
+                        if _tr:
+                            _atr_raw = float(sum(_tr) / len(_tr))
+                except Exception:
+                    _atr_raw = 0.0
+
+            if _atr_raw <= 0:
+                logger.warning(
+                    "[M2-SWING] %s: no usable ATR (bars=%d) — depth filter "
+                    "disabled this cycle, every fractal counts as a swing.",
+                    getattr(self, "asset_type", "?"), len(df),
+                )
+
             _min_depth = 0.3 * _atr_raw if _atr_raw > 0 else 0.0
 
             # Brain rebuild Part 0.5 (Tier X.1) — four real problems fixed:

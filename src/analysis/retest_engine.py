@@ -535,7 +535,7 @@ class RetestEngine:
                     "livermore_anchor_main_up_max",
                 )
                 if anchor is not None:
-                    logger.debug("[L1-RETEST] long anchor=%s src=%s ls=%s",
+                    logger.info("[L1-RETEST] long anchor=%s src=%s ls=%s",
                                  anchor, _src, ls)
                     return anchor
             if ls == "SECONDARY_RETRACEMENT":
@@ -544,7 +544,7 @@ class RetestEngine:
                     "livermore_anchor_natural_low",
                 )
                 if anchor is not None:
-                    logger.debug("[L1-RETEST] long anchor=%s src=%s ls=%s",
+                    logger.info("[L1-RETEST] long anchor=%s src=%s ls=%s",
                                  anchor, _src, ls)
                     return anchor
         elif direction == -1:
@@ -554,7 +554,7 @@ class RetestEngine:
                     "livermore_anchor_main_down_min",
                 )
                 if anchor is not None:
-                    logger.debug("[L1-RETEST] short anchor=%s src=%s ls=%s",
+                    logger.info("[L1-RETEST] short anchor=%s src=%s ls=%s",
                                  anchor, _src, ls)
                     return anchor
             if ls == "SECONDARY_REBOUND":
@@ -563,7 +563,7 @@ class RetestEngine:
                     "livermore_anchor_natural_high",
                 )
                 if anchor is not None:
-                    logger.debug("[L1-RETEST] short anchor=%s src=%s ls=%s",
+                    logger.info("[L1-RETEST] short anchor=%s src=%s ls=%s",
                                  anchor, _src, ls)
                     return anchor
         # Final fallback — unchanged
