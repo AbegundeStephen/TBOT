@@ -189,14 +189,40 @@ class LivermoreStateMachine:
         return self.snapshot()
 
     # States where each natural anchor is a LIVE level rather than a leftover.
-    # _nl_confirmed (the pullback floor) is only cleared on the MAIN_UP ->
-    # NATURAL_RETRACEMENT transition, so once price breaks it and the machine
-    # moves to the downside states it keeps reporting a floor that no longer
-    # exists — measured live at 5%+ from price. This mirrors the rule the zone
-    # ladder store already follows: a level that breaks flips role, loses its
-    # earned test history, and stops being surfaced until it re-earns one.
-    _LOW_LIVE_STATES  = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-    _HIGH_LIVE_STATES = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+    #
+    # N2 FOLLOWUP (2026-08-11): SECONDARY_RETRACEMENT/SECONDARY_REBOUND used to
+    # be included here. A logging-only anchor-coherence probe added across the
+    # system (composite_state_builder.py, [N2-ANCHOR]) caught this publishing a
+    # broken level as if it were live support/resistance on every asset tested
+    # (GOLD, BTC, USOIL, EURUSD -- not the 2-of-6 sample an earlier audit had
+    # suggested). Root cause, confirmed against real BTC log lines:
+    #
+    #   lsm1h=SECONDARY_RETRACEMENT price=117320 natural_low=117380 (+0.1%)
+    #   lsm1h=SECONDARY_RETRACEMENT price=116340 natural_low=117380 (+0.9%, same value, price fell further)
+    #   ...later, after recovering back to MAIN_UP...
+    #   lsm1h=MAIN_UP               price=111450 natural_low=117380 (+5.3%, SAME frozen value)
+    #
+    # By design (module docstring, decision #2), once price probes past the
+    # natural low into SECONDARY_RETRACEMENT, _nl_confirmed is deliberately
+    # FROZEN at the entry pivot (_nl_entry) so the dual-confirm-to-MAIN_DOWN
+    # threshold math doesn't treadmill chasing price down. That freeze is
+    # correct for the INTERNAL threshold check. The bug was publishing that
+    # same frozen value externally via snapshot() as "the current natural
+    # low" -- but SECONDARY means that low already broke; there is no valid
+    # level left to report until a fresh one is confirmed. 44% of all N2
+    # firings (BTC: 1447/3302) were this direct freeze.
+    #
+    # SECONDARY_RETRACEMENT/SECONDARY_REBOUND removed from the live-state
+    # sets below: snapshot() now returns None for the natural anchor while in
+    # a SECONDARY state, matching the "None = no live level, try the next
+    # tier" contract every downstream reader (BRC, N1's
+    # _resolve_setup_reference in composite_state_builder.py) already
+    # implements. See _natural_retr/_secondary_retr (and the _rebound
+    # mirrors) below for the paired fix to the recovery transition, which
+    # stops the same stale value leaking forward into MAIN_UP/MAIN_DOWN
+    # after a SECONDARY episode ends (a further 20% of N2 firings).
+    _LOW_LIVE_STATES  = ("MAIN_UP", "NATURAL_RETRACEMENT")
+    _HIGH_LIVE_STATES = ("MAIN_DOWN", "NATURAL_REBOUND")
 
     def snapshot(self) -> LivermoreSnapshot:
         """Return current state as an immutable snapshot."""
@@ -291,7 +317,15 @@ class LivermoreStateMachine:
         if close > nl + mn:
             self._state          = "NATURAL_RETRACEMENT"
             self._nl_watermark   = nl
-            self._nl_confirmed   = nl   # anchor for next NATURAL_RETRACEMENT cycle
+            # N2 FOLLOWUP: previously re-armed as `nl` (the just-broken pivot),
+            # which left it non-None so the bounce-lock guard in _natural_retr
+            # ("if self._nl_confirmed is None and ...") could never re-fire --
+            # the same already-invalidated level then kept publishing as live
+            # through this NATURAL_RETRACEMENT and into whatever MAIN_UP
+            # followed it. Reset to None instead, mirroring the MAIN_UP ->
+            # NATURAL_RETRACEMENT reset above (_main_up), so a genuinely fresh
+            # low gets locked from here on.
+            self._nl_confirmed   = None
             self._nl_bounce_high = close
             self._pending_down   = 0
             return
@@ -359,7 +393,13 @@ class LivermoreStateMachine:
         if close < nh - mn:
             self._state          = "NATURAL_REBOUND"
             self._nh_watermark   = nh
-            self._nh_confirmed   = nh
+            # N2 FOLLOWUP: mirror of the _secondary_retr fix above. Was
+            # re-armed as `nh` (the just-broken pivot), which blocked the
+            # bounce-lock guard in _natural_rebound from ever re-firing and
+            # let the same broken level keep publishing as live through this
+            # NATURAL_REBOUND and into whatever MAIN_DOWN followed. Reset to
+            # None so a genuinely fresh high locks from here on.
+            self._nh_confirmed   = None
             self._nh_dip_low     = close
             self._pending_up     = 0
             return
