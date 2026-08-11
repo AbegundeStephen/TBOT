@@ -112,7 +112,7 @@ class BreakRetestValidator:
                 anchor = getattr(state, "livermore_anchor_natural_low", None)
                 _l1_src = "4H-fallback"
             if anchor is not None and anchor > 0:
-                logger.debug("[L1-BRV] bullish anchor=%s src=%s state=%s",
+                logger.info("[L1-BRV] bullish anchor=%s src=%s state=%s",
                              anchor, _l1_src, lsm_state)
 
             if anchor is None or anchor <= 0:
@@ -155,7 +155,7 @@ class BreakRetestValidator:
                 anchor = getattr(state, "livermore_anchor_natural_high", None)
                 _l1_src = "4H-fallback"
             if anchor is not None and anchor > 0:
-                logger.debug("[L1-BRV] bearish anchor=%s src=%s state=%s",
+                logger.info("[L1-BRV] bearish anchor=%s src=%s state=%s",
                              anchor, _l1_src, lsm_state)
 
             if anchor is None or anchor <= 0:
