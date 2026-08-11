@@ -1531,31 +1531,92 @@ class CompositeStateBuilder:
                                 _f1_px,
                             )
                         else:
-                            _new_setup = dict(_candidate)
-                            _new_setup.update({
-                                "age": 0,
-                                "born_state": _lsm_now,
-                                "born_compression": _comp,
-                                "last_compression": _comp,
-                                "energy": "HOLDING",
-                                "ref": _f1_ref,
-                                "ref_tier": _f1_tier,
-                                "ref_role": self._ref_role_at(
-                                    _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                ),
-                                "ref_tests": self._ref_tests_at(
-                                    _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                ),
-                            })
-                            _store[_asset] = _new_setup
-                            _cur = _new_setup
-                            logger.info(
-                                "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
-                                self.asset_type, _new_setup["kind"],
-                                int(_new_setup["dir"]), _f1_ref, _f1_tier,
-                                _new_setup.get("ref_role"),
-                                _new_setup.get("ref_tests", 0),
+                            # ── P1: BREAK-MAGNITUDE FILTER (SHIPS OFF) ──────
+                            # A setup is created the moment price crosses a
+                            # level. A one-tick poke currently counts the same
+                            # as a decisive thrust.
+                            #
+                            # Threshold translated from Brock/Lakonishok/
+                            # LeBaron (1992), the only quantified academic
+                            # precedent: a 1% price-filter band on daily DJIA,
+                            # used explicitly to cut false breakout signals.
+                            # 1% does NOT transfer — on this book it is 1.7 ATR
+                            # on oil and 8.7 ATR on GBPAUD. BLL's daily ATR was
+                            # ~1-1.5% of price, so their band was ~0.7-1.0
+                            # daily ATR. That multiple is the transferable
+                            # quantity.
+                            #
+                            # Tier-scaled: a 4H level (SWING_4H, ZONE_LADDER)
+                            # must be broken by a 4H-meaningful amount, and 4H
+                            # ATR is roughly 2x 1H ATR. ANCHOR_1H is 1H-native
+                            # so takes the base multiple.
+                            #
+                            # SHIPS OFF. Logs the counterfactual so the multiple
+                            # can be set from this system's own data instead of
+                            # from a 1990s daily-index study.
+                            _p1_cfg = (getattr(state, "phase_config", {}) or {})
+                            _p1_on = bool(
+                                _p1_cfg.get("break_magnitude_filter_enabled", False)
                             )
+                            _p1_mult = float(
+                                _p1_cfg.get("break_magnitude_atr_mult", 0.5) or 0.5
+                            )
+                            _p1_scale = {
+                                "SWING_4H": 2.0,
+                                "ZONE_LADDER": 2.0,
+                                "ANCHOR_1H": 1.0,
+                            }.get(_f1_tier, 2.0)
+                            _p1_band = _p1_mult * _p1_scale * float(_atr or 0.0)
+                            _p1_dist = None
+                            _p1_weak = False
+                            try:
+                                if _f1_px is not None and _p1_band > 0:
+                                    _p1_dist = abs(float(_f1_px) - float(_f1_ref))
+                                    _p1_weak = _p1_dist < _p1_band
+                            except Exception:
+                                _p1_weak = False
+
+                            if _p1_weak:
+                                logger.info(
+                                    "[P1-MAGNITUDE] %s: %s dir=%+d ref=%.5g "
+                                    "px=%.5g dist=%.5g band=%.5g (%.2f x ATR "
+                                    "x %.1f tier=%s) — WEAK BREAK%s",
+                                    self.asset_type, _candidate["kind"],
+                                    int(_candidate["dir"]), _f1_ref, _f1_px,
+                                    _p1_dist if _p1_dist is not None else -1.0,
+                                    _p1_band, _p1_mult, _p1_scale, _f1_tier,
+                                    " — REFUSED" if _p1_on
+                                    else " — would refuse (filter OFF)",
+                                )
+
+                            if _p1_weak and _p1_on:
+                                pass          # refused: no setup is created
+                            else:
+                                _new_setup = dict(_candidate)
+                                _new_setup.update({
+                                    "age": 0,
+                                    "born_state": _lsm_now,
+                                    "born_compression": _comp,
+                                    "last_compression": _comp,
+                                    "energy": "HOLDING",
+                                    "ref": _f1_ref,
+                                    "ref_tier": _f1_tier,
+                                    "ref_role": self._ref_role_at(
+                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                    ),
+                                    "ref_tests": self._ref_tests_at(
+                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                    ),
+                                })
+                                _store[_asset] = _new_setup
+                                _cur = _new_setup
+                                logger.info(
+                                    "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
+                                    self.asset_type, _new_setup["kind"],
+                                    int(_new_setup["dir"]), _f1_ref, _f1_tier,
+                                    _new_setup.get("ref_role"),
+                                    _new_setup.get("ref_tests", 0),
+                                )
                 elif _candidate is not None:
                     # Item 2: a setup wanted to be born but this lane's slot
                     # was occupied.
@@ -1925,21 +1986,64 @@ class CompositeStateBuilder:
                         for _i in range(1, _n - 1):
                             if (_WIN - _i) >= _bars_since_break:
                                 continue                      # pre-break
+                            # ── P2: RUNNER ACCEPTANCE ────────────────────────
+                            # WAS: _recover required a later close above
+                            # _pre_high — the highest high since the break,
+                            # INCLUDING the break candle. That makes the bar to
+                            # clear rise one-for-one with the size of the break:
+                            # a 0.5-ATR poke needs +0.5 ATR, a 5-ATR thrust
+                            # needs +5 ATR. Explosive moves consolidate after a
+                            # thrust and rarely do that, so the tier built to
+                            # catch the strongest moves was rejecting them and
+                            # admitting the feeble ones.
+                            #
+                            # NOW: a fixed acceptance band, independent of
+                            # thrust size. Price must have CLOSED clearly beyond
+                            # the reference and never come back through it.
+                            #
+                            # "Never came back" is already guaranteed by the
+                            # `not _retest_failed` gate above, and the minimum
+                            # duration by `_bars_since_break >= 3` (3 HOURS —
+                            # this window runs on the H1 frame). So no candle
+                            # count is added here; only the margin is new.
+                            #
+                            # Bulkowski (n=10,348): breakouts perform better
+                            # WITHOUT a retest (97% up / 91% down), and a clean
+                            # retest that holds above the break price averages
+                            # 41.3% vs 26.7% for one that trades back through.
+                            # What makes a retest good is the refusal to return
+                            # — a move that never returns is the extreme case of
+                            # that, not a missing beat.
+                            _p2_mult = float(
+                                (getattr(state, "phase_config", {}) or {}).get(
+                                    "runner_accept_atr_mult", 0.5
+                                ) or 0.5
+                            )
+                            _p2_band = _p2_mult * float(_atr or 0.0)
+
                             if _brc_dir == 1:
-                                _pre_high = max(_wh[:_i]) if _i else None
-                                _pull_ok = _wl[_i] > _brc_ref  # held above
-                                _recover = any(
-                                    _c > _pre_high for _c in _wc[_i + 1:]
-                                ) if _pre_high is not None else False
+                                _pull_ok = _wl[_i] > _brc_ref          # dip held above
+                                _accept = any(
+                                    _c > (_brc_ref + _p2_band)
+                                    for _c in _wc[_i:]
+                                ) if _p2_band > 0 else False
                             else:
-                                _pre_low = min(_wl[:_i]) if _i else None
                                 _pull_ok = _wh[_i] < _brc_ref
-                                _recover = any(
-                                    _c < _pre_low for _c in _wc[_i + 1:]
-                                ) if _pre_low is not None else False
-                            if _pull_ok and _recover:
+                                _accept = any(
+                                    _c < (_brc_ref - _p2_band)
+                                    for _c in _wc[_i:]
+                                ) if _p2_band > 0 else False
+
+                            if _pull_ok and _accept:
                                 _retested = True
                                 _brc_tier_used = "RUNNER"
+                                logger.info(
+                                    "[P2-RUNNER] %s: %s dir=%+d ref=%.5g "
+                                    "band=%.5g (%.2f x ATR) — accepted "
+                                    "(held beyond level, never returned)",
+                                    self.asset_type, _brc_kind, _brc_dir,
+                                    _brc_ref, _p2_band, _p2_mult,
+                                )
                                 break
 
                     if _retested and _closed_through:
