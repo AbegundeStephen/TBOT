@@ -167,12 +167,12 @@ class RetestEngine:
           - sweep_detected, sweep_level
         """
         if len(df) < 2:
-            logger.debug("retest_engine: df too short (%d rows) — NO_LEVEL_NEARBY", len(df))
+            logger.info("retest_engine: df too short (%d rows) — NO_LEVEL_NEARBY", len(df))
             return self._no_level(symbol, direction)
 
         atr = self._get_atr(df)
         if atr <= 0:
-            logger.debug("retest_engine: ATR=0 — NO_LEVEL_NEARBY")
+            logger.info("retest_engine: ATR=0 — NO_LEVEL_NEARBY")
             return self._no_level(symbol, direction)
 
         close     = float(df["close"].iloc[-1])
@@ -249,7 +249,7 @@ class RetestEngine:
                 # after would make it unreachable (CLEAN always matches first).
                 choch_now = getattr(state, "choch_detected", False)
                 if choch_now:
-                    logger.debug("retest_engine: CHOCH_HOLD @ %.5f (dist=%.2f ATR)", level, dist_atr)
+                    logger.info("retest_engine: CHOCH_HOLD @ %.5f (dist=%.2f ATR)", level, dist_atr)
                     _rh, _rl = self._maybe_swing_range(state, df)
                     return RetestResult(
                         retest_type=RT_CHOCH_HOLD,
@@ -262,7 +262,7 @@ class RetestEngine:
                         level_2=level_2,
                         level_3=level_3,
                     )
-                logger.debug("retest_engine: CLEAN @ %.5f (dist=%.2f ATR)", level, dist_atr)
+                logger.info("retest_engine: CLEAN @ %.5f (dist=%.2f ATR)", level, dist_atr)
                 _rh, _rl = self._maybe_swing_range(state, df)
                 # A level tested multiple times is more proven than a fresh one —
                 # deepen the CLEAN discount (more negative = easier) rather than
@@ -296,7 +296,7 @@ class RetestEngine:
                 continue
             _dist_atr_alt = abs(close - _lvl) / atr
             if _dist_atr_alt <= self._clean_atr_mult:
-                logger.debug(
+                logger.info(
                     "retest_engine: CLEAN (secondary level) @ %.5f (dist=%.2f ATR)",
                     _lvl, _dist_atr_alt,
                 )
@@ -339,7 +339,7 @@ class RetestEngine:
                 _fresh = age_1h <= self._breakout_age_max
                 if not _fresh:
                     mod += 0.15
-                logger.debug(
+                logger.info(
                     "retest_engine: BREAKOUT @ %.5f (dist=%.2f ATR, mod=%.2f, fresh=%s)",
                     bo_level, dist_atr, mod, _fresh,
                 )
@@ -394,7 +394,7 @@ class RetestEngine:
                 _role_conflict = _level_type is not None and _level_type != _expected_type
 
             if not _role_conflict:
-                logger.debug("retest_engine: WICK @ sweep_level=%s", sweep_level)
+                logger.info("retest_engine: WICK @ sweep_level=%s", sweep_level)
                 _rh, _rl = self._maybe_swing_range(state, df)
                 return RetestResult(
                     retest_type=RT_WICK,
@@ -405,7 +405,7 @@ class RetestEngine:
                     range_high=_rh,
                     range_low=_rl,
                 )
-            logger.debug(
+            logger.info(
                 "retest_engine: WICK candidate rejected — level %.5f now labeled %s, "
                 "expected %s for direction=%d",
                 level, _level_type, _expected_type, direction,
@@ -424,7 +424,7 @@ class RetestEngine:
             ))
             # CHASE_HARD takes precedence over CHASE_SOFT
             if dist_atr >= chase_hard:
-                logger.debug(
+                logger.info(
                     "retest_engine: CHASE_HARD @ %.5f (dist=%.2f ATR)", level, dist_atr
                 )
                 return RetestResult(
@@ -437,7 +437,7 @@ class RetestEngine:
                     level_3=level_3,
                 )
             if dist_atr >= chase_soft:
-                logger.debug(
+                logger.info(
                     "retest_engine: CHASE_SOFT @ %.5f (dist=%.2f ATR)", level, dist_atr
                 )
                 return RetestResult(
@@ -661,7 +661,7 @@ class RetestEngine:
             else self._cont_mod_aligned_fx
         )
         level = cons_low if direction == 1 else cons_high
-        logger.debug(
+        logger.info(
             "retest_engine: CONTINUATION @ %.5f (flagpole=%.5f, box=[%.5f, %.5f])",
             level, flagpole, cons_low, cons_high,
         )
