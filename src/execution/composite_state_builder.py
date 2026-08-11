@@ -810,6 +810,59 @@ class CompositeStateBuilder:
                                 if g is not None and _m1_atr > 0 and (g * _m1_atr) <= _m1_tol
                             ]
 
+                            # N2: anchor invariant. Not a comparison BETWEEN systems — a check
+                            # that Livermore is internally coherent. In an up-state its natural
+                            # LOW must sit below price; in a down-state its natural HIGH must sit
+                            # above. main_up_max must be above price, main_down_min below.
+                            #
+                            # Live failure this caught: USOIL MAIN_UP with natural_low=87.811
+                            # against price 81.363 — a floor 7.9% above the market, and a price
+                            # that appears nowhere in nine days of bars. Matches the documented
+                            # _nl_confirmed clearing regression (livermore_state_machine.py:190,
+                            # measured at 5% when it was supposedly fixed).
+                            try:
+                                _n2_up = {"MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"}
+                                _n2_s = getattr(state, "livermore_state_1h", None)
+                                _n2_px = float(df["close"].iloc[-1])
+                                _n2_lo = getattr(state, "livermore_anchor_natural_low_1h", None)
+                                _n2_hi = getattr(state, "livermore_anchor_natural_high_1h", None)
+                                _n2_up_max = getattr(state, "livermore_anchor_main_up_max", None)
+                                _n2_dn_min = getattr(state, "livermore_anchor_main_down_min", None)
+                                _n2_bad = []
+
+                                if _n2_s in _n2_up:
+                                    if _n2_lo is None:
+                                        _n2_bad.append("natural_low MISSING in up-state")
+                                    elif float(_n2_lo) >= _n2_px:
+                                        _n2_bad.append(
+                                            f"natural_low {float(_n2_lo):.5g} is "
+                                            f"{(float(_n2_lo)-_n2_px)/_n2_px*100:+.1f}% vs price "
+                                            f"(a LOW above PRICE)"
+                                        )
+                                elif _n2_s is not None:
+                                    if _n2_hi is None:
+                                        _n2_bad.append("natural_high MISSING in down-state")
+                                    elif float(_n2_hi) <= _n2_px:
+                                        _n2_bad.append(
+                                            f"natural_high {float(_n2_hi):.5g} is "
+                                            f"{(float(_n2_hi)-_n2_px)/_n2_px*100:+.1f}% vs price "
+                                            f"(a HIGH below PRICE)"
+                                        )
+
+                                if _n2_up_max is not None and float(_n2_up_max) <= _n2_px:
+                                    _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} <= price")
+                                if _n2_dn_min is not None and float(_n2_dn_min) >= _n2_px:
+                                    _n2_bad.append(f"main_down_min {float(_n2_dn_min):.5g} >= price")
+
+                                if _n2_bad:
+                                    logger.warning(
+                                        "[N2-ANCHOR] %s: lsm1h=%s price=%.5g — STALE/INVALID: %s",
+                                        self.asset_type, _n2_s, _n2_px, " | ".join(_n2_bad),
+                                    )
+                            except Exception as _n2_err:
+                                logger.info("[N2-ANCHOR] %s: check error: %s",
+                                            self.asset_type, _n2_err)
+
                             logger.info(
                                 "[M1-CONVERGE] %s: lsm1h=%s price=%.5g atr=%.5g tol=%.5g | "
                                 "anchors lo=%s hi=%s up=%s dn=%s | "
@@ -1352,7 +1405,8 @@ class CompositeStateBuilder:
                             except Exception:
                                 _f1_px = None
                             _f1_now_role = self._ref_role_at(
-                                _asset, _cur.get("ref"), _atr, _f1_px
+                                _asset, _cur.get("ref"), _atr, _f1_px,
+                                _cur.get("ref_tier"),
                             )
                             if (
                                 _f1_now_role is not None
@@ -1464,16 +1518,20 @@ class CompositeStateBuilder:
                                 "ref": _f1_ref,
                                 "ref_tier": _f1_tier,
                                 "ref_role": self._ref_role_at(
-                                    _asset, _f1_ref, _atr, _f1_px
+                                    _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                ),
+                                "ref_tests": self._ref_tests_at(
+                                    _asset, _f1_ref, _atr, _f1_px, _f1_tier
                                 ),
                             })
                             _store[_asset] = _new_setup
                             _cur = _new_setup
                             logger.info(
-                                "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s",
+                                "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
                                 self.asset_type, _new_setup["kind"],
                                 int(_new_setup["dir"]), _f1_ref, _f1_tier,
                                 _new_setup.get("ref_role"),
+                                _new_setup.get("ref_tests", 0),
                             )
                 elif _candidate is not None:
                     # Item 2: a setup wanted to be born but this lane's slot
@@ -1506,6 +1564,7 @@ class CompositeStateBuilder:
                 state.setup_energy_trend_mr = _cur_mr.get("energy")
                 state.setup_ref_mr = _cur_mr.get("ref")               # F1
                 state.setup_ref_tier_mr = _cur_mr.get("ref_tier")     # F1
+                state.setup_ref_tests_mr = int(_cur_mr.get("ref_tests", 0) or 0)  # N4
 
             # E2: twelve existing consumers read the unsuffixed setup_*
             # fields with no concept of lanes. Prefer the TF lane when both
@@ -1519,6 +1578,7 @@ class CompositeStateBuilder:
                 state.setup_energy_trend = _pub.get("energy")
                 state.setup_ref = _pub.get("ref")                     # F1
                 state.setup_ref_tier = _pub.get("ref_tier")           # F1
+                state.setup_ref_tests = int(_pub.get("ref_tests", 0) or 0)  # N4
 
             self._prev_compression[_asset] = _comp
         except Exception as _traj_err:
@@ -2828,24 +2888,50 @@ class CompositeStateBuilder:
                 return float(_ref), _tier
         return None, None
 
-    def _ref_role_at(self, asset, ref_price, atr, current_price):
-        """F1: the role ('swing_high' / 'swing_low') of the tracked level
-        nearest to ref_price, or None if no tracked level sits within the
-        ladder's own dedup tolerance.
+    def _ref_role_at(self, asset, ref_price, atr, current_price, tier=None):
+        """N1: role ('swing_high' / 'swing_low') of the tracked level nearest
+        to ref_price, or None when no tracked level sits within the ladder's
+        own dedup tolerance.
 
-        Reuses min(0.3*ATR, 0.4% of price) — the exact tolerance
-        _update_zone_levels uses to decide two prices are one level — so
-        "same level" means the same thing everywhere in the system.
+        FIXED (N1): this previously iterated self._structure_levels — the 1H
+        store built by _update_structure_memory. But BRC resolves its reference
+        from self._zone_levels (4H/1D, built by _update_zone_levels), so for
+        every ZONE_LADDER-tier setup — 44% of all proofs in the log history —
+        the role was looked up in a store that does not contain that level.
+        Result: ref_role came back None (REF_ROLE_FLIPPED silently disabled) or,
+        worse, was read off a different level that merely shared a price.
+
+        Also adds a timeframe filter. _zone_levels holds 4H AND 1D levels tagged
+        by "tf"; _build_zone_view filters on it (:2673) and this did not. Without
+        the filter, a 4H reference could match a 1D level within tolerance.
         """
         try:
             if ref_price is None or not atr or float(atr) <= 0:
                 return None
             if current_price is None or float(current_price) <= 0:
                 return None
+
             _tol = min(0.3 * float(atr), 0.004 * float(current_price))
+
+            # Pick the store the reference actually came from.
+            if tier == "ZONE_LADDER":
+                _store, _want_tf = self._zone_levels.get(asset, []), "4H"
+            elif tier == "ZONE_LADDER_1D":
+                _store, _want_tf = self._zone_levels.get(asset, []), "1D"
+            else:
+                # SWING_4H / ANCHOR_1H / RUNNER / unknown: search both stores,
+                # zone first (it holds the 4H structural levels), then the 1H
+                # structure store as a fallback. Never silently pick the wrong
+                # timeframe from the zone store.
+                _store = list(self._zone_levels.get(asset, [])) + \
+                         list(self._structure_levels.get(asset, []))
+                _want_tf = None
+
             _best = None
             _bestd = None
-            for lvl in self._structure_levels.get(asset, []):
+            for lvl in _store:
+                if _want_tf is not None and lvl.get("tf") != _want_tf:
+                    continue
                 _d = abs(float(lvl["price"]) - float(ref_price))
                 if _d <= _tol and (_bestd is None or _d < _bestd):
                     _bestd = _d
@@ -2853,6 +2939,45 @@ class CompositeStateBuilder:
             return _best
         except Exception:
             return None
+
+    def _ref_tests_at(self, asset, ref_price, atr, current_price, tier=None):
+        """N4: how many times has the setup's OWN frozen reference been
+        defended? Mirrors _ref_role_at exactly, including N1's store selection
+        and timeframe filter, and returns the level's test count instead of
+        its role.
+
+        state.level_test_count already exists but tracks the NEAREST level to
+        price, not the setup's frozen reference — different question.
+        """
+        try:
+            if ref_price is None or not atr or float(atr) <= 0:
+                return 0
+            if current_price is None or float(current_price) <= 0:
+                return 0
+
+            _tol = min(0.3 * float(atr), 0.004 * float(current_price))
+
+            if tier == "ZONE_LADDER":
+                _store, _want_tf = self._zone_levels.get(asset, []), "4H"
+            elif tier == "ZONE_LADDER_1D":
+                _store, _want_tf = self._zone_levels.get(asset, []), "1D"
+            else:
+                _store = list(self._zone_levels.get(asset, [])) + \
+                         list(self._structure_levels.get(asset, []))
+                _want_tf = None
+
+            _best = 0
+            _bestd = None
+            for lvl in _store:
+                if _want_tf is not None and lvl.get("tf") != _want_tf:
+                    continue
+                _d = abs(float(lvl["price"]) - float(ref_price))
+                if _d <= _tol and (_bestd is None or _d < _bestd):
+                    _bestd = _d
+                    _best = int(lvl.get("tests", 0) or 0)
+            return _best
+        except Exception:
+            return 0
 
     def get_zone_ladder(self, asset, tf: str, extended: bool = False) -> List[dict]:
         """Full zone ladder for charting -- every level with real history,

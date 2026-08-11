@@ -298,6 +298,10 @@ class CompositeState:
     # far too late in the method to be usable there.
     setup_ref: Optional[float] = None
     setup_ref_tier: Optional[str] = None       # ANCHOR_1H | ZONE_LADDER | SWING_4H
+    # N4: defence history of the setup's own frozen reference. Published only —
+    # no consumer yet. Q1 (evidence-weighted STRUCTURE scoring) is the intended
+    # reader and is a separate build.
+    setup_ref_tests: int = 0
     # -- Age of the live setup in cycles (how many builds since it was born).
     setup_age: int = 0
     # -- Trajectory of the setup's supporting energy since birth:
@@ -316,6 +320,7 @@ class CompositeState:
     setup_dir_mr: int = 0
     setup_ref_mr: Optional[float] = None
     setup_ref_tier_mr: Optional[str] = None
+    setup_ref_tests_mr: int = 0
     setup_age_mr: int = 0
     setup_energy_trend_mr: Optional[str] = None
 
