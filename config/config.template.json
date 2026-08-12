@@ -1467,7 +1467,7 @@
     "mr_mode2_brc_gate_enabled": true,
     "independent_fire_brc_gate_enabled": true,
     "six_slot_judges_enabled": true,
-    "judge_bars_enabled": false,
+    "judge_bars_enabled": true,
     "profit_gate_real_tp_mult_enabled": true,
     "brc_max_age_tf": 20,
     "brc_max_age_mr": 20,
