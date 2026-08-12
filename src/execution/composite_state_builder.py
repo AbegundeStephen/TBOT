@@ -1336,25 +1336,44 @@ class CompositeStateBuilder:
                 _choch_candidate = {"kind": "MR_REV", "dir": -1}
 
             def _process_lane(_store, _candidate):
-                """One lane's STEP 1 (age) -> STEP 2 (death) -> STEP 3
-                (birth), unchanged from the pre-E2 single-lane logic except
-                that birth is restricted to the one candidate this lane owns.
-                Closes over _asset/_lsm_now/_comp/_UP/_DOWN/state from the
-                enclosing scope -- all identical for both lanes in one cycle.
-                """
-                _cur = _store.get(_asset)
+                """P4: queue-aware lane processing.
 
-                # ---- STEP 1: age + energy-trend an existing setup ------
-                if _cur is not None:
-                    _cur["age"] = int(_cur.get("age", 0)) + 1
-                    _prev_comp = float(_cur.get("last_compression", _comp))
+                WAS: one setup per lane. A second valid setup found the slot
+                occupied and was discarded — measured at 37 blocked births
+                against 37 successful ones on 11 Aug, i.e. half of all
+                opportunities thrown away.
+
+                NOW: up to _P4_CAP setups per lane. Every member ages, is
+                death-checked and is proof-checked every candle — cycling
+                shares the lane, it does not extend life. The slot holder
+                (index 0) is whichever member has the strongest evidence,
+                decided by test count at its own reference.
+                """
+                _P4_CAP = int(
+                    (getattr(state, "phase_config", {}) or {}).get(
+                        "setup_queue_cap", 20
+                    ) or 20
+                )
+
+                # Normalise: the store used to hold a single dict or None.
+                _q = _store.get(_asset)
+                if _q is None:
+                    _q = []
+                elif isinstance(_q, dict):
+                    _q = [_q]                      # migrate an in-flight setup
+
+                # ---- STEP 1: age + energy-trend + death, EVERY member ----
+                _survivors = []
+                for _s in _q:
+                    _s["age"] = int(_s.get("age", 0)) + 1
+                    _prev_comp = float(_s.get("last_compression", _comp))
                     if _comp > _prev_comp + 0.05:
-                        _cur["energy"] = "BUILDING"
+                        _s["energy"] = "BUILDING"
                     elif _comp < _prev_comp - 0.05:
-                        _cur["energy"] = "FADING"
+                        _s["energy"] = "FADING"
                     else:
-                        _cur["energy"] = "HOLDING"
-                    _cur["last_compression"] = _comp
+                        _s["energy"] = "HOLDING"
+                    _s["last_compression"] = _comp
 
                     # Item 4: the retest window BRC checks is the 8 candles
                     # before the current one (iloc[-9:-1]) — once a setup is
@@ -1362,22 +1381,21 @@ class CompositeStateBuilder:
                     # has slid out of the window and can never be seen again,
                     # even though nothing here kills the setup for being old.
                     # Logged once per setup, not every cycle.
-                    if _cur["age"] > 8 and not _cur.get("_past_window_logged"):
-                        _cur["_past_window_logged"] = True
+                    if _s["age"] > 8 and not _s.get("_past_window_logged"):
+                        _s["_past_window_logged"] = True
                         logger.info(
                             "[SETUP-PAST-PROOF-WINDOW] %s: %s dir=%+d age=%d — "
                             "older than the 8-candle retest window, can no "
                             "longer confirm via BRC unless it re-forms.",
-                            self.asset_type, _cur.get("kind"), _cur.get("dir"), _cur["age"],
+                            self.asset_type, _s.get("kind"), _s.get("dir"), _s["age"],
                         )
 
-                # ---- STEP 2: evidence-based death check ----------------
-                # A setup dies when the tape invalidates it. Order: master
-                # backstop first (state flip), then setup-specific evidence.
-                _death_reason = None
-                if _cur is not None:
-                    _born_state = _cur.get("born_state")
-                    _dir = int(_cur.get("dir", 0))
+                    # ---- evidence-based death check ----------------
+                    # A setup dies when the tape invalidates it. Order: master
+                    # backstop first (state flip), then setup-specific evidence.
+                    _death_reason = None
+                    _born_state = _s.get("born_state")
+                    _dir = int(_s.get("dir", 0))
                     # (a) MASTER BACKSTOP — Livermore 1H state transitioned
                     #     away from the context the setup was born into.
                     if _born_state is not None and _lsm_now != _born_state:
@@ -1408,8 +1426,8 @@ class CompositeStateBuilder:
                     #     Age 0 is skipped: the candle that births a setup
                     #     must not also be the candle that kills it.
                     if _death_reason is None:
-                        _f1_ref = _cur.get("ref")
-                        _f1_look = min(int(_cur.get("age", 0) or 0), 28)
+                        _f1_ref = _s.get("ref")
+                        _f1_look = min(int(_s.get("age", 0) or 0), 28)
                         if _f1_ref is not None and _f1_look >= 1 and df is not None:
                             try:
                                 _f1_tol = 0.15 * float(_atr or 0.0)
@@ -1443,8 +1461,8 @@ class CompositeStateBuilder:
                                             "[F1-DIAG] %s: %s dir=%+d tier=%s "
                                             "ref=%.5g tol=%.5g band=[%.5g,%.5g] "
                                             "closes=%s",
-                                            self.asset_type, _cur.get("kind"),
-                                            _dir, _cur.get("ref_tier"),
+                                            self.asset_type, _s.get("kind"),
+                                            _dir, _s.get("ref_tier"),
                                             float(_f1_ref), _f1_tol,
                                             float(_f1_ref) - _f1_tol,
                                             float(_f1_ref) + _f1_tol,
@@ -1462,15 +1480,15 @@ class CompositeStateBuilder:
                     #      level the thesis was built on, so there is nothing
                     #      left to be right about.
                     if _death_reason is None:
-                        _f1_born_role = _cur.get("ref_role")
+                        _f1_born_role = _s.get("ref_role")
                         if _f1_born_role is not None:
                             try:
                                 _f1_px = float(df["close"].iloc[-1])
                             except Exception:
                                 _f1_px = None
                             _f1_now_role = self._ref_role_at(
-                                _asset, _cur.get("ref"), _atr, _f1_px,
-                                _cur.get("ref_tier"),
+                                _asset, _s.get("ref"), _atr, _f1_px,
+                                _s.get("ref_tier"),
                             )
                             if (
                                 _f1_now_role is not None
@@ -1497,8 +1515,17 @@ class CompositeStateBuilder:
                     #     LSM_STATE_FLIP-style checks don't have, but
                     #     FAILED_BREAKOUT etc. don't need to, since they read
                     #     fields set earlier in the same call).
+                    #
+                    #     P4 NOTE: this flag is keyed (_asset, kind), not per
+                    #     setup id. All members of one lane share a kind, so
+                    #     if BRC flags a failed retest while more than one
+                    #     setup is queued, the pop only fires once — whichever
+                    #     member is checked first this iteration gets credited
+                    #     with RETEST_FAILED, the rest do not see it this
+                    #     cycle. Inherited from the pre-queue design; the doc
+                    #     did not ask for per-member attribution here.
                     if _death_reason is None and self._retest_failed_pending.pop(
-                        (_asset, _cur.get("kind")), False
+                        (_asset, _s.get("kind")), False
                     ):
                         _death_reason = "RETEST_FAILED"
                     # (d) SETUP-SPECIFIC — a structure break against the
@@ -1518,120 +1545,150 @@ class CompositeStateBuilder:
                     #     proof standard within BRC's 28-candle window.
                     if _death_reason is None:
                         _max_age = 28
-                        if int(_cur.get("age", 0)) > _max_age:
+                        if int(_s.get("age", 0)) > _max_age:
                             _death_reason = "EXPIRED_PROOF_WINDOW"
 
-                if _cur is not None and _death_reason is not None:
-                    state.setup_died = True
-                    state.setup_death_reason = _death_reason
-                    logger.info(
-                        "[MEASURE-8.4-DEATH] %s: kind=%s dir=%+d age_at_death=%s reason=%s",
-                        self.asset_type, _cur.get("kind"), _cur.get("dir"),
-                        _cur.get("age"), _death_reason,
-                    )
-                    _store[_asset] = None
-                    _cur = None
+                    if _death_reason is not None:
+                        state.setup_died = True
+                        state.setup_death_reason = _death_reason
+                        logger.info(
+                            "[MEASURE-8.4-DEATH] %s: kind=%s dir=%+d age_at_death=%s reason=%s",
+                            self.asset_type, _s.get("kind"), _s.get("dir"),
+                            _s.get("age"), _death_reason,
+                        )
+                    else:
+                        _survivors.append(_s)
+                _q = _survivors
 
-                # ---- STEP 3: birth check ---------------------------------
+                # ---- STEP 2: birth ---------------------------------------
                 # E2: this lane may only be born from the one candidate it
                 # owns (TF lane <- _bos_candidate, MR lane <- _choch_candidate).
                 # No overwrite between kinds any more — nothing to resolve.
-                if _cur is None:
-                    if _candidate is not None:
+                if _candidate is not None:
+                    _f1_px = None
+                    try:
+                        _f1_px = float(df["close"].iloc[-1])
+                    except Exception:
                         _f1_px = None
-                        try:
-                            _f1_px = float(df["close"].iloc[-1])
-                        except Exception:
-                            _f1_px = None
-                        # F1: resolve the level NOW and keep it for life. A
-                        # setup with no level has no thesis — there is nothing
-                        # for price to prove or disprove — so it is refused,
-                        # loudly, rather than born blind. F1-FOLLOWUP: a tier
-                        # already invalidated by price (stale SWING_4H during
-                        # a fast move) is treated the same as missing —
-                        # refused or passed over, never frozen pre-broken.
-                        _f1_ref, _f1_tier = self._resolve_setup_reference(
-                            state, _candidate["kind"], int(_candidate["dir"]),
-                            current_price=_f1_px, atr=_atr,
+                    # F1: resolve the level NOW and keep it for life. A
+                    # setup with no level has no thesis — there is nothing
+                    # for price to prove or disprove — so it is refused,
+                    # loudly, rather than born blind. F1-FOLLOWUP: a tier
+                    # already invalidated by price (stale SWING_4H during
+                    # a fast move) is treated the same as missing —
+                    # refused or passed over, never frozen pre-broken.
+                    _f1_ref, _f1_tier = self._resolve_setup_reference(
+                        state, _candidate["kind"], int(_candidate["dir"]),
+                        current_price=_f1_px, atr=_atr,
+                    )
+                    if _f1_ref is None:
+                        logger.info(
+                            "[SETUP-REFUSED] %s: %s dir=%+d — no usable "
+                            "reference (missing or already broken by "
+                            "price). anchor_1h_lo=%s anchor_1h_hi=%s "
+                            "ladder_lo=%s ladder_hi=%s swing_lo=%s "
+                            "swing_hi=%s price=%s",
+                            self.asset_type, _candidate["kind"],
+                            int(_candidate["dir"]),
+                            getattr(state, "livermore_anchor_natural_low_1h", None),
+                            getattr(state, "livermore_anchor_natural_high_1h", None),
+                            getattr(state, "zone_4h_current_lower", None),
+                            getattr(state, "zone_4h_current_upper", None),
+                            getattr(state, "last_swing_low_4h", None),
+                            getattr(state, "last_swing_high_4h", None),
+                            _f1_px,
                         )
-                        if _f1_ref is None:
-                            logger.info(
-                                "[SETUP-REFUSED] %s: %s dir=%+d — no usable "
-                                "reference (missing or already broken by "
-                                "price). anchor_1h_lo=%s anchor_1h_hi=%s "
-                                "ladder_lo=%s ladder_hi=%s swing_lo=%s "
-                                "swing_hi=%s price=%s",
-                                self.asset_type, _candidate["kind"],
-                                int(_candidate["dir"]),
-                                getattr(state, "livermore_anchor_natural_low_1h", None),
-                                getattr(state, "livermore_anchor_natural_high_1h", None),
-                                getattr(state, "zone_4h_current_lower", None),
-                                getattr(state, "zone_4h_current_upper", None),
-                                getattr(state, "last_swing_low_4h", None),
-                                getattr(state, "last_swing_high_4h", None),
-                                _f1_px,
-                            )
-                        else:
-                            # ── P1: BREAK-MAGNITUDE FILTER (SHIPS OFF) ──────
-                            # A setup is created the moment price crosses a
-                            # level. A one-tick poke currently counts the same
-                            # as a decisive thrust.
-                            #
-                            # Threshold translated from Brock/Lakonishok/
-                            # LeBaron (1992), the only quantified academic
-                            # precedent: a 1% price-filter band on daily DJIA,
-                            # used explicitly to cut false breakout signals.
-                            # 1% does NOT transfer — on this book it is 1.7 ATR
-                            # on oil and 8.7 ATR on GBPAUD. BLL's daily ATR was
-                            # ~1-1.5% of price, so their band was ~0.7-1.0
-                            # daily ATR. That multiple is the transferable
-                            # quantity.
-                            #
-                            # Tier-scaled: a 4H level (SWING_4H, ZONE_LADDER)
-                            # must be broken by a 4H-meaningful amount, and 4H
-                            # ATR is roughly 2x 1H ATR. ANCHOR_1H is 1H-native
-                            # so takes the base multiple.
-                            #
-                            # SHIPS OFF. Logs the counterfactual so the multiple
-                            # can be set from this system's own data instead of
-                            # from a 1990s daily-index study.
-                            _p1_cfg = (getattr(state, "phase_config", {}) or {})
-                            _p1_on = bool(
-                                _p1_cfg.get("break_magnitude_filter_enabled", False)
-                            )
-                            _p1_mult = float(
-                                _p1_cfg.get("break_magnitude_atr_mult", 0.5) or 0.5
-                            )
-                            _p1_scale = {
-                                "SWING_4H": 2.0,
-                                "ZONE_LADDER": 2.0,
-                                "ANCHOR_1H": 1.0,
-                            }.get(_f1_tier, 2.0)
-                            _p1_band = _p1_mult * _p1_scale * float(_atr or 0.0)
-                            _p1_dist = None
+                    else:
+                        # ── P1: BREAK-MAGNITUDE FILTER (SHIPS OFF) ──────
+                        # A setup is created the moment price crosses a
+                        # level. A one-tick poke currently counts the same
+                        # as a decisive thrust.
+                        #
+                        # Threshold translated from Brock/Lakonishok/
+                        # LeBaron (1992), the only quantified academic
+                        # precedent: a 1% price-filter band on daily DJIA,
+                        # used explicitly to cut false breakout signals.
+                        # 1% does NOT transfer — on this book it is 1.7 ATR
+                        # on oil and 8.7 ATR on GBPAUD. BLL's daily ATR was
+                        # ~1-1.5% of price, so their band was ~0.7-1.0
+                        # daily ATR. That multiple is the transferable
+                        # quantity.
+                        #
+                        # Tier-scaled: a 4H level (SWING_4H, ZONE_LADDER)
+                        # must be broken by a 4H-meaningful amount, and 4H
+                        # ATR is roughly 2x 1H ATR. ANCHOR_1H is 1H-native
+                        # so takes the base multiple.
+                        #
+                        # SHIPS OFF. Logs the counterfactual so the multiple
+                        # can be set from this system's own data instead of
+                        # from a 1990s daily-index study.
+                        _p1_cfg = (getattr(state, "phase_config", {}) or {})
+                        _p1_on = bool(
+                            _p1_cfg.get("break_magnitude_filter_enabled", False)
+                        )
+                        _p1_mult = float(
+                            _p1_cfg.get("break_magnitude_atr_mult", 0.5) or 0.5
+                        )
+                        _p1_scale = {
+                            "SWING_4H": 2.0,
+                            "ZONE_LADDER": 2.0,
+                            "ANCHOR_1H": 1.0,
+                        }.get(_f1_tier, 2.0)
+                        _p1_band = _p1_mult * _p1_scale * float(_atr or 0.0)
+                        _p1_dist = None
+                        _p1_weak = False
+                        try:
+                            if _f1_px is not None and _p1_band > 0:
+                                _p1_dist = abs(float(_f1_px) - float(_f1_ref))
+                                _p1_weak = _p1_dist < _p1_band
+                        except Exception:
                             _p1_weak = False
-                            try:
-                                if _f1_px is not None and _p1_band > 0:
-                                    _p1_dist = abs(float(_f1_px) - float(_f1_ref))
-                                    _p1_weak = _p1_dist < _p1_band
-                            except Exception:
-                                _p1_weak = False
 
-                            if _p1_weak:
+                        if _p1_weak:
+                            logger.info(
+                                "[P1-MAGNITUDE] %s: %s dir=%+d ref=%.5g "
+                                "px=%.5g dist=%.5g band=%.5g (%.2f x ATR "
+                                "x %.1f tier=%s) — WEAK BREAK%s",
+                                self.asset_type, _candidate["kind"],
+                                int(_candidate["dir"]), _f1_ref, _f1_px,
+                                _p1_dist if _p1_dist is not None else -1.0,
+                                _p1_band, _p1_mult, _p1_scale, _f1_tier,
+                                " — REFUSED" if _p1_on
+                                else " — would refuse (filter OFF)",
+                            )
+
+                        if _p1_weak and _p1_on:
+                            pass          # refused: no setup is created
+                        else:
+                            # P4-DEDUP: same thesis already queued? Uses the
+                            # ladder's OWN tolerance, so "same level" means the
+                            # same thing everywhere in the system.
+                            _p4_tol = (
+                                min(0.3 * float(_atr or 0.0),
+                                    0.004 * float(_f1_px or 0.0))
+                                if (_atr and _f1_px) else 0.0
+                            )
+                            _dup = None
+                            for _s in _q:
+                                if (_s.get("dir") == _candidate["dir"]
+                                        and _s.get("ref") is not None
+                                        and _p4_tol > 0
+                                        and abs(float(_s["ref"]) - float(_f1_ref))
+                                            <= _p4_tol):
+                                    _dup = _s
+                                    break
+
+                            if _dup is not None:
                                 logger.info(
-                                    "[P1-MAGNITUDE] %s: %s dir=%+d ref=%.5g "
-                                    "px=%.5g dist=%.5g band=%.5g (%.2f x ATR "
-                                    "x %.1f tier=%s) — WEAK BREAK%s",
+                                    "[SETUP-DUPLICATE] %s: %s dir=%+d ref=%.5g — "
+                                    "matches live setup (age=%s ref=%.5g "
+                                    "delta=%.5g < tol %.5g). Refused.",
                                     self.asset_type, _candidate["kind"],
-                                    int(_candidate["dir"]), _f1_ref, _f1_px,
-                                    _p1_dist if _p1_dist is not None else -1.0,
-                                    _p1_band, _p1_mult, _p1_scale, _f1_tier,
-                                    " — REFUSED" if _p1_on
-                                    else " — would refuse (filter OFF)",
+                                    int(_candidate["dir"]), _f1_ref,
+                                    _dup.get("age"), float(_dup["ref"]),
+                                    abs(float(_dup["ref"]) - float(_f1_ref)),
+                                    _p4_tol,
                                 )
-
-                            if _p1_weak and _p1_on:
-                                pass          # refused: no setup is created
                             else:
                                 _new_setup = dict(_candidate)
                                 _new_setup.update({
@@ -1649,8 +1706,24 @@ class CompositeStateBuilder:
                                         _asset, _f1_ref, _atr, _f1_px, _f1_tier
                                     ),
                                 })
-                                _store[_asset] = _new_setup
-                                _cur = _new_setup
+
+                                # P4-EVICT: make room if full.
+                                if len(_q) >= _P4_CAP:
+                                    _victim = self._p4_pick_eviction(_q)
+                                    if _victim is not None:
+                                        _q.remove(_victim)
+                                        logger.warning(
+                                            "[SETUP-EVICTED] %s: queue full (%d) — "
+                                            "dropped %s dir=%+d age=%s ref=%.5g "
+                                            "to admit ref=%.5g",
+                                            self.asset_type, _P4_CAP,
+                                            _victim.get("kind"),
+                                            int(_victim.get("dir", 0)),
+                                            _victim.get("age"),
+                                            float(_victim.get("ref") or 0.0),
+                                            _f1_ref,
+                                        )
+                                _q.append(_new_setup)
                                 logger.info(
                                     "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
                                     self.asset_type, _new_setup["kind"],
@@ -1658,17 +1731,20 @@ class CompositeStateBuilder:
                                     _new_setup.get("ref_role"),
                                     _new_setup.get("ref_tests", 0),
                                 )
-                elif _candidate is not None:
-                    # Item 2: a setup wanted to be born but this lane's slot
-                    # was occupied.
-                    logger.info(
-                        "[SETUP-BIRTH-BLOCKED] %s: wanted %s dir=%+d, slot held by "
-                        "%s dir=%+d (age=%s).",
-                        self.asset_type, _candidate["kind"], _candidate["dir"],
-                        _cur.get("kind"), _cur.get("dir"), _cur.get("age"),
-                    )
 
-                return _cur
+                # ---- STEP 3: arbitration — who holds the slot? -----------
+                # Desire's rule: most tests at its own reference wins. The
+                # ladder already tracks this (ref_tests, populated by N4);
+                # counting fresh would discard history the level has earned.
+                if _q:
+                    _q.sort(
+                        key=lambda s: (
+                            -int(s.get("ref_tests", 0) or 0),
+                            int(s.get("age", 0)),
+                        )
+                    )
+                _store[_asset] = _q
+                return _q[0] if _q else None
 
             if not _already_processed:
                 _cur = _process_lane(self._active_setup, _bos_candidate)
@@ -1676,8 +1752,18 @@ class CompositeStateBuilder:
                 if _candle_ts is not None:
                     self._traj_last_processed_ts[_asset] = _candle_ts
             else:
-                _cur = self._active_setup.get(_asset)
-                _cur_mr = self._active_setup_mr.get(_asset)
+                # P4: the store now holds a list (the queue), already sorted
+                # and cached by the real _process_lane call earlier this same
+                # candle -- STEP 3's arbitration already picked the winner.
+                # Reading .get(_asset) directly here and treating it as the
+                # setup dict (the pre-P4 behaviour) would hand a list to the
+                # STEP 4 publish block below, which calls _cur.get(...) --
+                # AttributeError on every one of the ~22 subsequent calls per
+                # candle this builder makes. Take index 0 instead.
+                _active_q = self._active_setup.get(_asset)
+                _cur = _active_q[0] if _active_q else None
+                _active_q_mr = self._active_setup_mr.get(_asset)
+                _cur_mr = _active_q_mr[0] if _active_q_mr else None
 
             # ---- STEP 4: publish readouts ------------------------------
             # MR lane gets its own suffixed fields.
@@ -3106,6 +3192,34 @@ class CompositeStateBuilder:
             if _usable(_ref, _tier):
                 return float(_ref), _tier
         return None, None
+
+    def _p4_pick_eviction(self, queue):
+        """P4: choose which queue member to drop when full.
+
+        Desire's rule, in priority order:
+          1. reference has role-flipped since birth — the level changed
+             identity, so there is nothing left to be right about
+          2. most penetrations — the level is being eaten into repeatedly
+          3. highest age — least runway remaining
+
+        Age is the TIEBREAK, not the rule. Evicting purely on age would
+        systematically kill young theses to protect old ones: a new setup has
+        zero tests because it has had no time to be tested.
+
+        _p4_role_flipped and ref_penetrations do not exist yet on any setup
+        dict. Until they do, this degrades to oldest-first — safe, and
+        matches the pre-P4 behaviour of simply discarding what didn't fit.
+        """
+        if not queue:
+            return None
+        return sorted(
+            queue,
+            key=lambda s: (
+                0 if s.get("_p4_role_flipped") else 1,
+                -int(s.get("ref_penetrations", 0) or 0),
+                -int(s.get("age", 0) or 0),
+            ),
+        )[0]
 
     def _ref_role_at(self, asset, ref_price, atr, current_price, tier=None):
         """N1: role ('swing_high' / 'swing_low') of the tracked level nearest
