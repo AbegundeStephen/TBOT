@@ -208,7 +208,20 @@ class RetestEngine:
         # ~440-472), swapping the old near-price level for the ladder line.
         # The builder keeps its OWN copy for STRUCTURE/VTM — the two are
         # deliberately separate (correlated votes aren't confirming votes).
-        _atr_d = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+        # N9: this had no fallback — when the df lacks an "atr" column it fell
+        # to 0.0 and the whole defence block below was skipped, leaving
+        # level_defended permanently False. That gates the CLEAN tier, and
+        # CHOCH_HOLD depends on CLEAN's conditions, so both were unreachable
+        # and every classification fell through to NO_LEVEL_NEARBY (:453).
+        #
+        # _get_atr() twelve lines above already does this correctly — column
+        # first, computed 14-bar TR fallback second. Two ATR sources in one
+        # function, only one of them safe. Use the safe one.
+        #
+        # Fourth instance of this exact defect: the zone ladder guard (fixed by
+        # H1) and the swing depth filter (fixed by M2a) had the same shape —
+        # `if "atr" in df.columns else 0.0`, no fallback, silent no-op.
+        _atr_d = self._get_atr(df)
         level_defended = False
         _level_2_defended = False
         if _atr_d > 0 and len(df) >= 1:

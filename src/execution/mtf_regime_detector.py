@@ -398,7 +398,20 @@ class MultiTimeFrameRegimeDetector:
                     daily_bars_available=_daily_bars,
                     regime_maturity=_maturity,
                 )
-            latest = df_daily.iloc[-1]
+            # N10: iloc[-1] on the daily frame is TODAY'S bar, which has not
+            # closed — logs confirm "Range: ... to <today> 00:00, Age: 10.8
+            # hours old". Reading it means every 1H decision inside the day
+            # sees a daily candle containing everything up to the moment it
+            # looks. Live this is self-referential rather than predictive, but
+            # in ANY backtest iloc[-1] contains the whole completed day, which
+            # makes the result invalid.
+            #
+            # The May 2026 spec flagged this precise case: "The 1D filter must
+            # use only the last COMPLETED daily bar... Any 1D data access
+            # timestamped within the current calendar day is a lookahead bias
+            # event."
+            _n10_idx = -2 if len(df_daily) >= 2 else -1
+            latest = df_daily.iloc[_n10_idx]
             current_price = latest["close"]
             ema_200 = latest[f"ema_{BASELINE_EMA}"]
 
@@ -414,7 +427,15 @@ class MultiTimeFrameRegimeDetector:
                 ema_slope = 0.0 # Not enough data for meaningful slope
             else:
                 ema_200_series = df_daily[f"ema_{BASELINE_EMA}"]
-                ema_slope = (ema_200_series.iloc[-1] - ema_200_series.iloc[-slope_lookback]) / ema_200_series.iloc[-slope_lookback]
+                # N10: same shift — the slope must not be anchored on the
+                # forming bar either.
+                _n10_hi = _n10_idx
+                _n10_lo = _n10_idx - (slope_lookback - 1)
+                if abs(_n10_lo) > len(ema_200_series):
+                    _n10_lo = -len(ema_200_series)
+                ema_slope = (
+                    ema_200_series.iloc[_n10_hi] - ema_200_series.iloc[_n10_lo]
+                ) / ema_200_series.iloc[_n10_lo]
 
 
             is_bullish = (current_price > ema_200) and (ema_slope > self.governor_thresholds["ema_slope_positive"])

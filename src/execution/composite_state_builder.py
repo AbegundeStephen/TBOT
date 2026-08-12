@@ -375,6 +375,30 @@ class CompositeStateBuilder:
         if _df_1d is not None:
             self._update_zone_levels(self.asset_type, _df_1d, "1D", _atr_now, _price_now)
             _v1 = self._build_zone_view(_df_1d, self.asset_type, "1D", _price_now)
+            # N3: TEMPORARY DIAGNOSTIC. Remove once the cause is identified.
+            # zone_1d_current_upper/lower have returned None on every asset,
+            # every cycle, since July — 87 of 87 convergence observations.
+            # The call path above runs. Three candidates: the 1D frame arrives
+            # empty; it arrives but no daily fractal survives the tests>=1
+            # filter; or levels exist and _build_zone_view filters them out.
+            # This prints enough to tell which.
+            try:
+                _n3_store = self._zone_levels.get(self.asset_type, [])
+                _n3_1d = [l for l in _n3_store if l.get("tf") == "1D"]
+                logger.info(
+                    "[N3-1D] %s: df_1d_bars=%s atr=%.5g price=%.5g | "
+                    "store_total=%d store_1d=%d | "
+                    "1d_tests=%s | view_upper=%s view_lower=%s",
+                    self.asset_type,
+                    len(_df_1d) if _df_1d is not None else None,
+                    float(_atr_now or 0.0), float(_price_now or 0.0),
+                    len(_n3_store), len(_n3_1d),
+                    sorted([int(l.get("tests", 0) or 0) for l in _n3_1d])[-5:],
+                    _v1.get("current_upper"), _v1.get("current_lower"),
+                )
+            except Exception as _n3_err:
+                logger.info("[N3-1D] %s: probe error: %s",
+                            self.asset_type, _n3_err)
             state.zone_1d_current_upper = _v1["current_upper"]
             state.zone_1d_current_lower = _v1["current_lower"]
             state.zone_1d_current_upper_tests = _v1["current_upper_tests"]
@@ -383,6 +407,9 @@ class CompositeStateBuilder:
             state.zone_1d_current_lower_type = _v1["current_lower_type"]
             state.zone_1d_outer_high = _v1["outer_high"]
             state.zone_1d_outer_low = _v1["outer_low"]
+        else:
+            logger.info("[N3-1D] %s: _df_1d is None — 1D frame never reached "
+                        "the zone builder.", self.asset_type)
 
         # ── E.4: Parabolic Space (Dynamic Z-Score) ────────────────────────
         try:
@@ -688,6 +715,11 @@ class CompositeStateBuilder:
                 # ── 4H update ────────────────────────────────────────────────
                 if df_4h is not None and len(df_4h) >= 15:
                     _4h_ts = df_4h.index[-1]
+                    # N8: pre-initialise so a read outside this branch (or a
+                    # future one added the way M1-CONVERGE's _atr1 read was)
+                    # never hits "referenced before assignment". Mirrors the
+                    # identical fix applied to _atr1 just below.
+                    _atr4 = 0.0
                     if _4h_ts != self._livermore_last_4h_ts:
                         # New 4H candle — compute ATR and update
                         _atr4_series = _atr14_lsm(df_4h)
@@ -728,6 +760,15 @@ class CompositeStateBuilder:
                         df["timestamp"].iloc[-1] if "timestamp" in df.columns
                         else df.index[-1]
                     )
+                    # N8: _atr1 was assigned ONLY inside this branch, but the
+                    # M1-CONVERGE probe below reads it unconditionally. On any
+                    # cycle where the 1H timestamp has not changed the else
+                    # branch runs, _atr1 is never bound, and the probe raises
+                    # "cannot access local variable '_atr1'". Caught by the
+                    # probe's try/except, so it degraded silently — observed
+                    # live on USOIL and GBPAUD at 17:11:58 on 11 Aug.
+                    # Pre-initialise so the probe always has a value.
+                    _atr1 = 0.0
                     if _1h_ts != self._livermore_last_1h_ts:
                         _atr1_series = _atr14_lsm(df)
                         _atr1 = (
