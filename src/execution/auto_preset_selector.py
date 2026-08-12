@@ -279,13 +279,29 @@ class DynamicPresetSelector:
             
             # FACTOR 5: Volume Trend (±10 points) - if available
             vol_trend = metrics.get('volume_trend', 0)
-            if abs(vol_trend) > 50:
+            # X4: two defects fixed here.
+            #
+            # 1. abs() meant falling volume scored as expansion. Measured live
+            #    on three assets in one cycle: "Rising Volume (-20.3%): +5",
+            #    "(-26.7%): +5", "(-23.5%): +5". Volume had COLLAPSED by a
+            #    fifth to a quarter on each. USTEC reached 100/100 and selected
+            #    AGGRESSIVE on volume down 20%.
+            #
+            # 2. `abs(vol_trend) < -20` is mathematically impossible — an
+            #    absolute value is never negative. The "Declining Volume"
+            #    penalty has never fired once in this system's history.
+            #
+            # Volume drying up is a warning, not a confirmation: it means the
+            # move has no participation behind it. The signed comparisons below
+            # restore that. Thresholds and point values are unchanged, so a
+            # genuinely rising-volume asset scores exactly as it did before.
+            if vol_trend > 50:
                 vol_trend_score = +10
                 decision_factors.append(f"Strong Volume ({vol_trend:+.1f}%): +10")
-            elif abs(vol_trend) > 20:
+            elif vol_trend > 20:
                 vol_trend_score = +5
                 decision_factors.append(f"Rising Volume ({vol_trend:+.1f}%): +5")
-            elif abs(vol_trend) < -20:
+            elif vol_trend < -20:
                 vol_trend_score = -8
                 decision_factors.append(f"Declining Volume ({vol_trend:+.1f}%): -8")
             else:
