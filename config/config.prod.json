@@ -1439,6 +1439,7 @@
     "break_magnitude_filter_enabled": false,
     "break_magnitude_atr_mult": 0.5,
     "runner_accept_atr_mult": 0.5,
+    "setup_queue_cap": 20,
     "per_tick_livermore_enabled": true,
     "bb_kc_squeeze_gate_enabled": true,
     "nr7_gate_enabled": true,
