@@ -3173,7 +3173,35 @@ class CompositeStateBuilder:
                 ),
             ]
         elif kind == "TF_CONT":
+            # N14: both original candidates asked for a level on the side price
+            # is moving TOWARD, not the side it is holding ABOVE. For a bullish
+            # continuation the thesis is "the resistance we broke has become
+            # support and we are holding above it" — so the level to validate
+            # against is a FLOOR, not a ceiling.
+            #
+            # _usable() below requires `current_price >= ref` for direction=+1,
+            # i.e. the reference must sit BELOW price. The old candidate list
+            # handed it levels ABOVE price, so the guard and the list disagreed
+            # by construction and almost every TF_CONT setup was refused.
+            #
+            # Measured: 13 of 13 refusals in the log were TF_CONT (BTC dir=+1,
+            # GBPAUD dir=-1, GOLD dir=+1) against ONE successful TF_CONT birth.
+            # On BTC, ladder_lo sat 30-45 points below price — correct side,
+            # usable — every hour from 23:02 to 07:05 and was never asked for.
+            # The single success at 01:02 was an accident: ladder_hi happened
+            # to land below price that hour.
+            #
+            # MR_REV already asks correctly (zone_4h_current_LOWER for dir=+1).
+            # This brings TF_CONT into line. The original two candidates are
+            # kept BELOW the new one — they remain valid on the cycle a level
+            # is genuinely broken through, and _usable() still rejects them
+            # when they are on the wrong side.
             _candidates = [
+                (
+                    getattr(state, "zone_4h_current_lower", None) if direction == 1
+                    else getattr(state, "zone_4h_current_upper", None),
+                    "ZONE_LADDER",
+                ),
                 (
                     getattr(state, "last_swing_high_4h", None) if direction == 1
                     else getattr(state, "last_swing_low_4h", None),
