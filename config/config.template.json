@@ -1423,7 +1423,7 @@
     "current_phase": "1",
     "autotrainer_enabled": false,
     "break_magnitude_filter_enabled": true,
-    "break_magnitude_atr_mult": 0.5,
+    "break_magnitude_atr_mult": 0.25,
     "runner_accept_atr_mult": 0.5,
     "setup_queue_cap": 20,
     "per_tick_livermore_enabled": true,
