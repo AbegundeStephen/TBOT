@@ -2808,15 +2808,33 @@ class CompositeStateBuilder:
             # Role reversal: a broken ceiling that price holds above becomes a
             # new floor, and vice versa. 0.3% buffer avoids flip-flopping on
             # noise right at the level.
+            # N16: the test history is KEPT across a role flip. A level
+            # defended four times and then breached has not become
+            # insignificant — it has changed sides, and the break arguably
+            # confirms it mattered. Zeroing threw away the only piece of real
+            # evidence the ladder collects.
+            #
+            # It also had a consequence nobody intended: _build_zone_view
+            # filters on `tests >= 1`, so a freshly flipped level DISAPPEARED
+            # from the ladder entirely until it earned a new touch — at exactly
+            # the moment a break-and-retest strategy most wants to see it.
+            #
+            # role_flipped_at is already recorded and already surfaced
+            # (visualization.py:415, get_zone_ladder), so consumers can weight
+            # a flipped level's history themselves rather than having it
+            # deleted for them. tests_pre_flip and flip_count give them the
+            # extra context to do it with.
             for lvl in self._structure_levels[asset]:
                 if lvl["type"] == "swing_high" and current_price > lvl["price"] * 1.003:
                     lvl["type"] = "swing_low"
                     lvl["role_flipped_at"] = datetime.now(timezone.utc).isoformat()
-                    lvl["tests"] = 0
+                    lvl["tests_pre_flip"] = int(lvl.get("tests", 0) or 0)
+                    lvl["flip_count"] = int(lvl.get("flip_count", 0) or 0) + 1
                 elif lvl["type"] == "swing_low" and current_price < lvl["price"] * 0.997:
                     lvl["type"] = "swing_high"
                     lvl["role_flipped_at"] = datetime.now(timezone.utc).isoformat()
-                    lvl["tests"] = 0
+                    lvl["tests_pre_flip"] = int(lvl.get("tests", 0) or 0)
+                    lvl["flip_count"] = int(lvl.get("flip_count", 0) or 0) + 1
 
             # Add new 4H swing points if available
             if df_4h is not None and len(df_4h) >= 10:
@@ -2967,19 +2985,26 @@ class CompositeStateBuilder:
         ]
 
         # ── Role reversal — copied from _update_structure_memory:1648.
-        # 0.3% buffer stops flip-flopping on noise. Test count resets on flip:
-        # a flipped level is a new level and must earn its history again.
+        # 0.3% buffer stops flip-flopping on noise.
+        #
+        # N16: the test count is now KEPT across a flip — see the matching
+        # change in _update_structure_memory. The previous comment here read
+        # "a flipped level is a new level and must earn its history again";
+        # that assumption is reversed. Both stores must behave the same way or
+        # they will disagree about the same level's history.
         for lvl in self._zone_levels[asset]:
             if lvl["tf"] != tf:
                 continue
             if lvl["type"] == "swing_high" and current_price > lvl["price"] * 1.003:
                 lvl["type"] = "swing_low"
                 lvl["role_flipped_at"] = _dt.now(_tz.utc).isoformat()
-                lvl["tests"] = 0
+                lvl["tests_pre_flip"] = int(lvl.get("tests", 0) or 0)
+                lvl["flip_count"] = int(lvl.get("flip_count", 0) or 0) + 1
             elif lvl["type"] == "swing_low" and current_price < lvl["price"] * 0.997:
                 lvl["type"] = "swing_high"
                 lvl["role_flipped_at"] = _dt.now(_tz.utc).isoformat()
-                lvl["tests"] = 0
+                lvl["tests_pre_flip"] = int(lvl.get("tests", 0) or 0)
+                lvl["flip_count"] = int(lvl.get("flip_count", 0) or 0) + 1
 
         # ── Tolerance: 0.3 ATR, capped at 0.4% of price.
         # The cap stops two genuinely distinct levels' bands growing into each
@@ -3362,6 +3387,8 @@ class CompositeStateBuilder:
                 "type": lvl.get("type"),
                 "tests": lvl.get("tests", 0),
                 "role_flipped_at": lvl.get("role_flipped_at"),
+                "tests_pre_flip": lvl.get("tests_pre_flip", 0),
+                "flip_count": lvl.get("flip_count", 0),
                 # 0 for levels created before zone_width existed -- charting
                 # falls back to a thin line for those, not a fabricated band.
                 "zone_width": lvl.get("zone_width", 0.0),
