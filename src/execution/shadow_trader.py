@@ -94,6 +94,20 @@ class ShadowPosition:
     # from one inside a 4H downtrend.
     livermore_state_4h: str = ""
 
+    # T4: the proof that generated this setup. Without these the shadow record
+    # cannot answer the question it exists for — "was the council's refusal
+    # right?" — because it does not know WHICH proof was refused. Tier and
+    # level quality are the two things most likely to separate a proof that
+    # pays from one that does not, and neither was captured.
+    brc_confirmed: bool = False
+    brc_kind: str = ""              # TF_CONT | MR_REV
+    setup_ref: float = 0.0          # the frozen reference level
+    setup_ref_tier: str = ""        # ANCHOR_1H | SWING_4H | ZONE_LADDER | RUNNER
+    setup_ref_tests: int = 0        # how many times that level was defended
+    setup_age_at_entry: int = 0     # bars from birth to entry
+    retest_type: str = ""           # CLEAN | WICK | BREAKOUT | CHASE_* | NO_LEVEL
+    stop_source: str = "atr"        # "structural" | "atr"
+
     regime_score: float = 0.0
     regime_name: str = "UNKNOWN"
 
@@ -418,12 +432,44 @@ class ShadowTradingEngine:
         #   TP1          = entry ± atr × first partial_target multiple
         _stop_loss = 0.0
         _take_profit = 0.0
+        # T4: pre-initialised so the ShadowPosition(...) call below (which
+        # reads this to set stop_source) never hits a NameError on the path
+        # where atr is falsy and the whole block below is skipped — the same
+        # shape as N8's _atr1 scope bug earlier this session.
+        _t4_use_struct = False
         if atr and atr > 0:
             _tp_mults = tp_multiples if tp_multiples else [2.5]
             _first_tp = float(_tp_mults[0]) if _tp_mults else 2.5
 
-            # Match VTM clamp: min 0.5×atr, max 5.0×atr
-            sl_dist = max(0.5 * atr, min(5.0 * atr, atr_multiplier * atr))
+            # T4: live runs with structural_stops_enabled=true, so the real
+            # trade exits at the level that invalidates the thesis — NOT at a
+            # volatility multiple. A shadow trade stopped at 1.8xATR is a
+            # different trade from the one the council declined, so its outcome
+            # cannot be used to judge that decision.
+            #
+            # Prefer the setup's own frozen reference when available; fall back
+            # to the ATR stop only when there is no structural level, and mark
+            # which was used so the archive is honest about it.
+            _t4_struct_ref = float(signal_details.get("setup_ref") or 0.0)
+            _t4_use_struct = False
+            if _t4_struct_ref > 0 and atr > 0:
+                _t4_buf = 0.15 * atr        # same tolerance BRC uses
+                if side == "long" and _t4_struct_ref < entry_price:
+                    sl_dist = (entry_price - _t4_struct_ref) + _t4_buf
+                    _t4_use_struct = True
+                elif side == "short" and _t4_struct_ref > entry_price:
+                    sl_dist = (_t4_struct_ref - entry_price) + _t4_buf
+                    _t4_use_struct = True
+
+            if not _t4_use_struct:
+                # Match VTM clamp: min 0.5×atr, max 5.0×atr
+                sl_dist = max(0.5 * atr, min(5.0 * atr, atr_multiplier * atr))
+
+            logger.info(
+                "[T4-SHADOW-SL] %s: %s stop — dist=%.5g (%s)",
+                asset, "STRUCTURAL" if _t4_use_struct else "ATR-fallback",
+                sl_dist, f"ref={_t4_struct_ref:.5g}" if _t4_use_struct else f"{atr_multiplier}xATR",
+            )
             tp_dist = _first_tp * atr
 
             if side == "long":
@@ -475,6 +521,14 @@ class ShadowTradingEngine:
             _lsm_4h = _lsm_4h.value
         _lsm_4h = _lsm_4h or ""
 
+        _t4_brc = bool(signal_details.get("brc_confirmed", False))
+        _t4_kind = signal_details.get("brc_kind") or ""
+        _t4_ref = float(signal_details.get("setup_ref") or 0.0)
+        _t4_tier = signal_details.get("setup_ref_tier") or ""
+        _t4_tests = int(signal_details.get("setup_ref_tests") or 0)
+        _t4_age = int(signal_details.get("setup_age") or 0)
+        _t4_retest = signal_details.get("retest_type") or ""
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
@@ -485,6 +539,14 @@ class ShadowTradingEngine:
             qualify_tag=_qualify_tag,
             livermore_state_1h=_lsm_1h,
             livermore_state_4h=_lsm_4h,
+            brc_confirmed=_t4_brc,
+            brc_kind=_t4_kind,
+            setup_ref=_t4_ref,
+            setup_ref_tier=_t4_tier,
+            setup_ref_tests=_t4_tests,
+            setup_age_at_entry=_t4_age,
+            retest_type=_t4_retest,
+            stop_source="structural" if _t4_use_struct else "atr",
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
