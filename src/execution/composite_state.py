@@ -54,6 +54,27 @@ class CompositeState:
     brc_direction: int = 0                # +1 long / -1 short
     brc_kind: Optional[str] = None        # "TF_CONT" (BOS) / "MR_REV" (CHoCH)
     brc_tier: Optional[str] = None        # RetestEngine tier if available
+    # ── BUILD U: the level that actually broke ─────────────────────────
+    # Every break flag in _update_structure is driven by one of two
+    # comparisons: a higher high (_hh) or a lower low (_ll). In both cases
+    # the level that was broken is already computed -- swing_highs[1] or
+    # swing_lows[1] -- and was then discarded.
+    #
+    # Discarding it meant a setup could never be anchored to the thing it
+    # broke, so the reference resolver substituted the nearest tracked line
+    # below price. That line is close by construction (the ladder dedups at
+    # 0.3 ATR), so the break-magnitude filter measured a distance the system
+    # is built to keep small, and refused 96% of setups.
+    #
+    # Measured on 44 live break events: the broken level sits a median 1.081
+    # ATR from price; the nearest line sits a median 0.27 ATR. Four times.
+    #
+    # None means "no break in that direction on this bar" -- never zero.
+    # Do NOT add these to sanitise()'s _count_fields list: that list turns a
+    # missing value into 0.0, and a price level of zero is not a neutral
+    # reading, it is a wrong one.
+    broken_level_up: Optional[float] = None
+    broken_level_dn: Optional[float] = None
     # Build 2: how old the proof is, in BARS (not cycles). 0 = completed on this
     # bar. The bot recomputes ~22x per 1H bar, so this must key off the bar
     # timestamp — a naive per-cycle increment would age a proof 22x per hour.

@@ -1633,6 +1633,18 @@ class CompositeStateBuilder:
                             "SWING_4H": 2.0,
                             "ZONE_LADDER": 2.0,
                             "ANCHOR_1H": 1.0,
+                            # BUILD U: 1H-native level measured with the 1H
+                            # ATR, so no unit conversion applies. The 2.0 on
+                            # the 4H tiers converts a 1H ruler into a 4H one;
+                            # it is not a strictness setting. Strictness lives
+                            # in break_magnitude_atr_mult, which stays at 0.5.
+                            #
+                            # 0.5 x 1.0 x ATR = 0.5 ATR. Against 20 measured
+                            # broken-level distances (min 0.307, p25 0.732,
+                            # median 1.081) that refuses roughly the weakest
+                            # 11% -- a filter that discriminates, rather than
+                            # one that refuses 96% regardless of quality.
+                            "BROKEN_SWING_1H": 1.0,
                         }.get(_f1_tier, 2.0)
                         _p1_band = _p1_mult * _p1_scale * float(_atr or 0.0)
                         _p1_dist = None
@@ -2688,6 +2700,78 @@ class CompositeStateBuilder:
                 )
                 _j1_may_reverse = _lsm_state in _J1_REVERSAL_STATES
 
+                # ── BUILD U: capture the level that actually broke ─────
+                # Set on BOTH branches -- value when the break is true,
+                # None when it is not -- so a reading from an earlier bar
+                # can never survive into a cycle where the break no longer
+                # holds. _hh guarantees len(swing_highs) >= 2, and _ll
+                # guarantees the same for swing_lows, so [1] is always safe
+                # on the branch that sets it.
+                state.broken_level_up = float(swing_highs[1]) if _hh else None
+                state.broken_level_dn = float(swing_lows[1]) if _ll else None
+
+                # Register in the 1H structure store so _ref_role_at and
+                # _ref_tests_at have something to read. Without this the
+                # role-flip death check returns None (no kill, but no check
+                # either) and every setup is born with tests=0 forever --
+                # which is why the test-count work has never had any data.
+                #
+                # THE ROLE STORED IS THE POST-BREAK ROLE. See the warning in
+                # the build document. A broken HIGH that price holds above is
+                # now SUPPORT -> "swing_low". A broken LOW that price holds
+                # below is now RESISTANCE -> "swing_high". Storing the old
+                # role would make the store's own 0.3% role-reversal rule
+                # fire on a HEALTHY break and G1 would kill the setup for
+                # working. On GOLD/BTC/USOIL 0.3% is under one ATR.
+                #
+                # Both directions register independently -- in an expanding
+                # range (_hh and _ll both true) both levels are real, and the
+                # resolver picks by direction.
+                try:
+                    _u_px = float(df["close"].iloc[-1])
+                    _u_regs = []
+                    if _hh and state.broken_level_up:
+                        _u_regs.append(
+                            (float(state.broken_level_up), "swing_low", "UP")
+                        )
+                    if _ll and state.broken_level_dn:
+                        _u_regs.append(
+                            (float(state.broken_level_dn), "swing_high", "DOWN")
+                        )
+                    if _u_regs and _atr_raw > 0 and _u_px > 0:
+                        _u_asset = self.asset_type
+                        if _u_asset not in self._structure_levels:
+                            self._structure_levels[_u_asset] = []
+                        # Same dedup width the rest of the system uses, so
+                        # "the same level" means one thing everywhere.
+                        _u_tol = min(0.3 * float(_atr_raw), 0.004 * _u_px)
+                        for _u_price, _u_role, _u_dir in _u_regs:
+                            _u_exists = any(
+                                l.get("tf") == "1H"
+                                and abs(float(l["price"]) - _u_price) <= _u_tol
+                                for l in self._structure_levels[_u_asset]
+                            )
+                            if _u_exists:
+                                continue
+                            self._structure_levels[_u_asset].append({
+                                "price": _u_price,
+                                "tf": "1H",
+                                "type": _u_role,
+                                "tests": 0,
+                                "age_hours": 0,
+                            })
+                            logger.info(
+                                "[U-BROKEN] %s: broke %s at %.5g — registered "
+                                "as %s (price=%.5g, atr=%.5g)",
+                                _u_asset, _u_dir, _u_price, _u_role,
+                                _u_px, float(_atr_raw),
+                            )
+                except Exception as _u_err:
+                    logger.info(
+                        "[U-BROKEN] %s: registration failed: %s",
+                        self.asset_type, _u_err,
+                    )
+
                 # BOS — the parent trend continuing. UNCHANGED.
                 if _parent_up and _hh:
                     state.bos_detected = True
@@ -3241,9 +3325,51 @@ class CompositeStateBuilder:
         else:
             _candidates = []
 
+        # ── BUILD U: the level that actually broke is the only source ──────
+        # Every break candidate that reaches this method was created by _hh
+        # or _ll, and both guarantee the broken level exists. So there is
+        # always exactly one right answer to "which level?" and the three-tier
+        # fallback chain below is only kept for comparison.
+        #
+        # _usable() is unchanged and still does the important work: for a
+        # bullish setup it requires price to be at or above the level it
+        # broke; for a bearish one, at or below. A break that was made and
+        # then given back is refused -- correctly, and for a reason a human
+        # trader would accept.
+        _u_broken = (
+            getattr(state, "broken_level_up", None) if direction == 1
+            else getattr(state, "broken_level_dn", None)
+        )
+
+        # Counterfactual only. Decides nothing. Delete this loop and the
+        # "legacy would have picked" half of the log lines after one week of
+        # side-by-side comparison.
+        _u_legacy_ref, _u_legacy_tier = None, None
         for _ref, _tier in _candidates:
             if _usable(_ref, _tier):
-                return float(_ref), _tier
+                _u_legacy_ref, _u_legacy_tier = float(_ref), _tier
+                break
+        _u_legacy_txt = (
+            "%s@%.5g" % (_u_legacy_tier, _u_legacy_ref)
+            if _u_legacy_ref is not None else "none"
+        )
+
+        if _usable(_u_broken, "BROKEN_SWING_1H"):
+            logger.info(
+                "[U-REF] %s: %s dir=%+d ACCEPT BROKEN_SWING_1H ref=%.5g "
+                "| legacy would have picked %s",
+                self.asset_type, kind, direction,
+                float(_u_broken), _u_legacy_txt,
+            )
+            return float(_u_broken), "BROKEN_SWING_1H"
+
+        logger.info(
+            "[U-REF] %s: %s dir=%+d REFUSE — broken level %s not held by "
+            "price | legacy would have picked %s",
+            self.asset_type, kind, direction,
+            ("%.5g" % float(_u_broken)) if _u_broken else "missing",
+            _u_legacy_txt,
+        )
         return None, None
 
     def _p4_pick_eviction(self, queue):
@@ -3304,6 +3430,13 @@ class CompositeStateBuilder:
                 _store, _want_tf = self._zone_levels.get(asset, []), "4H"
             elif tier == "ZONE_LADDER_1D":
                 _store, _want_tf = self._zone_levels.get(asset, []), "1D"
+            elif tier == "BROKEN_SWING_1H":
+                # BUILD U: same lesson N1 recorded above -- read the level
+                # from the store it was written to. U2 registers broken levels
+                # into _structure_levels tagged tf="1H". Falling through to the
+                # catch-all below would search both stores with no timeframe
+                # filter and could match a 4H zone level sharing the price.
+                _store, _want_tf = self._structure_levels.get(asset, []), "1H"
             else:
                 # SWING_4H / ANCHOR_1H / RUNNER / unknown: search both stores,
                 # zone first (it holds the 4H structural levels), then the 1H
@@ -3347,6 +3480,10 @@ class CompositeStateBuilder:
                 _store, _want_tf = self._zone_levels.get(asset, []), "4H"
             elif tier == "ZONE_LADDER_1D":
                 _store, _want_tf = self._zone_levels.get(asset, []), "1D"
+            elif tier == "BROKEN_SWING_1H":
+                # BUILD U: mirrors _ref_role_at exactly, as this method's own
+                # docstring requires. Same store, same timeframe filter.
+                _store, _want_tf = self._structure_levels.get(asset, []), "1H"
             else:
                 _store = list(self._zone_levels.get(asset, [])) + \
                          list(self._structure_levels.get(asset, []))
