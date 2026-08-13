@@ -111,9 +111,11 @@ class MeanReversionStrategy(BaseStrategy):
             },
             "mode2": {
                 "adx_max":                     25,
-                "optional_min_count":          4,
-                "bb_inside_required":          True,
-                "btc_long_zscore_threshold":  -2.0,
+                "optional_min_count":          1,     # BUILD V: was 4
+                "bb_inside_required":          False, # BUILD V: replaced by bb_through
+                "bb_through_required":         False, # BUILD V: scoring-first
+                "btc_zscore_required":         False, # BUILD V: scoring-first
+                "btc_long_zscore_threshold":  -2.0,   # magnitude reused, sign flipped in code
                 "btc_short_zscore_threshold":  3.5,
             },
             "mode3": {
@@ -836,9 +838,13 @@ class MeanReversionStrategy(BaseStrategy):
         if composite_state is not None:
             _pc2 = getattr(composite_state, "phase_config", {}) or {}
             if _pc2.get("mr_mode2_brc_gate_enabled", False):
+                # BUILD V: the proof direction IS the trade direction. Under
+                # the reversal thesis a SECONDARY_RETRACEMENT trades SHORT (-1)
+                # and a SECONDARY_REBOUND trades LONG (+1) — the opposite of the
+                # old mapping, which is what made this gate unsatisfiable.
                 _lsm2 = getattr(composite_state, "livermore_state_1h", None)
-                _intended_dir = 1 if _lsm2 == "SECONDARY_RETRACEMENT" else (
-                    -1 if _lsm2 == "SECONDARY_REBOUND" else 0
+                _intended_dir = -1 if _lsm2 == "SECONDARY_RETRACEMENT" else (
+                    1 if _lsm2 == "SECONDARY_REBOUND" else 0
                 )
                 _brc_ok2 = getattr(composite_state, "brc_confirmed", False)
                 _brc_dir2 = getattr(composite_state, "brc_direction", 0)
@@ -891,14 +897,32 @@ class MeanReversionStrategy(BaseStrategy):
                     )
                     return 0, 0.0
 
-        # Direction from Livermore state
+        # ── BUILD V: two directions, not one ─────────────────────────────
+        # move_dir  = which way the deep counter-move is running. This is what
+        #             the confirmation checks below read — they describe the
+        #             counter-move's own behaviour.
+        # trade_dir = which way we actually trade. Under the reversal thesis
+        #             this is the OPPOSITE of move_dir: a deep pullback in an
+        #             uptrend (SECONDARY_RETRACEMENT) that BREAKS STRUCTURE is
+        #             shorted, not bought.
+        #
+        # Before this build the two were collapsed into one `direction`, which
+        # is why Mode 2 fought its own proof: the proof said short, `direction`
+        # said long, and the full-proof gate could never agree. See BUILD V doc.
         lsm_state = getattr(composite_state, "livermore_state_1h", None) if composite_state else None
         if lsm_state == "SECONDARY_RETRACEMENT":
-            direction = 1
+            move_dir  = 1     # counter-move is up (a bounce inside the pullback)
+            trade_dir = -1    # we SHORT the break of the pullback's floor
         elif lsm_state == "SECONDARY_REBOUND":
-            direction = -1
+            move_dir  = -1    # counter-move is down (a dip inside the rebound)
+            trade_dir = 1     # we LONG the break of the rebound's ceiling
         else:
             return 0, 0.0
+
+        # trade_dir must match the proof. If Build V2's gate is on, this is
+        # already guaranteed by that gate; this assertion catches the case
+        # where the gate is off and the two could silently diverge.
+        direction = trade_dir   # everything downstream that trades uses trade_dir
 
         # ── ADX gate ──────────────────────────────────────────────────────
         adx_max = int(cfg["adx_max"])
@@ -921,12 +945,18 @@ class MeanReversionStrategy(BaseStrategy):
         # MR-lane concept. The unsuffixed setup_age now prefers the TF lane
         # when both are live, which would silently evaluate at the wrong
         # bar if a TF_CONT setup happens to also be alive this cycle.
+        # BUILD V: the optional checks describe the counter-move, so they read
+        # move_dir, not the trade direction. optional_min_count is relaxed in
+        # V4 because two of the four checks are exhaustion tests that a genuine
+        # reversal will not pass — see the BUILD V doc's confirmation-stack
+        # table. Ship as scoring-first: log what each returns, promote to
+        # mandatory only after a week of live evidence.
         _choch_bar_idx = -1 - int(getattr(composite_state, "setup_age_mr", 0) or 0)
         opt_count = self._count_optional(
-            features, direction,
+            features, move_dir,
             exclude_bar_idx=_choch_bar_idx, eval_bar_idx=_choch_bar_idx,
         )
-        min_opt   = int(cfg["optional_min_count"])   # 2
+        min_opt   = int(cfg["optional_min_count"])   # V4: now 1, was 4
         if opt_count < min_opt:
             _vc = self._check_vol_contraction(features, direction, exclude_bar_idx=_choch_bar_idx)
             _hd = self._check_hidden_divergence(features, direction)
@@ -942,48 +972,61 @@ class MeanReversionStrategy(BaseStrategy):
             )
             return 0, 0.0
 
-        # ── BB closed back inside ─────────────────────────────────────────
-        if cfg.get("bb_inside_required", True):
+        # ── BUILD V: BB THROUGH the band, in the trade direction ─────────────
+        # The old check required price to have closed back INSIDE the band —
+        # the signature of a mean-reversion bounce (exhaustion). A reversal is
+        # the opposite: price closes THROUGH the band in the trade direction
+        # and rides it. So a LONG break wants a recent close above the upper
+        # band; a SHORT break wants a recent close below the lower band.
+        #
+        # Scoring-first: this logs and contributes to a confidence nudge but
+        # does NOT hard-gate until validated. Set bb_through_required=true in
+        # config to make it mandatory once proven.
+        _bb_through_ok = True
+        if features is not None and "bb_position" in features:
             bb_pos_arr = features["bb_position"].values
-            if len(bb_pos_arr) < 5:
-                return 0, 0.0
-            if direction == 1:
-                # Was outside lower band (bb_pos < 0) and has now closed back inside
-                was_outside = any(float(v) < 0.0 for v in bb_pos_arr[-5:-1])
-                if not was_outside:
-                    _bb_recent = [f"{float(v):.2f}" for v in bb_pos_arr[-5:]]
-                    logger.info(
-                        f"[MR Mode2] {self.asset}: BB not recently outside lower band "
-                        f"(long) — bb_pos last 5: {_bb_recent} → 0"
-                    )
-                    return 0, 0.0
-            elif direction == -1:
-                was_outside = any(float(v) > 1.0 for v in bb_pos_arr[-5:-1])
-                if not was_outside:
-                    _bb_recent = [f"{float(v):.2f}" for v in bb_pos_arr[-5:]]
-                    logger.info(
-                        f"[MR Mode2] {self.asset}: BB not recently outside upper band "
-                        f"(short) — bb_pos last 5: {_bb_recent} → 0"
-                    )
-                    return 0, 0.0
+            if len(bb_pos_arr) >= 5:
+                if trade_dir == 1:
+                    _bb_through_ok = any(float(v) > 1.0 for v in bb_pos_arr[-5:])
+                else:
+                    _bb_through_ok = any(float(v) < 0.0 for v in bb_pos_arr[-5:])
+                logger.info(
+                    "[MR Mode2] %s: BB-through (trade_dir=%+d) = %s "
+                    "(bb_pos last 5: %s)",
+                    self.asset, trade_dir, _bb_through_ok,
+                    [f"{float(v):.2f}" for v in bb_pos_arr[-5:]],
+                )
+        if cfg.get("bb_through_required", False) and not _bb_through_ok:
+            logger.info(
+                "[MR Mode2] %s: BB-through required but not met — 0", self.asset
+            )
+            return 0, 0.0
 
-        # ── BTC-specific z-score gates ────────────────────────────────────
+        # ── BUILD V: BTC z-score, inverted for the reversal thesis ───────────
+        # OLD logic wanted a mean-reversion extreme: deeply oversold to go long,
+        # deeply overbought to go short — i.e. bet on the snap-back. A reversal
+        # trades WITH the break, so it wants price extended in the TRADE
+        # direction: a LONG break wants price pushing up (positive z), a SHORT
+        # break wants price pushing down (negative z). The thresholds flip.
+        #
+        # Scoring-first, same as BB-through: logs, contributes, does not hard
+        # gate until btc_zscore_required=true.
+        _btc_z_ok = True
         if self.asset in ("BTC", "BTCUSDT"):
             z_score = self._compute_bb_zscore(features)
-            if direction == 1:
-                z_thr = float(cfg["btc_long_zscore_threshold"])   # -2.0
-                if z_score >= z_thr:
-                    logger.info(
-                        f"[MR Mode2 BTC] LONG z={z_score:.2f} ≥ {z_thr} (need < {z_thr}) → 0"
-                    )
-                    return 0, 0.0
-            elif direction == -1:
-                z_thr = float(cfg["btc_short_zscore_threshold"])  # 3.5
-                if z_score <= z_thr:
-                    logger.info(
-                        f"[MR Mode2 BTC] SHORT z={z_score:.2f} ≤ {z_thr} (need > {z_thr}) → 0"
-                    )
-                    return 0, 0.0
+            # reuse the same magnitudes, applied in the trade direction
+            _z_mag_long  = abs(float(cfg["btc_long_zscore_threshold"]))   # 2.0
+            _z_mag_short = abs(float(cfg["btc_short_zscore_threshold"]))  # 3.5
+            if trade_dir == 1:
+                _btc_z_ok = z_score >= _z_mag_long      # pushing UP
+            else:
+                _btc_z_ok = z_score <= -_z_mag_short    # pushing DOWN
+            logger.info(
+                "[MR Mode2 BTC] z=%.2f trade_dir=%+d ok=%s", z_score, trade_dir, _btc_z_ok
+            )
+            if cfg.get("btc_zscore_required", False) and not _btc_z_ok:
+                logger.info("[MR Mode2 BTC] z-score required but not met — 0")
+                return 0, 0.0
 
         # ── Confidence: lower ADX = more range-bound = stronger MR edge ──
         adx_factor = max(0.0, (adx_max - adx_val) / adx_max)

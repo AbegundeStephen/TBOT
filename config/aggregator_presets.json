@@ -634,10 +634,12 @@
       "btc_ema200_4h_modifier": -0.1
     },
     "mode2": {
-      "_comment": "Counter-Trend \u2014 SECONDARY states only. SECONDARY_RETRACEMENT\u2192LONG, SECONDARY_REBOUND\u2192SHORT. optional_min_count lowered 4\u21923: requiring all 4 simultaneously is statistically near-impossible on hourly data.",
+      "_comment": "Counter-Trend \u2014 SECONDARY states only. BUILD V: SECONDARY_RETRACEMENT\u2192SHORT, SECONDARY_REBOUND\u2192LONG (trade_dir is opposite the counter-move; see mean_reversion.py). optional_min_count 4\u21921 \u2014 the confirmation stack was rebuilt scoring-first, ship mandatory only after live validation. bb_inside_required retired (bb_through_required replaces it) but left present at false rather than deleted, since removing a key here would silently fall back to the Python-side default instead of documenting the retirement.",
       "adx_max": 30,
-      "optional_min_count": 2,
-      "bb_inside_required": true,
+      "optional_min_count": 1,
+      "bb_inside_required": false,
+      "bb_through_required": false,
+      "btc_zscore_required": false,
       "btc_long_zscore_threshold": -2.0,
       "btc_short_zscore_threshold": 3.5
     },
