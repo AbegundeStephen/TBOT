@@ -1978,19 +1978,33 @@ class CompositeStateBuilder:
                         # age gate reads true_age instead; nothing else does.
                         #
                         # true_seed = bars between the break candle and now.
-                        # The break candle is the one whose high first cleared
-                        # the reference; we approximate its distance as the
-                        # index gap in the current window. If it can't be
-                        # located, fall back to 0 (behaves as before — safe).
-                        _true_seed = 0
-                        try:
-                            _hh_arr = df["high"].iloc[-(28 + 1):-1].values
-                            for _bi in range(len(_hh_arr) - 1, -1, -1):
-                                if _hh_arr[_bi] > _brc_ref:
-                                    _true_seed = (len(_hh_arr) - 1) - _bi
-                                    break
-                        except Exception:
-                            _true_seed = 0
+                        #
+                        # FOLLOWUP: the original approach re-derived the break
+                        # candle by scanning backward through the window for
+                        # the most recent bar whose high cleared _brc_ref.
+                        # Measured live in backtest: that search excludes the
+                        # current bar (iloc[...:-1]) -- but the current bar is
+                        # almost always the one that actually triggers the
+                        # break (_hh/_ll go true because THIS bar's high/low
+                        # just crossed the reference). And _brc_ref is a
+                        # CONFIRMED PRIOR SWING PIVOT price, not a nearby
+                        # level -- in a genuine deep pullback (the only
+                        # context this code runs in), price has usually been
+                        # below that old peak for a while, so the scan rarely
+                        # finds a match nearby and instead lands on an
+                        # incidental old high near where that pivot originally
+                        # formed. Measured: gaps up to 27 bars (the search
+                        # window's own edge), firing on ~18% of GOLD's 1H
+                        # candles, with no correlation to the small live
+                        # latency this fix was built to close.
+                        #
+                        # Simpler and matches what was actually measured live:
+                        # a fixed correction, not a re-derived price search.
+                        _true_seed = int(
+                            (getattr(self, "phase_config", {}) or {}).get(
+                                "runner_confirmation_latency_bars", 2
+                            ) or 0
+                        )
                         self._brc_break_ts[self.asset_type] = {
                             "ref": _brc_ref, "last_ts": _bar_ts,
                             "bars": 0, "true_age": _true_seed,
