@@ -1968,16 +1968,54 @@ class CompositeStateBuilder:
                     # however many times the tracker reset in between.
                     _bt = self._brc_break_ts.get(self.asset_type)
                     if _bt is None or _bt.get("ref") != _brc_ref:
+                        # LATENCY FIX: seed "true_age" from how far back the
+                        # break candle actually is, not from 0. _bars_since_break
+                        # stays 0-seeded because the retest pre/post split
+                        # (lines ~2011, ~2105) depends on it counting only bars
+                        # observed SINCE confirmation — inflating it would let a
+                        # pre-break touch masquerade as a post-break retest,
+                        # exactly the bug the ordering fix removed. The RUNNER
+                        # age gate reads true_age instead; nothing else does.
+                        #
+                        # true_seed = bars between the break candle and now.
+                        # The break candle is the one whose high first cleared
+                        # the reference; we approximate its distance as the
+                        # index gap in the current window. If it can't be
+                        # located, fall back to 0 (behaves as before — safe).
+                        _true_seed = 0
+                        try:
+                            _hh_arr = df["high"].iloc[-(28 + 1):-1].values
+                            for _bi in range(len(_hh_arr) - 1, -1, -1):
+                                if _hh_arr[_bi] > _brc_ref:
+                                    _true_seed = (len(_hh_arr) - 1) - _bi
+                                    break
+                        except Exception:
+                            _true_seed = 0
                         self._brc_break_ts[self.asset_type] = {
-                            "ref": _brc_ref, "last_ts": _bar_ts, "bars": 0
+                            "ref": _brc_ref, "last_ts": _bar_ts,
+                            "bars": 0, "true_age": _true_seed,
                         }
                     elif _bar_ts is not None and _bar_ts != _bt.get("last_ts"):
-                        # A new candle closed — the break is one bar older.
+                        # A new candle closed — both clocks tick.
                         _bt["bars"] = int(_bt.get("bars", 0)) + 1
+                        _bt["true_age"] = int(_bt.get("true_age", 0)) + 1
                         _bt["last_ts"] = _bar_ts
                     _bars_since_break = int(
                         self._brc_break_ts[self.asset_type].get("bars", 0)
                     )
+                    # RUNNER-only: true age from the actual break candle.
+                    _runner_age = int(
+                        self._brc_break_ts[self.asset_type].get("true_age", 0)
+                    )
+                    # LATENCY FIX: only logs when the two clocks actually
+                    # diverge, so this shows the real confirmation-lag gap
+                    # directly instead of spamming every cycle with gap=0.
+                    if _runner_age != _bars_since_break:
+                        logger.info(
+                            "[LATENCY-GAP] %s: bars_since_break=%d runner_age=%d gap=%d",
+                            self.asset_type, _bars_since_break, _runner_age,
+                            _runner_age - _bars_since_break,
+                        )
 
                     # Window widened 8 -> 28 candles (seven 4H bars' worth of
                     # hourly candles) so a 4H level has room to be retested.
@@ -2118,7 +2156,13 @@ class CompositeStateBuilder:
 
                     # E4: the RUNNER — a pullback that never reaches the level.
                     # Only evaluated when the normal retest did not qualify.
-                    if not _retested and not _retest_failed and _bars_since_break >= 3:
+                    # LATENCY FIX: RUNNER eligibility uses _runner_age (counts
+                    # from the actual break candle), not _bars_since_break
+                    # (counts from confirmation, ~2 bars later). The pre-break
+                    # FILTER inside this block below still uses _bars_since_break
+                    # on purpose — that boundary must match the retest split, or
+                    # pre-break bars leak into the runner scan.
+                    if not _retested and not _retest_failed and _runner_age >= 3:
                         _wl = list(_brc_win_low); _wh = list(_brc_win_high)
                         _wc = list(_win_close)
                         _n = len(_wc)
