@@ -2177,10 +2177,69 @@ class VeteranTradeManager:
         with self._sl_lock:
             return self._check_exit_locked(current_price, atr_value=atr_value, df_4h=df_4h)
 
+    def _check_r_based_breakeven(self, current_price: float) -> bool:
+        """FIX-A/E2 (16-Aug validation): move SL to entry once profit >=
+        trigger x R. Additive to the existing ATR-based/time-based BE logic
+        in _check_exit_locked below -- neither is touched or replaced.
+
+        ADAPTED from the original spec, which assumed a separate `position`
+        object with .entry_price/.stop_loss/.current_price/.direction
+        attributes. This class IS the per-trade position (self.entry_price,
+        self.side, self.current_stop_loss), matching every other method in
+        this file, so this reads self directly instead of a passed-in object.
+
+        R is measured against self.initial_stop_loss (the ORIGINAL risk at
+        entry), not self.current_stop_loss -- the latter already moves via
+        the ATR-based/time-based BE and trailing logic that runs after this,
+        and once it reaches entry the distance collapses to zero, which
+        would make `profit >= trigger * risk` trivially true on any positive
+        profit. Idempotency mirrors the pattern the two existing BE
+        mechanisms already use in this file (only move the stop if it
+        hasn't already crossed entry) rather than introducing a new tracked
+        flag.
+        """
+        try:
+            # Global toggle, not per-asset risk: read via risk_config's nested
+            # "phase_config" the same way this file's other global flags do
+            # (see _compute_swing_low_trail's structural_trailing_enabled
+            # read above) rather than as a top-level risk_config key.
+            _phase_cfg = self.risk_config.get("phase_config", {}) or {}
+            if not _phase_cfg.get("r_breakeven_enabled", False):
+                return False
+            entry = float(self.entry_price)
+            if self.initial_stop_loss is None:
+                return False
+            risk = abs(entry - float(self.initial_stop_loss))
+            if risk <= 0:
+                return False
+            profit = (current_price - entry) if self.side == "long" else (entry - current_price)
+            trigger = float(_phase_cfg.get("r_breakeven_trigger", 0.75))
+            if profit < trigger * risk:
+                return False
+            if self.side == "long" and self.current_stop_loss < entry:
+                self.current_stop_loss = entry
+            elif self.side == "short" and self.current_stop_loss > entry:
+                self.current_stop_loss = entry
+            else:
+                return False
+            logger.info(
+                f"[VTM] R-breakeven: {self.asset} profit "
+                f"{profit / risk:.2f}R >= {trigger}R -> SL moved to entry"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[VTM] R-breakeven check failed (no-op): {e}")
+        return False
+
     def _check_exit_locked(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         if self.remaining_position <= 0: return None
+
+        # ── FIX-A/E2: R-based break-even, first in the management pass ─────
+        # Ships OFF (r_breakeven_enabled defaults false in config); additive,
+        # runs before the existing ATR-based/time-based BE checks below.
+        self._check_r_based_breakeven(current_price)
 
         # ── J: Friday PM trailing tightener ───────────────────────────────
         try:

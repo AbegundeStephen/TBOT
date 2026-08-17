@@ -1419,6 +1419,17 @@ class TradingBot:
                         enable_detailed_logging=False,
                         use_macro_governor=False,
                         use_gatekeeper=False,
+                        # FIX-A/S6: each council-mode asset's companion owns its
+                        # OWN _cs_builder, whose structure_levels/zone_levels
+                        # dicts only ever contain THIS asset's keys. The class
+                        # default state_persistence_path is a single shared
+                        # literal ("data/aggregator_state.json") -- with every
+                        # asset's companion writing there, each persist call
+                        # would overwrite the previous asset's saved state,
+                        # silently losing every asset but whichever was
+                        # processed last. Per-asset path fixes both load (at
+                        # construction, below) and persist (S6a) consistently.
+                        state_persistence_path=f"data/aggregator_state_{asset_name}.json",
                     )
                     self.aggregators[asset_name] = {
                         "council":  _council_agg,
@@ -3211,6 +3222,9 @@ class TradingBot:
                     enable_detailed_logging=False,
                     use_macro_governor=False,
                     use_gatekeeper=False,
+                    # FIX-A/S6: see the matching note at the initial-setup
+                    # construction site. Per-asset path, not the shared default.
+                    state_persistence_path=f"data/aggregator_state_{asset_type}.json",
                 )
                 # Transfer warmed Livermore state to the companion.
                 if _old_lsm_warmed:
@@ -3678,6 +3692,35 @@ class TradingBot:
             # Reset error counter
             self._consecutive_errors = 0
             self._last_successful_cycle = datetime.now()
+
+            # ── FIX ③/S6a: COUNCIL-MODE STATE PERSISTENCE (16-Aug validation) ──
+            # aggregator_state.json froze 27 Jun: the only persist call lived in
+            # legacy get_aggregated_signal, never invoked in COUNCIL mode.
+            # Persist each council-mode asset's LSM companion state on a 15-min
+            # throttle so builder ladders/levels/regimes survive restarts.
+            #
+            # ADAPTED from the original spec, which assumed a single
+            # self._lsm_companion attribute. The real structure (confirmed via
+            # PRE-FLIGHT 6-p1) is per-asset: self.aggregators[asset_name] is a
+            # dict with a "livermore" key holding that asset's companion, only
+            # when mode == "council". Each companion now also has its OWN
+            # state_persistence_path (see the construction sites) rather than
+            # the shared default -- without that, every asset's persist call
+            # here would overwrite the same file with only its own single-asset
+            # state, silently erasing every other asset's saved structure.
+            _now_ts = time.time()
+            if _now_ts - getattr(self, "_last_state_persist_ts", 0.0) >= 900:
+                for _asset_name, _agg_entry in self.aggregators.items():
+                    if not isinstance(_agg_entry, dict) or _agg_entry.get("mode") != "council":
+                        continue
+                    _companion = _agg_entry.get("livermore")
+                    if _companion is None:
+                        continue
+                    try:
+                        _companion._persist_state()
+                    except Exception as e:
+                        logger.warning(f"[STATE] council persist failed for {_asset_name}: {e}")
+                self._last_state_persist_ts = _now_ts
 
             # ✨ Take periodic snapshot
             if self.db_manager:

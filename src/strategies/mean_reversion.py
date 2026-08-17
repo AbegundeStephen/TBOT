@@ -111,7 +111,7 @@ class MeanReversionStrategy(BaseStrategy):
             },
             "mode2": {
                 "adx_max":                     25,
-                "optional_min_count":          1,     # BUILD V: was 4
+                "optional_min_count":          0,     # FIX-A/S1: was 4, then 1, ratified 0 (16-Aug validation)
                 "bb_inside_required":          False, # BUILD V: replaced by bb_through
                 "bb_through_required":         False, # BUILD V: scoring-first
                 "btc_zscore_required":         False, # BUILD V: scoring-first
@@ -956,20 +956,26 @@ class MeanReversionStrategy(BaseStrategy):
             features, move_dir,
             exclude_bar_idx=_choch_bar_idx, eval_bar_idx=_choch_bar_idx,
         )
-        min_opt   = int(cfg["optional_min_count"])   # V4: now 1, was 4
+        min_opt   = int(cfg["optional_min_count"])   # FIX-A/S1: now 0, was 1, was 4
+        # FIX-A/S1: log relocated OUTSIDE the blocking branch. At min_opt=0 the
+        # gate can never block (opt_count < 0 is impossible), so the old
+        # log-only-when-blocking placement would have gone permanently dark —
+        # we'd have zero visibility into what the four checks actually return.
+        # Unconditional now, with an explicit PASS/BLOCK status.
+        _vc = self._check_vol_contraction(features, direction, exclude_bar_idx=_choch_bar_idx)
+        _hd = self._check_hidden_divergence(features, direction)
+        _bc = self._check_bb_contraction(features, direction, eval_bar_idx=_choch_bar_idx)
+        _mp = self._check_ma_proximity(features, direction, eval_bar_idx=_choch_bar_idx)
+        logger.info(
+            f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} "
+            f"{'PASS' if opt_count >= min_opt else 'BLOCK'} "
+            f"(checks advisory at min_opt=0) "
+            f"[vol={'✓' if _vc else '✗'} "
+            f"hdiv={'✓' if _hd else '✗'} "
+            f"bbc={'✓' if _bc else '✗'} "
+            f"map={'✓' if _mp else '✗'}]"
+        )
         if opt_count < min_opt:
-            _vc = self._check_vol_contraction(features, direction, exclude_bar_idx=_choch_bar_idx)
-            _hd = self._check_hidden_divergence(features, direction)
-            _bc = self._check_bb_contraction(features, direction, eval_bar_idx=_choch_bar_idx)
-            _mp = self._check_ma_proximity(features, direction, eval_bar_idx=_choch_bar_idx)
-            logger.info(
-                f"[MR Mode2] {self.asset}: opt={opt_count}/{min_opt} (need {min_opt} of 4, "
-                f"eval@CHoCH bar idx={_choch_bar_idx}) → 0 "
-                f"[vol={'✓' if _vc else '✗'} "
-                f"hdiv={'✓' if _hd else '✗'} "
-                f"bbc={'✓' if _bc else '✗'} "
-                f"map={'✓' if _mp else '✗'}]"
-            )
             return 0, 0.0
 
         # ── BUILD V: BB THROUGH the band, in the trade direction ─────────────

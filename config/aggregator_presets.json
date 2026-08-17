@@ -634,9 +634,9 @@
       "btc_ema200_4h_modifier": -0.1
     },
     "mode2": {
-      "_comment": "Counter-Trend \u2014 SECONDARY states only. BUILD V: SECONDARY_RETRACEMENT\u2192SHORT, SECONDARY_REBOUND\u2192LONG (trade_dir is opposite the counter-move; see mean_reversion.py). optional_min_count 4\u21921 \u2014 the confirmation stack was rebuilt scoring-first, ship mandatory only after live validation. bb_inside_required retired (bb_through_required replaces it) but left present at false rather than deleted, since removing a key here would silently fall back to the Python-side default instead of documenting the retirement.",
+      "_comment": "Counter-Trend \u2014 SECONDARY states only. BUILD V: SECONDARY_RETRACEMENT\u2192SHORT, SECONDARY_REBOUND\u2192LONG (trade_dir is opposite the counter-move; see mean_reversion.py). optional_min_count 4\u21921\u21920 (FIX-A/S1, 16-Aug validation) \u2014 the confirmation stack was rebuilt scoring-first for a reversal, but all four checks were built for continuation and structurally fail on a real reversal, so the gate killed every Mode 2 setup at the last step. Zero makes it advisory; the checks stay visible via the log. bb_inside_required retired (bb_through_required replaces it) but left present at false rather than deleted, since removing a key here would silently fall back to the Python-side default instead of documenting the retirement.",
       "adx_max": 30,
-      "optional_min_count": 1,
+      "optional_min_count": 0,
       "bb_inside_required": false,
       "bb_through_required": false,
       "btc_zscore_required": false,
