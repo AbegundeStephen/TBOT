@@ -2756,6 +2756,8 @@ class TradingBot:
             _risk_cfg = asset_cfg.get("risk_management", asset_cfg)
             _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
             _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
+            _trail_mult = float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
+            _be_r       = float(_risk_cfg.get("r_breakeven_trigger", 0.75))          # S7c
             _src = details.get("aggregator_mode", "PERF").upper()
             # J2.1: Pass CompositeState snapshot at entry.
             # Part 1.5 (Brain Rebuild): _aggregator was never unwrapped from
@@ -2792,6 +2794,8 @@ class TradingBot:
                 atr_multiplier=_atr_mult,
                 tp_multiples=_tp_mults,
                 composite_state=_comp_state_dict,
+                trail_mult=_trail_mult,   # S7c
+                be_r=_be_r,               # S7c
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -6644,6 +6648,8 @@ class TradingBot:
                         _risk_cfg   = asset_cfg.get("risk_management", asset_cfg)
                         _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
                         _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
+                        _trail_mult = float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
+                        _be_r       = float(_risk_cfg.get("r_breakeven_trigger", 0.75))          # S7c
 
                         # J2.1: Pass CompositeState snapshot at entry.
                         # Unwrap hybrid/council dict wrappers the same way
@@ -6675,6 +6681,8 @@ class TradingBot:
                             atr_multiplier=_atr_mult,
                             tp_multiples=_tp_mults,
                             composite_state=_comp_state_dict2,
+                            trail_mult=_trail_mult,   # S7c
+                            be_r=_be_r,               # S7c
                         )
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")

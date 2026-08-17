@@ -65,6 +65,9 @@ FRICTION_PENALTIES: Dict[str, float] = {
     "GBPAUD": 0.0005,   # 0.05% round-trip
     "GBPAUDm": 0.0005,
 }
+# S7a: lookups are .upper() — normalize keys so mixed-case MT5 variants
+# ("XAUUSDm") can actually match instead of silently falling to default.
+FRICTION_PENALTIES = {k.upper(): v for k, v in FRICTION_PENALTIES.items()}
 _DEFAULT_FRICTION = 0.0005
 
 
@@ -107,6 +110,10 @@ class ShadowPosition:
     setup_age_at_entry: int = 0     # bars from birth to entry
     retest_type: str = ""           # CLEAN | WICK | BREAKOUT | CHASE_* | NO_LEVEL
     stop_source: str = "atr"        # "structural" | "atr"
+    initial_stop_loss: float = 0.0   # S7d: entry-time SL, never mutated — R-units anchor
+    friction_source: str = "map"     # S7d: "map" | "default" | "learned"
+    gate_code: str = ""              # S7e: machine-stable gate identity
+    outcome_class: str = ""          # S7b: "win" | "loss" | "scratch"
 
     regime_score: float = 0.0
     regime_name: str = "UNKNOWN"
@@ -152,6 +159,11 @@ class ShadowPosition:
     tp1_reached: bool = False
     tp1_price: float = 0.0               # First partial target: entry ± 1.5 × ATR
 
+    # S7c: R-based breakeven, replaces the TP1-touch trigger above (verified
+    # optimum from the 1,341-trade study). be_r set at open from config.
+    be_r: float = 0.75
+    breakeven_applied: bool = False
+
     def _profit_pct(self, price: float) -> float:
         """Current unrealised P&L as a fraction of entry price."""
         if self.entry_price == 0:
@@ -179,16 +191,22 @@ class ShadowPosition:
         if pnl < self.mae_pct:
             self.mae_pct = pnl
 
-        # J2.3: Breakeven after TP1 — simulates VTM's partial exit + BE lock
+        # J2.3: TP1 touch tracking retained for MFE/peak bookkeeping — no
+        # longer moves the stop (S7c below replaces the BE trigger).
         if not self.tp1_reached and self.tp1_price > 0:
             if (self.side == "long" and current_price >= self.tp1_price) or \
                (self.side == "short" and current_price <= self.tp1_price):
                 self.tp1_reached = True
-                # Move SL to breakeven (side-aware, matching T1.4 fix)
-                if self.side == "long" and self.stop_loss < self.entry_price:
-                    self.stop_loss = self.entry_price
-                elif self.side == "short" and self.stop_loss > self.entry_price:
-                    self.stop_loss = self.entry_price
+
+        # S7c: BE at be_r × ENTRY-TIME risk (verified optimum), was TP1-touch.
+        if not self.breakeven_applied and self.initial_stop_loss:
+            _risk = abs(self.entry_price - self.initial_stop_loss)
+            if _risk > 0:
+                _prof = (current_price - self.entry_price) if self.side == "long" \
+                        else (self.entry_price - current_price)
+                if _prof >= self.be_r * _risk:
+                    self.stop_loss = self.entry_price      # side-aware by construction
+                    self.breakeven_applied = True
 
         # J2.2: VTM-lite trailing stop
         # Activate trailing after 1.0× ATR favorable move
@@ -252,7 +270,12 @@ class ShadowPosition:
         self.friction_pct = FRICTION_PENALTIES.get(
             self.asset.upper(), _DEFAULT_FRICTION
         ) * 100
+        self.friction_source = "map" if self.asset.upper() in FRICTION_PENALTIES else "default"   # S7d
         self.net_pnl_pct = self.gross_pnl_pct - self.friction_pct
+        # S7b: three-way outcome. A trade that protected capital is not a loss.
+        # 0.05% gross band = Desire-ratified scratch threshold.
+        self.outcome_class = ("scratch" if abs(self.gross_pnl_pct) < 0.05
+                              else ("win" if self.net_pnl_pct > 0 else "loss"))
         logger.debug(
             f"[SHADOW] {self.asset} {self.side} closed: "
             f"reason={reason}, gross={self.gross_pnl_pct:.3f}%, "
@@ -285,7 +308,31 @@ class ShadowPosition:
             "net_pnl_pct":      round(self.net_pnl_pct, 4),
             "strategy_votes":   self.strategy_votes,
             "composite_state":  self.composite_state,
+            # ── S7d: fields that existed on the position but never reached
+            # the archive — proof identity, stop provenance, R-units. ──
+            "brc_confirmed":    self.brc_confirmed,
+            "brc_kind":         self.brc_kind,
+            "stop_source":      self.stop_source,
+            "initial_stop_loss": self.initial_stop_loss,
+            "friction_source":  self.friction_source,
+            "trailing_activated": self.trailing_active,
+            "net_pnl_r":        self._net_r(),
+            "gate_code":        self.gate_code,          # S7e
+            "outcome_class":    self.outcome_class,       # S7b
         }
+
+    def _net_r(self):
+        """S7d: net result in R using the FROZEN entry-time stop."""
+        try:
+            risk = abs(self.entry_price - self.initial_stop_loss)
+            if risk <= 0 or not self.close_price:
+                return None
+            move = (self.close_price - self.entry_price) if self.side == "long" \
+                   else (self.entry_price - self.close_price)
+            fr = (self.friction_pct / 100.0) * self.entry_price
+            return round((move - fr) / risk, 3)
+        except Exception:
+            return None
 
 
 class ShadowTradingEngine:
@@ -381,6 +428,8 @@ class ShadowTradingEngine:
         atr_multiplier: float = 1.8,
         tp_multiples: list = None,
         composite_state: dict = None,   # J2.1 — from CompositeState.to_dict()
+        trail_mult: float = 0.8,        # S7c: was hardcoded 1.5
+        be_r: float = 0.75,             # S7c: was TP1-touch trigger
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -478,13 +527,17 @@ class ShadowTradingEngine:
             else:
                 _stop_loss   = entry_price + sl_dist
                 _take_profit = entry_price - tp_dist
+        else:
+            # S7h: refuse an unmeasurable shadow rather than open a degenerate one.
+            logger.warning("[SHADOW] open refused for %s: atr unavailable — no risk anchor", asset)
+            return None
 
         # J2.2 + J2.3: Compute standardized trailing and TP1 params at entry time
         _trailing_distance = 0.0
         _trailing_activation_pct = 0.0
         _tp1_price = 0.0
         if atr and atr > 0 and entry_price > 0:
-            _trailing_distance = atr * 1.5
+            _trailing_distance = atr * trail_mult   # S7c: was 1.5 — now config-driven
             _trailing_activation_pct = atr / entry_price * 1.0  # 1.0× ATR
             _tp1_dist = 1.5 * atr
             if side == "long":
@@ -529,11 +582,16 @@ class ShadowTradingEngine:
         _t4_age = int(signal_details.get("setup_age") or 0)
         _t4_retest = signal_details.get("retest_type") or ""
 
+        # S7e: machine-stable gate identity — text before the first "(",
+        # e.g. "HOLD (Score: 2.71/4.1)" -> "HOLD"; "NY_OPEN (session)" -> "NY_OPEN"
+        _gate_code = (gate_blocked_by or "UNKNOWN").split("(")[0].strip() or "UNKNOWN"
+
         pos = ShadowPosition(
             asset=asset,
             side=side,
             strategy_source=strategy_source,
             gate_blocked_by=gate_blocked_by,
+            gate_code=_gate_code,
             judge_driver=_judge_driver,
             score_pct_of_max=_score_pct_of_max,
             qualify_tag=_qualify_tag,
@@ -556,6 +614,7 @@ class ShadowTradingEngine:
             ),
             regime_name=signal_details.get("regime", "UNKNOWN"),
             stop_loss=_stop_loss,
+            initial_stop_loss=_stop_loss,   # S7d: freeze entry-time risk
             take_profit=_take_profit,
             strategy_votes={
                 "mr_signal":    signal_details.get("mr_signal", 0),
@@ -580,6 +639,7 @@ class ShadowTradingEngine:
             lowest_price=entry_price,
             # J2.3: Breakeven after TP1
             tp1_price=_tp1_price,
+            be_r=be_r,   # S7c
         )
 
         self.open_positions.append(pos)
@@ -716,22 +776,40 @@ class ShadowTradingEngine:
         Summarise performance by blocking gate — uses net_pnl_pct (after friction).
         Useful for identifying gates that are blocking profitable signals.
 
-        Returns dict keyed by gate name:
-            {"count": int, "win_rate": float, "avg_net_pnl": float}
+        Returns dict keyed by gate code:
+            {"count": int, "win_rate": float, "avg_net_pnl": float,
+             "scratch_count": int, "win_rate_ex_scratch": float}
         """
         from collections import defaultdict
         buckets: Dict[str, list] = defaultdict(list)
         for r in self.closed_results:
-            buckets[r["gate_blocked_by"]].append(r["net_pnl_pct"])
+            # S7e: prefer the machine-stable gate_code; legacy records that
+            # predate it fall back to parsing gate_blocked_by the same way.
+            _code = r.get("gate_code") or (
+                r.get("gate_blocked_by", "UNKNOWN").split("(")[0].strip()
+            )
+            buckets[_code or "UNKNOWN"].append(r)
 
         scorecard = {}
-        for gate, pnls in buckets.items():
-            wins = sum(1 for p in pnls if p > 0)
+        for gate, recs in buckets.items():
+            pnls = [r["net_pnl_pct"] for r in recs]
+            wins = sum(1 for p in pnls if p > 0)   # legacy definition, unchanged
+            # S7b: scratch-aware win rate — excludes protected-capital trades
+            # from both sides of the ratio instead of letting them dilute it.
+            _oc = [r.get("outcome_class") for r in recs]
+            scratches = sum(1 for o in _oc if o == "scratch")
+            _ex_wins = sum(1 for i, o in enumerate(_oc)
+                           if o == "win" or (not o and pnls[i] > 0))
+            _ex_losses = sum(1 for i, o in enumerate(_oc)
+                             if o == "loss" or (not o and pnls[i] <= 0))
+            _ex_denom = _ex_wins + _ex_losses
             scorecard[gate] = {
                 "count":       len(pnls),
                 "win_rate":    round(wins / len(pnls) * 100, 1) if pnls else 0.0,
                 "avg_net_pnl": round(sum(pnls) / len(pnls), 3) if pnls else 0.0,
                 "total_pnl":   round(sum(pnls), 3),
+                "scratch_count": scratches,
+                "win_rate_ex_scratch": round(_ex_wins / _ex_denom * 100, 1) if _ex_denom else 0.0,
             }
         return dict(sorted(scorecard.items(), key=lambda x: x[1]["total_pnl"]))
 
