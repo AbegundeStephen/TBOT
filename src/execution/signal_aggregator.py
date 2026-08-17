@@ -432,6 +432,23 @@ class PerformanceWeightedAggregator:
             with open(self._state_persistence_path) as f:
                 saved = json.load(f)
 
+            # FIX ③/S6b: never restore structure from a stale file. 48h Desire-
+            # ratified default; moves to config in persistence part 2. A
+            # June-era file with no saved_at also lands here — by design.
+            STATE_RESTORE_MAX_AGE_H = 48
+            from datetime import datetime as _dt
+            _saved_at = saved.get("saved_at")
+            try:
+                _age_h = (_dt.now() - _dt.fromisoformat(str(_saved_at))).total_seconds() / 3600 if _saved_at else 1e9
+            except Exception:
+                _age_h = 1e9
+            if _age_h > STATE_RESTORE_MAX_AGE_H:
+                logger.warning(
+                    f"[STATE] Persisted state is {_age_h:.0f}h old (> {STATE_RESTORE_MAX_AGE_H}h) — "
+                    f"skipping structural restore, starting fresh."
+                )
+                return
+
             # Restore dynamic threshold distributions
             if hasattr(self, "dynamic_thresholds"):
                 for key_str, values in saved.get("threshold_cache", {}).items():
@@ -549,7 +566,7 @@ class PerformanceWeightedAggregator:
             with open(tmp, "w") as f:
                 json.dump(state_data, f, default=str)
             os.replace(tmp, self._state_persistence_path)
-            logger.debug("[STATE] Persisted state to disk.")
+            logger.info("[STATE] Persisted state to disk.")
         except Exception as e:
             logger.warning(f"[STATE] Persist failed: {e}")
 

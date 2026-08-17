@@ -2584,6 +2584,28 @@ class InstitutionalCouncilAggregator:
                 _achievable_max, w_structure + w_momentum + w_pattern + w_volume
             )
 
+            # ── FIX-A: HONEST CEILING (16-Aug validation) ─────────────────────────
+            # Subtract confirmed-dead input weight so the denominator only counts
+            # points a trade can actually earn. Value audited + Desire-ratified;
+            # recompute if judge segments change. Never below the 4-judge floor x 0.6
+            # so a bad config can't make every score meaningless.
+            #
+            # SCOPE NOTE (found during verification, not in the original spec):
+            # self.phase_config is not read into _pc_cfg until further down this
+            # method (the council_min_score_margin block) -- this segment runs
+            # earlier, so it needs its own read of the same source rather than
+            # reusing a not-yet-defined name.
+            _pc_cfg_early = getattr(self, "phase_config", {}) or {}
+            _dead_disc = float(_pc_cfg_early.get("dead_ceiling_discount", 0.0))
+            if _dead_disc > 0.0:
+                _floor_min = (w_structure + w_momentum + w_pattern + w_volume) * 0.6
+                _honest_max = max(_achievable_max - _dead_disc, _floor_min)
+                logger.info(
+                    f"[COUNCIL] Honest ceiling: {_achievable_max:.2f} -> {_honest_max:.2f} "
+                    f"(dead weight {_dead_disc:.2f})"
+                )
+                _achievable_max = _honest_max
+
             # ── H2: SCORING SYMMETRY ────────────────────────────────────────
             # E5b removed the irrelevant judge's WEIGHT from the denominator
             # above but left its SCORE in the numerator. buy_total was summed
