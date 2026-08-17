@@ -463,6 +463,8 @@ class VeteranTradeManager:
         self.use_structure_targets = self.risk_config.get("use_structure_targets", True)
         # Runner trailing stop ATR multiplier (replaces hardcoded 2.0)
         self.runner_trail_atr_multiplier = self.risk_config.get("runner_trail_atr_multiplier", 2.0)
+        # R-batch: floor under all downward trail mutations (0.0 = disabled)
+        self._trail_mult_floor = float(self.risk_config.get("trail_mult_floor", 0.0))
         # Time-based break-even: move SL to entry after N bars if pnl >= threshold
         self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
         self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
@@ -1509,6 +1511,7 @@ class VeteranTradeManager:
                         # Tighten, don't lock breakeven outright — genuinely
                         # different confidence than a confirmed 4H MAIN flip.
                         self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+                        self._floor_trail("retracement_failing")
                         logger.warning(
                             "[VTM D4] %s: retracement failing (depth recovered >50%% "
                             "since entry) — trail tightened to %.2f× ATR",
@@ -1553,6 +1556,7 @@ class VeteranTradeManager:
                             self.current_stop_loss = self.entry_price
                             self._lv_breakeven_locked = True
                         self.runner_trail_atr_multiplier *= 0.5
+                        self._floor_trail("structural_against")
                         logger.warning(
                             "[VTM STRUCTURAL] %s: %s detected against %s position — "
                             "trail tightened to %.2f× ATR%s",
@@ -1595,6 +1599,7 @@ class VeteranTradeManager:
                             f"{self.runner_trail_atr_multiplier:.2f}× → {_new_mult:.2f}×"
                         )
                         self.runner_trail_atr_multiplier = _new_mult
+                        self._floor_trail("level_rejection")
 
                 # 2. is_parabolic in position's favor — lock in gains.
                 # Parabolic extension is a take-profit-opportunity signal
@@ -1621,6 +1626,7 @@ class VeteranTradeManager:
                             f"({self.runner_trail_atr_multiplier:.2f}× → {_locked_mult:.2f}×)"
                         )
                         self.runner_trail_atr_multiplier = _locked_mult
+                        self._floor_trail("parabolic_lock")
 
                 # 3. absorption_detected — institutional orders absorbing at price.
                 # Only act outside silent zones (normal retracements expect this).
@@ -1635,6 +1641,7 @@ class VeteranTradeManager:
                         f"({self.runner_trail_atr_multiplier:.2f}× → {_abs_mult:.2f}×)"
                     )
                     self.runner_trail_atr_multiplier = _abs_mult
+                    self._floor_trail("absorption")
 
             if self.side == "long":
                 # Guard: highest_price_reached may be None if entry_price was None at construction
@@ -1718,6 +1725,15 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Price update error: {e}")
             return None
 
+    def _floor_trail(self, reason: str) -> None:
+        """R-batch: clamp the compounded trail multiplier to the configured floor."""
+        f = getattr(self, "_trail_mult_floor", 0.0)
+        if f > 0.0 and self.runner_trail_atr_multiplier < f:
+            logger.info(
+                f"[VTM] trail floor: {self.runner_trail_atr_multiplier:.2f}x -> {f:.2f}x ({reason})"
+            )
+            self.runner_trail_atr_multiplier = f
+
     def _apply_livermore_transition(
         self,
         prev_state: str,
@@ -1777,12 +1793,14 @@ class VeteranTradeManager:
             if _same_dir:
                 # Normal pullback against position — tighten trail
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail
+                self._floor_trail("lsm_main_to_natural")
                 logger.info(
                     "[VTM LIVE LSM] %s: MAIN→NATURAL — tightening trail to %.2f× ATR",
                     self.asset, self.runner_trail_atr_multiplier,
                 )
             elif _thesis_confirming:
                 self.runner_trail_atr_multiplier = _config_trail * 1.1
+                self._floor_trail("lsm_thesis_confirming")
                 logger.info(
                     "[VTM LIVE LSM] %s: counter-trend thesis confirming — trail eased",
                     self.asset,
@@ -1791,6 +1809,7 @@ class VeteranTradeManager:
         # ── MAIN → SECONDARY: deep counter-move, structural warning ──────
         elif prev_state in _MAIN and new_state in _SEC:
             self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+            self._floor_trail("lsm_main_to_secondary")
             if in_profit and not getattr(self, "_lv_breakeven_locked", False):
                 self.current_stop_loss = self.entry_price
                 self._lv_breakeven_locked = True
@@ -1806,6 +1825,7 @@ class VeteranTradeManager:
         # ── NATURAL → SECONDARY: counter-move escalating ─────────────────
         elif prev_state in _NATURAL and new_state in _SEC:
             self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
+            self._floor_trail("lsm_natural_to_secondary")
             if in_profit and not getattr(self, "_lv_breakeven_locked", False):
                 self.current_stop_loss = self.entry_price
                 self._lv_breakeven_locked = True
@@ -1826,6 +1846,7 @@ class VeteranTradeManager:
             )
             if _same_dir:
                 self.runner_trail_atr_multiplier = _config_trail * _main_trail
+                self._floor_trail("lsm_trend_resumed")
                 self._lv_breakeven_locked = False
                 logger.info(
                     "[VTM LIVE LSM] %s: →MAIN_%s (trend resumed) — trail restored to %.2f× ATR",
@@ -1835,6 +1856,7 @@ class VeteranTradeManager:
             else:
                 # Opposite MAIN — full reversal
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
+                self._floor_trail("lsm_reversal")
                 if not getattr(self, "_lv_breakeven_locked", False):
                     self.current_stop_loss = self.entry_price
                     self._lv_breakeven_locked = True
@@ -1867,6 +1889,7 @@ class VeteranTradeManager:
             )
             if thesis_confirmed and lv_1h_confirmed:
                 self.runner_trail_atr_multiplier = _config_trail * _main_trail
+                self._floor_trail("lsm_thesis_confirmed_1h")
                 self._lv_breakeven_locked = False
                 logger.info(
                     "[VTM LIVE LSM] %s: %s→%s (thesis confirmed, 1H agrees) — "
@@ -1877,6 +1900,7 @@ class VeteranTradeManager:
             else:
                 # e.g. MAIN_DOWN → MAIN_UP while holding SHORT — thesis invalidated
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
+                self._floor_trail("lsm_direct_reversal")
                 if not getattr(self, "_lv_breakeven_locked", False):
                     self.current_stop_loss = self.entry_price
                     self._lv_breakeven_locked = True
@@ -2206,6 +2230,14 @@ class VeteranTradeManager:
             _phase_cfg = self.risk_config.get("phase_config", {}) or {}
             if not _phase_cfg.get("r_breakeven_enabled", False):
                 return False
+            # R2: fire once per trade -- the lock price itself is idempotent
+            # (only ever tightens), but without this guard the log line and
+            # the arm-trail check would re-run every tick for the rest of
+            # the trade's life once profit crosses trigger*risk. Not
+            # __init__-initialized (matches this file's _lv_breakeven_locked
+            # convention), hence getattr rather than a direct attribute read.
+            if getattr(self, "breakeven_applied", False):
+                return False
             entry = float(self.entry_price)
             if self.initial_stop_loss is None:
                 return False
@@ -2214,17 +2246,23 @@ class VeteranTradeManager:
                 return False
             profit = (current_price - entry) if self.side == "long" else (entry - current_price)
             trigger = float(_phase_cfg.get("r_breakeven_trigger", 0.75))
+            lock_r  = float(_phase_cfg.get("r_breakeven_lock", 0.0))   # R2: 0.0 = entry (old behavior)
             if profit < trigger * risk:
                 return False
-            if self.side == "long" and self.current_stop_loss < entry:
-                self.current_stop_loss = entry
-            elif self.side == "short" and self.current_stop_loss > entry:
-                self.current_stop_loss = entry
-            else:
-                return False
+            _lock_px = (entry + lock_r * risk) if self.side == "long" \
+                       else (entry - lock_r * risk)
+            # side-aware: only ever tightens
+            if (self.side == "long" and _lock_px > self.current_stop_loss) or \
+               (self.side == "short" and _lock_px < self.current_stop_loss):
+                self.current_stop_loss = _lock_px
+            self.breakeven_applied = True
+            # R2: this step now also ARMS the trail (the ladder used to).
+            if not self.runner_activated:
+                self.runner_activated = True
+                self.enable_trailing_stop()
             logger.info(
-                f"[VTM] R-breakeven: {self.asset} profit "
-                f"{profit / risk:.2f}R >= {trigger}R -> SL moved to entry"
+                f"[VTM] R-lock: {self.asset} profit {profit / risk:.2f}R >= {trigger}R -> "
+                f"SL locked at {'+' if lock_r > 0 else ''}{lock_r}R, trailing ARMED"
             )
             return True
         except Exception as e:
@@ -3006,6 +3044,11 @@ class VeteranTradeManager:
                 return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
 
         # --- STEP 7: TP Partial Exits ---
+        # R2: ladder executes ONLY when partials are phase-enabled. With partials
+        # off (current phase), exits are: SL / BE-family / R-lock / trail / time /
+        # smart exits, with the exchange holding the final rung as safety net.
+        if not self.partials_enabled:
+            return None
         try:
             _is_last_rung = lambda idx: idx == len(self.take_profit_levels) - 1
             for i, (target, size) in enumerate(zip(self.take_profit_levels, self.partial_sizes)):

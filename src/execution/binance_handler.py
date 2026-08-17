@@ -1392,7 +1392,8 @@ class BinanceExecutionHandler:
                         if _new_pos and _new_pos.trade_manager:
                             _tp_levels = getattr(_new_pos.trade_manager, "take_profit_levels", None)
                             if _tp_levels:
-                                self._push_tp_to_exchange(_new_pos, self.symbol, _tp_levels[0])
+                                # R1: push the FINAL rung as the safety net (was [0])
+                                self._push_tp_to_exchange(_new_pos, self.symbol, _tp_levels[-1])
                     except Exception as _tp_err:
                         logger.debug(f"[OPEN] Initial TP push failed (non-fatal): {_tp_err}")
 

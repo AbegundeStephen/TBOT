@@ -1186,7 +1186,12 @@ class MT5ExecutionHandler:
                     # not a risk event and must never trigger an emergency close.
                     if _push_tp and _tm is not None:
                         try:
-                            _initial_tp = _tm.current_take_profit
+                            # R1: exchange TP = FINAL rung only (safety net), never TP1.
+                            # A full-lot TP1 closes the whole position at ~1R — the worst
+                            # regime in the 17-Aug study. Matches the defer policy the
+                            # Binance updater already enforces.
+                            _tp_lv = getattr(_tm, "take_profit_levels", None)
+                            _initial_tp = _tp_lv[-1] if _tp_lv else _tm.current_take_profit
                             if _initial_tp:
                                 self._push_tp_to_exchange(mt5_ticket, symbol, _initial_tp)
                         except Exception as _e:
