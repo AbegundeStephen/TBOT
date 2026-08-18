@@ -489,6 +489,13 @@ class VeteranTradeManager:
         # entry_type: MR_PULLBACK / TREND_FOLLOWING / SPRING_ENTRY /
         #             RANGE_BOUNDARY / CONTINUATION / REJECT / None (no classification)
         self.vtm_entry_type             = _cs.get("entry_type")
+        # Tier-Conditional Stops (17-Aug study): RetestEngine tier, only set
+        # when a BRC (break-retest-confirmation) proof actually confirmed —
+        # None otherwise, which Segment 2's tier gate treats as "unknown" and
+        # resolves to today's ATR-baseline behavior. Same _cs.get() pattern
+        # as every sibling field above; composite_state.py already declares
+        # this field, it just wasn't extracted into VTM until now.
+        self.brc_tier                   = _cs.get("brc_tier")
 
         # 7.4: Populate _mfe_target_r from real trade history once enough
         # exists. Stays None (safely skipped by _blend_single_tp, see the
@@ -543,6 +550,27 @@ class VeteranTradeManager:
             self.atr_multiplier = max(1.5, self.atr_multiplier - _sec_stop_sub)
             logger.info(
                 f"[VTM] Livermore={_lv4h}: ATR mult −{_sec_stop_sub} → {self.atr_multiplier:.2f}×"
+            )
+
+        # ── RUNNER ATR MULTIPLIER (17-Aug sweep, ships OFF, optional) ──────
+        # 1.0x -0.023 | 1.5x +0.011 | 2.0x +0.032 | 2.5x +0.024 | 3.0x +0.007
+        # A genuine interior optimum (rises then falls), worth ~0.011R over
+        # live per-asset values (1.8-2.5) — a tune, not a repair. Overrides
+        # (does not add to) the Livermore overlay above for RUNNER-tier
+        # entries specifically, since it's a flat replacement value, not an
+        # incremental adjustment. Rejected alternatives, measured negative,
+        # do not reintroduce: 3-bar swing anchor -0.037, 5-bar swing -0.033,
+        # broken-level anchor -0.011.
+        _phase_cfg_runner = self.risk_config.get("phase_config", {})
+        if (
+            _phase_cfg_runner.get("runner_atr_mult_flat_enabled", False)
+            and (getattr(self, "brc_tier", None) or "").upper() == "RUNNER"
+        ):
+            _old_mult = self.atr_multiplier
+            self.atr_multiplier = float(_phase_cfg_runner.get("runner_atr_mult_flat", 2.0))
+            logger.info(
+                f"[TIER-STOP] {self.asset}: RUNNER flat ATR mult {_old_mult:.2f}× → "
+                f"{self.atr_multiplier:.2f}×"
             )
 
         if _lv4h in ("MAIN_UP", "MAIN_DOWN"):
@@ -1044,13 +1072,39 @@ class VeteranTradeManager:
                         max(self.entry_price + min_stop_dist, final_sl)
                     )
 
+                # ── TIER-CONDITIONAL STOPS (17-Aug study, ships OFF) ──────────
+                # retest-class: structural (level ± allowance) — measured +0.010 vs
+                #               -0.005 for ATR on 1,700 events
+                # RUNNER-class: ATR distance — measured +0.032 vs -0.011 structural
+                # Tier source: brc_tier, extracted from composite_state at
+                # construction (see __init__'s Phase 4 block). Unknown/missing
+                # tier resolves to ATR, i.e. today's behavior — the safe direction.
+                # Gates STEP 2.5 below (the existing structural-stop mechanism,
+                # untouched) rather than reimplementing it — off, STEP 2.5 always
+                # runs exactly as it does today.
+                _phase_cfg_tier = self.risk_config.get("phase_config", {})
+                if _phase_cfg_tier.get("tier_conditional_stops_enabled", False):
+                    _tier = (getattr(self, "brc_tier", None) or "").upper()
+                    if _tier and _tier != "RUNNER":
+                        _allow = float(self.risk_config.get("structural_stop_allowance_atr", 0.3))
+                        _attempt_structural = True
+                        logger.info(
+                            f"[TIER-STOP] {self.asset}: tier={_tier} -> structural "
+                            f"(allowance {_allow} ATR, _compute_structural_stop's own per-entry_type buffer applies)"
+                        )
+                    else:
+                        _attempt_structural = False
+                        logger.info(f"[TIER-STOP] {self.asset}: tier={_tier or 'UNKNOWN'} -> ATR distance")
+                else:
+                    _attempt_structural = True
+
                 # STEP 2.5 — Structural Stop Override (Phase 4)
                 # Routes stop placement by entry_type from the retest engine.
                 # Overrides the ATR baseline with a level-anchored stop when
                 # the entry context provides a structural invalidation reference.
                 # Global clamps (min/max ATR) applied again after to ensure safety.
                 try:
-                    _struct_sl = self._compute_structural_stop(atr)
+                    _struct_sl = self._compute_structural_stop(atr) if _attempt_structural else None
                     if _struct_sl is not None:
                         # Validate the structural stop is on the correct side of entry
                         _valid = (
@@ -1130,6 +1184,24 @@ class VeteranTradeManager:
                 _min_sl_pct = self.risk_config.get("min_sl_pct", 0.0)
                 if _min_sl_pct > 0 and self.entry_price > 0:
                     _min_sl_dist = self.entry_price * _min_sl_pct
+
+                    # ── TELEMETRY (17-Aug): the floor is invisible today. Panel
+                    # says it binds on 61.5% of structural retest stops and costs
+                    # ~0.009 R/trade there. Log every evaluation so the per-asset
+                    # recalibration can be made on live data, not simulation.
+                    # Captured before either branch below can mutate
+                    # initial_stop_loss, so this is the true pre-floor distance —
+                    # this file has no separate "_candidate_stop" variable; the
+                    # pre-floor stop lives directly on self.initial_stop_loss.
+                    _raw_dist = abs(self.entry_price - self.initial_stop_loss)
+                    logger.info(
+                        f"[MIN-SL] {self.asset}: raw={_raw_dist:.5f} "
+                        f"floor={_min_sl_dist:.5f} ({_min_sl_pct:.4%}) "
+                        f"binds={'YES' if _raw_dist < _min_sl_dist else 'no'}"
+                        + (f" widened_by={(_min_sl_dist - _raw_dist):.5f}"
+                           if _raw_dist < _min_sl_dist else "")
+                    )
+
                     if self.side == "long":
                         _floor_sl = self.entry_price - _min_sl_dist
                         if self.initial_stop_loss > _floor_sl:

@@ -486,6 +486,7 @@ class ShadowTradingEngine:
         # where atr is falsy and the whole block below is skipped — the same
         # shape as N8's _atr1 scope bug earlier this session.
         _t4_use_struct = False
+        _t4_stop_source = "atr"  # Segment 4: same pre-init discipline as _t4_use_struct above
         if atr and atr > 0:
             _tp_mults = tp_multiples if tp_multiples else [2.5]
             _first_tp = float(_tp_mults[0]) if _tp_mults else 2.5
@@ -501,7 +502,23 @@ class ShadowTradingEngine:
             # which was used so the archive is honest about it.
             _t4_struct_ref = float(signal_details.get("setup_ref") or 0.0)
             _t4_use_struct = False
-            if _t4_struct_ref > 0 and atr > 0:
+
+            # ── Segment 4 (17-Aug): mirror VTM's tier-conditional gate, same
+            # config keys. ShadowTradingEngine carries no config reference of
+            # its own (unlike VTM's self.risk_config), so this reads
+            # phase_config off the composite_state dict passed in here — the
+            # same field composite_state.py declares and VTM's council/LSM
+            # companion already populates. RUNNER tier forces ATR regardless
+            # of whether a structural reference exists, matching Segment 2's
+            # VTM-side behavior; off (default), _attempt_struct_shadow is
+            # always True and every path below is unchanged from today.
+            _cs_dict_t4 = composite_state or {}
+            _phase_cfg_shadow = _cs_dict_t4.get("phase_config", {}) or {}
+            _tier_gate_on = bool(_phase_cfg_shadow.get("tier_conditional_stops_enabled", False))
+            _shadow_tier = (_cs_dict_t4.get("brc_tier") or "").upper()
+            _attempt_struct_shadow = (not _tier_gate_on) or (bool(_shadow_tier) and _shadow_tier != "RUNNER")
+
+            if _attempt_struct_shadow and _t4_struct_ref > 0 and atr > 0:
                 _t4_buf = 0.15 * atr        # same tolerance BRC uses
                 if side == "long" and _t4_struct_ref < entry_price:
                     sl_dist = (entry_price - _t4_struct_ref) + _t4_buf
@@ -514,10 +531,22 @@ class ShadowTradingEngine:
                 # Match VTM clamp: min 0.5×atr, max 5.0×atr
                 sl_dist = max(0.5 * atr, min(5.0 * atr, atr_multiplier * atr))
 
+            # stop_source: "structural"/"atr" preserved byte-identical when the
+            # tier gate is off; new "_tier" suffix only appears once it's on,
+            # so the archive can be split by anchor once tier-conditional
+            # stops are actually enabled without relabeling historical rows.
+            if _tier_gate_on:
+                _t4_stop_source = "structural_tier" if _t4_use_struct else (
+                    "atr_tier" if _shadow_tier == "RUNNER" else "atr_fallback"
+                )
+            else:
+                _t4_stop_source = "structural" if _t4_use_struct else "atr"
+
             logger.info(
-                "[T4-SHADOW-SL] %s: %s stop — dist=%.5g (%s)",
+                "[T4-SHADOW-SL] %s: %s stop — dist=%.5g (%s)%s",
                 asset, "STRUCTURAL" if _t4_use_struct else "ATR-fallback",
                 sl_dist, f"ref={_t4_struct_ref:.5g}" if _t4_use_struct else f"{atr_multiplier}xATR",
+                f" [tier={_shadow_tier or 'UNKNOWN'}]" if _tier_gate_on else "",
             )
             tp_dist = _first_tp * atr
 
@@ -604,7 +633,7 @@ class ShadowTradingEngine:
             setup_ref_tests=_t4_tests,
             setup_age_at_entry=_t4_age,
             retest_type=_t4_retest,
-            stop_source="structural" if _t4_use_struct else "atr",
+            stop_source=_t4_stop_source,
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
