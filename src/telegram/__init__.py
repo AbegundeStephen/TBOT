@@ -318,6 +318,9 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("vtm_status", self.cmd_vtm_status_detail))
         self.application.add_handler(CommandHandler("set_sl", self.cmd_set_sl))
         self.application.add_handler(CommandHandler("set_tp", self.cmd_set_tp))
+        self.application.add_handler(CommandHandler("reverse", self.cmd_reverse))
+        self.application.add_handler(CommandHandler("moves", self.cmd_moves))
+        self.application.add_handler(CommandHandler("resume_sl", self.cmd_resume_sl))
         self.application.add_handler(CommandHandler("reset_equity", self.cmd_reset_equity))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
@@ -485,6 +488,9 @@ class TradingTelegramBot:
             "/vtm_status — Full VTM override breakdown with hints\n"
             "/set_sl ASSET PRICE — Move stop loss on a live position\n"
             "/set_tp ASSET PRICE [TIER] — Move take profit (tier optional)\n"
+            "/moves ASSET — Last 10 automated/manual SL+TP moves for a position\n"
+            "/reverse ASSET MOVE_ID — Undo the latest automated move, pauses auto-SL\n"
+            "/resume_sl ASSET — Re-enable automated SL management after /reverse\n"
             "/history — Last 10 closed trades with P&amp;L and hold time\n"
             "/performance — Win rate, profit factor, drawdown, equity curve\n\n"
 
@@ -1465,6 +1471,232 @@ class TradingTelegramBot:
 
         except Exception as e:
             logger.error(f"[TG] /set_tp error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_reverse(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /reverse <asset> <move_id>
+
+        Undo the latest automated SL/TP move for a position and, for SL
+        moves, pause automated SL management (protection still armed —
+        only movement pauses). /resume_sl re-enables it. Only the most
+        recent automated move is reversible; older ids are rejected with
+        "superseded by #N" — reversing a stale move is incoherent once
+        newer moves have landed on top of it.
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            args = context.args
+            if not args or len(args) < 2:
+                await update.message.reply_text(
+                    "ℹ️ Usage: /reverse &lt;asset&gt; &lt;move_id&gt;\n"
+                    "Example: /reverse BTC 12\n"
+                    "See /moves &lt;asset&gt; for recent move ids.",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_arg = args[0].upper()
+            try:
+                move_id = int(args[1])
+            except ValueError:
+                await update.message.reply_text(f"❌ Invalid move id: {args[1]}")
+                return
+
+            positions = self.trading_bot.portfolio_manager.positions
+            matched = [
+                p for p in positions.values()
+                if p.asset.upper() == asset_arg and p.trade_manager
+            ]
+            if not matched:
+                await update.message.reply_text(
+                    f"⚠️ No active VTM position found for <b>{asset_arg}</b>.\n"
+                    f"Use /vtm_status to see open positions.",
+                    parse_mode="HTML",
+                )
+                return
+
+            position = matched[0]
+            tm = position.trade_manager
+            hist = getattr(tm, "_move_history", [])
+            auto = [r for r in hist if r["source"] == "AUTO"]
+            if not auto:
+                await update.message.reply_text(
+                    f"ℹ️ No automated moves recorded for {asset_arg} yet."
+                )
+                return
+
+            last = auto[-1]
+            if move_id != last["move_id"]:
+                await update.message.reply_text(
+                    f"❌ Move #{move_id} superseded by #{last['move_id']} — "
+                    f"only the latest automated move is reversible.\n"
+                    f"Use /moves {asset_arg} to see the current list."
+                )
+                return
+
+            target = last["old"]
+
+            if last["kind"] == "SL":
+                if target is None:
+                    await update.message.reply_text(
+                        f"❌ Move #{move_id} had no prior SL to restore to "
+                        f"(it was the first stop ever set for this position)."
+                    )
+                    return
+                result = tm.override_stop_loss(float(target))  # reuses validation + logging
+                if "❌" in result:
+                    await update.message.reply_text(
+                        f"Reversal rejected: {html.escape(result)}", parse_mode="HTML"
+                    )
+                    return
+                tm._auto_sl_paused = True
+                # override_stop_loss already recorded a MANUAL move for the restore
+                # itself (old=last['new'], new=target) — no separate _record_auto_move
+                # call needed here, matching how /set_sl's own writes get recorded.
+
+                # Push the restored SL to the exchange — same block cmd_set_sl uses.
+                try:
+                    asset_cfg = self.trading_bot.config.get("assets", {}).get(position.asset, {})
+                    trading_cfg = self.trading_bot.config.get("trading", {})
+                    mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+                    if (
+                        asset_cfg.get("exchange", "mt5") == "mt5"
+                        and mt5_handler
+                        and position.mt5_ticket
+                        and trading_cfg.get("place_vtm_sl_on_exchange", False)
+                    ):
+                        symbol = mt5_handler._resolve_symbol(position.asset)
+                        if symbol:
+                            mt5_handler._push_sl_to_exchange(position.mt5_ticket, symbol, float(target))
+                    position.stop_loss = float(target)
+                except Exception as _push_err:
+                    logger.error(f"[TG] /reverse SL exchange push failed: {_push_err}")
+
+                await update.message.reply_text(
+                    f"⏪ Reversed #{move_id}: SL back to {float(target):.5f}.\n"
+                    f"⏸️ Auto-SL PAUSED for {tm.asset} — protection still armed, "
+                    f"movement stopped. /resume_sl {tm.asset} to re-enable."
+                )
+            else:  # TP
+                # Some automated TP moves rewrite the whole ladder (greed-mode
+                # collapse, REVERSION→TREND mutation cancelling all TPs), so
+                # `old`/`new` can be a list, not a single price — override_take_profit
+                # only handles a single tier. Restore the list directly when needed.
+                if isinstance(target, list):
+                    _old_list = list(tm.take_profit_levels)
+                    tm.take_profit_levels = list(target)
+                    tm._record_auto_move("TP", _old_list, list(target), f"reverse_of_{move_id}", source="MANUAL")
+                    await update.message.reply_text(
+                        f"⏪ Reversed #{move_id}: TP levels restored to {target}."
+                    )
+                elif target is None:
+                    await update.message.reply_text(
+                        f"❌ Move #{move_id} had no prior TP to restore to."
+                    )
+                else:
+                    result = tm.override_take_profit(float(target))
+                    await update.message.reply_text(
+                        f"⏪ Reversed #{move_id}: {html.escape(result)}", parse_mode="HTML"
+                    )
+
+        except Exception as e:
+            logger.error(f"[TG] /reverse error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_moves(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /moves <asset> — last 10 SL/TP move-ledger entries for the position
+        (both automated and manual), newest last.
+        """
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            args = context.args
+            if not args:
+                await update.message.reply_text(
+                    "ℹ️ Usage: /moves &lt;asset&gt;\nExample: /moves BTC",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_arg = args[0].upper()
+            positions = self.trading_bot.portfolio_manager.positions
+            matched = [
+                p for p in positions.values()
+                if p.asset.upper() == asset_arg and p.trade_manager
+            ]
+            if not matched:
+                await update.message.reply_text(
+                    f"⚠️ No active VTM position found for <b>{asset_arg}</b>.\n"
+                    f"Use /vtm_status to see open positions.",
+                    parse_mode="HTML",
+                )
+                return
+
+            tm = matched[0].trade_manager
+            hist = getattr(tm, "_move_history", [])[-10:]
+            if not hist:
+                await update.message.reply_text(f"ℹ️ No moves recorded for {asset_arg} yet.")
+                return
+
+            lines = [f"SL/TP moves — {asset_arg} ({tm.side.upper()})"]
+            for r in hist:
+                _time_part = r["ts"].split("T")[-1] if "T" in r["ts"] else r["ts"]
+                _old_s = f"{r['old']:.5f}" if isinstance(r["old"], (int, float)) else str(r["old"])
+                _new_s = f"{r['new']:.5f}" if isinstance(r["new"], (int, float)) else str(r["new"])
+                lines.append(
+                    f"#{r['move_id']} {_time_part} {r['kind']} {_old_s}→{_new_s} "
+                    f"({r['reason']}) {r['source']}"
+                )
+            await update.message.reply_text(
+                f"<pre>{html.escape(chr(10).join(lines))}</pre>", parse_mode="HTML"
+            )
+
+        except Exception as e:
+            logger.error(f"[TG] /moves error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def cmd_resume_sl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/resume_sl <asset> — re-enable automated SL management after /reverse."""
+        try:
+            if not self.trading_bot:
+                await update.message.reply_text("⚠️ Trading bot not connected")
+                return
+
+            args = context.args
+            if not args:
+                await update.message.reply_text(
+                    "ℹ️ Usage: /resume_sl &lt;asset&gt;\nExample: /resume_sl BTC",
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_arg = args[0].upper()
+            positions = self.trading_bot.portfolio_manager.positions
+            matched = [
+                p for p in positions.values()
+                if p.asset.upper() == asset_arg and p.trade_manager
+            ]
+            if not matched:
+                await update.message.reply_text(
+                    f"⚠️ No active VTM position found for <b>{asset_arg}</b>.\n"
+                    f"Use /vtm_status to see open positions.",
+                    parse_mode="HTML",
+                )
+                return
+
+            tm = matched[0].trade_manager
+            tm._auto_sl_paused = False
+            await update.message.reply_text(f"▶️ Auto-SL resumed for {tm.asset}.")
+
+        except Exception as e:
+            logger.error(f"[TG] /resume_sl error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
     async def cmd_reset_equity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

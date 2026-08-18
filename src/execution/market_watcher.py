@@ -604,7 +604,7 @@ class MarketWatcher:
         )
 
         # Push SL to breakeven on the exchange
-        self._push_sl(position, be_sl, asset_name)
+        self._push_sl(position, be_sl, asset_name, reason="market_watcher_breakeven")
 
         # Telegram alert
         self._send_alert(
@@ -643,7 +643,7 @@ class MarketWatcher:
             f"Pushing emergency SL → ${emergency_sl:.4g}"
         )
 
-        self._push_sl(position, emergency_sl, asset_name)
+        self._push_sl(position, emergency_sl, asset_name, reason="market_watcher_emergency")
 
         self._send_alert(
             f"🚨 <b>MARKET WATCHER — EMERGENCY</b>\n"
@@ -656,12 +656,34 @@ class MarketWatcher:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _push_sl(self, position, new_sl: float, asset_name: str):
-        """Push a new SL to the exchange for an MT5 position."""
+    def _push_sl(self, position, new_sl: float, asset_name: str, reason: str = "market_watcher"):
+        """Push a new SL to the exchange for an MT5 position.
+
+        MANUAL-AUTHORITY BATCH: gated by the same tighten-only rule VTM's
+        _propose_stop enforces for every other automated writer. Previously
+        this pushed to the broker unconditionally, then wrote the local
+        state directly — a market-watcher "safety" push could have actually
+        loosened a manually-locked stop, since nothing checked direction.
+        Checked BEFORE the exchange call so a rejected proposal never
+        reaches the broker either — the exchange-level stop is the one that
+        actually matters for risk, more so than the local VTM mirror.
+        """
         if not position.mt5_ticket:
             return
         if not self.mt5_handler:
             return
+        tm = position.trade_manager
+        if tm is not None and hasattr(tm, "_is_tighter"):
+            with tm._sl_lock:
+                _cur = tm.current_stop_loss
+                _tighter = tm._is_tighter(new_sl, _cur)
+            if not _tighter:
+                logger.info(
+                    f"[WATCHER] ✗ {reason}: SL {new_sl:.5g} not tighter than "
+                    f"{_cur if _cur is None else f'{_cur:.5g}'} for {asset_name} — "
+                    f"suppressed (tighten-only), not pushed to exchange"
+                )
+                return
         try:
             symbol = self.mt5_handler._resolve_symbol(asset_name)
             if symbol:
@@ -674,15 +696,23 @@ class MarketWatcher:
                 )
                 # A13: this write races against VTM's own check_exit tick
                 # (runs on the main loop's thread, this runs on the watcher's
-                # own 15s-poll thread). Acquire the same lock check_exit
-                # holds for its whole tick so the two can't interleave.
-                if position.trade_manager:
-                    _sl_lock = getattr(position.trade_manager, "_sl_lock", None)
+                # own 15s-poll thread). MANUAL-AUTHORITY BATCH: routes through
+                # VTM's own choke-point (re-confirms tighten-only, records the
+                # move, queues the Telegram notification) instead of writing
+                # current_stop_loss directly. _flush_pending_moves runs the
+                # actual ledger I/O — safe here since this thread has never
+                # held tm._sl_lock before this call (top-level acquire).
+                if tm is not None and hasattr(tm, "_propose_stop"):
+                    tm._propose_stop(new_sl, reason)
+                    if hasattr(tm, "_flush_pending_moves"):
+                        tm._flush_pending_moves()
+                elif tm is not None:
+                    _sl_lock = getattr(tm, "_sl_lock", None)
                     if _sl_lock is not None:
                         with _sl_lock:
-                            position.trade_manager.current_stop_loss = new_sl
+                            tm.current_stop_loss = new_sl
                     else:
-                        position.trade_manager.current_stop_loss = new_sl
+                        tm.current_stop_loss = new_sl
         except Exception as exc:
             logger.error(f"[WATCHER] SL push failed for {asset_name}: {exc}")
 
