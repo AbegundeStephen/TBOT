@@ -1477,6 +1477,10 @@
     "profit_gate_real_tp_mult_enabled": true,
     "brc_max_age_tf": 20,
     "brc_max_age_mr": 20,
-    "brc_max_age_solo": 20
+    "brc_max_age_solo": 20,
+    "auto_move_guard_enabled": true,
+    "auto_move_notify_enabled": true,
+    "auto_move_trail_digest_atr": 0.25,
+    "auto_move_trail_digest_min": 15
   }
 }

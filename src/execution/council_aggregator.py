@@ -405,30 +405,47 @@ class InstitutionalCouncilAggregator:
         preset_trade_type: str = "TREND",
     ) -> Tuple[bool, str]:
         """
-        Check the 1D Macro Trend via pre-injected Governor data.
-        ✅ INSTITUTIONAL: Strict TREND enforcement. Supports REVERSION gating.
+        GOVERNOR — ADVISORY MODE (17-Aug ratification).
+
+        Evidence (1,690 proofs, 1D-200EMA regime, verified exits,
+        Mar25-Jun26): counter-trend +0.110R vs aligned +0.023R; identical
+        tail risk (worst-5% ~-1.09 both); hard-block simulation cost ~-71.8R.
+        The directional veto failed its evidence bar and is removed.
+
+        This function now ONLY classifies and logs. It never returns False,
+        never mutates scoring, never blocks on missing data (abstain), and
+        passes preset_trade_type through unchanged — Gate 4 (profit
+        economics) selects min_rr by trade_type and the performance tracker
+        keys on it, so the plumbing contract is preserved exactly.
+
+        Authority can be earned back via Fix-B: join [GOVERNOR-ADVISORY]
+        verdicts to trade outcomes; any future veto must clear the same
+        bar every judge faces.
+
+        The caller (this class's decision block) still has three branches
+        keyed on gov_passed==False and trade_type=="SLIGHTLY_COUNTER" — both
+        conditions this function no longer produces, so those branches are
+        permanently unreachable. Left in place deliberately; removing them
+        is a separate hygiene task.
         """
-        # 1. FAIL-SAFE: If no Governor data, return NO TRADE (Strict macro dependency)
-        if not governor_data:
-            logger.warning(
-                "[GOV] ❌ BLOCKED - No MTF Governor data available. Blocking trade (Strict Macro Rule)."
-            )
-            return False, "NEUTRAL"
-
-        governor = governor_data.get("governor") or governor_data.get(
-            "full_regime_status"
-        )
-
-        if not governor:
-            logger.warning(
-                "[GOV] ❌ BLOCKED - No Governor status object found in data. Blocking trade."
-            )
-            return False, "NEUTRAL"
-
+        _verdict = "NO_DATA"
+        _regime_name = "UNKNOWN"
         try:
-            # Extract regime context
-            regime_name = getattr(
-                governor, "consensus_regime", governor_data.get("regime", "NEUTRAL")
+            governor = None
+            if governor_data:
+                governor = governor_data.get("governor") or governor_data.get(
+                    "full_regime_status"
+                )
+            if governor is None:
+                logger.info(
+                    f"[GOVERNOR-ADVISORY] {self.asset_type}: verdict=NO_DATA "
+                    f"sig={signal:+d} type={preset_trade_type} — abstain (advisory mode)"
+                )
+                return True, preset_trade_type
+
+            _regime_name = getattr(
+                governor, "consensus_regime",
+                governor_data.get("regime", "NEUTRAL"),
             )
             is_bullish = getattr(
                 governor, "is_bullish", governor_data.get("is_bullish", False)
@@ -437,92 +454,29 @@ class InstitutionalCouncilAggregator:
                 governor, "is_bearish", governor_data.get("is_bearish", False)
             )
 
-            # 2. MRS §6 Phase 0 — TRANSITION path permanently removed.
-            # NEUTRAL regime passes through at normal scoring. Structural gating
-            # is handled by main.py's POST-SIGNAL LIVERMORE COUNTER-TREND BLOCK
-            # which blocks entries in NATURAL_RETRACEMENT / NATURAL_REBOUND states
-            # — the only states where NEUTRAL regime entries were genuinely
-            # dangerous. (Previously referenced the retired signal_aggregator.py
-            # Hard Veto Blocks A-D; those were consolidated into main.py 2026-07-01
-            # so the gate covers all aggregator paths, not just Performance mode.)
-            # Raising required_score +0.75 for MTF NEUTRAL was the single largest
-            # source of rejected valid setups in the pre-v3 system.
-            if regime_name == "NEUTRAL" and preset_trade_type == "TREND":
-                logger.debug(
-                    f"[GOV] NEUTRAL regime — passing at standard score threshold."
+            if (is_bullish and signal == -1) or (is_bearish and signal == 1):
+                _verdict = (
+                    "SLIGHTLY_COUNTER"
+                    if _regime_name in ("SLIGHTLY_BEARISH", "SLIGHTLY_BULLISH")
+                    else "COUNTER"
                 )
-                return True, "TREND"
-
-            # 3. ASSET-DNA Gating & Trade Alignment
-            asset = self.asset_type.upper()
-
-            if preset_trade_type == "REVERSION":
-                # --- REVERSION GATING (DNA) ---
-                if "BTC" in asset or "USTEC" in asset:
-                    # Block MR during BULLISH or SLIGHTLY_BULLISH
-                    if regime_name in ["BULLISH", "SLIGHTLY_BULLISH"]:
-                        logger.info(
-                            f"[GOV] ❌ BLOCKED - MR forbidden in {regime_name} regime for {asset}"
-                        )
-                        return False, "REVERSION"
-                    # Allow MR Buys only in BEARISH or NEUTRAL
-                    if signal == -1:  # MR Short
-                        logger.info(
-                            f"[GOV] ❌ BLOCKED - MR Shorts forbidden for {asset}"
-                        )
-                        return False, "REVERSION"
-                    # Buys in BEARISH or NEUTRAL are allowed
-                    return True, "REVERSION"
-
-                elif "GOLD" in asset:
-                    # Allow MR Buys in BEARISH
-                    if signal == 1:
-                        if regime_name == "BEARISH":
-                            return True, "REVERSION"
-                        else:
-                            logger.info(
-                                f"[GOV] ❌ BLOCKED - MR Buys only allowed in BEARISH for {asset} (Current: {regime_name})"
-                            )
-                            return False, "REVERSION"
-                    # Block MR Shorts in BULLISH
-                    elif signal == -1:
-                        if regime_name == "BULLISH":
-                            logger.info(
-                                f"[GOV] ❌ BLOCKED - MR Shorts forbidden in BULLISH for {asset}"
-                            )
-                            return False, "REVERSION"
-                        else:
-                            # Implies allowed in BEARISH or NEUTRAL
-                            return True, "REVERSION"
-
-                # EURUSD / EURJPY allow symmetric MR (no extra blocks here)
-                return True, "REVERSION"
-
+            elif is_bullish or is_bearish:
+                _verdict = "ALIGNED"
             else:
-                # --- TREND GATING (STRICT) ---
-                if (is_bullish and signal == -1) or (is_bearish and signal == 1):
-                    # ✨ SLIGHTLY regimes are ambiguous — soft block instead of hard block.
-                    # Returns SLIGHTLY_COUNTER so the caller raises required_score by +0.5
-                    # (needs ≥4.0) rather than rejecting outright.  Full BEARISH/BULLISH
-                    # counter-trend signals are still hard-blocked below.
-                    if regime_name in ("SLIGHTLY_BEARISH", "SLIGHTLY_BULLISH"):
-                        direction = "Short" if signal == -1 else "Long"
-                        logger.info(
-                            f"[GOV] ⚠️ SLIGHTLY_COUNTER — {direction} in {regime_name}: "
-                            f"allowing at raised score threshold (+0.5)"
-                        )
-                        return True, "SLIGHTLY_COUNTER"
+                _verdict = "NEUTRAL"
 
-                    logger.info(
-                        f"[GOV] ❌ BLOCKED - {('Short' if signal == -1 else 'Long')} attempt in Macro {('BULLISH' if is_bullish else 'BEARISH')} regime ({regime_name})"
-                    )
-                    return False, "TREND"
-
-                return True, "TREND"
+            logger.info(
+                f"[GOVERNOR-ADVISORY] {self.asset_type}: verdict={_verdict} "
+                f"regime={_regime_name} sig={signal:+d} "
+                f"type={preset_trade_type} — advisory only (earn-in)"
+            )
+            return True, preset_trade_type
 
         except Exception as e:
-            logger.error(f"[GOV] Error processing Governor data: {e}", exc_info=True)
-            return False, "NEUTRAL"
+            logger.warning(
+                f"[GOVERNOR-ADVISORY] {self.asset_type}: error ({e}) — abstain"
+            )
+            return True, preset_trade_type
 
     def _check_volatility_gate_adaptive(
         self, df: pd.DataFrame, atr_fast: float, atr_slow: float

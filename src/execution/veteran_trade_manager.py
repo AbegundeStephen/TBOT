@@ -586,7 +586,16 @@ class VeteranTradeManager:
         # threaded main loop). Shared lock so the two can't interleave a
         # read-modify-write on the same SL — market_watcher acquires this
         # same lock before its write (see market_watcher.py's _push_sl).
-        self._sl_lock = threading.Lock()
+        # MANUAL-AUTHORITY BATCH: RLock, not Lock. update_with_current_price
+        # and check_exit already hold this lock for a whole tick before
+        # calling into _check_exit_locked's ~9 interior SL writers (see the
+        # "already holding _sl_lock" comment a few lines below in
+        # on_new_bar) — those writers now route through _propose_stop, which
+        # itself acquires this lock. A plain Lock would deadlock the VTM
+        # management thread on the very first SL adjustment of any open
+        # trade; RLock lets the same thread re-enter safely while still
+        # blocking other threads (market_watcher's) exactly as before.
+        self._sl_lock = threading.RLock()
 
         # State
         self.initial_stop_loss = None
@@ -955,7 +964,7 @@ class VeteranTradeManager:
                         tp_target = self.entry_price - (2.0 * atr)
                         logger.warning("[VTM] REVERSION SHORT: TP was >= entry — clamped to entry - 2×ATR")
 
-                self.current_stop_loss = self.initial_stop_loss
+                self._propose_stop(self.initial_stop_loss, "initial_stop")
                 self.take_profit_levels = [tp_target]
                 self.partial_sizes = [1.0]
 
@@ -1384,7 +1393,7 @@ class VeteranTradeManager:
                 raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
             
             self.position_size = final_size
-            self.current_stop_loss = self.initial_stop_loss
+            self._propose_stop(self.initial_stop_loss, "initial_stop")
 
         except ValueError as ve:
             raise # Re-raise lot size error to abort
@@ -1421,10 +1430,14 @@ class VeteranTradeManager:
         # lock for the whole tick so market_watcher.py's cross-thread SL push
         # can't land in the middle of it.
         with self._sl_lock:
-            return self._update_with_current_price_locked(
+            result = self._update_with_current_price_locked(
                 current_price, df_4h=df_4h, composite_state=composite_state,
                 judge_scores=judge_scores,
             )
+        # MANUAL-AUTHORITY BATCH: flush queued moves (JSONL + Telegram) only
+        # now that _sl_lock is fully released — see _propose_stop's docstring.
+        self._flush_pending_moves()
+        return result
 
     def _update_with_current_price_locked(
         self,
@@ -1553,7 +1566,7 @@ class VeteranTradeManager:
                             (not is_long and current_price < self.entry_price)
                         )
                         if _in_profit and not getattr(self, "_lv_breakeven_locked", False):
-                            self.current_stop_loss = self.entry_price
+                            self._propose_stop(self.entry_price, "structural_against_entry")
                             self._lv_breakeven_locked = True
                         self.runner_trail_atr_multiplier *= 0.5
                         self._floor_trail("structural_against")
@@ -1653,7 +1666,7 @@ class VeteranTradeManager:
                     new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
                     if new_trail > self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
-                        self.current_stop_loss = new_trail
+                        self._propose_stop(new_trail, "trailing_stop")
 
                 # ── STRUCTURAL SWING LOW TRAIL (Option 1 + Option B) ──────────
                 # Fires for BOTH REVERSION and TREND types when in profit.
@@ -1669,7 +1682,7 @@ class VeteranTradeManager:
                             "(swing low − 0.3×ATR, was %.5g)",
                             self.asset, _struct_sl, self.current_stop_loss,
                         )
-                        self.current_stop_loss = _struct_sl
+                        self._propose_stop(_struct_sl, "structural_swing_trail")
                 # ───────────────────────────────────────────────
             else:
                 # Guard: lowest_price_reached may be None if entry_price was None at construction
@@ -1681,7 +1694,7 @@ class VeteranTradeManager:
                     new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
                     if new_trail < self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
-                        self.current_stop_loss = new_trail
+                        self._propose_stop(new_trail, "trailing_stop")
 
                 # ── STRUCTURAL SWING HIGH TRAIL (Option 1 + Option B, shorts) ─
                 _current_profit_short = self.entry_price - self.close[-1]
@@ -1693,7 +1706,7 @@ class VeteranTradeManager:
                             "(swing high + 0.3×ATR, was %.5g)",
                             self.asset, _struct_sl, self.current_stop_loss,
                         )
-                        self.current_stop_loss = _struct_sl
+                        self._propose_stop(_struct_sl, "structural_swing_trail")
                 # ──────────────────────────────────────────────────────────────
 
             # Q3: dynamic zone-aware TP. If price has cleared the zone that was
@@ -1712,9 +1725,11 @@ class VeteranTradeManager:
                     # Only ADVANCE the target in the trade's favour, never pull it in.
                     if self.side == "long" and _next > _cur_tp:
                         self.take_profit_levels[-1] = _next
+                        self._queue_pending_move("TP", _cur_tp, _next, "zone_tp_advance")
                         logger.info(f"[VTM] {self.asset}: price cleared zone — TP advanced to {_next:.5f}")
                     elif self.side == "short" and _next < _cur_tp:
                         self.take_profit_levels[-1] = _next
+                        self._queue_pending_move("TP", _cur_tp, _next, "zone_tp_advance")
                         logger.info(f"[VTM] {self.asset}: price cleared zone — TP advanced to {_next:.5f}")
 
             # A13: already holding _sl_lock (acquired by the update_with_
@@ -1811,7 +1826,7 @@ class VeteranTradeManager:
             self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
             self._floor_trail("lsm_main_to_secondary")
             if in_profit and not getattr(self, "_lv_breakeven_locked", False):
-                self.current_stop_loss = self.entry_price
+                self._propose_stop(self.entry_price, "lsm_main_to_secondary_breakeven")
                 self._lv_breakeven_locked = True
                 logger.warning(
                     "[VTM LIVE LSM] %s: MAIN→SECONDARY — SL moved to breakeven $%.2f",
@@ -1827,7 +1842,7 @@ class VeteranTradeManager:
             self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.5
             self._floor_trail("lsm_natural_to_secondary")
             if in_profit and not getattr(self, "_lv_breakeven_locked", False):
-                self.current_stop_loss = self.entry_price
+                self._propose_stop(self.entry_price, "lsm_natural_to_secondary_breakeven")
                 self._lv_breakeven_locked = True
                 logger.warning(
                     "[VTM LIVE LSM] %s: NATURAL→SECONDARY — SL moved to breakeven $%.2f",
@@ -1858,7 +1873,7 @@ class VeteranTradeManager:
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
                 self._floor_trail("lsm_reversal")
                 if not getattr(self, "_lv_breakeven_locked", False):
-                    self.current_stop_loss = self.entry_price
+                    self._propose_stop(self.entry_price, "lsm_reversal_breakeven")
                     self._lv_breakeven_locked = True
                 logger.warning(
                     "[VTM LIVE LSM] %s: →MAIN_%s (REVERSAL) — SL at breakeven, trail %.2f× ATR",
@@ -1902,7 +1917,7 @@ class VeteranTradeManager:
                 self.runner_trail_atr_multiplier = _config_trail * _sec_trail * 0.3
                 self._floor_trail("lsm_direct_reversal")
                 if not getattr(self, "_lv_breakeven_locked", False):
-                    self.current_stop_loss = self.entry_price
+                    self._propose_stop(self.entry_price, "lsm_direct_reversal_breakeven")
                     self._lv_breakeven_locked = True
                 logger.warning(
                     "[VTM LIVE LSM] %s: %s→%s (DIRECT REVERSAL) — SL at breakeven $%.2f, trail %.2f× ATR",
@@ -2199,7 +2214,11 @@ class VeteranTradeManager:
         # cross-thread SL push (which acquires the same lock) can't
         # interleave with this method's own current_stop_loss writes.
         with self._sl_lock:
-            return self._check_exit_locked(current_price, atr_value=atr_value, df_4h=df_4h)
+            result = self._check_exit_locked(current_price, atr_value=atr_value, df_4h=df_4h)
+        # MANUAL-AUTHORITY BATCH: flush queued moves (JSONL + Telegram) only
+        # now that _sl_lock is fully released — see _propose_stop's docstring.
+        self._flush_pending_moves()
+        return result
 
     def _check_r_based_breakeven(self, current_price: float) -> bool:
         """FIX-A/E2 (16-Aug validation): move SL to entry once profit >=
@@ -2254,7 +2273,7 @@ class VeteranTradeManager:
             # side-aware: only ever tightens
             if (self.side == "long" and _lock_px > self.current_stop_loss) or \
                (self.side == "short" and _lock_px < self.current_stop_loss):
-                self.current_stop_loss = _lock_px
+                self._propose_stop(_lock_px, "r_breakeven_lock")
             self.breakeven_applied = True
             # R2: this step now also ARMS the trail (the ladder used to).
             if not self.runner_activated:
@@ -2272,6 +2291,7 @@ class VeteranTradeManager:
     def _check_exit_locked(self, current_price: float, atr_value: Optional[float] = None, df_4h: Optional[pd.DataFrame] = None) -> Optional[Dict]:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
+        self._last_atr = atr_value  # MANUAL-AUTHORITY BATCH: feeds _queue_move_notification's trail digest threshold
         if self.remaining_position <= 0: return None
 
         # ── FIX-A/E2: R-based break-even, first in the management pass ─────
@@ -2316,7 +2336,7 @@ class VeteranTradeManager:
                         f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
                         f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
                     )
-                    self.current_stop_loss = _soft_sl
+                    self._propose_stop(_soft_sl, "soft_risk_cut")
             else:
                 _soft_sl = self.entry_price + 0.75 * _initial_risk
                 if _soft_sl < self.current_stop_loss:
@@ -2324,7 +2344,7 @@ class VeteranTradeManager:
                         f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
                         f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
                     )
-                    self.current_stop_loss = _soft_sl
+                    self._propose_stop(_soft_sl, "soft_risk_cut")
 
         # --- STEP 0.5: Intermediate Trail (Early Protection) ---
         # Fires when profit exceeds 1.0×ATR — trade has proven itself with a full
@@ -2338,7 +2358,7 @@ class VeteranTradeManager:
                         f"[VTM] 🔒 Intermediate trail: {self.asset} SL → {_intermediate_sl:,.5f} "
                         f"(Profit: ${current_profit:.2f} > 1.0×ATR: ${1.0*atr_value:.2f})"
                     )
-                    self.current_stop_loss = _intermediate_sl
+                    self._propose_stop(_intermediate_sl, "intermediate_trail")
             else:
                 _intermediate_sl = self.entry_price + max(0.0, _initial_risk - 0.5 * atr_value)
                 if _intermediate_sl < self.current_stop_loss:
@@ -2346,7 +2366,7 @@ class VeteranTradeManager:
                         f"[VTM] 🔒 Intermediate trail: {self.asset} SL → {_intermediate_sl:,.5f} "
                         f"(Profit: ${current_profit:.2f} > 1.0×ATR: ${1.0*atr_value:.2f})"
                     )
-                    self.current_stop_loss = _intermediate_sl
+                    self._propose_stop(_intermediate_sl, "intermediate_trail")
 
         # Phase 4: break-even trigger is Livermore-aware (set in __init__).
         # Young state (age < 5) = 1.8×ATR; aged state (>20) = 1.2×ATR; default 1.5×.
@@ -2361,14 +2381,14 @@ class VeteranTradeManager:
                     f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
                     f"${_be_trigger*atr_value:.2f})"
                 )
-                self.current_stop_loss = self.entry_price
+                self._propose_stop(self.entry_price, "breakeven_atr")
             elif self.side == "short" and self.current_stop_loss > self.entry_price:
                 logger.info(
                     f"[VTM] 🛡️ Break-even lock: {self.asset} "
                     f"(Profit: ${current_profit:.2f} > {_be_trigger:.1f}×ATR: "
                     f"${_be_trigger*atr_value:.2f})"
                 )
-                self.current_stop_loss = self.entry_price
+                self._propose_stop(self.entry_price, "breakeven_atr")
 
         # --- STEP 1.5: Time-Based Break-Even Lock ---
         # Fires independently of ATR: if the trade has been open for N bars and
@@ -2385,13 +2405,13 @@ class VeteranTradeManager:
                         f"[VTM] ⏱ Time-based BE lock: {self.asset} bar={self.bars_in_trade} "
                         f"pnl={_tbe_pnl:.2%} >= {self.breakeven_profit_threshold:.2%}"
                     )
-                    self.current_stop_loss = self.entry_price
+                    self._propose_stop(self.entry_price, "breakeven_time")
                 elif self.side == "short" and self.current_stop_loss > self.entry_price:
                     logger.info(
                         f"[VTM] ⏱ Time-based BE lock: {self.asset} bar={self.bars_in_trade} "
                         f"pnl={_tbe_pnl:.2%} >= {self.breakeven_profit_threshold:.2%}"
                     )
-                    self.current_stop_loss = self.entry_price
+                    self._propose_stop(self.entry_price, "breakeven_time")
 
         # Calculate ADX and atr_slow once — used by multiple steps below.
         adx_value = self._calculate_adx()
@@ -2409,7 +2429,7 @@ class VeteranTradeManager:
             # current_stop_loss is None on freshly-imported positions (set to initial on first trail tick).
             # Fall back to initial_stop_loss so the SL check is never skipped.
             if self.current_stop_loss is None:
-                self.current_stop_loss = self.initial_stop_loss
+                self._propose_stop(self.initial_stop_loss, "initial_stop")
             if self.current_stop_loss is None:
                 logger.warning("[VTM] SL check skipped — both current and initial stop_loss are None")
             elif (self.side == "long" and current_price <= self.current_stop_loss) or \
@@ -2551,11 +2571,11 @@ class VeteranTradeManager:
                         if self.side == "long":
                             tight_sl = self.entry_price - 0.8 * atr_value
                             if tight_sl > self.current_stop_loss:
-                                self.current_stop_loss = tight_sl
+                                self._propose_stop(tight_sl, "reversal_candle_tighten")
                         else:
                             tight_sl = self.entry_price + 0.8 * atr_value
                             if tight_sl < self.current_stop_loss:
-                                self.current_stop_loss = tight_sl
+                                self._propose_stop(tight_sl, "reversal_candle_tighten")
                         logger.warning(
                             f"[VTM] 🕯️ REVERSAL CANDLE: {self.asset} {self.side.upper()} — "
                             f"Range={bar_range:.5f} (1.5×ATR={1.5*atr_value:.5f}), "
@@ -2700,11 +2720,11 @@ class VeteranTradeManager:
                             if self.side == "short":
                                 _tight_sl = self.entry_price + 0.5 * atr_value
                                 if _tight_sl < self.current_stop_loss:
-                                    self.current_stop_loss = _tight_sl
+                                    self._propose_stop(_tight_sl, "counter_momentum_tighten")
                             else:
                                 _tight_sl = self.entry_price - 0.5 * atr_value
                                 if _tight_sl > self.current_stop_loss:
-                                    self.current_stop_loss = _tight_sl
+                                    self._propose_stop(_tight_sl, "counter_momentum_tighten")
                             logger.warning(
                                 f"[VTM] ⚔️ COUNTER-MOMENTUM CUT: {self.asset} {self.side.upper()} — "
                                 f"Loss=${_loss:.2f} ({_loss/atr_value:.2f}×ATR), "
@@ -2774,7 +2794,7 @@ class VeteranTradeManager:
                         _pg_struct = self._compute_swing_low_trail(atr_value)
                         if _pg_struct is not None:
                             if self.side == "long" and _pg_struct > self.current_stop_loss:
-                                self.current_stop_loss = _pg_struct
+                                self._propose_stop(_pg_struct, "profit_guard_struct_tighten")
                                 logger.warning(
                                     "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
                                     "Statistical warning: tightening SL to structural "
@@ -2782,7 +2802,7 @@ class VeteranTradeManager:
                                     self.asset, self.side.upper(), _rsi_now, _pg_struct,
                                 )
                             elif self.side == "short" and _pg_struct < self.current_stop_loss:
-                                self.current_stop_loss = _pg_struct
+                                self._propose_stop(_pg_struct, "profit_guard_struct_tighten")
                                 logger.warning(
                                     "[VTM] 💰 PROFIT GUARD: %s %s — MACD flipped, RSI=%.1f. "
                                     "Statistical warning: tightening SL to structural "
@@ -2815,9 +2835,11 @@ class VeteranTradeManager:
                         f"[VTM] 🔥 GREED MODE: Strong trend (ADX:{adx_value:.1f}) & "
                         f"Volatility Expansion detected. Keeping TP1 (30%), collapsing rest to runner."
                     )
+                    _old_tps = list(self.take_profit_levels)
                     self.take_profit_levels = [self.take_profit_levels[0], self.take_profit_levels[-1]]
                     self.partial_sizes = [0.30, 0.70]
                     self._greed_mode_activated = True
+                    self._queue_pending_move("TP", _old_tps, list(self.take_profit_levels), "greed_mode_collapse")
 
         # --- STEP 3.5: Early Scale Exit ---
         # Objective: Lock in a small partial profit quickly in the first few bars before
@@ -2855,7 +2877,7 @@ class VeteranTradeManager:
                                     f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
                                     f"(entry + {self.early_lock_atr_multiplier}x ATR)"
                                 )
-                                self.current_stop_loss = lock_sl
+                                self._propose_stop(lock_sl, "early_scale_lock")
                         else:
                             lock_sl = self.entry_price - lock_offset
                             if lock_sl < self.current_stop_loss:
@@ -2863,7 +2885,7 @@ class VeteranTradeManager:
                                     f"[VTM] ⚡ Early Scale SL lock: ${self.current_stop_loss:,.2f} → ${lock_sl:,.2f} "
                                     f"(entry - {self.early_lock_atr_multiplier}x ATR)"
                                 )
-                                self.current_stop_loss = lock_sl
+                                self._propose_stop(lock_sl, "early_scale_lock")
 
                         logger.info(
                             f"[VTM] ⚡ EARLY SCALE: {self.asset} {self.side.upper()} — "
@@ -2891,7 +2913,7 @@ class VeteranTradeManager:
                 else:
                     logger.info(f"[VTM] 🗼 TREND PYRAMIDING: Strong trend confirmed. Scaling in.")
                     # Move SL of position 1 to entry before adding exposure
-                    self.current_stop_loss = self.entry_price
+                    self._propose_stop(self.entry_price, "pyramid_entry_breakeven")
                     self.has_pyramided = True
                     return {
                         "action": "pyramid",
@@ -2925,7 +2947,9 @@ class VeteranTradeManager:
                         "Runner + structural trail now both active.",
                         self.asset, _trigger,
                     )
+                    _old_tps = list(self.take_profit_levels)
                     self.cancel_take_profit()
+                    self._queue_pending_move("TP", _old_tps, [], "reversion_to_trend_mutation_cancel_tp")
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
 
@@ -2978,17 +3002,21 @@ class VeteranTradeManager:
                             # place the stop there — it is structurally more meaningful
                             # than locking to entry price regardless of market context.
                             # Fall back to entry price lock only if no structural level found.
-                            _exhaust_struct = self._compute_swing_low_trail(atr)
+                            # NOTE: was self._compute_swing_low_trail(atr) — `atr` doesn't
+                            # exist in this scope (NameError, this branch could never run
+                            # correctly before now); the parameter throughout this method
+                            # is atr_value. Fixed while wiring this site into the choke-point.
+                            _exhaust_struct = self._compute_swing_low_trail(atr_value)
                             if _exhaust_struct is not None:
                                 if self.side == "long" and _exhaust_struct > self.current_stop_loss:
-                                    self.current_stop_loss = _exhaust_struct
+                                    self._propose_stop(_exhaust_struct, "momentum_exhaustion_struct_trail")
                                     logger.info(
                                         "[VTM] 📉 Momentum exhaustion remainder: "
                                         "SL → structural swing low %.5g",
                                         _exhaust_struct,
                                     )
                                 elif self.side == "short" and _exhaust_struct < self.current_stop_loss:
-                                    self.current_stop_loss = _exhaust_struct
+                                    self._propose_stop(_exhaust_struct, "momentum_exhaustion_struct_trail")
                                     logger.info(
                                         "[VTM] 📉 Momentum exhaustion remainder: "
                                         "SL → structural swing high %.5g",
@@ -2997,9 +3025,9 @@ class VeteranTradeManager:
                             else:
                                 # No structural swing formed yet — safety net
                                 if self.side == "long" and self.current_stop_loss < self.entry_price:
-                                    self.current_stop_loss = self.entry_price
+                                    self._propose_stop(self.entry_price, "momentum_exhaustion_breakeven_fallback")
                                 elif self.side == "short" and self.current_stop_loss > self.entry_price:
-                                    self.current_stop_loss = self.entry_price
+                                    self._propose_stop(self.entry_price, "momentum_exhaustion_breakeven_fallback")
                             logger.warning(
                                 f"[VTM] 📉 MOMENTUM EXHAUSTION: {self.asset} {self.side.upper()} — "
                                 f"RSI={rsi_val:.1f}, MACD hist declining, ADX={adx_arr[-1]:.1f}↓. "
@@ -3213,6 +3241,178 @@ class VeteranTradeManager:
         vtm._counter_momentum_cut = state.get("_counter_momentum_cut", False)
         return vtm
 
+    # ── MANUAL-AUTHORITY BATCH: single choke-point for automated SL writes ──
+    def _is_tighter(self, candidate: float, current: Optional[float]) -> bool:
+        """Tighter = closer to price on the protective side, per direction."""
+        if current is None:
+            return True
+        return candidate > current if self.side == "long" else candidate < current
+
+    def _propose_stop(self, candidate: Optional[float], reason: str) -> bool:
+        """
+        ALL automated stop writes route here (Manual-Authority batch,
+        ratified 17-Aug). Tighten-only: an automated move may protect more,
+        never less. The manual override (/set_sl) deliberately bypasses this
+        — the human may loosen; the machine may not. Queues every accepted
+        move for the ledger (_queue_pending_move) and honors the per-position
+        pause set by /reverse. Never raises; a rejected proposal is a log
+        line, not an error.
+
+        Why queue instead of recording immediately: this is called from deep
+        inside check_exit()/update_with_current_price(), both of which hold
+        _sl_lock (now an RLock) for the WHOLE tick before ever reaching here.
+        Re-entering the lock below is safe (RLock), but the outer hold does
+        NOT release when this method's own `with` block exits — the thread
+        still owns it via the outer frame. Doing the real ledger I/O (JSONL
+        write + Telegram send) here would therefore run "under the lock" in
+        every sense that matters for cross-thread contention (market_watcher
+        blocking on a Telegram round-trip), even though textually it's
+        outside this method's own `with`. _queue_pending_move is a pure
+        in-memory append — safe regardless of lock depth. The actual I/O
+        happens in _flush_pending_moves, called only by the genuine top-level
+        entry points (check_exit, update_with_current_price, market_watcher's
+        _push_sl) after they've released every level of the lock.
+        """
+        try:
+            if candidate is None or candidate <= 0:
+                return False
+            # Escape hatch (Segment 6, expected never used in practice): guard
+            # ships ON. False restores legacy unconditional-assignment
+            # semantics with zero recording — a full revert of this batch's
+            # SL behavior via one config edit, no redeploy.
+            if not self.risk_config.get("phase_config", {}).get("auto_move_guard_enabled", True):
+                self.current_stop_loss = candidate
+                return True
+            if getattr(self, "_auto_sl_paused", False):
+                logger.info(
+                    f"[VTM] ⏸️ {reason}: auto-SL paused by user for {self.asset} — proposal "
+                    f"{candidate:.5f} suppressed (/resume_sl to re-enable)"
+                )
+                return False
+            with self._sl_lock:
+                cur = self.current_stop_loss
+                if not self._is_tighter(candidate, cur):
+                    logger.info(
+                        f"[VTM] ✗ {reason}: SL {candidate:.5f} not tighter than "
+                        f"{cur if cur is None else f'{cur:.5f}'} for {self.asset} {self.side} — suppressed (tighten-only)"
+                    )
+                    return False
+                self.current_stop_loss = candidate
+            self._queue_pending_move("SL", cur, candidate, reason)
+            return True
+        except Exception as e:
+            logger.warning(f"[VTM] _propose_stop error ({reason}): {e}")
+            return False
+
+    def _queue_pending_move(self, kind: str, old, new, reason: str, source: str = "AUTO") -> None:
+        """Lightweight, in-memory only — no file or network I/O, so it's safe
+        to call at any lock depth. Real recording happens in
+        _flush_pending_moves, called by the top-level tick entry points
+        after _sl_lock is fully released."""
+        try:
+            pending = getattr(self, "_pending_moves", [])
+            pending.append({"kind": kind, "old": old, "new": new, "reason": reason, "source": source})
+            self._pending_moves = pending
+        except Exception as e:
+            logger.warning(f"[VTM] pending-move queue error: {e}")
+
+    def _flush_pending_moves(self) -> None:
+        """Call ONLY from a context holding no part of _sl_lock — the
+        top-level tick entry points, right after their own `with
+        self._sl_lock:` block has exited. Records each queued move (JSONL +
+        notification) with real I/O, now safely outside the lock."""
+        pending = getattr(self, "_pending_moves", [])
+        if not pending:
+            return
+        self._pending_moves = []
+        for p in pending:
+            self._record_auto_move(p["kind"], p["old"], p["new"], p["reason"], source=p["source"])
+
+    def _record_auto_move(self, kind: str, old, new, reason: str, source: str = "AUTO") -> None:
+        """Append to the in-memory ring + daily JSONL + hand to the notifier.
+        Telemetry must never break trading: everything is try/except-swallowed.
+        Callers: _flush_pending_moves (AUTO moves, already lock-free by the
+        time they get here) and override_stop_loss/override_take_profit
+        (MANUAL moves — those methods hold no outer lock, so calling this
+        directly, right after their own single-write `with self._sl_lock:`
+        block, is already lock-free)."""
+        try:
+            import json as _json_ram, os as _os_ram, time as _time_ram
+            mid = getattr(self, "_move_seq", 0) + 1
+            self._move_seq = mid
+            rec = {
+                "move_id": mid, "ts": _time_ram.strftime("%Y-%m-%dT%H:%M:%S"),
+                "asset": self.asset, "side": self.side, "kind": kind,
+                "old": old, "new": new, "reason": reason, "source": source,
+                "entry": self.entry_price,
+            }
+            self._move_history = (getattr(self, "_move_history", []) + [rec])[-50:]
+            _os_ram.makedirs("logs/vtm_moves", exist_ok=True)
+            with open(f"logs/vtm_moves/moves_{_time_ram.strftime('%Y-%m-%d')}.jsonl", "a") as f:
+                f.write(_json_ram.dumps(rec, default=str) + "\n")
+            # Segment 6: notify/digest honor auto_move_notify_enabled (default
+            # ON) — the ledger itself (ring + JSONL, above) always records
+            # regardless, since /reverse and /moves depend on it existing.
+            if source == "AUTO" and self.risk_config.get("phase_config", {}).get(
+                "auto_move_notify_enabled", True
+            ):
+                self._queue_move_notification(rec)
+        except Exception as e:
+            logger.warning(f"[VTM] move-ledger error: {e}")
+
+    def _queue_move_notification(self, rec: dict) -> None:
+        """Format + hand off to the existing Telegram courier (self.telegram,
+        same reference _safe_send_alert already uses — no new plumbing).
+        Trail moves accumulate into a digest so the phone stays useful;
+        everything else sends immediately. Never blocks, never raises."""
+        try:
+            if rec["reason"] == "initial_stop":
+                # Setting the FIRST stop a position ever has (old is always
+                # None here) is already covered by the position-open
+                # notification — same "not a move" treatment Segment 3 gives
+                # the entry-time TP blend. Still recorded to the ledger
+                # (ring + JSONL) above; just doesn't duplicate a Telegram send.
+                return
+            import time as _time_qn
+            if rec["reason"] == "trailing_stop":
+                d = getattr(self, "_trail_digest", None) or {
+                    "first_old": rec["old"], "n": 0, "t0": _time_qn.time()
+                }
+                d["n"] += 1
+                d["last_new"] = rec["new"]
+                d["last_id"] = rec["move_id"]
+                self._trail_digest = d
+                _atr = abs(getattr(self, "_last_atr", 0.0)) or 1e-9
+                _pc = self.risk_config.get("phase_config", {})
+                _digest_atr = float(_pc.get("auto_move_trail_digest_atr", 0.25))
+                _digest_min = float(_pc.get("auto_move_trail_digest_min", 15))
+                moved = abs(d["last_new"] - d["first_old"])
+                if moved < _digest_atr * _atr and (_time_qn.time() - d["t0"]) < _digest_min * 60:
+                    return  # keep accumulating
+                text = (
+                    f"🤖 AUTO #{d['last_id']} {self.asset} {self.side.upper()}: "
+                    f"trail advanced ×{d['n']}  SL {d['first_old']:.5f} → {d['last_new']:.5f}\n"
+                    f"Keep: do nothing · Reverse+pause: /reverse {self.asset} {d['last_id']}"
+                )
+                self._trail_digest = None
+            elif rec["kind"] == "TP":
+                text = (
+                    f"🤖 AUTO #{rec['move_id']} {self.asset} {self.side.upper()}: "
+                    f"TP {rec['old']} → {rec['new']}  ({rec['reason']})\n"
+                    f"Keep: do nothing · Reverse+pause: /reverse {self.asset} {rec['move_id']}"
+                )
+            else:
+                _old_s = f"{rec['old']:.5f}" if isinstance(rec["old"], (int, float)) else str(rec["old"])
+                _new_s = f"{rec['new']:.5f}" if isinstance(rec["new"], (int, float)) else str(rec["new"])
+                text = (
+                    f"🤖 AUTO #{rec['move_id']} {self.asset} {self.side.upper()}: "
+                    f"{rec['kind']} {_old_s} → {_new_s}  ({rec['reason']})\n"
+                    f"Keep: do nothing · Reverse+pause: /reverse {self.asset} {rec['move_id']}"
+                )
+            self._safe_send_alert(text)  # existing courier (Brain Rebuild Part 0.3)
+        except Exception as e:
+            logger.warning(f"[VTM] notify error: {e}")
+
     # ─────────────────────────────────────────────────────────────────────────
     # T3.2 — Manual Override Methods (Telegram /set_sl /set_tp /vtm_status)
     # ─────────────────────────────────────────────────────────────────────────
@@ -3256,6 +3456,7 @@ class VeteranTradeManager:
         with self._sl_lock:
             old_sl = self.current_stop_loss
             self.current_stop_loss = new_sl
+        self._record_auto_move("SL", old_sl, new_sl, "manual_set_sl", source="MANUAL")
         logger.info(
             f"[VTM] 🖊️ Manual SL override: {self.asset} {self.side.upper()} "
             f"SL {old_sl:.5f} → {new_sl:.5f}"
@@ -3308,6 +3509,7 @@ class VeteranTradeManager:
         # Instead of refusing, append the new price as the single exit target.
         if not remaining_indices:
             self.take_profit_levels = [new_tp]
+            self._record_auto_move("TP", None, new_tp, "manual_set_tp", source="MANUAL")
             logger.info(
                 f"[VTM] 🖊️ Manual TP added (was empty): {self.asset} {self.side.upper()} "
                 f"→ {new_tp:.5f}"
@@ -3323,6 +3525,7 @@ class VeteranTradeManager:
         actual_idx = remaining_indices[target_index]
         old_tp = self.take_profit_levels[actual_idx]
         self.take_profit_levels[actual_idx] = new_tp
+        self._record_auto_move("TP", old_tp, new_tp, "manual_set_tp", source="MANUAL")
 
         logger.info(
             f"[VTM] 🖊️ Manual TP override: {self.asset} {self.side.upper()} "
