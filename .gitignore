@@ -58,7 +58,7 @@ Thumbs.db
 EOF
 models/training_metadata.json
 
-data/
+/data/
 
 models/ai/*.weights.h5
 models/ai/*_config.pkl

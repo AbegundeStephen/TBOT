@@ -1507,6 +1507,10 @@
     "trap_tier_keyed_enabled": false,
     "tier_conditional_stops_enabled": false,
     "runner_atr_mult_flat_enabled": false,
-    "runner_atr_mult_flat": 2.0
-  }
+    "runner_atr_mult_flat": 2.0,
+    "btc_flow_harvester_enabled": true,
+    "asset_aware_ceiling_enabled": true,
+    "dead_judge_streak_n": 20
+  },
+  "btc_volume_source": "binance"
 }

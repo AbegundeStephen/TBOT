@@ -54,6 +54,15 @@ class CompositeState:
     brc_direction: int = 0                # +1 long / -1 short
     brc_kind: Optional[str] = None        # "TF_CONT" (BOS) / "MR_REV" (CHoCH)
     brc_tier: Optional[str] = None        # RetestEngine tier if available
+    # ── BTC-FLOW (17-Aug): bench material only, no live consumer yet ────
+    # Public Binance data (src/data/btc_flow_harvester.py). Missing data is
+    # None, never zero, per the 2.6 rule — a harvester outage or an
+    # off-BTC asset must not read as "zero taker interest."
+    btc_taker_ratio: Optional[float] = None     # BTC-FLOW: aggressive-buy share
+    btc_oi_delta_pct: Optional[float] = None    # BTC-FLOW: 1h open-interest change
+    btc_funding_rate: Optional[float] = None    # BTC-FLOW: current funding, %
+    btc_basis_pct: Optional[float] = None       # BTC-FLOW: perp-spot basis, %
+    btc_flow_age_min: Optional[float] = None    # BTC-FLOW: staleness of the above
     # ── BUILD U: the level that actually broke ─────────────────────────
     # Every break flag in _update_structure is driven by one of two
     # comparisons: a higher high (_hh) or a lower low (_ll). In both cases

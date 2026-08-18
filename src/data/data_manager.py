@@ -613,6 +613,38 @@ class DataManager:
             df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df[["timestamp", "open", "high", "low", "close", "tick_volume"]]
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
+
+            # ── BTC VOLUME OVERLAY (17-Aug): the VOLUME judge was calibrated
+            # for real exchange volume; Exness tick counts never surge past its
+            # 1.5x bar, so BTC:volume flatlined dead after the venue switch.
+            # Swap in real BTCUSDT volume for the CLOSED bars we have; any bar
+            # we can't match keeps tick volume — the overlay never guesses.
+            # Gated on symbol (this function has no "asset" param — it's a
+            # shared MT5 fetcher for every MT5-routed asset), matched against
+            # BTC's actual configured MT5 symbol rather than the literal
+            # string "BTC". Must run HERE, before set_index("timestamp")
+            # below turns "timestamp" from a column into the index — the
+            # overlay's df["timestamp"].dt access would KeyError afterward.
+            if symbol.upper().startswith("BTCUSD") and getattr(self, "btc_flow", None) and \
+               self.config.get("btc_volume_source", "binance") == "binance":
+                _swapped = 0
+                _flow_csv = "data/btc_flow_1h.csv"
+                try:
+                    import os as _os
+                    if _os.path.exists(_flow_csv):
+                        _fv = pd.read_csv(_flow_csv).drop_duplicates("bar_ts", keep="last")
+                        _fv["_hr"] = pd.to_datetime(_fv["bar_ts"], unit="s", utc=True)
+                        _key = df["timestamp"].dt.tz_convert("UTC").dt.floor("h") \
+                               if df["timestamp"].dt.tz is not None else \
+                               df["timestamp"].dt.tz_localize("UTC").dt.floor("h")
+                        _m = _key.map(_fv.set_index("_hr")["volume"])
+                        _swapped = int(_m.notna().sum())
+                        df.loc[_m.notna(), "volume"] = _m[_m.notna()].values
+                    logger.info(f"[VOL-SOURCE] BTC: binance overlay on {_swapped}/{len(df)} bars"
+                                + ("" if _swapped else " — tick-volume fallback"))
+                except Exception as _e:
+                    logger.warning(f"[VOL-SOURCE] BTC overlay failed — tick fallback: {_e}")
+
             df = df.set_index("timestamp")
 
             logger.info(f"✅ Fetched {len(df)} bars from MT5")
