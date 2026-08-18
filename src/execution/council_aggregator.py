@@ -495,6 +495,20 @@ class InstitutionalCouncilAggregator:
 
                 atr_ratio_series = atr_f_series / atr_s_series
 
+                # ── TELEMETRY: report EVERY evaluation. The gate speaks only
+                # when it vetoes, so its own log can never reveal its false
+                # positives. Panel note: the 0.65-0.90 ratio band was the
+                # best-performing volatility state (+0.130R, n=978) — worth
+                # watching live before this gate's fate is decided.
+                _r_now = float(atr_ratio_series[-1]) if not np.isnan(atr_ratio_series[-1]) else -1.0
+                _r_max20 = float(np.max(atr_ratio_series[-20:]))
+                logger.info(
+                    f"[VOL-TELEMETRY] {self.asset_type}: ratio={_r_now:.2f} "
+                    f"max20={_r_max20:.2f} spring={'YES' if _r_max20 < 0.65 else 'no'} "
+                    f"dead={'YES' if atr_fast < 0.5 * atr_slow else 'no'} "
+                    f"atr_f={atr_fast:.5f} atr_s={atr_slow:.5f}"
+                )
+
                 # Check last 20 bars for extreme compression
                 if np.max(atr_ratio_series[-20:]) < 0.65:
                     logger.info(
@@ -810,6 +824,72 @@ class InstitutionalCouncilAggregator:
         except Exception as e:
             logger.error(f"[PROFIT] Error: {e}")
             return True
+
+    def _friction_telemetry(
+        self, entry: float, atr_fast: float, governor_data: Optional[Dict] = None
+    ) -> None:
+        """
+        GATE ③ PART ① — measurement only, never gates anything.
+        Reports: the friction the gate is USING (map, or 0.0 when the asset
+        isn't mapped — see note below) vs the friction actually OBSERVED
+        (live spread, tracked locally on this instance), both as a fraction
+        of price, plus the ATR the gate needs to clear it. Round-trip is
+        modelled as 2x the one-way spread; slippage is NOT included, so the
+        observed figure is a FLOOR on true cost — state that when reading it.
+
+        Deviation from the original spec: that assumed self._cs_builder (a
+        CompositeStateBuilder reference) existed on this class to read its
+        _spread_history. It doesn't — CompositeStateBuilder lives on the
+        separate performance/LSM companion aggregator (signal_aggregator.py),
+        never on InstitutionalCouncilAggregator. governor_data (the same
+        dict main.py calls mtf_regime, passed to both aggregators — see
+        main.py's "F.7: Inject MT5 spread" block) already carries
+        current_spread directly, so this method keeps its own rolling-20
+        history locally instead of reaching into another object.
+
+        Also corrected: "used" mirrors _check_profit_economics_adaptive's
+        ACTUAL fallback (FRICTION_PENALTIES.get(...) with no default ->
+        0.0 friction for an unmapped asset), not shadow_trader.py's
+        separate _DEFAULT_FRICTION fallback (used only for realized-P&L
+        bookkeeping in ShadowPosition.close(), never read by this gate).
+        Reporting _DEFAULT_FRICTION here would have misstated what the
+        live gate actually charges an unmapped asset — which is nothing.
+        """
+        try:
+            _asset = (self.asset_type or "").upper()
+            _used = FRICTION_PENALTIES.get(_asset)
+            _source = "map" if _used is not None else "UNMAPPED (gate charges $0 friction)"
+            if _used is None:
+                _used = 0.0
+
+            _current_spread = float(governor_data.get("current_spread", 0) or 0) if governor_data else 0.0
+            _hist = getattr(self, "_friction_spread_history", [])
+            if _current_spread > 0:
+                _hist = (_hist + [_current_spread])[-20:]
+                self._friction_spread_history = _hist
+
+            if not _hist or entry <= 0:
+                logger.info(
+                    f"[FRICTION] {_asset}: used={_used:.5f} ({_source}) observed=NO_DATA"
+                )
+                return
+
+            _med_spread = float(np.median(_hist))
+            _obs_fraction = (2.0 * _med_spread) / entry          # round-trip floor
+            _pt0 = float((getattr(self, "risk_config", {}) or {}).get("partial_targets", [1.0])[0])
+            _atr_needed_used = (_used * entry) / max(_pt0 - 0.5, 1e-9)
+            _atr_needed_obs = (_obs_fraction * entry) / max(_pt0 - 0.5, 1e-9)
+            _ratio = (_obs_fraction / _used) if _used > 0 else float("inf")
+            logger.info(
+                f"[FRICTION] {_asset}: used={_used:.5f} ({_source}) "
+                f"observed={_obs_fraction:.5f} (median spread {_med_spread:.5f}, n={len(_hist)}) "
+                f"ratio_obs/used={_ratio:.2f}x | "
+                f"ATR now={atr_fast:.5f} | ATR needed: used={_atr_needed_used:.5f} "
+                f"observed={_atr_needed_obs:.5f} | "
+                f"would_pass_on_observed={'YES' if atr_fast * (_pt0 - 0.5) > _obs_fraction * entry else 'no'}"
+            )
+        except Exception as e:
+            logger.warning(f"[FRICTION] telemetry error: {e}")
 
     def _check_macro_regime(self, asset: str) -> str:
         """
@@ -3078,6 +3158,10 @@ class InstitutionalCouncilAggregator:
                     direction="long" if signal == 1 else "short",
                     regime_confidence=regime_conf,
                     regime_aligned=_trap_regime_aligned,
+                    brc_tier=getattr(_composite_state, "brc_tier", None),
+                    tier_keyed=bool(
+                        getattr(self, "phase_config", {}).get("trap_tier_keyed_enabled", False)
+                    ),
                 ):
                     # Gate Tier 2.2: graduated instead of absolute — a wick trap
                     # firing once costs a real but recoverable penalty; the
@@ -3135,6 +3219,7 @@ class InstitutionalCouncilAggregator:
                 # B. PROFIT ECONOMICS — B7: single R:R veto (trade-type aware:
                 # TREND needs 1.0, REVERSION 0.6), replacing the old separate
                 # rr_gate_rejected_trend/reversion block above.
+                self._friction_telemetry(entry_price, atr_fast, governor_data=governor_data)
                 if not self._check_profit_economics_adaptive(
                     entry_price, stop_loss, atr_fast,
                     asset_name=self.asset_type, trade_type=trade_type,
