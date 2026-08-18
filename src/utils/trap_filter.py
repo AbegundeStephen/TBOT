@@ -12,6 +12,8 @@ def validate_candle_structure(
     direction: str = "long",
     regime_confidence: float = 0.0,
     regime_aligned: bool = False,
+    brc_tier: str = None,
+    tier_keyed: bool = False,
 ) -> bool:
     """
     Regime-aware candle structure validation. (T2.3 — replaces fixed 1.0x ATR version)
@@ -39,6 +41,17 @@ def validate_candle_structure(
     regime_aligned : bool
         True when the signal direction matches the current macro regime.
         Raised wick threshold only activates when this is True AND regime_confidence >= 0.6.
+    brc_tier : str, optional
+        RetestEngine setup tier for this signal (e.g. "RUNNER", "ZONE_LADDER").
+        Only consulted when tier_keyed=True.
+    tier_keyed : bool
+        Gate ② re-key (17-Aug study, ships OFF). False reproduces the
+        regime-keyed behavior above exactly. True keys the wick threshold on
+        SETUP TYPE instead of regime direction: a 3,559-event panel showed
+        wick size predicts outcome for retest-class entries (flagged retests
+        -0.156R vs +0.018R clean, n=84) but not for RUNNER entries (+0.027 vs
+        +0.021, n=63, indistinguishable) — a wick on a retest means the level
+        didn't hold; a wick on a runner is momentum noise.
 
     Returns
     -------
@@ -73,7 +86,23 @@ def validate_candle_structure(
     # In confirmed trends (regime_aligned + high confidence), normal
     # retracement wicks exceed 1x ATR and should not block valid entries.
     # Raise the threshold to 1.5x only when the regime backing is strong.
-    wick_multiplier = 1.5 if (regime_aligned and regime_confidence >= 0.6) else 1.0
+    #
+    # ── GATE ② RE-KEY (17-Aug study) ─────────────────────────────────────
+    # OLD: strict 1.0x unless regime-aligned + confident -> 1.5x. That keyed
+    # the threshold on a directional claim the governor study disproved, and
+    # aimed the strictest test at the better-performing (counter-trend) bucket.
+    # NEW (tier_keyed=True): key on SETUP TYPE, which is what the panel shows
+    # actually discriminates — strict on retest-class entries (wick = the level
+    # failing to hold), lenient on RUNNER entries (wick = momentum noise, no
+    # measurable relationship to outcome). 2.5x is an effective off-switch for
+    # runners (only 0.7% of runner entries exceed 1.5x ATR in the panel) while
+    # keeping this code path and its telemetry intact rather than branching
+    # around it.
+    if tier_keyed:
+        _is_runner = (brc_tier or "").upper() == "RUNNER"
+        wick_multiplier = 2.5 if _is_runner else 1.0
+    else:
+        wick_multiplier = 1.5 if (regime_aligned and regime_confidence >= 0.6) else 1.0
 
     if upper_wick > (wick_multiplier * atr) or lower_wick > (wick_multiplier * atr):
         logger.info(

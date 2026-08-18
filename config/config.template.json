@@ -1481,6 +1481,7 @@
     "auto_move_guard_enabled": true,
     "auto_move_notify_enabled": true,
     "auto_move_trail_digest_atr": 0.25,
-    "auto_move_trail_digest_min": 15
+    "auto_move_trail_digest_min": 15,
+    "trap_tier_keyed_enabled": false
   }
 }
