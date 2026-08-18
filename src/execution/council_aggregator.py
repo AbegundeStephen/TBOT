@@ -2640,6 +2640,50 @@ class InstitutionalCouncilAggregator:
                 )
                 _achievable_max = _honest_max
 
+            # ── ASSET-AWARE CEILING (17-Aug): track judges that are INCLUDED
+            # in this cycle's achievable yet score 0.0 on BOTH sides. A streak
+            # >= N marks the judge dead FOR THIS ASSET and its weight leaves
+            # the honest ceiling until it scores again. Self-healing: one
+            # nonzero score resets the streak. Lane-removed judges (REVERSION
+            # under MR_dead, TREND when not _trend_relevant) are excluded from
+            # _included_judges below — their weight is already out of
+            # _achievable_max via the E5b logic above, so tracking them here
+            # too would double-subtract the same weight.
+            _included_judges = {
+                "structure": w_structure,
+                "momentum": w_momentum,
+                "pattern": w_pattern,
+                "volume": w_volume,
+            }
+            if _trend_relevant:
+                _included_judges["trend"] = w_trend
+            if _rev_relevant:
+                _included_judges["reversion"] = w_reversion
+
+            if not hasattr(self, "_judge_zero_streak"):
+                self._judge_zero_streak = {}
+            _dead_extra = 0.0
+            _dead_names = []
+            _streak_n = int(_pc_cfg_early.get("dead_judge_streak_n", 20))
+            for _jname, _jweight in _included_judges.items():
+                _b = float(buy_scores.get(_jname, 0.0) or 0.0)
+                _s = float(sell_scores.get(_jname, 0.0) or 0.0)
+                if _b == 0.0 and _s == 0.0:
+                    self._judge_zero_streak[_jname] = self._judge_zero_streak.get(_jname, 0) + 1
+                else:
+                    self._judge_zero_streak[_jname] = 0
+                if self._judge_zero_streak[_jname] >= _streak_n:
+                    _dead_extra += float(_jweight)
+                    _dead_names.append(_jname)
+
+            if _pc_cfg_early.get("asset_aware_ceiling_enabled", True) and _dead_extra > 0:
+                _achievable_max = max(1.0, _achievable_max - _dead_extra)
+                logger.info(
+                    f"[CEILING-ASSET] {self.asset_type}: dead={_dead_names} "
+                    f"extra −{_dead_extra:.2f} → honest {_achievable_max:.2f} "
+                    f"(streak_n={_streak_n})"
+                )
+
             # ── H2: SCORING SYMMETRY ────────────────────────────────────────
             # E5b removed the irrelevant judge's WEIGHT from the denominator
             # above but left its SCORE in the numerator. buy_total was summed

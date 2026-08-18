@@ -703,6 +703,26 @@ class CompositeStateBuilder:
             except Exception:
                 pass
 
+        # ── BTC-FLOW (17-Aug): bench material only, populated, never
+        # consumed by any judge/gate yet. This builder (CompositeStateBuilder,
+        # owned by the performance/LSM companion aggregator) has no live
+        # reference to BTCFlowHarvester — reused the same governor_data
+        # injection pattern F.7 above uses for spread data instead of wiring
+        # a new cross-object reference. main.py injects mtf_regime["btc_flow"]
+        # from self.btc_flow.refresh()'s cached dict before this call; missing
+        # data (harvester disabled, feed down, or a non-BTC asset) leaves
+        # every field None per the 2.6 rule — never a fabricated zero.
+        if self.asset_type in ("BTC", "BTCUSDT") and governor_data:
+            try:
+                _bf = governor_data.get("btc_flow") or {}
+                state.btc_taker_ratio = _bf.get("taker_buy_ratio")
+                state.btc_oi_delta_pct = _bf.get("oi_delta_pct")
+                state.btc_funding_rate = _bf.get("funding_rate")
+                state.btc_basis_pct = _bf.get("basis_pct")
+                state.btc_flow_age_min = _bf.get("age_min")
+            except Exception:
+                pass
+
         # ── PHASE 1: Livermore State Machine update ──────────────────────────
         # Update both timeframe instances with the latest closed bar.
         # 4H: only update when df_4h has a bar newer than the last processed one.

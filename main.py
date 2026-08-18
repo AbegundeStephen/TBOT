@@ -95,6 +95,7 @@ from src.training.autotrainer import ContinuousLearningPipeline
 from src.execution.cvd_consumer import CVDConsumer
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
 from src.execution.shadow_trader import ShadowTradingEngine  # T3.1
+from src.data.btc_flow_harvester import BTCFlowHarvester  # BTC Flow batch, 17-Aug
 
 
 def setup_logging(config):
@@ -468,6 +469,24 @@ class TradingBot:
         # further down) is too late: _initialize_telegram() runs first and
         # would hit AttributeError on self.outcome_pipeline before it's set.
         self.outcome_pipeline = OutcomeTracker()
+
+        # BTC Flow batch (17-Aug ratification): public, keyless Binance data
+        # for the volume overlay (data_manager.py) and composite-state bench
+        # fields. Harvests and computes; never decides — no judge/gate/VTM
+        # logic imports this module. Set before _initialize_telegram() for
+        # the same reason outcome_pipeline is (nothing here reads it that
+        # early today, but matching the established ordering avoids the
+        # exact AttributeError class the comment above already warns about).
+        self.btc_flow = BTCFlowHarvester(
+            enabled=bool(self.config.get("phase_config", {}).get("btc_flow_harvester_enabled", True))
+        )
+        # DataManager is a separate class (self.data_manager, constructed
+        # earlier at line ~365) — its fetch_mt5_data volume overlay gates on
+        # getattr(self, "btc_flow", None) as a live enabled-check, so it
+        # needs its own reference, not just TradingBot's. The overlay itself
+        # reads data/btc_flow_1h.csv directly (not this object's in-memory
+        # cache), so this wiring only has to make the gate check truthy.
+        self.data_manager.btc_flow = self.btc_flow
 
         # Initialize components in CORRECT order
         self._initialize_telegram()
@@ -3415,6 +3434,17 @@ class TradingBot:
             except Exception as _fe:
                 logger.debug(f"[FUNDING] Skipped: {_fe}")
 
+            # BTC Flow batch: refresh the harvester BEFORE BTC's own frame
+            # fetch runs later this cycle (inside trade_asset), so Segment 2's
+            # volume overlay in data_manager.py has this cycle's freshest CSV
+            # row available rather than lagging a full cycle behind. Never
+            # blocks or raises — see BTCFlowHarvester.refresh()'s own
+            # try/except; this outer one is belt-and-suspenders only.
+            try:
+                self.btc_flow.refresh()
+            except Exception as _bf_err:
+                logger.debug(f"[BTC-FLOW] cycle refresh skipped: {_bf_err}")
+
             # ✨ Record heartbeat and check health
             if hasattr(self, 'health_monitor') and self.health_monitor:
                 logger.info("[HEARTBEAT] System running...")
@@ -4937,6 +4967,18 @@ class TradingBot:
                 and asset_name in self._current_regime_data
             ):
                 mtf_regime = self._current_regime_data[asset_name]
+
+            # BTC Flow batch: this is the live trade-decision path (as opposed
+            # to _update_asset_signal's ranking/caching pass, which has its
+            # own separate injection) — the composite_state built a few lines
+            # below is what the VOLUME judge and the honest-ceiling streak
+            # tracker actually see for a real trade evaluation, so the
+            # harvester data needs to land here too, not just there.
+            if asset_name == "BTC":
+                try:
+                    mtf_regime['btc_flow'] = self.btc_flow.refresh()
+                except Exception:
+                    pass  # Bench telemetry is a bonus — never block execution
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
@@ -6504,6 +6546,18 @@ class TradingBot:
                         mtf_regime['current_spread'] = _spread_data[_sym]
             except Exception:
                 pass  # Spread capture is a bonus — never block execution
+
+            # BTC Flow batch: inject the harvester's cached dict the same way
+            # spread data is injected above — composite_state_builder.py has
+            # no live reference to self.btc_flow, so it reads this off
+            # governor_data (mtf_regime) instead. .refresh() is cheap here
+            # (cache hit unless the 1H bar just rolled or 15min has elapsed;
+            # the real fetch already happened once at cycle-top).
+            if asset_name == "BTC":
+                try:
+                    mtf_regime['btc_flow'] = self.btc_flow.refresh()
+                except Exception:
+                    pass  # Bench telemetry is a bonus — never block execution
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 # HYBRID MODE: Use dynamic selector
