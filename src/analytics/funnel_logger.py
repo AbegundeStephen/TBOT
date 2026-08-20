@@ -127,7 +127,7 @@ class FunnelLogger:
                 stage = self._classify_stage(signal, details)
                 self._counts[ck][stage] += 1
 
-                self._append(day, "funnel", {
+                record = {
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "asset": asset,
                     "final_signal": signal,
@@ -137,7 +137,26 @@ class FunnelLogger:
                     "quality": details.get("signal_quality", details.get("signal_quality", 0)),
                     "reasoning": details.get("reasoning", ""),
                     "stage": stage,
-                })
+                }
+                # Window 2 rider 5 (funnel telemetry, logging-only): four
+                # fields so future age/regime studies run on the bot's own
+                # live records instead of proxies. Never conditional on the
+                # write itself — missing context just lands as null.
+                try:
+                    record["proof_age_tf"] = details.get("proof_age_tf")
+                    record["proof_age_mr"] = details.get("proof_age_mr")
+                except Exception:
+                    record["proof_age_tf"] = record["proof_age_mr"] = None
+                try:
+                    record["regime"] = details.get("consensus_regime")
+                except Exception:
+                    record["regime"] = None
+                try:
+                    record["scored_side"] = details.get("scored_side")
+                except Exception:
+                    record["scored_side"] = None
+
+                self._append(day, "funnel", record)
 
                 # Phase 2.2: AI A/B — capture genuinely AI-rejected signals only
                 # (validator actively changed a real signal → hold), keyed off
