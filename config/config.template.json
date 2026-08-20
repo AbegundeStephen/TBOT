@@ -1463,7 +1463,7 @@
     "pyramid_livermore_maturity_gate_enabled": true,
     "council_counter_trend_cap": 3.5,
     "council_min_score_margin": 0.35,
-    "lsm_regime_disagreement_gate_enabled": true,
+    "lsm_regime_disagreement_gate_enabled": false,
     "graduated_squeeze_enabled": false,
     "conviction_dying_directional_enabled": true,
     "emergency_close_unanchored_weak_signal_enabled": false,

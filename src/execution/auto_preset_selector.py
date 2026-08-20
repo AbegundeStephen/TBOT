@@ -369,33 +369,10 @@ class DynamicPresetSelector:
                 )
                 return "mr"
             
-            # ================================================================
-            # 🛡️ ASSET-DNA HARD LOCKS (Gating)
-            # ================================================================
-            asset = asset_name.upper()
-            
-            _FX_ASSET_SET = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            # ── Asset-DNA hard locks REMOVED (Window 2, ratified 20 Aug 2026) ──
+            # Directional MR-blocking by macro regime contradicted the both-ways
+            # strategy; the blocked class outperformed in the 1,690-proof study.
 
-            if new_preset == "mr":
-                # BTC / USTEC: Block MR during BULLISH or SLIGHTLY_BULLISH
-                # These assets trend strongly — MR in a bull regime is fighting the tape.
-                if "BTC" in asset or "USTEC" in asset:
-                    if regime_name in ["BULLISH", "SLIGHTLY_BULLISH"]:
-                        logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
-                        new_preset = "conservative"
-
-                # GOLD: Only allow MR in BEARISH or NEUTRAL (safety rule — gold has structural bull bias)
-                elif "GOLD" in asset:
-                    if regime_name not in ["BEARISH", "NEUTRAL"]:
-                        logger.info(f"[SELECTOR] 🛡️ GATED - MR blocked for {asset} in {regime_name}. Falling back to conservative.")
-                        new_preset = "conservative"
-
-                # FX pairs: Allow MR in any regime — these are inherently mean-reverting intra-session.
-                # The Regime Alignment Veto above already blocks MR in strong TREND (ADX > 25),
-                # so no additional hard gate needed here.
-                elif asset in _FX_ASSET_SET:
-                    pass  # MR allowed — FX DNA is mean-reverting by design
-            
             # Build detailed reason
             reason = self._format_reason_with_score(
                 preset=new_preset,

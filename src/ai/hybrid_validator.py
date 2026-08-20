@@ -265,15 +265,16 @@ class HybridSignalValidator:
         #   Both fail                        → reject (as before)
         #
         # "Regime-aligned" means the signal direction matches the macro bias
-        # (bull+buy or bear+sell). Counter-trend signals keep the hard AND gate
-        # because they need every confirmation available.
+        # (bull+buy or bear+sell). Window 2 (20 Aug 2026): no longer gates any
+        # soft-pass branch below — both directions get the same weighted-OR
+        # treatment. Computed and logged only, for telemetry.
         # ─────────────────────────────────────────────────────────────────────
         regime = signal_details.get("regime", "NEUTRAL")
         is_bull_regime = "BULL" in regime.upper() or "BULLISH" in regime.upper()
         is_bear_regime = "BEAR" in regime.upper() or "BEARISH" in regime.upper()
         is_neutral_regime = not is_bull_regime and not is_bear_regime
-        
-        # In NEUTRAL regimes, we treat the signal as "potentially aligned" to allow 
+
+        # In NEUTRAL regimes, we treat the signal as "potentially aligned" to allow
         # momentum-based soft passes (Phase 3 recovery logic).
         regime_aligned = (signal == 1 and is_bull_regime) or (signal == -1 and is_bear_regime) or is_neutral_regime
 
@@ -301,42 +302,45 @@ class HybridSignalValidator:
         if sr_passed and pattern_passed:
             # Full approval — both layers confirmed
             pass  # fall through to _approve_signal
-        elif sr_passed and not pattern_passed and regime_aligned and not model_uncertain:
-            # S/R confirmed, no clean pattern, but trend-aligned → soft pass
+        elif sr_passed and not pattern_passed and not model_uncertain:
+            # S/R confirmed, no clean pattern → soft pass (Window 2: no longer
+            # gated on regime_aligned, kept only as telemetry below)
             logger.info(
                 f"[AI] Soft-pass: S/R ✓ | Pattern ✗ ({pattern_result.get('reason','?')}) "
-                f"| regime-aligned → approve with quality penalty"
+                f"| regime_aligned={regime_aligned} → approve with quality penalty"
             )
             signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_sr}
-        elif pattern_passed and not sr_passed and regime_aligned:
-            # Pattern confirmed, no nearby S/R level, but trend-aligned → soft pass
+        elif pattern_passed and not sr_passed:
+            # Pattern confirmed, no nearby S/R level → soft pass (Window 2: no
+            # longer gated on regime_aligned, kept only as telemetry below)
             logger.info(
                 f"[AI] Soft-pass: Pattern ✓ ({pattern_result.get('pattern_name','?')}) "
-                f"| S/R ✗ ({sr_result.get('reason','?')}) | regime-aligned → approve with quality penalty"
+                f"| S/R ✗ ({sr_result.get('reason','?')}) | regime_aligned={regime_aligned} → approve with quality penalty"
             )
             signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_pattern}
         elif model_uncertain and sr_passed:
             # Model couldn't read the candle (uncertain output) but S/R is solid → soft pass
             logger.info(f"[AI] Soft-pass: S/R ✓ | Model uncertain → approve with quality penalty")
             signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_uncertain}
-        elif regime_aligned and h1_momentum_confirmed and (sr_passed or pattern_passed):
+        elif h1_momentum_confirmed and (sr_passed or pattern_passed):
             # ── 1H MOMENTUM SOFT-PASS (new) ──────────────────────────────────
-            # Regime aligns with signal direction AND the 1H session is actively
-            # moving in the same direction (slope + structure) AND at least one
-            # of S/R or pattern confirms.  This path catches mid-trend entries
-            # like declining BTC SELLs or falling GOLD where the candle pattern
-            # is ambiguous but the price action context is unambiguous.
-            # USTEC-style false signals are NOT helped by this path because they
-            # show h1_dir="DOWN" / h1_lower_highs=True while regime=BULLISH — the
-            # regime_aligned gate prevents the conflict from slipping through.
+            # The 1H session is actively moving in the signal's direction
+            # (slope + structure) AND at least one of S/R or pattern confirms.
+            # This path catches mid-trend entries like declining BTC SELLs or
+            # falling GOLD where the candle pattern is ambiguous but the price
+            # action context is unambiguous.
+            # USTEC-style false signals are NOT helped by this path because
+            # h1_momentum_confirmed itself requires the signal direction to
+            # match h1_dir/h1_higher_lows/h1_lower_highs — a signal fighting
+            # the 1H tape fails h1_momentum_confirmed regardless of regime.
             _confirm_src = "S/R" if sr_passed else "Pattern"
             logger.info(
                 f"[AI] 1H-momentum soft-pass: {_confirm_src} ✓ | "
                 f"1H dir={h1_dir} | lower_highs={h1_lower_highs} | higher_lows={h1_higher_lows} "
-                f"| regime-aligned → approve with quality penalty"
+                f"| regime_aligned={regime_aligned} → approve with quality penalty"
             )
             signal_details = {**signal_details, "ai_quality_penalty": self.soft_pass_penalty_momentum, "h1_momentum_pass": True}
-        elif regime_aligned and h1_momentum_confirmed and signal_quality >= self.third_path_min_quality:
+        elif h1_momentum_confirmed and signal_quality >= self.third_path_min_quality:
             # ── PATH 3: HIGH CONFIDENCE TREND BYPASS ─────────────────────────
             # item 18d redesign, flag-gated OFF by default (phase_config.
             # ai_third_path_structural_anchor_enabled). Today this is a bare
@@ -384,7 +388,7 @@ class HybridSignalValidator:
                     logger.info(
                         f"[AI] Structural-momentum pass: anchor={_anchor:.2f} "
                         f"({_anchor_dist_atr:.2f}x ATR) | quality={signal_quality:.2f} | "
-                        f"1H dir={h1_dir} | regime-aligned + independent confirmation → "
+                        f"1H dir={h1_dir} | regime_aligned={regime_aligned} + independent confirmation → "
                         f"approve with quality penalty"
                     )
                     signal_details = {
@@ -418,16 +422,16 @@ class HybridSignalValidator:
                 # Pre-existing behavior, unchanged while the flag is off.
                 logger.info(
                     f"[AI] Trend-bypass: High Quality ({signal_quality:.2f}) | "
-                    f"1H dir={h1_dir} | regime-aligned → approve with quality penalty"
+                    f"1H dir={h1_dir} | regime_aligned={regime_aligned} → approve with quality penalty"
                 )
                 signal_details = {**signal_details, "ai_quality_penalty": self.third_path_penalty, "trend_bypass": True}
         else:
-            # Hard reject — either both failed, or counter-trend with one missing,
-            # or 1H momentum contradicts the signal direction.
+            # Hard reject — both S/R and pattern failed, or one is missing
+            # and 1H momentum contradicts the signal direction.
             rejection_reason = "both_gates_failed" if (not sr_passed and not pattern_passed) else \
                 ("no_sr_level" if not sr_passed else pattern_result.get("reason", "no_pattern"))
             # Annotate when 1H momentum was the deciding factor
-            if regime_aligned and not h1_momentum_aligned and h1_dir != "FLAT":
+            if not h1_momentum_aligned and h1_dir != "FLAT":
                 rejection_reason = f"h1_momentum_contradict ({h1_dir})"
             result = self._reject_signal(
                 signal_details, sr_result, pattern_result,
