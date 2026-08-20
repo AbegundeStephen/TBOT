@@ -104,7 +104,18 @@ def validate_candle_structure(
     else:
         wick_multiplier = 1.5 if (regime_aligned and regime_confidence >= 0.6) else 1.0
 
-    if upper_wick > (wick_multiplier * atr) or lower_wick > (wick_multiplier * atr):
+    logger.debug(
+        f"[TRAP-TELEMETRY] mode={'tier_keyed' if tier_keyed else 'regime_keyed'} "
+        f"brc_tier={brc_tier} wick_multiplier={wick_multiplier:.1f}"
+    )
+
+    _wick_blocked = upper_wick > (wick_multiplier * atr) or lower_wick > (wick_multiplier * atr)
+    logger.debug(
+        f"[TRAP-TELEMETRY] wick_max={max(upper_wick, lower_wick):.4f} "
+        f"threshold={wick_multiplier * atr:.4f} atr={atr:.4f} result={'BLOCK' if _wick_blocked else 'PASS'}"
+    )
+
+    if _wick_blocked:
         logger.info(
             f"[TRAP] ❌ BLOCKED — Wick {max(upper_wick, lower_wick):.4f} > "
             f"{wick_multiplier:.1f}x ATR {atr:.4f} "
@@ -121,7 +132,12 @@ def validate_candle_structure(
     if 'BTC' in asset_type.upper() and not regime_aligned:
         volume = latest.get('volume', 0)
         volume_rolling_avg = df['volume'].iloc[-21:-1].mean()
-        if volume_rolling_avg > 0 and volume < 1.5 * volume_rolling_avg:
+        _vol_blocked = volume_rolling_avg > 0 and volume < 1.5 * volume_rolling_avg
+        logger.debug(
+            f"[TRAP-TELEMETRY] btc_volume={volume:.0f} avg20={volume_rolling_avg:.0f} "
+            f"threshold={1.5 * volume_rolling_avg:.0f} result={'BLOCK' if _vol_blocked else 'PASS'}"
+        )
+        if _vol_blocked:
             logger.debug(
                 f"[TRAP] BTC volume insufficient (not regime-aligned): "
                 f"{volume:.0f} < 1.5x avg ({volume_rolling_avg:.0f})"

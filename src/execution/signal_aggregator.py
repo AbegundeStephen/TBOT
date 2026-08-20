@@ -2676,19 +2676,14 @@ class PerformanceWeightedAggregator:
                                 f"[{self.asset_type}]"
                             )
                             if tf_signal < 0:
-                                tf_conf *= _full_bull_penalty
                                 logger.info(
-                                    f"[GATEKEEPER] ⚠️ PENALIZED SHORT (TF): Full bullish+evidence — "
-                                    f"conf reduced to {tf_conf:.2f}"
+                                    f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED SHORT (TF): Full bullish+evidence — "
+                                    f"conf reduced to {tf_conf * _full_bull_penalty:.2f}"
                                 )
-                            if ema_signal < 0:
-                                ema_signal = 0
-                                ema_conf = 0.0
                             if mr_signal < 0:
-                                mr_conf *= min(_full_bull_penalty + 0.10, 0.80)
                                 logger.info(
-                                    f"[GATEKEEPER] ⚠️ PENALIZED SHORT (MR): Full bullish+evidence — "
-                                    f"conf reduced to {mr_conf:.2f}"
+                                    f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED SHORT (MR): Full bullish+evidence — "
+                                    f"conf reduced to {mr_conf * min(_full_bull_penalty + 0.10, 0.80):.2f}"
                                 )
                             elif mr_signal > 0:
                                 logger.info(
@@ -2740,22 +2735,14 @@ class PerformanceWeightedAggregator:
                                 f"conditions={_transition_conditions}/4)"
                             )
                         if tf_signal < 0:
-                            tf_conf *= _penalty
                             logger.info(
-                                f"[GATEKEEPER] ⚠️ PENALIZED SHORT (TF): Slightly bullish — "
-                                f"conf reduced to {tf_conf:.2f}"
+                                f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED SHORT (TF): Slightly bullish — "
+                                f"conf reduced to {tf_conf * _penalty:.2f}"
                             )
-                        if ema_signal < 0:
-                            # EMA is a slow-trend follower — still zero in counter trend
-                            ema_signal = 0
-                            ema_conf = 0.0
                         if mr_signal < 0:
-                            mr_conf *= min(
-                                _penalty + 0.10, 0.80
-                            )  # MR slightly less penalised
                             logger.info(
-                                f"[GATEKEEPER] ⚠️ PENALIZED SHORT (MR): Slightly bullish — "
-                                f"conf reduced to {mr_conf:.2f}"
+                                f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED SHORT (MR): Slightly bullish — "
+                                f"conf reduced to {mr_conf * min(_penalty + 0.10, 0.80):.2f}"
                             )
                         elif mr_signal > 0:
                             logger.info(
@@ -2787,20 +2774,14 @@ class PerformanceWeightedAggregator:
                                 f"[{self.asset_type}]"
                             )
                             if tf_signal > 0:
-                                tf_conf *= _full_bear_penalty
                                 logger.info(
-                                    f"[GATEKEEPER] ⚠️ PENALIZED LONG (TF): Full bearish+evidence — "
-                                    f"conf reduced to {tf_conf:.2f}"
+                                    f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED LONG (TF): Full bearish+evidence — "
+                                    f"conf reduced to {tf_conf * _full_bear_penalty:.2f}"
                                 )
-                            if ema_signal > 0:
-                                # EMA is slow — zero it even with evidence; TF covers the bullish case
-                                ema_signal = 0
-                                ema_conf = 0.0
                             if mr_signal > 0:
-                                mr_conf *= min(_full_bear_penalty + 0.10, 0.80)
                                 logger.info(
-                                    f"[GATEKEEPER] ⚠️ PENALIZED LONG (MR): Full bearish+evidence — "
-                                    f"conf reduced to {mr_conf:.2f}"
+                                    f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED LONG (MR): Full bearish+evidence — "
+                                    f"conf reduced to {mr_conf * min(_full_bear_penalty + 0.10, 0.80):.2f}"
                                 )
                             elif mr_signal < 0:
                                 logger.info(
@@ -2852,19 +2833,14 @@ class PerformanceWeightedAggregator:
                                 f"conditions={_transition_conditions}/4)"
                             )
                         if tf_signal > 0:
-                            tf_conf *= _penalty
                             logger.info(
-                                f"[GATEKEEPER] ⚠️ PENALIZED LONG (TF): Slightly bearish — "
-                                f"conf reduced to {tf_conf:.2f}"
+                                f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED LONG (TF): Slightly bearish — "
+                                f"conf reduced to {tf_conf * _penalty:.2f}"
                             )
-                        if ema_signal > 0:
-                            ema_signal = 0
-                            ema_conf = 0.0
                         if mr_signal > 0:
-                            mr_conf *= min(_penalty + 0.10, 0.80)
                             logger.info(
-                                f"[GATEKEEPER] ⚠️ PENALIZED LONG (MR): Slightly bearish — "
-                                f"conf reduced to {mr_conf:.2f}"
+                                f"[GATEKEEPER-ADVISORY] ⚠️ PENALIZED LONG (MR): Slightly bearish — "
+                                f"conf reduced to {mr_conf * min(_penalty + 0.10, 0.80):.2f}"
                             )
                         elif mr_signal < 0:
                             logger.info(

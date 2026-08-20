@@ -1477,7 +1477,7 @@
     "council_lifecycle_livermore_guard_enabled": true,
     "strategy_livermore_awareness_enabled": false,
     "pyramid_livermore_maturity_gate_enabled": true,
-    "lsm_regime_disagreement_gate_enabled": true,
+    "lsm_regime_disagreement_gate_enabled": false,
     "graduated_squeeze_enabled": false,
     "conviction_dying_directional_enabled": true,
     "tier3_shadow_enabled": false,
