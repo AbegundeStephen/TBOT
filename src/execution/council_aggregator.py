@@ -1504,6 +1504,12 @@ class InstitutionalCouncilAggregator:
                     "total_score": 0.0,
                     "signal_quality": 0.0,
                     "timestamp": timestamp,
+                    # Window 2 rider 5 (funnel telemetry, logging-only): same
+                    # source variables as the [NO-PROOF] line just above.
+                    "proof_age_tf": getattr(_composite_state, "setup_age", None),
+                    "proof_age_mr": getattr(_composite_state, "setup_age_mr", None),
+                    "consensus_regime": (governor_data or {}).get("consensus_regime", "NEUTRAL"),
+                    "scored_side": None,
                 }
 
             # ================================================================
@@ -3678,6 +3684,17 @@ class InstitutionalCouncilAggregator:
                 "legacy_reference_sell_trend": _old_sell_trend,
                 "regime": regime_name,
                 "regime_confidence": regime_conf,
+                # Window 2 rider 5 (funnel telemetry, logging-only). Named
+                # "consensus_regime" (not "regime") to avoid colliding with
+                # the bull/bear emoji label already stored under that key.
+                "consensus_regime": consensus_regime,
+                "proof_age_tf": getattr(_composite_state, "setup_age", None),
+                "proof_age_mr": getattr(_composite_state, "setup_age_mr", None),
+                "scored_side": (
+                    "buy" if signal == 1
+                    else "sell" if signal == -1
+                    else ("buy" if buy_total >= sell_total else "sell")
+                ),
                 "explanations": chosen_explanations,
                 "signal_quality": signal_quality,
                 "reasoning": main_reasoning,
