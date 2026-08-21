@@ -51,7 +51,7 @@
     "min_position_scale": 0.5,
     "max_hedge_ratio": 0.0,
     "max_total_open_risk": 0.25,
-    "small_account_threshold_usd": 200,
+    "small_account_threshold_usd": 400,
     "small_account_max_exposure_pct": 10.0,
     "max_total_open_positions": 10
   },
