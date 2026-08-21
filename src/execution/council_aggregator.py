@@ -738,6 +738,7 @@ class InstitutionalCouncilAggregator:
         first_tp_mult: float = 1.5,
         asset_name: Optional[str] = None,
         trade_type: Optional[str] = None,
+        governor_data: Optional[Dict] = None,
     ) -> bool:
         """
         The 'Worth It' Check. Validates if potential RR covers fees using ATR scaling.
@@ -766,60 +767,92 @@ class InstitutionalCouncilAggregator:
         atr_multiplier=2.5) the real first exit only pays 1.2/2.5 = 0.48R,
         not 1.5R.
 
-        This is NOT enabled unconditionally: with the real per-asset
-        numbers, only BTC's configured stop/TP structure clears min_rr
-        (1.5) — GOLD/USTEC/EURUSD/EURJPY/USOIL/GBPAUD all fall well under
-        it even using the full size-weighted average across all three
-        partials (0.81-1.12R vs required 1.3-1.5R), because they're built
-        as tight-first-scale-out/wide-stop structures. Deriving the real
-        number here would permanently block those six assets until min_rr
-        is recalibrated per asset — a strategy-level decision, not a
-        one-line fix — so this stays behind profit_gate_real_tp_mult_enabled
-        (default False) until that recalibration happens. OFF keeps
-        today's hardcoded-1.5 behavior byte-identical.
+        Window-G Segment A (20-Aug): the R:R reward check above (min_rr veto)
+        is RETIRED from this veto path — measured live, its cost defaults were
+        4x-26x larger than reality, computed against a reward derived from a
+        partial-exit ladder that Segment R2 already retired, so it killed
+        100% of clears. min_rr itself is left in config, unread here (hygiene
+        removal later). Replaced with a pure cost-sanity check: veto only if
+        the round-trip spread cost, expressed in ATR terms, exceeds a cap.
+        Ships dark behind gate4_pure_cost_enabled (phase_config) — this flag
+        is the single final switch that first lets a cleared council signal
+        reach execution; false reproduces the exact prior min_rr behavior.
         """
         try:
             risk = abs(entry - stop_loss)
             if risk <= 0:
                 return True
 
-            _risk_cfg_tp = getattr(self, "risk_config", {}) or {}
-            if getattr(self, "phase_config", {}).get("profit_gate_real_tp_mult_enabled", False):
-                _partial_targets = _risk_cfg_tp.get("partial_targets") or []
-                if _partial_targets:
-                    first_tp_mult = (float(_partial_targets[0]) * atr_fast) / risk
+            _phase_cfg_g4 = getattr(self, "phase_config", {}) or {}
+            if not _phase_cfg_g4.get("gate4_pure_cost_enabled", False):
+                # Legacy path, byte-identical to pre-Window-G behavior.
+                _risk_cfg_tp = getattr(self, "risk_config", {}) or {}
+                if _phase_cfg_g4.get("profit_gate_real_tp_mult_enabled", False):
+                    _partial_targets = _risk_cfg_tp.get("partial_targets") or []
+                    if _partial_targets:
+                        first_tp_mult = (float(_partial_targets[0]) * atr_fast) / risk
 
-            expected_reward = risk * first_tp_mult
-            min_required = 0.5 * atr_fast
+                expected_reward = risk * first_tp_mult
+                min_required = 0.5 * atr_fast
 
-            # Real, observed friction cost — replaces the implicit "cost is zero"
-            # assumption. FRICTION_PENALTIES stores round-trip cost as a FRACTION
-            # of price (e.g. 0.0003 = 0.03%), so no /100 conversion here — that
-            # conversion only applies where the source value is itself a percent.
-            _friction_cost = 0.0
-            if asset_name:
-                _friction_fraction = FRICTION_PENALTIES.get(asset_name.upper())
-                if _friction_fraction is not None:
-                    _friction_cost = _friction_fraction * entry
-                    expected_reward -= _friction_cost
+                _friction_cost = 0.0
+                if asset_name:
+                    _friction_fraction = FRICTION_PENALTIES.get(asset_name.upper())
+                    if _friction_fraction is not None:
+                        _friction_cost = _friction_fraction * entry
+                        expected_reward -= _friction_cost
 
-            if expected_reward < min_required:
+                if expected_reward < min_required:
+                    logger.info(
+                        f"[PROFIT GATE] ❌ Blocked - Low Reward after real friction "
+                        f"(reward {expected_reward:.4f} < {min_required:.4f}, "
+                        f"friction_cost={_friction_cost:.4f})"
+                    )
+                    return False
+
+                _min_rr = float(getattr(self, "risk_config", {}).get("min_rr", 1.5))
+                return (expected_reward / risk) >= _min_rr
+
+            # ── A1: pure cost test ──────────────────────────────────────
+            # cost_R = spread_used / ATR; veto only if cost_R > cost_cap.
+            # spread_used = live harness observation (governor_data, the
+            # same source _friction_telemetry reads at the call site above
+            # this one) when present, else the 20-Aug measured table below
+            # x1.0 (the cap already embodies ~2x normal GBPAUD).
+            _asset_u = (asset_name or self.asset_type or "").upper()
+            # A3: BTC has no live-observed history yet -- spread collection
+            # is MT5-only (main.py's F.7 injection reads self.mt5_handler;
+            # BTC trades via self.binance_handler, which has no equivalent
+            # spread tracking). Placeholder until that's built (tracked
+            # separately, not a one-line fix -- confirmed no existing
+            # bid/ask infrastructure in binance_handler.py).
+            _GATE3_MEASURED_SPREAD = {
+                "GOLD": 0.26, "XAUUSD": 0.26,
+                "USTEC": 1.12, "US100": 1.12, "NAS100": 1.12,
+                "EURUSD": 0.00008,
+                "USOIL": 0.02, "OIL": 0.02,
+                "GBPAUD": 0.00021,
+            }
+            _spread_used = None
+            _live_spread = float((governor_data or {}).get("current_spread", 0) or 0)
+            if _live_spread > 0:
+                _spread_used = _live_spread
+            elif _asset_u == "BTC":
+                _spread_used = 0.0005 * entry   # A3 placeholder: 0.05% of price
+            else:
+                _spread_used = _GATE3_MEASURED_SPREAD.get(_asset_u, 0.0)
+
+            _atr_for_cost = atr_fast if atr_fast > 0 else 1e-9
+            _cost_R = _spread_used / _atr_for_cost
+            _cost_cap = float(_phase_cfg_g4.get("gate4_cost_cap_r", 0.15))
+
+            if _cost_R > _cost_cap:
                 logger.info(
-                    f"[PROFIT GATE] ❌ Blocked - Low Reward after real friction "
-                    f"(reward {expected_reward:.4f} < {min_required:.4f}, "
-                    f"friction_cost={_friction_cost:.4f})"
+                    f"[GATE-③ COST] ❌ Blocked - {_asset_u}: cost {_cost_R:.3f}R "
+                    f"> cap {_cost_cap:.2f}R (spread_used={_spread_used:.5g}, atr={atr_fast:.5g})"
                 )
                 return False
-
-            # Strategy minimum is 1:1.5, per asset — never by trade type.
-            # The old ladder (TREND 1.0 / REVERSION 0.6 / else 1.2) approved
-            # trades risking more than they stood to make, and gave counter-trend
-            # an easier bar by formula — the same pattern B4/B5 removed.
-            # R:R is a property of the instrument, not the direction.
-            # Same source VTM already uses (vtm:231), so both halves of the bot
-            # now judge the same trade by the same rule.
-            _min_rr = float(getattr(self, "risk_config", {}).get("min_rr", 1.5))
-            return (expected_reward / risk) >= _min_rr
+            return True
 
         except Exception as e:
             logger.error(f"[PROFIT] Error: {e}")
@@ -2964,6 +2997,17 @@ class InstitutionalCouncilAggregator:
             entry_price = 0.0
             stop_loss = 0.0
 
+            # A4 (Window-G Segment A, 20-Aug): [FRICTION] telemetry now fires
+            # every convening, not only when signal != 0 -- it previously lived
+            # inside the signal-gated block below, so measurement silently
+            # depended on the council actually clearing a signal. Uses the raw
+            # close, not `entry_price` (which stays 0.0 on a HOLD convening by
+            # design just below), so a real reading exists on every cycle.
+            try:
+                self._friction_telemetry(float(df["close"].iloc[-1]), atr_fast, governor_data=governor_data)
+            except Exception as _fric_err:
+                logger.debug(f"[FRICTION] telemetry call failed: {_fric_err}")
+
             if signal != 0:
                 # Pre-calculate entry and stop loss for gates and penalties
                 try:
@@ -3269,10 +3313,12 @@ class InstitutionalCouncilAggregator:
                 # B. PROFIT ECONOMICS — B7: single R:R veto (trade-type aware:
                 # TREND needs 1.0, REVERSION 0.6), replacing the old separate
                 # rr_gate_rejected_trend/reversion block above.
-                self._friction_telemetry(entry_price, atr_fast, governor_data=governor_data)
+                # A4: friction telemetry now fires unconditionally above, every
+                # convening -- not duplicated here.
                 if not self._check_profit_economics_adaptive(
                     entry_price, stop_loss, atr_fast,
                     asset_name=self.asset_type, trade_type=trade_type,
+                    governor_data=governor_data,
                 ):
                     logger.info(
                         f"[VETO] ❌ BLOCKED - R:R Gate ({trade_type}): reward doesn't "
@@ -4960,12 +5006,23 @@ class InstitutionalCouncilAggregator:
             pass
 
         # ── Segment 1: ADX-scaled base (0.45) ─────────────────────────
+        # Window-G Segment B (20-Aug): award by directional-index dominance,
+        # not by is_bull (the daily macro read) -- confirmed live that this
+        # awarded the judge's largest component to the wrong side on a
+        # counter-macro move (miswired sell adx(1.00) matched to the third
+        # decimal against a live scorecard).
         _adx_scale = min(_adx_for_gate / 32.0, 1.0)
         if _adx_scale > 0:
-            if is_bull:
-                buy += 0.45 * weight * _adx_scale; buy_parts.append(f"adx({_adx_scale:.2f})")
-            else:
-                sell += 0.45 * weight * _adx_scale; sell_parts.append(f"adx({_adx_scale:.2f})")
+            try:
+                _pdi = ta.PLUS_DI(df["high"].values, df["low"].values, df["close"].values, timeperiod=14)[-1]
+                _ndi = ta.MINUS_DI(df["high"].values, df["low"].values, df["close"].values, timeperiod=14)[-1]
+            except Exception:
+                _pdi = _ndi = float("nan")
+            if not (np.isnan(_pdi) or np.isnan(_ndi)) and _pdi != _ndi:
+                if _pdi > _ndi:
+                    buy += 0.45 * weight * _adx_scale; buy_parts.append(f"adx({_adx_scale:.2f})")
+                else:
+                    sell += 0.45 * weight * _adx_scale; sell_parts.append(f"adx({_adx_scale:.2f})")
 
         features_mr = self.s_mean_reversion.generate_features(df.tail(100))
         rsi = float(features_mr.iloc[-1].get("rsi", 50)) if not features_mr.empty else 50.0

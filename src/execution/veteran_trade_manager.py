@@ -463,8 +463,26 @@ class VeteranTradeManager:
         self.use_structure_targets = self.risk_config.get("use_structure_targets", True)
         # Runner trailing stop ATR multiplier (replaces hardcoded 2.0)
         self.runner_trail_atr_multiplier = self.risk_config.get("runner_trail_atr_multiplier", 2.0)
+        # R-batch / Window-G: both live in the global phase_config block
+        # (config.phase_config.*), same as r_breakeven_enabled/trigger/lock
+        # just below -- NOT per-asset risk_config keys, so both must read
+        # through the nested "phase_config" merge portfolio_manager.py
+        # injects into risk_config (confirmed at its two VTM construction
+        # sites), matching _check_r_based_breakeven's established pattern.
+        # Corrected here (20-Aug): trail_mult_floor previously read
+        # self.risk_config.get("trail_mult_floor", ...) directly -- always
+        # silently 0.0 regardless of config, since that key only ever
+        # existed under phase_config. Invisible until now because the
+        # shipped value was 0.0 either way (floor disabled by design).
+        _phase_cfg_init = self.risk_config.get("phase_config", {}) or {}
         # R-batch: floor under all downward trail mutations (0.0 = disabled)
-        self._trail_mult_floor = float(self.risk_config.get("trail_mult_floor", 0.0))
+        self._trail_mult_floor = float(_phase_cfg_init.get("trail_mult_floor", 0.0))
+        # Window-G Segment D: neither trail mechanism may move the stop until
+        # close-basis progress reaches this many R (0.0 = disabled, trails as
+        # before). Gates both the ATR runner trail and the structural swing
+        # trail -- proven live that an early trail pre-empts a wide structural
+        # stop before the thesis has any room to work.
+        self._trail_start_progress_r = float(_phase_cfg_init.get("trail_start_progress_r", 0.0))
         # Time-based break-even: move SL to entry after N bars if pnl >= threshold
         self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
         self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
@@ -1728,13 +1746,25 @@ class VeteranTradeManager:
                     self.runner_trail_atr_multiplier = _abs_mult
                     self._floor_trail("absorption")
 
+            # Window-G Segment D: close-basis progress in R, gating BOTH trail
+            # mechanisms below (ATR runner trail and structural swing trail) --
+            # proven live (EURUSD: -0.19R at 10:00, +3.05R at 12:00 on the same
+            # signal) that an early trail pre-empts a wide structural stop
+            # before the thesis has room to work. 0.0 = disabled, both trail
+            # exactly as before. BE (+0.75R, R-lock) and the +0.2R lock are
+            # unrelated mechanisms and are untouched by this gate.
+            _risk_d = abs(self.entry_price - self.initial_stop_loss) if self.initial_stop_loss else 0.0
+            _profit_d = (self.close[-1] - self.entry_price) if self.side == "long" else (self.entry_price - self.close[-1])
+            _progress_r = (_profit_d / _risk_d) if _risk_d > 0 else 0.0
+            _trail_start_ok = _progress_r >= self._trail_start_progress_r
+
             if self.side == "long":
                 # Guard: highest_price_reached may be None if entry_price was None at construction
                 if self.highest_price_reached is None:
                     self.highest_price_reached = current_price
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
-                if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND":
+                if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
                     if new_trail > self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
@@ -1746,7 +1776,7 @@ class VeteranTradeManager:
                 # Structural trail takes over when it produces a higher stop.
                 # Only active when structural_trailing_enabled = true in config.
                 _current_profit_long = self.close[-1] - self.entry_price
-                if _current_profit_long > 1.0 * atr:
+                if _current_profit_long > 1.0 * atr and _trail_start_ok:
                     _struct_sl = self._compute_swing_low_trail(atr)
                     if _struct_sl is not None and _struct_sl > self.current_stop_loss:
                         logger.info(
@@ -1762,7 +1792,7 @@ class VeteranTradeManager:
                     self.lowest_price_reached = current_price
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
-                if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND":
+                if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
                     if new_trail < self.current_stop_loss:
                         logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
@@ -1770,7 +1800,7 @@ class VeteranTradeManager:
 
                 # ── STRUCTURAL SWING HIGH TRAIL (Option 1 + Option B, shorts) ─
                 _current_profit_short = self.entry_price - self.close[-1]
-                if _current_profit_short > 1.0 * atr:
+                if _current_profit_short > 1.0 * atr and _trail_start_ok:
                     _struct_sl = self._compute_swing_low_trail(atr)
                     if _struct_sl is not None and _struct_sl < self.current_stop_loss:
                         logger.info(

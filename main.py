@@ -26,6 +26,16 @@ from types import SimpleNamespace
 from dotenv import load_dotenv
 import os
 
+# ── INTERPRETER GUARD (Window-G, ratified 20 Aug 2026) ─────────────────────
+# Any instance not launched by the official venv interpreter exits at
+# birth. Containment for the self-spawned Python312 twin; root-cause
+# hunt continues in parallel. Remove only with Desire's sign-off.
+import sys as _g_sys
+from pathlib import Path as _g_Path
+_VENV = _g_Path(r"C:\TradingBot\TBOT\venv\Scripts\python.exe").resolve()
+if _g_Path(_g_sys.executable).resolve() != _VENV:
+    _g_sys.exit(0)
+
 # Load environment variables from .env file at startup
 load_dotenv()
 
@@ -1327,8 +1337,12 @@ class TradingBot:
             # neighbor's numbers. Remaining FX pairs (EURJPY/GBPUSD/GBPAUD/
             # USDJPY) and any future commodity/index are untested this pass
             # and keep the shared bucket as an honest "not yet tuned" default.
-            _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD"}
-            _FX_ASSETS = {"EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            # Window-G Segment C (20-Aug): GBPAUD split out of _FX_ASSETS into
+            # its own dedicated AGGREGATOR_PRESETS block — its score
+            # distribution was measured independently, so it no longer
+            # inherits EURJPY/GBPUSD/USDJPY's shared, unmeasured-for-it bars.
+            _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD", "GBPAUD"}
+            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY"}
             _asset_upper = asset_name.upper()
             if _asset_upper in _DEDICATED_ASSETS:
                 config_key = _asset_upper
@@ -3004,9 +3018,13 @@ class TradingBot:
             # Get preset config — map asset to its preset bucket.
             # FX pairs use a dedicated preset tuned for tighter ranges and higher
             # MR weight. Commodities/indices share GOLD. BTC is its own bucket.
-            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            # GBPAUD split out (Window-G Segment C, 20-Aug) — see the matching
+            # note at the other _FX_ASSETS site above.
+            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "USDJPY"}
             if "BTC" in asset_name.upper():
                 _preset_key = "BTC"
+            elif asset_name.upper() == "GBPAUD":
+                _preset_key = "GBPAUD"
             elif asset_name.upper() in _FX_ASSETS:
                 _preset_key = "FX"
             else:
