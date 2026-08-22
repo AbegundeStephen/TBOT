@@ -9,8 +9,9 @@ from flask_cors import CORS
 import json
 import os
 import sys
+import subprocess
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 import logging
 
@@ -89,6 +90,15 @@ def index():
         dashboard_html = dashboard_html.replace(
             "'YOUR_SUPABASE_ANON_KEY'",
             f"'{os.getenv('SUPABASE_ANON_KEY', SUPABASE_KEY)}'",
+        )
+        # Dashboard auth key, same client-safe injection pattern as the
+        # Supabase credentials above -- this is a single-operator local
+        # dashboard (no login system), so this is a lightweight guard
+        # against accidental/CSRF-ish state changes, not a real security
+        # boundary; DASHBOARD_API_KEY may be unset (falls back to '' and
+        # every @require_dashboard_auth route then correctly rejects).
+        dashboard_html = dashboard_html.replace(
+            "'YOUR_DASHBOARD_API_KEY'", f"'{DASHBOARD_API_KEY or ''}'"
         )
 
         return render_template_string(dashboard_html)
@@ -754,6 +764,88 @@ def get_audit_events():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/funnel")
+def get_funnel():
+    """
+    Signal funnel: every aggregator evaluation, by asset and pipeline stage.
+    Reads logs/funnel/funnel_<date>.jsonl the same way
+    scripts/analyze_observability.py does (that script's output is text-only,
+    formatted for a terminal, so this re-implements the same aggregation
+    shaped for JSON instead of importing it) -- answers "how many signals
+    got caught, how far they went, what happened" without SSHing in.
+    """
+    import glob as _glob
+    from collections import defaultdict as _defaultdict
+
+    try:
+        days = request.args.get("days", 1, type=int)
+        funnel_dir = os.path.join(project_root, "logs", "funnel")
+        files = sorted(_glob.glob(os.path.join(funnel_dir, "funnel_*.jsonl")))
+        if days:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+            files = [
+                fp for fp in files
+                if os.path.basename(fp).replace("funnel_", "").replace(".jsonl", "") >= cutoff
+            ]
+
+        rows = []
+        for fp in files:
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        if not rows:
+            return jsonify({"available": False, "assets": {}, "veto_totals": {}, "days": days})
+
+        per_asset = _defaultdict(lambda: _defaultdict(int))
+        stage_totals = _defaultdict(int)
+        for r in rows:
+            a = r.get("asset", "?")
+            stage = r.get("stage", "unknown")
+            per_asset[a]["evaluations"] += 1
+            if stage == "executed":
+                per_asset[a]["executed"] += 1
+                continue
+            if any(r.get(k) for k in ("mr", "tf", "ema")):
+                per_asset[a]["raw_signal"] += 1
+            per_asset[a][stage] += 1
+            stage_totals[stage] += 1
+
+        assets = {}
+        for a, c in per_asset.items():
+            blocks = {
+                k: v for k, v in c.items()
+                if k.startswith("blocked") or k == "no_raw_signal" or k == "risk_capped_shared_budget"
+            }
+            assets[a] = {
+                "evaluations": c.get("evaluations", 0),
+                "raw_signal": c.get("raw_signal", 0),
+                "passed_to_execution": c.get("passed_to_execution", 0),
+                "executed": c.get("executed", 0),
+                "blocked": dict(sorted(blocks.items(), key=lambda x: -x[1])),
+            }
+
+        veto_totals = dict(sorted(
+            ((k, v) for k, v in stage_totals.items()
+             if k.startswith("blocked") or k == "no_raw_signal" or k == "risk_capped_shared_budget"),
+            key=lambda x: -x[1],
+        ))
+
+        return jsonify({"available": True, "assets": assets, "veto_totals": veto_totals, "days": days})
+    except Exception as e:
+        logger.error(f"Funnel error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/shadow/state")
 def get_shadow_state():
     """
@@ -779,6 +871,34 @@ def get_shadow_state():
         return jsonify(state)
     except Exception as e:
         logger.error(f"Shadow state error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/livermore/<asset>")
+def get_livermore_state(asset):
+    """
+    Returns the Livermore state-machine snapshot for one asset, written by
+    main.py every cycle to logs/composite_state.json (dashboard runs as a
+    separate process and can't read the bot's in-memory composite_state --
+    same file-dump pattern as /api/shadow/state above).
+    """
+    try:
+        state_path = os.path.join(project_root, "logs", "composite_state.json")
+        if not os.path.exists(state_path):
+            return jsonify({"asset": asset.upper(), "available": False, "state": None})
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        asset_state = (state.get("assets") or {}).get(asset.upper())
+        if asset_state is None:
+            return jsonify({"asset": asset.upper(), "available": False, "state": None})
+        return jsonify({
+            "asset": asset.upper(),
+            "available": True,
+            "updated_at": state.get("updated_at"),
+            "state": asset_state,
+        })
+    except Exception as e:
+        logger.error(f"Livermore state error for {asset}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1224,6 +1344,192 @@ def download_logs():
 
     else:
         return jsonify({"error": f"Unknown type: {log_type}"}), 400
+
+
+# ============================================================================
+# BACKTEST (dashboard wiring)
+# ============================================================================
+# backtest.py writes status.json/result.json per run under logs/backtests/
+# <run_id>/ when launched with --run-id/--output-dir. This block never keeps
+# a live Popen handle across requests -- every status/result check is a pure
+# file read keyed by run_id, matching this file's existing convention of
+# reading state another process writes (shadow_state.json, composite_state.
+# json) rather than an in-memory job registry. See the plan file for the
+# full design rationale (race/crash-detection handling below).
+
+_BACKTESTS_DIR = os.path.join(project_root, "logs", "backtests")
+
+
+def _backtest_status_path(run_id):
+    return os.path.join(_BACKTESTS_DIR, run_id, "status.json")
+
+
+def _backtest_result_path(run_id):
+    return os.path.join(_BACKTESTS_DIR, run_id, "result.json")
+
+
+def _read_backtest_status(run_id):
+    """
+    Returns the status dict, or None if it doesn't exist yet. Synthesizes a
+    "failed" state in two cases backtest.py itself can never self-report:
+      - "running" with a dead PID: a hard-killed subprocess that never got
+        the chance to write its own failure state (same liveness-check
+        pattern /api/bot/pid already uses).
+      - "starting" for too long (no PID yet -- the route pre-writes this
+        before spawning): the subprocess crashed before its own first
+        status.json write, e.g. argparse rejecting a bad CLI arg via
+        sys.exit() -- that happens before --run-id is even parsed, so
+        nothing in that process can ever write "failed" for it. Confirmed
+        live: an invalid asset name reproduces exactly this stuck state.
+    """
+    path = _backtest_status_path(run_id)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        status = json.load(f)
+    if status.get("state") == "running":
+        pid = status.get("pid")
+        try:
+            import psutil
+            alive = pid is not None and psutil.pid_exists(pid)
+        except ImportError:
+            alive = True  # psutil unavailable -- can't check, assume alive
+        if not alive:
+            status = dict(status)
+            status["state"] = "failed"
+            status["error"] = "process terminated unexpectedly"
+    elif status.get("state") == "starting":
+        started_at = status.get("started_at")
+        try:
+            age_s = (datetime.utcnow() - datetime.fromisoformat(started_at)).total_seconds()
+        except (TypeError, ValueError):
+            age_s = 0
+        if age_s > 30:
+            status = dict(status)
+            status["state"] = "failed"
+            status["error"] = "process failed to start (never reached its first status update)"
+    return status
+
+
+@app.route("/api/backtest/run", methods=["POST"])
+@require_dashboard_auth
+def run_backtest_route():
+    """
+    Launches backtest.py as a detached subprocess for one asset/aggregator/
+    preset combination. Pre-writes a minimal status.json (state: "starting")
+    before spawning so an immediate poll never 404s -- backtest.py itself
+    overwrites it with state: "running" once it actually starts, matching
+    the write-before-read ordering the whole file convention relies on.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        asset = str(data.get("asset", "")).upper()
+        if not asset:
+            return jsonify({"error": "asset is required"}), 400
+        if asset not in _ASSETS:
+            # backtest.py's own argparse would reject this too, but only
+            # AFTER being spawned -- and argparse's sys.exit() happens before
+            # --run-id is even parsed, so no status.json would ever get
+            # written for it. Reject here so the failure is immediate and
+            # visible, not a run stuck at "starting" forever.
+            return jsonify({"error": f"Unknown asset '{asset}'. Valid: {_ASSETS}"}), 400
+        aggregator = data.get("aggregator", "performance")
+        if aggregator not in ("performance", "council"):
+            return jsonify({"error": "aggregator must be 'performance' or 'council'"}), 400
+        preset = data.get("preset")  # None = use per-asset recommendation
+
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(_BACKTESTS_DIR, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        with open(os.path.join(run_dir, "status.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "run_id": run_id, "state": "starting",
+                "started_at": datetime.utcnow().isoformat(), "finished_at": None,
+                "pid": None,
+                "params": {"asset": asset, "aggregator": aggregator, "preset": preset},
+                "error": None,
+            }, f)
+
+        cmd = [
+            sys.executable, os.path.join(project_root, "backtest.py"),
+            "--asset", asset, "--aggregator", aggregator,
+            "--run-id", run_id, "--output-dir", _BACKTESTS_DIR,
+        ]
+        if preset:
+            cmd += ["--preset", preset]
+        if data.get("capital"):
+            cmd += ["--capital", str(data["capital"])]
+        if data.get("lookback"):
+            cmd += ["--lookback", str(data["lookback"])]
+        if data.get("no_ai"):
+            cmd += ["--no-ai"]
+        if data.get("no_gov"):
+            cmd += ["--no-gov"]
+        if data.get("no_gatekeeper"):
+            cmd += ["--no-gatekeeper"]
+
+        subprocess.Popen(
+            cmd, cwd=project_root,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        logger.info(f"[BACKTEST] Launched run {run_id}: {asset} / {aggregator} / {preset or 'recommended'}")
+        return jsonify({"run_id": run_id}), 202
+
+    except Exception as e:
+        logger.error(f"Backtest launch error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/backtest/status/<run_id>")
+def backtest_status(run_id):
+    try:
+        status = _read_backtest_status(run_id)
+        if status is None:
+            return jsonify({"error": "unknown run_id"}), 404
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Backtest status error for {run_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/backtest/result/<run_id>")
+def backtest_result(run_id):
+    try:
+        status = _read_backtest_status(run_id)
+        if status is None:
+            return jsonify({"error": "unknown run_id"}), 404
+        if status.get("state") != "completed":
+            return jsonify({"state": status.get("state", "running")}), 200
+        result_path = _backtest_result_path(run_id)
+        if not os.path.exists(result_path):
+            # status says completed but result.json hasn't landed yet -- the
+            # write ordering in backtest.py makes this a narrow timing window,
+            # not a real failure; report as still-running rather than 404.
+            return jsonify({"state": "running"}), 200
+        with open(result_path, "r", encoding="utf-8") as f:
+            result = json.load(f)
+        return jsonify({"state": "completed", "result": result})
+    except Exception as e:
+        logger.error(f"Backtest result error for {run_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/backtest/history")
+def backtest_history():
+    try:
+        if not os.path.isdir(_BACKTESTS_DIR):
+            return jsonify([])
+        runs = []
+        for run_id in os.listdir(_BACKTESTS_DIR):
+            status = _read_backtest_status(run_id)
+            if status:
+                runs.append(status)
+        runs.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+        return jsonify(runs)
+    except Exception as e:
+        logger.error(f"Backtest history error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ============================================================================

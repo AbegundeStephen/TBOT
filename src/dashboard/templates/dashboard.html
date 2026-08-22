@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TBOT — Trading Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         :root {
             --bg:        #060b14;
@@ -266,49 +267,115 @@
         .regime-asset { font-weight: 700; font-size: 13px; }
         .regime-label { font-size: 11px; color: var(--muted); }
 
-        /* ── Main Content ──────────────────────── */
-        .content-grid {
+        /* ── Livermore section ─────────────────── */
+        .lv-strip {
             display: grid;
-            grid-template-columns: 1fr 340px;
-            gap: 12px;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 10px;
+            padding: 14px;
         }
-
-        /* ── Tabs ──────────────────────────────── */
-        .tabs-bar {
-            display: flex;
-            gap: 2px;
+        .lv-card {
             background: var(--surface2);
-            border-radius: 8px 8px 0 0;
-            padding: 4px;
             border: 1px solid var(--border);
-            border-bottom: none;
+            border-radius: 8px;
+            padding: 12px 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .lv-card:hover { border-color: var(--border2); }
+        .lv-card.active { border-color: var(--accent); background: rgba(59,130,246,0.06); }
+        .lv-card-asset { font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+        .lv-card-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-bottom: 4px; }
+        .lv-card-row .label { color: var(--muted); }
+        .lv-state {
+            padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
+            letter-spacing: 0.02em; font-family: var(--font-mono);
+        }
+        .lv-state-main   { background: rgba(16,185,129,0.15); color: var(--green2); border: 1px solid rgba(16,185,129,0.3); }
+        .lv-state-natural{ background: rgba(245,158,11,0.15); color: var(--yellow2); border: 1px solid rgba(245,158,11,0.3); }
+        .lv-state-secondary{ background: rgba(239,68,68,0.15); color: var(--red2); border: 1px solid rgba(239,68,68,0.3); }
+        .lv-state-down   { background: rgba(239,68,68,0.15); color: var(--red2); border: 1px solid rgba(239,68,68,0.3); }
+        .lv-chart-toolbar { display: flex; align-items: center; gap: 6px; padding: 12px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+        .lv-chart-wrap { padding: 0 14px 14px; }
+        .lv-chart-container { height: 420px; border-radius: 8px; overflow: hidden; }
+        .lv-legend { display: flex; gap: 14px; padding: 0 14px 14px; flex-wrap: wrap; font-size: 10px; color: var(--muted); }
+        .lv-legend-item { display: flex; align-items: center; gap: 5px; }
+        .lv-legend-swatch { width: 14px; height: 2px; border-radius: 1px; }
+
+        /* ── Main Content ──────────────────────── */
+        /* ── Sidebar shell ─────────────────────── */
+        .dash-shell {
+            display: flex;
+            align-items: stretch;
+            gap: 16px;
         }
 
-        .tab-btn {
-            padding: 7px 14px;
+        .sidebar {
+            width: 200px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 6px;
+            position: sticky;
+            top: 76px;
+        }
+
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 12px;
             border-radius: 6px;
             border: none;
+            border-left: 2px solid transparent;
             background: transparent;
-            color: var(--muted);
-            font-size: 12px;
+            color: var(--muted2);
+            font-size: 12.5px;
             font-weight: 500;
             cursor: pointer;
             transition: all 0.15s;
-            white-space: nowrap;
+            text-align: left;
+            width: 100%;
         }
 
-        .tab-btn:hover { color: var(--text); background: var(--surface); }
-        .tab-btn.active { background: var(--surface); color: var(--text); font-weight: 600; }
+        .sidebar-item:hover { color: var(--text); background: var(--surface2); }
+        .sidebar-item.active {
+            background: var(--surface2);
+            color: var(--text);
+            font-weight: 600;
+            border-left-color: var(--accent);
+        }
 
+        .sidebar-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+
+        .section-content { flex: 1; min-width: 0; }
+
+        /* ── Sections (formerly tabs) ──────────── */
         .tab-panel {
             display: none;
             background: var(--surface);
             border: 1px solid var(--border);
-            border-top: none;
-            border-radius: 0 0 10px 10px;
+            border-radius: 10px;
             min-height: 300px;
         }
         .tab-panel.active { display: block; }
+
+        @media (max-width: 900px) {
+            .dash-shell { flex-direction: column; }
+            .sidebar {
+                width: 100%;
+                flex-direction: row;
+                overflow-x: auto;
+                position: static;
+                top: auto;
+            }
+            .sidebar-item { width: auto; white-space: nowrap; border-left: none; border-bottom: 2px solid transparent; }
+            .sidebar-item.active { border-left-color: transparent; border-bottom-color: var(--accent); }
+        }
 
         /* ── Tables ────────────────────────────── */
         .data-table {
@@ -458,7 +525,7 @@
         .outcome-conflict { color: var(--yellow2); font-size: 11px; }
 
         /* ── Side panel ────────────────────────── */
-        .side-panel { display: flex; flex-direction: column; gap: 12px; }
+        .side-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 16px; }
 
         .mini-card {
             background: var(--surface);
@@ -743,8 +810,6 @@
         @media (max-width: 1200px) {
             .stat-row { grid-template-columns: repeat(3, 1fr); }
             .charts-row { grid-template-columns: 1fr 1fr; }
-            .content-grid { grid-template-columns: 1fr; }
-            .side-panel { display: grid; grid-template-columns: repeat(2, 1fr); }
         }
 
         @media (max-width: 768px) {
@@ -753,7 +818,6 @@
             .regime-strip { grid-template-columns: repeat(2, 1fr); }
             .strat-row { grid-template-columns: 1fr; }
             .topbar-nav .tb-btn span { display: none; }
-            .side-panel { grid-template-columns: 1fr; }
         }
 
         /* Shadow live indicator */
@@ -908,6 +972,26 @@
      MAIN CONTENT
 ═══════════════════════════════════════════════════════════════════ -->
 <div class="main">
+<div class="dash-shell">
+
+    <nav class="sidebar" id="dash-sidebar">
+        <button class="sidebar-item active" data-tab="overview"><span class="sidebar-icon">🏠</span>Overview</button>
+        <button class="sidebar-item" data-tab="open"><span class="sidebar-icon">📈</span>Open Positions</button>
+        <button class="sidebar-item" data-tab="closed"><span class="sidebar-icon">📉</span>Closed Trades</button>
+        <button class="sidebar-item" data-tab="signals"><span class="sidebar-icon">📡</span>Signals</button>
+        <button class="sidebar-item" data-tab="livermore"><span class="sidebar-icon">🌊</span>Livermore</button>
+        <button class="sidebar-item" data-tab="backtest"><span class="sidebar-icon">🧪</span>Backtest</button>
+        <button class="sidebar-item" data-tab="funnel"><span class="sidebar-icon">🔻</span>Funnel</button>
+        <button class="sidebar-item" data-tab="shadow"><span class="sidebar-icon">🟣</span>Shadow Intel</button>
+        <button class="sidebar-item" data-tab="control"><span class="sidebar-icon">🎛</span>Control</button>
+        <button class="sidebar-item" data-tab="config"><span class="sidebar-icon">⚙️</span>Config</button>
+        <button class="sidebar-item" data-tab="downloads"><span class="sidebar-icon">📥</span>Downloads</button>
+    </nav>
+
+    <div class="section-content">
+
+    <!-- Overview -->
+    <div class="tab-panel active" id="tab-overview">
 
     <!-- ── Stat Row ─────────────────────────── -->
     <div class="stat-row">
@@ -998,23 +1082,52 @@
         </div>
     </div>
 
-    <!-- ── Main + Side ───────────────────────── -->
-    <div class="content-grid">
+    <!-- ── Side panel (now part of Overview) ─── -->
+    <div class="side-panel">
 
-        <!-- ── LEFT: tabbed content ─────────── -->
-        <div>
-            <div class="tabs-bar">
-                <button class="tab-btn active" data-tab="open">Open Positions</button>
-                <button class="tab-btn" data-tab="closed">Closed Trades</button>
-                <button class="tab-btn" data-tab="signals">Signals</button>
-                <button class="tab-btn" data-tab="shadow">🟣 Shadow Intel</button>
-                <button class="tab-btn" data-tab="control">🎛 Control</button>
-                <button class="tab-btn" data-tab="config">⚙️ Config</button>
-                <button class="tab-btn" data-tab="downloads">📥 Downloads</button>
+        <!-- System Health -->
+        <div class="mini-card">
+            <div class="mini-card-header">🖥 System Health</div>
+            <table class="mini-table">
+                <tr><td class="label">DB Status</td>     <td class="val" id="db-status">—</td></tr>
+                <tr><td class="label">Bot Active</td>    <td class="val" id="bot-active">—</td></tr>
+                <tr><td class="label">Last Activity</td> <td class="val" id="last-activity">—</td></tr>
+                <tr><td class="label">Trading Mode</td>  <td class="val" id="trading-mode">—</td></tr>
+                <tr><td class="label">Shadow Engine</td> <td class="val" id="shadow-engine-status">—</td></tr>
+            </table>
+        </div>
+
+        <!-- Performance Metrics -->
+        <div class="mini-card">
+            <div class="mini-card-header">📊 Performance (7d)</div>
+            <table class="mini-table">
+                <tr><td class="label">Total Trades</td>  <td class="val" id="perf-total">—</td></tr>
+                <tr><td class="label">Winning</td>       <td class="val pos" id="perf-wins">—</td></tr>
+                <tr><td class="label">Losing</td>        <td class="val neg" id="perf-losses">—</td></tr>
+                <tr><td class="label">Total P&L</td>     <td class="val" id="perf-pnl">—</td></tr>
+                <tr><td class="label">Avg Win</td>       <td class="val pos" id="perf-avgwin">—</td></tr>
+                <tr><td class="label">Avg Loss</td>      <td class="val neg" id="perf-avgloss">—</td></tr>
+                <tr><td class="label">Best Trade</td>    <td class="val pos" id="perf-best">—</td></tr>
+                <tr><td class="label">Worst Trade</td>   <td class="val neg" id="perf-worst">—</td></tr>
+            </table>
+        </div>
+
+        <!-- Gate Scorecard Mini -->
+        <div class="mini-card" id="gate-mini-card">
+            <div class="mini-card-header">
+                🚧 Top Blocking Gates
+                <span class="shadow-live" id="gate-mini-live"></span>
             </div>
+            <div id="gate-mini-content">
+                <div class="score-row" style="text-align:center;color:var(--muted);font-size:11px;padding:16px;">No shadow data yet</div>
+            </div>
+        </div>
+
+    </div>
+    </div><!-- /tab-overview -->
 
             <!-- Open Positions -->
-            <div class="tab-panel active" id="tab-open">
+            <div class="tab-panel" id="tab-open">
                 <div id="open-trades-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
@@ -1054,6 +1167,115 @@
                 </div>
                 <div id="signals-pagination" style="display:none;"></div>
                 <div id="signals-table-container">
+                    <div class="spinner-wrap"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <!-- Livermore -->
+            <div class="tab-panel" id="tab-livermore">
+                <div class="shadow-header">
+                    <span class="shadow-title" style="color:var(--cyan);">🌊 Livermore State Machine</span>
+                    <span class="shadow-meta" id="lv-last-updated">—</span>
+                </div>
+                <div class="lv-strip" id="lv-strip">
+                    <div class="spinner-wrap"><div class="spinner"></div></div>
+                </div>
+                <div class="lv-chart-toolbar" id="lv-asset-picker" style="display:none;"></div>
+                <div class="lv-chart-wrap" id="lv-chart-outer" style="display:none;">
+                    <div class="lv-chart-container" id="lv-chart"></div>
+                </div>
+                <div class="lv-legend" id="lv-legend" style="display:none;">
+                    <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--green2);"></span>MAIN watermark</div>
+                    <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--yellow2);"></span>Natural high/low</div>
+                    <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--red2);"></span>1H counterpart</div>
+                </div>
+            </div>
+
+            <!-- Backtest -->
+            <div class="tab-panel" id="tab-backtest">
+                <div class="shadow-header">
+                    <span class="shadow-title" style="color:var(--yellow2);">🧪 Backtest</span>
+                    <span class="shadow-meta" id="bt-last-updated">—</span>
+                </div>
+
+                <!-- Launch panel -->
+                <div style="padding:14px;border-bottom:1px solid var(--border);">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Asset</label>
+                            <select class="filter-select" id="bt-asset">
+                                <option value="BTC">BTC</option>
+                                <option value="GOLD">GOLD</option>
+                                <option value="USTEC">USTEC</option>
+                                <option value="EURUSD">EURUSD</option>
+                                <option value="USOIL">USOIL</option>
+                                <option value="GBPAUD">GBPAUD</option>
+                                <option value="EURJPY">EURJPY</option>
+                                <option value="GBPUSD">GBPUSD</option>
+                                <option value="USDJPY">USDJPY</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Aggregator</label>
+                            <div style="display:flex;gap:2px;">
+                                <button class="mode-btn active" data-bt-agg="performance" onclick="btSetAggregator('performance')">Performance</button>
+                                <button class="mode-btn" data-bt-agg="council" onclick="btSetAggregator('council')">Council</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Preset</label>
+                            <select class="filter-select" id="bt-preset">
+                                <option value="">Recommended</option>
+                                <option value="conservative">Conservative</option>
+                                <option value="balanced">Balanced</option>
+                                <option value="aggressive">Aggressive</option>
+                                <option value="scalper">Scalper</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Capital</label>
+                            <input type="number" id="bt-capital" placeholder="10000" style="width:90px;padding:4px 8px;border-radius:6px;border:1px solid var(--border2);background:var(--surface);color:var(--text);font-size:12px;">
+                        </div>
+                        <button class="tb-btn primary" id="bt-run-btn" onclick="btRunBacktest()">▶ Run Backtest</button>
+                    </div>
+                    <div id="bt-run-status" style="margin-top:10px;font-size:12px;color:var(--muted);"></div>
+                </div>
+
+                <!-- Results view -->
+                <div id="bt-results" style="display:none;padding:14px;border-bottom:1px solid var(--border);">
+                    <div class="stat-row" id="bt-results-stats" style="grid-template-columns:repeat(6,1fr);margin-bottom:14px;"></div>
+                    <div class="card" style="margin-bottom:14px;">
+                        <div class="card-title">📈 Equity Curve</div>
+                        <div class="chart-wrap" style="height:220px;"><canvas id="btEquityChart"></canvas></div>
+                    </div>
+                    <div id="bt-trades-container"></div>
+                    <div id="bt-trades-pagination" style="display:none;"></div>
+                </div>
+
+                <!-- History -->
+                <div style="padding:14px;">
+                    <div class="card-title">🕘 Run History</div>
+                    <div id="bt-history-container">
+                        <div class="spinner-wrap"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Funnel -->
+            <div class="tab-panel" id="tab-funnel">
+                <div class="shadow-header">
+                    <span class="shadow-title" style="color:var(--accent2);">🔻 Signal Funnel</span>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <select class="filter-select" id="funnel-days" onchange="loadFunnelSection()">
+                            <option value="1">Today</option>
+                            <option value="3">Last 3 days</option>
+                            <option value="7">Last 7 days</option>
+                            <option value="30">Last 30 days</option>
+                        </select>
+                        <span class="shadow-meta" id="funnel-meta">—</span>
+                    </div>
+                </div>
+                <div id="funnel-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
             </div>
@@ -1136,52 +1358,9 @@
                     <p id="dl-hint" style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.6;">Full log file will download as plain text.</p>
                 </div>
             </div>
-        </div>
 
-        <!-- ── RIGHT: side panel ─────────────── -->
-        <div class="side-panel">
-
-            <!-- System Health -->
-            <div class="mini-card">
-                <div class="mini-card-header">🖥 System Health</div>
-                <table class="mini-table">
-                    <tr><td class="label">DB Status</td>     <td class="val" id="db-status">—</td></tr>
-                    <tr><td class="label">Bot Active</td>    <td class="val" id="bot-active">—</td></tr>
-                    <tr><td class="label">Last Activity</td> <td class="val" id="last-activity">—</td></tr>
-                    <tr><td class="label">Trading Mode</td>  <td class="val" id="trading-mode">—</td></tr>
-                    <tr><td class="label">Shadow Engine</td> <td class="val" id="shadow-engine-status">—</td></tr>
-                </table>
-            </div>
-
-            <!-- Performance Metrics -->
-            <div class="mini-card">
-                <div class="mini-card-header">📊 Performance (7d)</div>
-                <table class="mini-table">
-                    <tr><td class="label">Total Trades</td>  <td class="val" id="perf-total">—</td></tr>
-                    <tr><td class="label">Winning</td>       <td class="val pos" id="perf-wins">—</td></tr>
-                    <tr><td class="label">Losing</td>        <td class="val neg" id="perf-losses">—</td></tr>
-                    <tr><td class="label">Total P&L</td>     <td class="val" id="perf-pnl">—</td></tr>
-                    <tr><td class="label">Avg Win</td>       <td class="val pos" id="perf-avgwin">—</td></tr>
-                    <tr><td class="label">Avg Loss</td>      <td class="val neg" id="perf-avgloss">—</td></tr>
-                    <tr><td class="label">Best Trade</td>    <td class="val pos" id="perf-best">—</td></tr>
-                    <tr><td class="label">Worst Trade</td>   <td class="val neg" id="perf-worst">—</td></tr>
-                </table>
-            </div>
-
-            <!-- Gate Scorecard Mini -->
-            <div class="mini-card" id="gate-mini-card">
-                <div class="mini-card-header">
-                    🚧 Top Blocking Gates
-                    <span class="shadow-live" id="gate-mini-live"></span>
-                </div>
-                <div id="gate-mini-content">
-                    <div class="score-row" style="text-align:center;color:var(--muted);font-size:11px;padding:16px;">No shadow data yet</div>
-                </div>
-            </div>
-
-        </div>
-    </div><!-- /content-grid -->
-
+    </div><!-- /section-content -->
+</div><!-- /dash-shell -->
 </div><!-- /main -->
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -1202,9 +1381,23 @@
 ═══════════════════════════════════════════════════════════════════ -->
 <script>
 const API = window.location.origin;
+// Injected server-side (src/dashboard/server.py's index() route), same
+// pattern as the Supabase credentials below -- empty string if
+// DASHBOARD_API_KEY isn't set, in which case the guarded routes correctly
+// reject every request until it's configured.
+const DASHBOARD_KEY = 'YOUR_DASHBOARD_API_KEY';
+function dashboardAuthHeaders(extra) {
+    return Object.assign({'X-Dashboard-Key': DASHBOARD_KEY}, extra || {});
+}
 let portfolioChart = null;
 let pnlChart       = null;
 let shadowChart    = null;
+
+// Livermore section state
+const LV_ASSETS = ['BTC', 'GOLD', 'USTEC', 'EURUSD', 'USOIL', 'GBPAUD', 'EURJPY', 'GBPUSD', 'USDJPY'];
+let livermoreChart = null;
+let livermoreAsset = 'BTC';
+let livermoreLoaded = false;
 
 // Signal state
 let signalMode = 'recent', signalPage = 1, signalPageSize = 50;
@@ -1495,15 +1688,36 @@ async function loadOpenTrades() {
         const d = await fetchJSON('/api/trades/open');
         const el = document.getElementById('open-trades-content');
         if (!d.trades?.length) { el.innerHTML = emptyState('📭','No open positions'); return; }
+
+        // R-progress needs a live price. initial_stop_loss (the frozen
+        // entry-time risk) comes from the trades table; there's no
+        // continuously-updated "current price" column on open trades, so
+        // reuse /api/history/<asset> (already built for the Livermore
+        // section) and take its latest close -- one fetch per distinct
+        // asset among open positions, not per trade.
+        const distinctAssets = [...new Set(d.trades.map(t => t.asset))];
+        const priceEntries = await Promise.allSettled(
+            distinctAssets.map(a => fetchJSON(API + '/api/history/' + a))
+        );
+        const lastPrice = {};
+        distinctAssets.forEach((a, i) => {
+            const r = priceEntries[i];
+            if (r.status === 'fulfilled' && r.value && r.value.length) {
+                lastPrice[a] = r.value[r.value.length - 1].close;
+            }
+        });
+
         let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>';
-        h += '<th>Asset</th><th>Side</th><th>Entry</th><th>P&L</th><th>Stop Loss</th><th>Take Profit</th><th>Opened</th></tr></thead><tbody>';
+        h += '<th>Asset</th><th>Side</th><th>Entry</th><th>P&L</th><th>Progress (R)</th><th>Stop Loss</th><th>Take Profit</th><th>Opened</th></tr></thead><tbody>';
         d.trades.forEach(t => {
             const pnlClass = (t.pnl >= 0 ? 'pos' : 'neg');
+            const rInfo = computeRProgress(t, lastPrice[t.asset]);
             h += `<tr>
                 <td><strong>${t.asset}</strong></td>
                 <td><span class="badge badge-${t.side}">${t.side.toUpperCase()}</span></td>
                 <td>$${fmt(t.entry_price, 2)}</td>
                 <td class="${pnlClass}">${t.pnl != null ? (t.pnl >= 0?'+':'') + '$' + fmt(t.pnl,2) : '—'}</td>
+                <td class="${rInfo.cls}" style="font-family:var(--font-mono);font-weight:700;" title="${esc(rInfo.title)}">${rInfo.label}</td>
                 <td>${t.stop_loss   ? '$' + fmt(t.stop_loss,  2) : '—'}</td>
                 <td>${t.take_profit ? '$' + fmt(t.take_profit, 2) : '—'}</td>
                 <td>${fmtDate(t.entry_time)}</td>
@@ -1512,6 +1726,26 @@ async function loadOpenTrades() {
         h += '</tbody></table></div>';
         el.innerHTML = h;
     } catch(e) { document.getElementById('open-trades-content').innerHTML = err(e); }
+}
+
+// Profit progress in R, using the FROZEN entry-time stop (initial_stop_loss)
+// as the risk denominator -- current_stop_loss/stop_loss would collapse
+// toward zero once BE/trailing has moved it, making the ratio meaningless
+// for anything but the entry-time risk. Same distinction the R-lock/trail
+// logic itself makes (veteran_trade_manager.py's initial_stop_loss vs
+// current_stop_loss, established during the R-batch work).
+function computeRProgress(t, currentPrice) {
+    if (t.initial_stop_loss == null || currentPrice == null) {
+        return { label: '—', cls: '', title: t.initial_stop_loss == null
+            ? 'No frozen entry-time stop recorded for this trade' : 'No live price available' };
+    }
+    const risk = Math.abs(t.entry_price - t.initial_stop_loss);
+    if (risk <= 0) return { label: '—', cls: '', title: 'Zero risk distance' };
+    const profit = t.side === 'long' ? (currentPrice - t.entry_price) : (t.entry_price - currentPrice);
+    const r = profit / risk;
+    const cls = r >= 0 ? 'pos' : 'neg';
+    return { label: (r >= 0 ? '+' : '') + r.toFixed(2) + 'R', cls,
+        title: `Entry $${fmt(t.entry_price,4)} · Initial stop $${fmt(t.initial_stop_loss,4)} · Last $${fmt(currentPrice,4)}` };
 }
 
 async function loadClosedTrades() {
@@ -1734,20 +1968,31 @@ function renderShadowClosed(results) {
           </div>
           <div class="shadow-asset-body" id="${bodyId}" style="display:${startOpen ? 'block' : 'none'}">
             <table class="data-table"><thead><tr>
-              <th>Side</th><th>Entry</th><th>Stop Loss</th><th>Take Profit</th><th>Net P&L%</th><th>Bars</th><th>Close Reason</th><th>Blocked By</th><th>Regime</th>
+              <th>Side</th><th>Entry</th><th>Stop Loss</th><th>Take Profit</th><th>Net P&L%</th><th>Net R</th><th>Outcome</th><th>Bars</th><th>Close Reason</th><th>Gate</th><th>Regime</th>
             </tr></thead><tbody>`;
 
         rows.forEach(r => {
             const rpc = (r.net_pnl_pct || 0) >= 0 ? 'pos' : 'neg';
+            const outcomeColor = r.outcome_class === 'win' ? 'var(--green2)'
+                                : r.outcome_class === 'loss' ? 'var(--red2)'
+                                : r.outcome_class === 'scratch' ? 'var(--yellow2)' : 'var(--muted)';
+            const netR = (r.net_pnl_r === null || r.net_pnl_r === undefined) ? '—'
+                       : (r.net_pnl_r >= 0 ? '+' : '') + r.net_pnl_r.toFixed(2) + 'R';
+            // gate_code is the S7e machine-stable bucket (e.g. "HOLD"); the
+            // full gate_blocked_by string (e.g. "HOLD (Score: 2.71/4.1)")
+            // stays available as a hover tooltip -- same info, less noise.
+            const gateCode = r.gate_code || (r.gate_blocked_by || '').split('(')[0].trim() || '—';
             h += `<tr>
               <td><span class="badge badge-${r.side}">${r.side.toUpperCase()}</span></td>
               <td>$${fmt(r.entry_price, 4)}</td>
               <td style="color:var(--red2);">${r.stop_loss  ? '$' + fmt(r.stop_loss,  4) : '—'}</td>
               <td style="color:var(--green2);">${r.take_profit ? '$' + fmt(r.take_profit, 4) : '—'}</td>
               <td class="${rpc}" style="font-weight:700;">${(r.net_pnl_pct||0) >= 0 ? '+' : ''}${(r.net_pnl_pct||0).toFixed(3)}%</td>
+              <td style="color:var(--muted2);font-family:var(--font-mono);">${netR}</td>
+              <td>${r.outcome_class ? `<span style="font-size:10px;font-weight:700;text-transform:uppercase;color:${outcomeColor};">${esc(r.outcome_class)}</span>` : '—'}</td>
               <td style="color:var(--muted2);">${r.bars_open||0}</td>
               <td style="font-size:11px;color:var(--muted2);">${r.close_reason||'—'}</td>
-              <td style="font-size:10px;color:var(--yellow2);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.gate_blocked_by)}">${esc(r.gate_blocked_by)}</td>
+              <td style="font-size:10px;color:var(--yellow2);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.gate_blocked_by)}">${esc(gateCode)}</td>
               <td style="font-size:11px;color:var(--muted2);">${r.regime_name||'—'}</td>
             </tr>`;
         });
@@ -1777,9 +2022,9 @@ function renderShadowGates(scorecard) {
                 <span class="score-name" style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;">${esc(gate)}</span>
                 <span class="score-meta">
                     ${s.count} trades &nbsp;·&nbsp;
-                    WR: <strong>${s.win_rate}%</strong> &nbsp;·&nbsp;
+                    WR: <strong>${s.win_rate}%</strong>${s.win_rate_ex_scratch !== undefined ? ` <span style="color:var(--muted);">(${s.win_rate_ex_scratch}% ex-scratch)</span>` : ''} &nbsp;·&nbsp;
                     Avg: <span class="${pc}">${pnl >= 0?'+':''}${(s.avg_net_pnl||0).toFixed(3)}%</span> &nbsp;·&nbsp;
-                    Total: <span class="${pc}">${pnl >= 0?'+':''}${pnl.toFixed(2)}%</span>
+                    Total: <span class="${pc}">${pnl >= 0?'+':''}${pnl.toFixed(2)}%</span>${s.scratch_count ? ` &nbsp;·&nbsp; <span style="color:var(--yellow2);">${s.scratch_count} scratch</span>` : ''}
                 </span>
             </div>
             <div class="score-bar-bg"><div class="score-bar-fill" style="background:${barColor};width:${barWidth}%;"></div></div>
@@ -2078,7 +2323,7 @@ function renderSignalsTable(signals, container) {
     let h = '<div style="overflow-x:auto;"><table class="data-table" style="min-width:1000px;"><thead><tr>';
     h += '<th>Time</th><th>Asset</th><th>Signal</th><th>Regime</th><th>MR</th><th>TF</th><th>EMA</th><th>AI</th><th>Price</th><th>Outcome</th>';
     h += '</tr></thead><tbody>';
-    signals.forEach(s => {
+    signals.forEach((s, i) => {
         const sig   = s.signal===1?'BUY':s.signal===-1?'SELL':'HOLD';
         const sigBg = s.signal===1?'badge-buy':s.signal===-1?'badge-sell':'badge-hold';
         const ts    = fmtDate(s.timestamp);
@@ -2094,7 +2339,7 @@ function renderSignalsTable(signals, container) {
         else ai = s.ai_validated ? '✅' : '—';
         const price = s.price!=null ? s.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:5}) : '—';
         const out = getSignalOutcome(s);
-        h += `<tr onclick='showSignalDetail(${JSON.stringify(s).replace(/'/g,"\\'")})'  style="cursor:pointer;">
+        h += `<tr onclick="showSignalDetail(${i})" style="cursor:pointer;">
             <td style="white-space:nowrap;">${ts}</td>
             <td><strong>${s.asset}</strong></td>
             <td><span class="badge ${sigBg}">${sig}</span><div style="font-size:10px;color:var(--muted);margin-top:2px;">${((s.signal_quality||0)*100).toFixed(0)}% quality</div></td>
@@ -2178,7 +2423,16 @@ function csvDownload(csv, name) {
 }
 
 // Signal detail modal
-function showSignalDetail(s) {
+function showSignalDetail(i) {
+    // Rows pass their index into signalCache (the same array renderSignalsTable
+    // was given), never the raw signal object -- that used to be JSON.stringify'd
+    // straight into an onclick='...' HTML attribute, which broke (and dumped raw
+    // text onto the page) the moment a signal's `details`/`reasoning` field
+    // contained the kind of quote- and newline-heavy content Python object
+    // reprs (CompositeState, full dataframes) produce. Escaping harder isn't
+    // the fix; not putting the object in the HTML at all is.
+    const s = signalCache[i];
+    if (!s) return;
     document.getElementById('modal-title').textContent = '📊 Signal Detail — ' + s.asset;
     let h = '<div class="detail-grid">';
     h += detailBox('Asset', s.asset);
@@ -2426,16 +2680,19 @@ async function showDoc(type) {
 // TABS
 // ────────────────────────────────────────────────────────────
 function setupTabs() {
-    document.querySelectorAll('.tab-btn').forEach(btn => {
+    document.querySelectorAll('.sidebar-item').forEach(btn => {
         btn.addEventListener('click', () => {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
             btn.classList.add('active');
             const panel = document.getElementById('tab-' + btn.dataset.tab);
             if (panel) panel.classList.add('active');
             // Lazy load on first open
-            if (btn.dataset.tab === 'config')   loadConfig();
-            if (btn.dataset.tab === 'control')  loadControlCenter();
+            if (btn.dataset.tab === 'config')    loadConfig();
+            if (btn.dataset.tab === 'control')   loadControlCenter();
+            if (btn.dataset.tab === 'livermore') loadLivermoreSection();
+            if (btn.dataset.tab === 'funnel')    loadFunnelSection();
+            if (btn.dataset.tab === 'backtest')  loadBacktestSection();
         });
     });
 }
@@ -2756,7 +3013,7 @@ async function ccSave() {
     try {
         const r = await fetch(API + '/api/config/save', {
             method: 'POST',
-            headers: {'Content-Type':'application/json'},
+            headers: dashboardAuthHeaders({'Content-Type':'application/json'}),
             body: JSON.stringify({ updates: ccDirty })
         });
         const data = await r.json();
@@ -2784,7 +3041,7 @@ async function ccRestart() {
     if (btn) btn.disabled = true;
     ccFeedback('🔄 Restart signal sent — bot will restart within 5–10 seconds…', 'info');
     try {
-        const r = await fetch(API + '/api/bot/restart', { method: 'POST' });
+        const r = await fetch(API + '/api/bot/restart', { method: 'POST', headers: dashboardAuthHeaders() });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Restart failed');
         // Poll for bot to come back online
@@ -2848,6 +3105,484 @@ document.addEventListener('DOMContentLoaded', () => {
         if (panel && panel.classList.contains('active')) updateCCBotStatus();
     }, 30000);
 });
+
+// Refresh Livermore state every 30s when that tab is visible. composite_state
+// only changes once per ~5min bot cycle server-side, so this is generous
+// headroom, not aggressive polling -- matches the CC pattern above rather
+// than the global loadAll() poll, since this data doesn't need eager loading
+// on every page load.
+document.addEventListener('DOMContentLoaded', () => {
+    setInterval(() => {
+        const panel = document.getElementById('tab-livermore');
+        if (panel && panel.classList.contains('active')) loadLivermoreSection();
+    }, 30000);
+});
+
+// ────────────────────────────────────────────────────────────
+// LIVERMORE STATE MACHINE
+// ────────────────────────────────────────────────────────────
+async function loadLivermoreSection() {
+    livermoreLoaded = true;
+    const strip = document.getElementById('lv-strip');
+    try {
+        const results = await Promise.allSettled(
+            LV_ASSETS.map(a => fetchJSON(API + '/api/livermore/' + a))
+        );
+        const states = {};
+        let updatedAt = null;
+        results.forEach((r, i) => {
+            const asset = LV_ASSETS[i];
+            if (r.status === 'fulfilled' && r.value && r.value.available) {
+                states[asset] = r.value.state;
+                if (r.value.updated_at) updatedAt = r.value.updated_at;
+            }
+        });
+        renderLivermoreStrip(states);
+        document.getElementById('lv-last-updated').textContent =
+            updatedAt ? ('Updated ' + timeAgo(new Date(updatedAt).getTime())) : 'No data yet';
+        if (Object.keys(states).length > 0) {
+            renderLivermoreAssetPicker(Object.keys(states));
+            document.getElementById('lv-asset-picker').style.display = 'flex';
+            document.getElementById('lv-chart-outer').style.display = 'block';
+            document.getElementById('lv-legend').style.display = 'flex';
+            if (!LV_ASSETS.includes(livermoreAsset) || !states[livermoreAsset]) {
+                livermoreAsset = Object.keys(states)[0];
+            }
+            loadLivermoreChart(livermoreAsset, states[livermoreAsset]);
+        }
+    } catch (e) {
+        strip.innerHTML = emptyState('🌊', 'Could not load Livermore state');
+    }
+}
+
+function lvStateClass(state) {
+    if (!state) return '';
+    if (state.includes('MAIN_UP')) return 'lv-state-main';
+    if (state.includes('MAIN_DOWN')) return 'lv-state-down';
+    if (state.includes('NATURAL')) return 'lv-state-natural';
+    if (state.includes('SECONDARY')) return 'lv-state-secondary';
+    return '';
+}
+
+function renderLivermoreStrip(states) {
+    const strip = document.getElementById('lv-strip');
+    const assets = Object.keys(states);
+    if (assets.length === 0) {
+        strip.innerHTML = emptyState('🌊', 'No Livermore data yet — appears once the bot has completed a cycle');
+        return;
+    }
+    let h = '';
+    for (const asset of assets) {
+        const s = states[asset] || {};
+        const st4h = s.livermore_state_4h || '—';
+        const st1h = s.livermore_state_1h || '—';
+        const age4h = s.livermore_state_age_4h ?? '—';
+        const age1h = s.livermore_state_age_1h ?? '—';
+        const dual = s.livermore_dual_confirmation ? '✓ confirmed' : '— unconfirmed';
+        const silent = s.is_silent_zone ? ' · 🔇 silent zone' : '';
+        const activeCls = asset === livermoreAsset ? ' active' : '';
+        h += `<div class="lv-card${activeCls}" onclick="selectLivermoreAsset('${asset}')">
+            <div class="lv-card-asset">${asset}</div>
+            <div class="lv-card-row"><span class="label">4H</span><span class="lv-state ${lvStateClass(st4h)}">${st4h}</span></div>
+            <div class="lv-card-row"><span class="label">4H age</span><span>${age4h} bars</span></div>
+            <div class="lv-card-row"><span class="label">1H</span><span class="lv-state ${lvStateClass(st1h)}">${st1h}</span></div>
+            <div class="lv-card-row"><span class="label">1H age</span><span>${age1h} bars</span></div>
+            <div class="lv-card-row"><span class="label">Dual confirm</span><span>${dual}</span></div>
+            <div class="lv-card-row" style="color:var(--muted);font-size:10px;">${s.range_classification || ''}${silent}</div>
+        </div>`;
+    }
+    strip.innerHTML = h;
+}
+
+function renderLivermoreAssetPicker(assets) {
+    const el = document.getElementById('lv-asset-picker');
+    el.innerHTML = assets.map(a =>
+        `<button class="mode-btn${a === livermoreAsset ? ' active' : ''}" onclick="selectLivermoreAsset('${a}')">${a}</button>`
+    ).join('');
+}
+
+async function selectLivermoreAsset(asset) {
+    livermoreAsset = asset;
+    document.querySelectorAll('#lv-asset-picker .mode-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent === asset);
+    });
+    document.querySelectorAll('.lv-card').forEach(c => {
+        c.classList.toggle('active', c.querySelector('.lv-card-asset').textContent === asset);
+    });
+    try {
+        const r = await fetchJSON(API + '/api/livermore/' + asset);
+        loadLivermoreChart(asset, r && r.available ? r.state : null);
+    } catch (e) { /* keep last chart on transient error */ }
+}
+
+async function loadLivermoreChart(asset, state) {
+    if (typeof LightweightCharts === 'undefined') return;
+    try {
+        const candles = await fetchJSON(API + '/api/history/' + asset);
+        if (!candles || candles.length === 0) return;
+
+        const container = document.getElementById('lv-chart');
+        container.innerHTML = '';
+        if (livermoreChart) { livermoreChart.remove(); livermoreChart = null; }
+
+        livermoreChart = LightweightCharts.createChart(container, {
+            width: container.clientWidth,
+            height: container.clientHeight,
+            layout: { background: { color: 'transparent' }, textColor: '#94a3b8' },
+            grid: {
+                vertLines: { color: 'rgba(255,255,255,0.04)' },
+                horzLines: { color: 'rgba(255,255,255,0.04)' },
+            },
+            timeScale: { borderColor: '#243d58' },
+            rightPriceScale: { borderColor: '#243d58' },
+        });
+        const series = livermoreChart.addCandlestickSeries({
+            upColor: '#10b981', downColor: '#ef4444',
+            borderVisible: false,
+            wickUpColor: '#10b981', wickDownColor: '#ef4444',
+        });
+        series.setData(candles.slice(-300));
+
+        // Pivot-level overlays. Green = 4H MAIN watermark, yellow = 4H
+        // natural high/low, red-tinted = 1H counterparts -- matches the
+        // legend under the chart.
+        if (state) {
+            const lines = [
+                ['livermore_anchor_main_up_max',        '#34d399', 'MAIN UP max (4H)'],
+                ['livermore_anchor_main_down_min',       '#34d399', 'MAIN DOWN min (4H)'],
+                ['livermore_anchor_natural_high',        '#fbbf24', 'Natural high (4H)'],
+                ['livermore_anchor_natural_low',         '#fbbf24', 'Natural low (4H)'],
+                ['livermore_anchor_main_up_max_1h',      '#f87171', 'MAIN UP max (1H)'],
+                ['livermore_anchor_main_down_min_1h',    '#f87171', 'MAIN DOWN min (1H)'],
+                ['livermore_anchor_natural_high_1h',     '#fca5a5', 'Natural high (1H)'],
+                ['livermore_anchor_natural_low_1h',      '#fca5a5', 'Natural low (1H)'],
+            ];
+            for (const [field, color, title] of lines) {
+                const price = state[field];
+                if (price === null || price === undefined) continue;
+                series.createPriceLine({
+                    price: price, color: color, lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true, title: title,
+                });
+            }
+        }
+        livermoreChart.timeScale().fitContent();
+    } catch (e) {
+        console.error('[LIVERMORE] chart load failed', e);
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// BACKTEST
+// ────────────────────────────────────────────────────────────
+let btEquityChart   = null;
+let btAggregator    = 'performance';
+let btCurrentRunId  = null;
+let btLastKnownState = null;
+let btTrades        = [];
+let btTradePage     = 1;
+const BT_TRADES_PER_PAGE = 20;
+
+function btSetAggregator(agg) {
+    btAggregator = agg;
+    document.querySelectorAll('[data-bt-agg]').forEach(b => b.classList.toggle('active', b.dataset.btAgg === agg));
+}
+
+async function loadBacktestSection() {
+    await btLoadHistory();
+    // Resume tracking an in-flight run rather than waiting for the next
+    // 15s poll tick, so returning to this tab refreshes immediately.
+    if (btCurrentRunId && (btLastKnownState === 'running' || btLastKnownState === 'starting')) {
+        btCheckCurrentRun();
+    }
+}
+
+async function btRunBacktest() {
+    const btn = document.getElementById('bt-run-btn');
+    const statusEl = document.getElementById('bt-run-status');
+    const body = {
+        asset: document.getElementById('bt-asset').value,
+        aggregator: btAggregator,
+        preset: document.getElementById('bt-preset').value || null,
+    };
+    const capital = document.getElementById('bt-capital').value;
+    if (capital) body.capital = Number(capital);
+
+    btn.disabled = true;
+    statusEl.textContent = 'Launching…';
+    try {
+        const r = await fetch(API + '/api/backtest/run', {
+            method: 'POST',
+            headers: dashboardAuthHeaders({'Content-Type': 'application/json'}),
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Launch failed');
+        btCurrentRunId = data.run_id;
+        btLastKnownState = 'starting';
+        statusEl.textContent = `Run ${data.run_id} launched — this typically takes 15-25+ minutes on a full dataset.`;
+        document.getElementById('bt-results').style.display = 'none';
+        btCheckCurrentRun();
+    } catch (e) {
+        statusEl.textContent = '❌ ' + e.message;
+        btn.disabled = false;
+    }
+}
+
+// Single global poll, matching the Livermore/Control-Center convention:
+// only does work while the Backtest tab is active AND a run is being tracked.
+document.addEventListener('DOMContentLoaded', () => {
+    setInterval(() => {
+        const panel = document.getElementById('tab-backtest');
+        if (panel && panel.classList.contains('active') && btCurrentRunId &&
+            (btLastKnownState === 'running' || btLastKnownState === 'starting')) {
+            btCheckCurrentRun();
+        }
+    }, 15000);
+});
+
+async function btCheckCurrentRun() {
+    if (!btCurrentRunId) return;
+    const btn = document.getElementById('bt-run-btn');
+    const statusEl = document.getElementById('bt-run-status');
+    try {
+        const s = await fetchJSON(API + '/api/backtest/status/' + btCurrentRunId);
+        btLastKnownState = s.state;
+        if (s.state === 'starting' || s.state === 'running') {
+            btn.disabled = true;
+            statusEl.textContent = `⏳ ${btCurrentRunId} — ${s.state} (started ${timeAgo(new Date(s.started_at).getTime())})`;
+        } else if (s.state === 'completed') {
+            btn.disabled = false;
+            statusEl.textContent = `✅ ${btCurrentRunId} completed.`;
+            await btLoadResult(btCurrentRunId);
+            btLoadHistory();
+        } else if (s.state === 'failed') {
+            btn.disabled = false;
+            statusEl.textContent = `❌ ${btCurrentRunId} failed: ${s.error || 'unknown error'}`;
+            btLoadHistory();
+        }
+    } catch (e) {
+        // transient fetch error -- leave state as-is, next poll tick retries
+    }
+}
+
+async function btLoadResult(runId) {
+    try {
+        const r = await fetchJSON(API + '/api/backtest/result/' + runId);
+        if (r.state !== 'completed' || !r.result) return;
+        btRenderResults(r.result);
+    } catch (e) {
+        console.error('[BACKTEST] result load failed', e);
+    }
+}
+
+function btRenderResults(result) {
+    const el = document.getElementById('bt-results');
+    el.style.display = 'block';
+    document.getElementById('bt-last-updated').textContent =
+        `${result.asset} · ${result.aggregator} · ${result.preset || 'recommended'}`;
+
+    const stats = document.getElementById('bt-results-stats');
+    const retClass = result.return_pct >= 0 ? 'green' : 'red';
+    stats.innerHTML = `
+        <div class="stat-card ${retClass}"><div class="stat-label">Return</div><div class="stat-value ${result.return_pct>=0?'pos':'neg'}">${fmt(result.return_pct,2)}%</div><div class="stat-sub">$${fmt(result.initial,0)} → $${fmt(result.final,0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Sharpe</div><div class="stat-value">${result.sharpe!=null?fmt(result.sharpe,2):'N/A'}</div></div>
+        <div class="stat-card red"><div class="stat-label">Max Drawdown</div><div class="stat-value neg">${fmt(result.max_drawdown,2)}%</div></div>
+        <div class="stat-card cyan"><div class="stat-label">Trades</div><div class="stat-value">${result.trades}</div></div>
+        <div class="stat-card ${result.win_rate>=50?'green':'yellow'}"><div class="stat-label">Win Rate</div><div class="stat-value">${fmt(result.win_rate,1)}%</div></div>
+        <div class="stat-card"><div class="stat-label">Avg PnL</div><div class="stat-value ${result.avg_pnl>=0?'pos':'neg'}">$${fmt(result.avg_pnl,2)}</div></div>
+    `;
+
+    const eq = result.equity_curve || [];
+    if (eq.length) {
+        const labels = eq.map(p => new Date(p.t).toLocaleDateString('en-US',{month:'short',day:'numeric'}));
+        const values = eq.map(p => p.equity);
+        const ctx = document.getElementById('btEquityChart').getContext('2d');
+        if (btEquityChart) btEquityChart.destroy();
+        btEquityChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels, datasets: [{
+                data: values, borderColor: '#fbbf24', backgroundColor: 'rgba(251,191,36,0.08)',
+                borderWidth: 2, fill: true, tension: 0.2, pointRadius: 0, pointHoverRadius: 4,
+            }]},
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 10 } },
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 10 }, callback: v => '$' + v.toLocaleString() } },
+                },
+            },
+        });
+    }
+
+    btTrades = result.trades_detail || [];
+    btTradePage = 1;
+    btRenderTradesPage();
+}
+
+function btRenderTradesPage() {
+    const container = document.getElementById('bt-trades-container');
+    if (!btTrades.length) { container.innerHTML = emptyState('🧪', 'No closed trades this run'); document.getElementById('bt-trades-pagination').style.display = 'none'; return; }
+
+    const totalPages = Math.max(1, Math.ceil(btTrades.length / BT_TRADES_PER_PAGE));
+    btTradePage = Math.min(btTradePage, totalPages);
+    const start = (btTradePage - 1) * BT_TRADES_PER_PAGE;
+    const pageRows = btTrades.slice(start, start + BT_TRADES_PER_PAGE);
+
+    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>';
+    h += '<th>Entry</th><th>Exit</th><th>Side</th><th>Type</th><th>Entry $</th><th>PnL</th><th>PnL %</th><th>Exit Reason</th>';
+    h += '</tr></thead><tbody>';
+    pageRows.forEach(t => {
+        const pnlCls = (t.pnl_net ?? t.pnl) >= 0 ? 'pos' : 'neg';
+        h += `<tr>
+            <td class="mono">${fmtDate(t.entry_time)}</td>
+            <td class="mono">${fmtDate(t.exit_time)}</td>
+            <td>${t.side === 'long' ? '🟢 LONG' : '🔴 SHORT'}</td>
+            <td>${t.trade_type || '—'}</td>
+            <td class="mono">${t.entry_price!=null?fmt(t.entry_price,5):'—'}</td>
+            <td class="mono ${pnlCls}">$${fmt(t.pnl_net ?? t.pnl, 2)}</td>
+            <td class="mono ${pnlCls}">${fmt(t.pnl_pct, 2)}%</td>
+            <td>${t.exit_reason || '—'}</td>
+        </tr>`;
+    });
+    h += '</tbody></table></div>';
+    container.innerHTML = h;
+
+    const pag = document.getElementById('bt-trades-pagination');
+    if (totalPages <= 1) { pag.style.display = 'none'; return; }
+    pag.style.display = 'block';
+    let p = '<div class="pagination">';
+    p += `<button class="page-btn" onclick="btGoTradePage(${btTradePage-1})" ${btTradePage<=1?'disabled':''}>‹</button>`;
+    for (let i=Math.max(1,btTradePage-2); i<=Math.min(totalPages,btTradePage+2); i++)
+        p += `<button class="page-btn ${i===btTradePage?'current':''}" onclick="btGoTradePage(${i})">${i}</button>`;
+    p += `<button class="page-btn" onclick="btGoTradePage(${btTradePage+1})" ${btTradePage>=totalPages?'disabled':''}>›</button>`;
+    p += `<span class="page-info">Page ${btTradePage}/${totalPages} · ${btTrades.length} trades</span></div>`;
+    pag.innerHTML = p;
+}
+
+function btGoTradePage(p) {
+    if (p < 1) return;
+    btTradePage = p;
+    btRenderTradesPage();
+}
+
+async function btLoadHistory() {
+    const container = document.getElementById('bt-history-container');
+    try {
+        const runs = await fetchJSON(API + '/api/backtest/history');
+        renderBacktestHistory(runs, container);
+    } catch (e) {
+        container.innerHTML = emptyState('🧪', 'Could not load run history');
+    }
+}
+
+function renderBacktestHistory(runs, container) {
+    if (!runs.length) { container.innerHTML = emptyState('🧪', 'No backtests run yet'); return; }
+    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>';
+    h += '<th>Started</th><th>Asset</th><th>Aggregator</th><th>Preset</th><th>State</th><th></th>';
+    h += '</tr></thead><tbody>';
+    runs.forEach(r => {
+        const p = r.params || {};
+        const stateBadge = r.state === 'completed' ? '<span class="badge" style="background:rgba(16,185,129,0.15);color:var(--green2);">completed</span>'
+            : r.state === 'failed' ? '<span class="badge" style="background:rgba(239,68,68,0.15);color:var(--red2);">failed</span>'
+            : '<span class="badge" style="background:rgba(59,130,246,0.15);color:var(--accent2);">' + r.state + '</span>';
+        const actionBtn = r.state === 'completed'
+            ? `<button class="mode-btn" onclick="btViewRun('${r.run_id}')">View</button>` : '';
+        h += `<tr>
+            <td class="mono">${fmtDate(r.started_at)}</td>
+            <td>${p.asset || '—'}</td>
+            <td>${p.aggregator || '—'}</td>
+            <td>${p.preset || 'recommended'}</td>
+            <td>${stateBadge}</td>
+            <td>${actionBtn}</td>
+        </tr>`;
+    });
+    h += '</tbody></table></div>';
+    container.innerHTML = h;
+}
+
+function btViewRun(runId) {
+    btCurrentRunId = runId;
+    btLastKnownState = 'completed';
+    document.getElementById('bt-run-status').textContent = `Viewing ${runId}`;
+    btLoadResult(runId);
+}
+
+// ────────────────────────────────────────────────────────────
+// SIGNAL FUNNEL
+// ────────────────────────────────────────────────────────────
+async function loadFunnelSection() {
+    const el = document.getElementById('funnel-content');
+    const days = document.getElementById('funnel-days').value;
+    try {
+        const d = await fetchJSON(API + '/api/funnel?days=' + days);
+        document.getElementById('funnel-meta').textContent =
+            d.available ? `${Object.keys(d.assets).length} assets` : 'no data yet';
+        if (!d.available) {
+            el.innerHTML = emptyState('🔻', 'No funnel data yet for this window — appears once the bot has evaluated signals');
+            return;
+        }
+        renderFunnel(d);
+    } catch (e) {
+        el.innerHTML = emptyState('🔻', 'Could not load funnel data');
+    }
+}
+
+function funnelVetoLabel(key) {
+    return key.replace(/^blocked_/, '').replace(/_/g, ' ');
+}
+
+function renderFunnel(d) {
+    const el = document.getElementById('funnel-content');
+    const assets = Object.entries(d.assets).sort((a, b) => b[1].evaluations - a[1].evaluations);
+
+    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>' +
+        '<th>Asset</th><th>Evaluations</th><th>Raw Signal</th><th>No Setup</th>' +
+        '<th>Top Block</th><th>Passed</th><th>Executed</th></tr></thead><tbody>';
+    for (const [asset, c] of assets) {
+        const blocks = Object.entries(c.blocked || {}).filter(([k]) => k !== 'no_raw_signal');
+        const top = blocks.length ? blocks[0] : null;
+        const noSetup = (c.blocked || {}).no_raw_signal || 0;
+        h += `<tr>
+            <td style="font-weight:700;">${esc(asset)}</td>
+            <td>${c.evaluations}</td>
+            <td>${c.raw_signal} <span style="color:var(--muted);font-size:11px;">(${_fnPct(c.raw_signal, c.evaluations)})</span></td>
+            <td>${noSetup} <span style="color:var(--muted);font-size:11px;">(${_fnPct(noSetup, c.evaluations)})</span></td>
+            <td>${top ? esc(funnelVetoLabel(top[0])) + ' ×' + top[1] : '—'}</td>
+            <td>${c.passed_to_execution}</td>
+            <td class="${c.executed > 0 ? 'pos' : ''}">${c.executed}</td>
+        </tr>`;
+    }
+    h += '</tbody></table></div>';
+
+    // Veto families ranked across all assets -- same bar pattern as the
+    // Gate Scorecard mini-card, so the two "what's blocking trades" views
+    // on this dashboard read consistently.
+    const vetoes = Object.entries(d.veto_totals || {});
+    if (vetoes.length) {
+        const maxV = Math.max(...vetoes.map(([, v]) => v));
+        h += '<div style="padding:14px;border-top:1px solid var(--border);">' +
+             '<div class="card-title" style="margin-bottom:10px;">Veto families ranked (most blocking first)</div>';
+        vetoes.slice(0, 10).forEach(([k, v]) => {
+            const pct = maxV ? Math.round(v / maxV * 100) : 0;
+            const isNoSetup = k === 'no_raw_signal';
+            h += `<div class="score-row" style="border-bottom:none;padding:6px 0;">
+                <div class="score-header">
+                    <span class="score-name">${esc(funnelVetoLabel(k))}</span>
+                    <span class="score-meta">${v}</span>
+                </div>
+                <div class="score-bar-bg"><div class="score-bar-fill" style="background:${isNoSetup ? 'var(--muted)' : 'var(--accent)'};width:${pct}%;"></div></div>
+            </div>`;
+        });
+        h += '</div>';
+    }
+
+    el.innerHTML = h;
+}
+
+function _fnPct(n, d) { return d ? Math.round(n / d * 100) + '%' : '—'; }
 
 // ── Downloads tab ────────────────────────────────────────────────────────────
 function dlUpdateUI() {
