@@ -981,6 +981,7 @@
         <button class="sidebar-item" data-tab="signals"><span class="sidebar-icon">📡</span>Signals</button>
         <button class="sidebar-item" data-tab="livermore"><span class="sidebar-icon">🌊</span>Livermore</button>
         <button class="sidebar-item" data-tab="backtest"><span class="sidebar-icon">🧪</span>Backtest</button>
+        <button class="sidebar-item" data-tab="data"><span class="sidebar-icon">📊</span>Data</button>
         <button class="sidebar-item" data-tab="funnel"><span class="sidebar-icon">🔻</span>Funnel</button>
         <button class="sidebar-item" data-tab="shadow"><span class="sidebar-icon">🟣</span>Shadow Intel</button>
         <button class="sidebar-item" data-tab="control"><span class="sidebar-icon">🎛</span>Control</button>
@@ -1236,6 +1237,12 @@
                             <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Capital</label>
                             <input type="number" id="bt-capital" placeholder="10000" style="width:90px;padding:4px 8px;border-radius:6px;border:1px solid var(--border2);background:var(--surface);color:var(--text);font-size:12px;">
                         </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Window</label>
+                            <div style="display:flex;gap:2px;flex-wrap:wrap;" id="bt-range-preset">
+                                <button class="mode-btn active" data-bt-range="" onclick="btSetRangePreset('')">Full history</button>
+                            </div>
+                        </div>
                         <button class="tb-btn primary" id="bt-run-btn" onclick="btRunBacktest()">▶ Run Backtest</button>
                     </div>
                     <div id="bt-run-status" style="margin-top:10px;font-size:12px;color:var(--muted);"></div>
@@ -1257,6 +1264,63 @@
                     <div class="card-title">🕘 Run History</div>
                     <div id="bt-history-container">
                         <div class="spinner-wrap"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data (candle-data analytics) -->
+            <div class="tab-panel" id="tab-data">
+                <div class="shadow-header">
+                    <span class="shadow-title" style="color:var(--green2);">📊 Candle Data</span>
+                    <span class="shadow-meta" id="data-last-updated">—</span>
+                </div>
+
+                <!-- Refresh control -->
+                <div style="padding:14px;border-bottom:1px solid var(--border);">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Asset</label>
+                            <select class="filter-select" id="data-refresh-asset">
+                                <option value="">All Enabled</option>
+                                <option value="BTC">BTC</option>
+                                <option value="GOLD">GOLD</option>
+                                <option value="USTEC">USTEC</option>
+                                <option value="EURUSD">EURUSD</option>
+                                <option value="USOIL">USOIL</option>
+                                <option value="GBPAUD">GBPAUD</option>
+                                <option value="EURJPY">EURJPY</option>
+                                <option value="GBPUSD">GBPUSD</option>
+                                <option value="USDJPY">USDJPY</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Depth</label>
+                            <div style="display:flex;gap:2px;flex-wrap:wrap;" id="data-range-preset">
+                                <button class="mode-btn active" data-data-range="" onclick="dataSetRangePreset('')">Default</button>
+                            </div>
+                        </div>
+                        <button class="tb-btn primary" id="data-refresh-btn" onclick="dataRunRefresh()">🔄 Refresh</button>
+                    </div>
+                    <div id="data-refresh-status" style="margin-top:10px;font-size:12px;color:var(--muted);"></div>
+                </div>
+
+                <!-- Per-asset summary cards -->
+                <div class="lv-strip" id="data-summary-strip">
+                    <div class="spinner-wrap"><div class="spinner"></div></div>
+                </div>
+
+                <!-- Growth chart -->
+                <div style="padding:14px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+                        <div class="card-title" style="margin-bottom:0;">📈 Growth Over Time — <span id="data-growth-asset-label">click an asset above</span></div>
+                        <div style="display:flex;gap:2px;" id="data-growth-tf-picker">
+                            <button class="mode-btn active" data-growth-tf="1h" onclick="dataSetGrowthTf('1h')">1H</button>
+                            <button class="mode-btn" data-growth-tf="4h" onclick="dataSetGrowthTf('4h')">4H</button>
+                            <button class="mode-btn" data-growth-tf="1d" onclick="dataSetGrowthTf('1d')">1D</button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="chart-wrap" style="height:220px;"><canvas id="dataGrowthChart"></canvas></div>
                     </div>
                 </div>
             </div>
@@ -1338,10 +1402,11 @@
                             <option value="bot_log">Trading Bot Log  (trading_bot.log)</option>
                             <option value="funnel">Funnel Data  (signal funnel + AI rejects)</option>
                             <option value="shadow">Shadow Data  (shadow closed trades)</option>
+                            <option value="backtest_log">Backtest Run Log</option>
                         </select>
                     </div>
 
-                    <!-- Date range (hidden for bot_log) -->
+                    <!-- Date range (hidden for bot_log, backtest_log) -->
                     <div id="dl-range-wrap" style="display:none;margin-bottom:16px;">
                         <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Date range</label>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -1353,8 +1418,28 @@
                         </div>
                     </div>
 
-                    <!-- Download button + hint -->
-                    <button onclick="dlExecute()" style="padding:9px 22px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0.02em;">⬇ Download</button>
+                    <!-- Backtest run picker (only for backtest_log) -->
+                    <div id="dl-backtest-wrap" style="display:none;margin-bottom:16px;">
+                        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Filter by asset</label>
+                        <select id="dl-bt-asset" onchange="dlRenderBacktestRuns()" class="filter-select" style="width:100%;padding:8px 10px;margin-bottom:12px;">
+                            <option value="">All Assets</option>
+                            <option value="BTC">BTC</option>
+                            <option value="GOLD">GOLD</option>
+                            <option value="EURUSD">EURUSD</option>
+                            <option value="GBPUSD">GBPUSD</option>
+                            <option value="USDJPY">USDJPY</option>
+                            <option value="USTEC">USTEC</option>
+                            <option value="USOIL">USOIL</option>
+                            <option value="GBPAUD">GBPAUD</option>
+                            <option value="EURJPY">EURJPY</option>
+                        </select>
+                        <div id="dl-backtest-runs" style="max-height:320px;overflow-y:auto;">
+                            <div class="spinner-wrap"><div class="spinner"></div></div>
+                        </div>
+                    </div>
+
+                    <!-- Download button + hint (hidden for backtest_log -- download is per-row above) -->
+                    <button id="dl-execute-btn" onclick="dlExecute()" style="padding:9px 22px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0.02em;">⬇ Download</button>
                     <p id="dl-hint" style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.6;">Full log file will download as plain text.</p>
                 </div>
             </div>
@@ -2693,6 +2778,7 @@ function setupTabs() {
             if (btn.dataset.tab === 'livermore') loadLivermoreSection();
             if (btn.dataset.tab === 'funnel')    loadFunnelSection();
             if (btn.dataset.tab === 'backtest')  loadBacktestSection();
+            if (btn.dataset.tab === 'data')      loadDataSection();
         });
     });
 }
@@ -3278,6 +3364,7 @@ async function loadLivermoreChart(asset, state) {
 // ────────────────────────────────────────────────────────────
 let btEquityChart   = null;
 let btAggregator    = 'performance';
+let btRangePreset   = '';   // '' = full history (unchanged default behavior)
 let btCurrentRunId  = null;
 let btLastKnownState = null;
 let btTrades        = [];
@@ -3289,7 +3376,38 @@ function btSetAggregator(agg) {
     document.querySelectorAll('[data-bt-agg]').forEach(b => b.classList.toggle('active', b.dataset.btAgg === agg));
 }
 
+function btSetRangePreset(key) {
+    btRangePreset = key;
+    document.querySelectorAll('[data-bt-range]').forEach(b => b.classList.toggle('active', b.dataset.btRange === key));
+}
+
+// Shared with the Data section's depth picker -- one fetch, cached, since
+// the preset list itself never changes during a session.
+let rangePresetsCache = null;
+
+async function loadRangePresets() {
+    if (rangePresetsCache) return rangePresetsCache;
+    try {
+        rangePresetsCache = await fetchJSON(API + '/api/range-presets');
+    } catch (e) {
+        rangePresetsCache = [];
+    }
+    const btContainer = document.getElementById('bt-range-preset');
+    if (btContainer) {
+        for (const p of rangePresetsCache) {
+            const btn = document.createElement('button');
+            btn.className = 'mode-btn';
+            btn.dataset.btRange = p.key;
+            btn.textContent = p.label;
+            btn.onclick = () => btSetRangePreset(p.key);
+            btContainer.appendChild(btn);
+        }
+    }
+    return rangePresetsCache;
+}
+
 async function loadBacktestSection() {
+    await loadRangePresets();
     await btLoadHistory();
     // Resume tracking an in-flight run rather than waiting for the next
     // 15s poll tick, so returning to this tab refreshes immediately.
@@ -3308,6 +3426,7 @@ async function btRunBacktest() {
     };
     const capital = document.getElementById('bt-capital').value;
     if (capital) body.capital = Number(capital);
+    if (btRangePreset) body.range_preset = btRangePreset;
 
     btn.disabled = true;
     statusEl.textContent = 'Launching…';
@@ -3494,7 +3613,7 @@ function renderBacktestHistory(runs, container) {
             <td class="mono">${fmtDate(r.started_at)}</td>
             <td>${p.asset || '—'}</td>
             <td>${p.aggregator || '—'}</td>
-            <td>${p.preset || 'recommended'}</td>
+            <td>${p.preset || 'recommended'}${p.range_preset ? ' · ' + esc(p.range_preset) : ''}</td>
             <td>${stateBadge}</td>
             <td>${actionBtn}</td>
         </tr>`;
@@ -3509,6 +3628,194 @@ function btViewRun(runId) {
     document.getElementById('bt-run-status').textContent = `Viewing ${runId}`;
     btLoadResult(runId);
 }
+
+// ────────────────────────────────────────────────────────────
+// DATA (candle-data analytics)
+// ────────────────────────────────────────────────────────────
+let dataGrowthChart    = null;
+let dataRangePreset    = '';   // '' = per-timeframe hardcoded default (unchanged)
+let dataSelectedAsset  = null;
+let dataGrowthTf       = '1h';
+let dataCurrentRunId   = null;
+let dataLastKnownState = null;
+let dataSummaryCache   = [];
+
+function dataSetRangePreset(key) {
+    dataRangePreset = key;
+    document.querySelectorAll('[data-data-range]').forEach(b => b.classList.toggle('active', b.dataset.dataRange === key));
+}
+
+async function loadDataSection() {
+    await loadRangePresets();
+    const container = document.getElementById('data-range-preset');
+    // Populated once -- guard against re-adding buttons on repeat tab visits.
+    if (container && container.children.length === 1 && rangePresetsCache) {
+        for (const p of rangePresetsCache) {
+            const btn = document.createElement('button');
+            btn.className = 'mode-btn';
+            btn.dataset.dataRange = p.key;
+            btn.textContent = p.label;
+            btn.onclick = () => dataSetRangePreset(p.key);
+            container.appendChild(btn);
+        }
+    }
+    await dataLoadSummary();
+    if (dataCurrentRunId && (dataLastKnownState === 'running' || dataLastKnownState === 'starting')) {
+        dataCheckCurrentRun();
+    }
+}
+
+async function dataLoadSummary() {
+    const strip = document.getElementById('data-summary-strip');
+    try {
+        dataSummaryCache = await fetchJSON(API + '/api/data/summary');
+        dataRenderSummary();
+        document.getElementById('data-last-updated').textContent =
+            'Updated ' + new Date().toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        if (!dataSelectedAsset && dataSummaryCache.length) {
+            dataSelectAsset(dataSummaryCache[0].asset);
+        } else if (dataSelectedAsset) {
+            dataLoadGrowthChart();
+        }
+    } catch (e) {
+        strip.innerHTML = emptyState('📊', 'Could not load data summary');
+    }
+}
+
+function dataRenderSummary() {
+    const strip = document.getElementById('data-summary-strip');
+    if (!dataSummaryCache.length) { strip.innerHTML = emptyState('📊', 'No assets configured'); return; }
+    const byAsset = {};
+    for (const row of dataSummaryCache) {
+        (byAsset[row.asset] = byAsset[row.asset] || []).push(row);
+    }
+    let h = '';
+    for (const [asset, rows] of Object.entries(byAsset)) {
+        const anyEnabled = rows.some(r => r.enabled);
+        const activeCls = asset === dataSelectedAsset ? ' active' : '';
+        h += `<div class="lv-card${activeCls}" onclick="dataSelectAsset('${asset}')">
+            <div class="lv-card-asset">${asset}${anyEnabled ? '' : ' <span style="color:var(--muted);font-size:10px;font-weight:400;">(disabled)</span>'}</div>`;
+        for (const r of rows) {
+            const statusColor = r.status === 'OK' ? 'var(--green2)' : r.status === 'LOW' ? 'var(--yellow2)' : 'var(--red2)';
+            h += `<div class="lv-card-row"><span class="label">${r.timeframe.toUpperCase()}</span><span style="color:${statusColor};">${r.bars} bars · ${r.status}</span></div>`;
+        }
+        const range = rows[0];
+        h += `<div class="lv-card-row" style="color:var(--muted);font-size:10px;">${range.start || '—'} → ${range.end || '—'}</div>`;
+        h += `</div>`;
+    }
+    strip.innerHTML = h;
+}
+
+function dataSelectAsset(asset) {
+    dataSelectedAsset = asset;
+    document.getElementById('data-growth-asset-label').textContent = asset;
+    dataRenderSummary();
+    dataLoadGrowthChart();
+}
+
+function dataSetGrowthTf(tf) {
+    dataGrowthTf = tf;
+    document.querySelectorAll('[data-growth-tf]').forEach(b => b.classList.toggle('active', b.dataset.growthTf === tf));
+    dataLoadGrowthChart();
+}
+
+async function dataLoadGrowthChart() {
+    if (!dataSelectedAsset) return;
+    try {
+        const points = await fetchJSON(API + `/api/data/growth?asset=${encodeURIComponent(dataSelectedAsset)}&timeframe=${dataGrowthTf}`);
+        const ctx = document.getElementById('dataGrowthChart').getContext('2d');
+        if (dataGrowthChart) dataGrowthChart.destroy();
+        if (!points.length) {
+            // No snapshots recorded yet for this (asset, timeframe) -- the
+            // growth log only gets entries from an actual refresh; nothing
+            // to backfill. Leave the canvas blank rather than fake a line.
+            dataGrowthChart = null;
+            return;
+        }
+        const labels = points.map(p => new Date(p.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'}));
+        const values = points.map(p => p.bars);
+        dataGrowthChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels, datasets: [{
+                data: values, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.08)',
+                borderWidth: 2, fill: true, tension: 0.2, pointRadius: 3, pointHoverRadius: 5,
+            }]},
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 10 } },
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 10 } } },
+                },
+            },
+        });
+    } catch (e) {
+        console.error('[DATA] growth chart load failed', e);
+    }
+}
+
+async function dataRunRefresh() {
+    const btn = document.getElementById('data-refresh-btn');
+    const statusEl = document.getElementById('data-refresh-status');
+    const body = {};
+    const asset = document.getElementById('data-refresh-asset').value;
+    if (asset) body.asset = asset;
+    if (dataRangePreset) body.range_preset = dataRangePreset;
+
+    btn.disabled = true;
+    statusEl.textContent = 'Launching…';
+    try {
+        const r = await fetch(API + '/api/data/refresh', {
+            method: 'POST',
+            headers: dashboardAuthHeaders({'Content-Type': 'application/json'}),
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Launch failed');
+        dataCurrentRunId = data.run_id;
+        dataLastKnownState = 'starting';
+        statusEl.textContent = `Refresh ${data.run_id} launched — connects to MT5/Binance, can take a few minutes.`;
+        dataCheckCurrentRun();
+    } catch (e) {
+        statusEl.textContent = '❌ ' + e.message;
+        btn.disabled = false;
+    }
+}
+
+async function dataCheckCurrentRun() {
+    if (!dataCurrentRunId) return;
+    const statusEl = document.getElementById('data-refresh-status');
+    const btn = document.getElementById('data-refresh-btn');
+    try {
+        const s = await fetchJSON(API + '/api/data/refresh/status/' + dataCurrentRunId);
+        dataLastKnownState = s.state;
+        if (s.state === 'completed') {
+            statusEl.textContent = `✅ Refresh ${dataCurrentRunId} completed.`;
+            btn.disabled = false;
+            await dataLoadSummary();
+        } else if (s.state === 'failed') {
+            statusEl.textContent = `❌ Refresh ${dataCurrentRunId} failed: ${s.error || 'unknown error'}`;
+            btn.disabled = false;
+        } else {
+            statusEl.textContent = `⏳ Refresh ${dataCurrentRunId}: ${s.state}…`;
+        }
+    } catch (e) {
+        statusEl.textContent = '❌ Status check failed: ' + e.message;
+        btn.disabled = false;
+    }
+}
+
+// Poll only while the Data tab is active AND a refresh is being tracked --
+// same convention as the Backtest/Livermore/Control-Center sections.
+document.addEventListener('DOMContentLoaded', () => {
+    setInterval(() => {
+        const panel = document.getElementById('tab-data');
+        if (panel && panel.classList.contains('active') && dataCurrentRunId &&
+            (dataLastKnownState === 'running' || dataLastKnownState === 'starting')) {
+            dataCheckCurrentRun();
+        }
+    }, 15000);
+});
 
 // ────────────────────────────────────────────────────────────
 // SIGNAL FUNNEL
@@ -3588,17 +3895,67 @@ function _fnPct(n, d) { return d ? Math.round(n / d * 100) + '%' : '—'; }
 function dlUpdateUI() {
     const type = document.getElementById('dl-type').value;
     const rangeWrap = document.getElementById('dl-range-wrap');
+    const btWrap = document.getElementById('dl-backtest-wrap');
+    const execBtn = document.getElementById('dl-execute-btn');
     const hint = document.getElementById('dl-hint');
+    rangeWrap.style.display = 'none';
+    btWrap.style.display = 'none';
+    execBtn.style.display = 'inline-block';
     if (type === 'bot_log') {
-        rangeWrap.style.display = 'none';
         hint.textContent = 'Full log file will download as plain text.';
     } else if (type === 'funnel') {
         rangeWrap.style.display = 'block';
         hint.textContent = 'Downloads signal funnel + AI rejects as a single JSONL file.';
-    } else {
+    } else if (type === 'shadow') {
         rangeWrap.style.display = 'block';
         hint.textContent = 'Downloads shadow closed trade records as a single JSONL file.';
+    } else if (type === 'backtest_log') {
+        btWrap.style.display = 'block';
+        execBtn.style.display = 'none';
+        hint.textContent = 'Pick a run below to download its log directly — one log per run, not a date-range bundle.';
+        dlLoadBacktestRuns();
     }
+}
+
+// Cached once per Downloads-tab visit; backtest history doesn't change fast
+// enough to need re-fetching on every asset-filter change.
+let dlBacktestRunsCache = null;
+
+async function dlLoadBacktestRuns() {
+    const container = document.getElementById('dl-backtest-runs');
+    try {
+        dlBacktestRunsCache = await fetchJSON(API + '/api/backtest/history');
+        dlRenderBacktestRuns();
+    } catch (e) {
+        container.innerHTML = emptyState('📥', 'Could not load backtest run history');
+    }
+}
+
+function dlRenderBacktestRuns() {
+    const container = document.getElementById('dl-backtest-runs');
+    if (!dlBacktestRunsCache) return;
+    const assetFilter = document.getElementById('dl-bt-asset').value;
+    const runs = dlBacktestRunsCache.filter(r =>
+        !assetFilter || (r.params && r.params.asset === assetFilter)
+    );
+    if (runs.length === 0) {
+        container.innerHTML = emptyState('📥', 'No backtest runs yet' + (assetFilter ? ` for ${assetFilter}` : ''));
+        return;
+    }
+    let h = '<table class="data-table"><thead><tr><th>Started</th><th>Asset</th><th>Aggregator</th><th>State</th><th></th></tr></thead><tbody>';
+    for (const r of runs) {
+        const p = r.params || {};
+        const started = r.started_at ? fmtDate(r.started_at) : '—';
+        h += `<tr>
+            <td>${started}</td>
+            <td>${esc(p.asset || '—')}</td>
+            <td>${esc(p.aggregator || '—')}${p.range_preset ? ' · ' + esc(p.range_preset) : ''}</td>
+            <td>${esc(r.state || '—')}</td>
+            <td><a href="/api/backtest/log/${encodeURIComponent(r.run_id)}" style="color:var(--accent);text-decoration:none;">⬇ Download</a></td>
+        </tr>`;
+    }
+    h += '</tbody></table>';
+    container.innerHTML = h;
 }
 
 function dlSelectRange(btn) {

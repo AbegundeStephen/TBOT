@@ -8,9 +8,11 @@ from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
 import json
 import os
+import re
 import sys
 import subprocess
 import pandas as pd
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 import logging
@@ -24,6 +26,8 @@ if project_root not in sys.path:
 from src.analysis.storyteller import TradeStoryteller
 from src.analysis.gemini_exporter import GeminiExporter
 from src.database.database_manager import TradingDatabaseManager
+from src.utils.range_presets import RANGE_PRESETS
+from src.utils.run_status import read_run_status
 
 from dotenv import load_dotenv
 
@@ -1360,55 +1364,18 @@ def download_logs():
 _BACKTESTS_DIR = os.path.join(project_root, "logs", "backtests")
 
 
-def _backtest_status_path(run_id):
-    return os.path.join(_BACKTESTS_DIR, run_id, "status.json")
-
-
 def _backtest_result_path(run_id):
     return os.path.join(_BACKTESTS_DIR, run_id, "result.json")
 
 
 def _read_backtest_status(run_id):
-    """
-    Returns the status dict, or None if it doesn't exist yet. Synthesizes a
-    "failed" state in two cases backtest.py itself can never self-report:
-      - "running" with a dead PID: a hard-killed subprocess that never got
-        the chance to write its own failure state (same liveness-check
-        pattern /api/bot/pid already uses).
-      - "starting" for too long (no PID yet -- the route pre-writes this
-        before spawning): the subprocess crashed before its own first
-        status.json write, e.g. argparse rejecting a bad CLI arg via
-        sys.exit() -- that happens before --run-id is even parsed, so
-        nothing in that process can ever write "failed" for it. Confirmed
-        live: an invalid asset name reproduces exactly this stuck state.
-    """
-    path = _backtest_status_path(run_id)
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        status = json.load(f)
-    if status.get("state") == "running":
-        pid = status.get("pid")
-        try:
-            import psutil
-            alive = pid is not None and psutil.pid_exists(pid)
-        except ImportError:
-            alive = True  # psutil unavailable -- can't check, assume alive
-        if not alive:
-            status = dict(status)
-            status["state"] = "failed"
-            status["error"] = "process terminated unexpectedly"
-    elif status.get("state") == "starting":
-        started_at = status.get("started_at")
-        try:
-            age_s = (datetime.utcnow() - datetime.fromisoformat(started_at)).total_seconds()
-        except (TypeError, ValueError):
-            age_s = 0
-        if age_s > 30:
-            status = dict(status)
-            status["state"] = "failed"
-            status["error"] = "process failed to start (never reached its first status update)"
-    return status
+    """Thin wrapper over the shared read_run_status (src/utils/run_status.py),
+    extracted once refresh_data.py became a second writer of the identical
+    status.json pattern -- see that module for the dead-PID/stuck-starting
+    synthesis logic. Confirmed live: an invalid asset name reproduces the
+    stuck-starting case (argparse's sys.exit() fires before --run-id is even
+    parsed, so nothing in that process can ever write "failed" for it)."""
+    return read_run_status(_BACKTESTS_DIR, run_id)
 
 
 @app.route("/api/backtest/run", methods=["POST"])
@@ -1438,6 +1405,10 @@ def run_backtest_route():
             return jsonify({"error": "aggregator must be 'performance' or 'council'"}), 400
         preset = data.get("preset")  # None = use per-asset recommendation
 
+        range_preset = data.get("range_preset")  # None = full history (unchanged default)
+        if range_preset and range_preset not in RANGE_PRESETS:
+            return jsonify({"error": f"Unknown range_preset '{range_preset}'. Valid: {list(RANGE_PRESETS)}"}), 400
+
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(_BACKTESTS_DIR, run_id)
         os.makedirs(run_dir, exist_ok=True)
@@ -1447,7 +1418,10 @@ def run_backtest_route():
                 "run_id": run_id, "state": "starting",
                 "started_at": datetime.utcnow().isoformat(), "finished_at": None,
                 "pid": None,
-                "params": {"asset": asset, "aggregator": aggregator, "preset": preset},
+                "params": {
+                    "asset": asset, "aggregator": aggregator, "preset": preset,
+                    "range_preset": range_preset,
+                },
                 "error": None,
             }, f)
 
@@ -1458,6 +1432,8 @@ def run_backtest_route():
         ]
         if preset:
             cmd += ["--preset", preset]
+        if range_preset:
+            cmd += ["--range-preset", range_preset]
         if data.get("capital"):
             cmd += ["--capital", str(data["capital"])]
         if data.get("lookback"):
@@ -1529,6 +1505,183 @@ def backtest_history():
         return jsonify(runs)
     except Exception as e:
         logger.error(f"Backtest history error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+@app.route("/api/backtest/log/<run_id>")
+def backtest_log(run_id):
+    """
+    Streams the human-readable log for a dashboard-launched backtest run.
+    run_id becomes a filename below (logs/backtest_<run_id>.log) -- validated
+    against a strict allowlist first as a path-traversal guard, matching the
+    same concern _backtest_status_path's os.path.join already relies on
+    run_id being safe for, made explicit here since this route builds a path
+    outside _BACKTESTS_DIR.
+    """
+    if not _RUN_ID_RE.match(run_id):
+        return jsonify({"error": "invalid run_id"}), 400
+    log_path = os.path.join(project_root, "logs", f"backtest_{run_id}.log")
+    if not os.path.exists(log_path):
+        return jsonify({"error": "no log for this run"}), 404
+    from flask import send_file
+    return send_file(log_path, as_attachment=True, download_name=f"backtest_{run_id}.log")
+
+
+@app.route("/api/range-presets")
+def range_presets():
+    """Shared vocabulary for the Data section's depth picker and the Backtest
+    launch panel's range-preset picker -- one source of truth in Python."""
+    return jsonify([{"key": k, "label": v["label"]} for k, v in RANGE_PRESETS.items()])
+
+
+# ============================================================================
+# DATA (candle-data analytics -- dashboard wiring for scripts/refresh_data.py)
+# ============================================================================
+# refresh_data.py is imported lazily inside each route below, not at module
+# level -- it has import-time side effects (os.chdir(PROJECT_ROOT),
+# load_dotenv()) that are harmless once but shouldn't run unconditionally
+# just because server.py itself was imported.
+
+_DATA_REFRESH_DIR = os.path.join(project_root, "logs", "data_refresh")
+
+
+@app.route("/api/data/summary")
+def data_summary():
+    """
+    Bar counts/date-range/status per (asset, timeframe) for every asset in
+    config.json (enabled AND disabled -- an orphaned/disabled asset's stale
+    data is itself useful information for this tab), reusing refresh_data.
+    py's own _audit_file() rather than a fourth CSV-parsing implementation.
+    """
+    try:
+        from scripts.refresh_data import _audit_file
+        cfg_path = os.path.join(project_root, "config", "config.json")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            full_config = json.load(f)
+        data_dir = os.path.join(project_root, "data", "raw")
+        rows = []
+        for asset_name, cfg in full_config.get("assets", {}).items():
+            exchange = cfg.get("exchange", "binance")
+            symbol = cfg.get("mt5_symbol", cfg.get("symbol", asset_name)) if exchange == "mt5" \
+                else cfg.get("symbol", asset_name)
+            for tf in ("1h", "4h", "1d"):
+                fpath = os.path.join(data_dir, f"{symbol}_{tf}.csv")
+                audit = _audit_file(Path(fpath), tf)
+                rows.append({
+                    "asset": asset_name, "enabled": bool(cfg.get("enabled", False)),
+                    "timeframe": tf, **audit,
+                })
+        return jsonify(rows)
+    except Exception as e:
+        logger.error(f"Data summary error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/growth")
+def data_growth():
+    """Reads data/data_growth_log.jsonl, filtered by asset/timeframe. Starts
+    empty until at least one refresh (CLI or dashboard-triggered) has run --
+    no history exists to backfill; the frontend renders an explicit empty
+    state for that case rather than faking data."""
+    try:
+        from scripts.refresh_data import GROWTH_LOG_PATH
+        asset = request.args.get("asset")
+        timeframe = request.args.get("timeframe")
+        if not os.path.exists(GROWTH_LOG_PATH):
+            return jsonify([])
+        points = []
+        with open(GROWTH_LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if asset and row.get("asset") != asset:
+                    continue
+                if timeframe and row.get("timeframe") != timeframe:
+                    continue
+                points.append(row)
+        points.sort(key=lambda r: r.get("ts") or "")
+        return jsonify(points)
+    except Exception as e:
+        logger.error(f"Data growth error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/refresh", methods=["POST"])
+@require_dashboard_auth
+def data_refresh_route():
+    """
+    Launches scripts/refresh_data.py as a detached subprocess, mirroring
+    run_backtest_route() exactly (pre-write "starting" status before
+    spawning so an immediate poll never 404s). Must be detached, not run
+    inline -- _init_data_manager()'s MT5/Binance connect is blocking I/O
+    that would tie up a Flask worker thread for the whole refresh.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        asset = data.get("asset")
+        if asset:
+            asset = str(asset).upper()
+            cfg_path = os.path.join(project_root, "config", "config.json")
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                full_config = json.load(f)
+            if asset not in full_config.get("assets", {}):
+                return jsonify({"error": f"Unknown asset '{asset}'"}), 400
+
+        range_preset = data.get("range_preset")
+        if range_preset and range_preset not in RANGE_PRESETS:
+            return jsonify({"error": f"Unknown range_preset '{range_preset}'. Valid: {list(RANGE_PRESETS)}"}), 400
+
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(_DATA_REFRESH_DIR, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        with open(os.path.join(run_dir, "status.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "run_id": run_id, "state": "starting",
+                "started_at": datetime.utcnow().isoformat(), "finished_at": None,
+                "pid": None,
+                "params": {"asset": asset, "range_preset": range_preset},
+                "error": None,
+            }, f)
+
+        cmd = [
+            sys.executable, os.path.join(project_root, "scripts", "refresh_data.py"),
+            "--full", "--run-id", run_id, "--output-dir", _DATA_REFRESH_DIR,
+        ]
+        if asset:
+            cmd += ["--asset", asset]
+        if range_preset:
+            cmd += ["--range-preset", range_preset]
+
+        subprocess.Popen(
+            cmd, cwd=project_root,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        logger.info(f"[DATA-REFRESH] Launched run {run_id}: asset={asset or 'all enabled'} range={range_preset or 'default'}")
+        return jsonify({"run_id": run_id}), 202
+
+    except Exception as e:
+        logger.error(f"Data refresh launch error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/refresh/status/<run_id>")
+def data_refresh_status(run_id):
+    try:
+        status = read_run_status(_DATA_REFRESH_DIR, run_id)
+        if status is None:
+            return jsonify({"error": "unknown run_id"}), 404
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Data refresh status error for {run_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
 

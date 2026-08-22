@@ -23,6 +23,8 @@ from src.execution.signal_aggregator import PerformanceWeightedAggregator
 from src.execution.council_aggregator import InstitutionalCouncilAggregator
 from src.execution.veteran_trade_manager import VeteranTradeManager
 from src.ai import DynamicAnalyst, OHLCSniper, HybridSignalValidator
+from src.utils.range_presets import RANGE_PRESETS, resolve_cutoff
+from src.utils.run_status import write_json_atomic as _write_json_atomic
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -51,18 +53,6 @@ def _setup_run_log(run_tag: str) -> Path:
 
     return log_path
 
-
-def _write_json_atomic(path: Path, data: dict) -> None:
-    """
-    Dashboard backtest wiring: write-temp-then-os.replace so a poller reading
-    status.json/result.json (from server.py, a different process) never sees
-    a half-written file mid-write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, default=str)
-    os.replace(tmp_path, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data file mapping: derived from config/config.json — single source of truth.
@@ -1211,6 +1201,7 @@ def run_backtest(
     use_gatekeeper: bool = True,
     initial_capital: float = None,
     lookback: int = 300,           # bars fed to strategies per step (≥200 for EMA200 warmup)
+    range_preset: str = None,      # e.g. "6m"/"2y" -- restricts total backtest span; None = full history
 ) -> dict:
     """
     Run a single backtest. Returns a results dict for comparison tables.
@@ -1235,6 +1226,13 @@ def run_backtest(
     data_path = f"data/raw/{filename}"
     try:
         df = load_ohlcv_csv(data_path)
+        if range_preset:
+            # Anchored to the CSV's own last bar, not wall-clock now() -- the
+            # two can drift (stale local data), and "last N months of what we
+            # actually have" is the correct meaning of this control.
+            cutoff = resolve_cutoff(df.index[-1], range_preset)
+            df = df[df.index >= cutoff]
+            logger.info(f"   Range preset '{range_preset}' applied: cutoff {cutoff}")
         logger.info(f"✅ Loaded {len(df)} bars from {filename}")
         logger.info(f"   Date range: {df.index[0]} → {df.index[-1]}")
         logger.info(f"   Price range: {df['close'].min():.5f} → {df['close'].max():.5f}")
@@ -1333,6 +1331,7 @@ def run_backtest(
         # backward compatibility; the per-trade list lives here instead.
         "trades_detail":  getattr(strat, "trades_list", []),
         "equity_curve":   getattr(strat, "equity_curve", []),
+        "range_preset":   range_preset,
     }
 
 
@@ -1347,6 +1346,7 @@ def run_comparison(
     use_gatekeeper: bool = True,
     initial_capital: float = None,
     lookback: int = 300,
+    range_preset: str = None,
 ):
     """
     Run Performance then Council on each asset and print a comparison table.
@@ -1368,6 +1368,7 @@ def run_comparison(
                 use_gatekeeper=use_gatekeeper,
                 initial_capital=initial_capital,
                 lookback=lookback,
+                range_preset=range_preset,
             )
             all_results.append(r)
 
@@ -1497,6 +1498,12 @@ Examples:
         help="Dashboard wiring: parent directory for <run-id>/status.json and "
              "<run-id>/result.json. Only used when --run-id is set.",
     )
+    parser.add_argument(
+        "--range-preset", type=str, default=None, choices=list(RANGE_PRESETS),
+        help="Restrict the backtest to the last N months/years of the CSV's "
+             "own history (anchored to its last bar, not wall-clock now). "
+             "Default: full history (unchanged behavior).",
+    )
 
     args = parser.parse_args()
 
@@ -1504,7 +1511,12 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # ── Set up per-run log file ───────────────────────────────────────────────
-    run_tag  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Dashboard-launched runs pass --run-id; use it directly as run_tag so the
+    # log filename (logs/backtest_<run_tag>.log) is deterministic and
+    # resolvable from run_id alone -- previously these were two independent
+    # timestamps with no stored link, so a dashboard run's log could never be
+    # found from its run_id.
+    run_tag  = args.run_id if args.run_id else datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = _setup_run_log(run_tag)
     logger.info(f"📝 Logging this run to: {log_path}")
 
@@ -1540,6 +1552,7 @@ Examples:
         "asset": asset_list[0], "aggregator": args.aggregator,
         "preset": args.preset, "capital": args.capital, "lookback": args.lookback,
         "no_ai": args.no_ai, "no_gov": args.no_gov, "no_gatekeeper": args.no_gatekeeper,
+        "range_preset": args.range_preset,
     } if _dash_run else None
     _dash_started_at = datetime.now(timezone.utc).isoformat() if _dash_run else None
     if _dash_run:
@@ -1558,6 +1571,7 @@ Examples:
             use_gatekeeper=use_gatekeeper,
             initial_capital=args.capital,
             lookback=args.lookback,
+            range_preset=args.range_preset,
         )
     else:
         try:
@@ -1571,6 +1585,7 @@ Examples:
                     use_gatekeeper=use_gatekeeper,
                     initial_capital=args.capital,
                     lookback=args.lookback,
+                    range_preset=args.range_preset,
                 )
             if _dash_run:
                 # result.json written BEFORE status flips to "completed" so a
