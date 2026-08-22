@@ -2836,6 +2836,10 @@ class PortfolioManager:
                     mt5_ticket=mt5_ticket,
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
+                    initial_stop_loss=(
+                        position.trade_manager.initial_stop_loss
+                        if position.trade_manager else None
+                    ),
                     livermore_state_4h=_cs_for_db.get("livermore_state_4h"),
                     livermore_state_1h=_cs_for_db.get("livermore_state_1h"),
                     livermore_state_age_4h=_cs_for_db.get("livermore_state_age_4h"),

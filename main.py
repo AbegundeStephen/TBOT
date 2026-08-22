@@ -27,12 +27,18 @@ from dotenv import load_dotenv
 import os
 
 # ── INTERPRETER GUARD (Window-G, ratified 20 Aug 2026) ─────────────────────
-# Any instance not launched by the official venv interpreter exits at
+# Any instance not launched by this checkout's own venv interpreter exits at
 # birth. Containment for the self-spawned Python312 twin; root-cause
 # hunt continues in parallel. Remove only with Desire's sign-off.
+#
+# Computed relative to this file's own location (not hardcoded to the
+# production path) so the guard works on any checkout -- local dev included.
+# The original hardcoded C:\TradingBot\TBOT\... path silently killed every
+# local run on a dev machine (sys.exit(0), no output) since a local venv
+# never matches a different machine's absolute path.
 import sys as _g_sys
 from pathlib import Path as _g_Path
-_VENV = _g_Path(r"C:\TradingBot\TBOT\venv\Scripts\python.exe").resolve()
+_VENV = (_g_Path(__file__).resolve().parent / "venv" / "Scripts" / "python.exe")
 if _g_Path(_g_sys.executable).resolve() != _VENV:
     _g_sys.exit(0)
 
@@ -3605,6 +3611,42 @@ class TradingBot:
                     self.shadow_trader.dump_state(_shadow_path)
             except Exception as _sle:
                 logger.debug(f"[SHADOW] Update failed: {_sle}")
+
+            # Dashboard redesign: persist Livermore state per asset. The
+            # dashboard runs as a separate OS process (spawned via
+            # subprocess.Popen below) and cannot read self._latest_composite_state
+            # in-memory, so it gets the same file-dump treatment as shadow
+            # state above -- trimmed to the fields the Livermore dashboard
+            # section actually renders, not the full CompositeState.to_dict()
+            # (zone ladder / phase_config / etc. stay internal-only).
+            try:
+                import os as _os
+                import json as _json
+                _lv_fields = (
+                    "livermore_state_1h", "livermore_state_4h",
+                    "livermore_state_age_1h", "livermore_state_age_4h",
+                    "livermore_anchor_main_up_max", "livermore_anchor_main_down_min",
+                    "livermore_anchor_natural_high", "livermore_anchor_natural_low",
+                    "livermore_anchor_main_up_max_1h", "livermore_anchor_main_down_min_1h",
+                    "livermore_anchor_natural_high_1h", "livermore_anchor_natural_low_1h",
+                    "livermore_dual_confirmation", "is_silent_zone", "range_classification",
+                )
+                _lv_snapshot = {}
+                for _asset_name, _cs in (self._latest_composite_state or {}).items():
+                    if not isinstance(_cs, dict):
+                        continue
+                    _lv_snapshot[_asset_name] = {k: _cs.get(k) for k in _lv_fields}
+                _lv_path = _os.path.join(
+                    _os.path.dirname(_os.path.abspath(__file__)),
+                    "logs", "composite_state.json"
+                )
+                with open(_lv_path, "w", encoding="utf-8") as _lv_f:
+                    _json.dump(
+                        {"assets": _lv_snapshot, "updated_at": datetime.now(timezone.utc).isoformat()},
+                        _lv_f,
+                    )
+            except Exception as _lve:
+                logger.debug(f"[LIVERMORE-DASH] State dump failed: {_lve}")
 
             # ✨ NEW: Update positions with OHLC data for VTM
             try:

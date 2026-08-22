@@ -139,6 +139,9 @@ class TradingDatabaseManager:
         livermore_state_1h: Optional[str] = None,
         livermore_state_age_4h: Optional[int] = None,
         livermore_state_age_1h: Optional[int] = None,
+        # Dashboard: frozen entry-time stop, for R-progress on open positions.
+        # Requires scripts/add_initial_stop_loss_column.sql -- see that file.
+        initial_stop_loss: Optional[float] = None,
         metadata: Optional[Dict] = None,
         update_if_exists: bool = True,
     ) -> Tuple[Optional[int], bool]:
@@ -181,6 +184,9 @@ class TradingDatabaseManager:
                         "livermore_state_1h": livermore_state_1h,
                         "livermore_state_age_4h": livermore_state_age_4h,
                         "livermore_state_age_1h": livermore_state_age_1h,
+                        "initial_stop_loss": (
+                            float(initial_stop_loss) if initial_stop_loss else None
+                        ),
                     }
 
                     if metadata:
@@ -206,7 +212,8 @@ class TradingDatabaseManager:
                             new_fields = ["regime_at_entry", "session_quality", "aggregator_mode",
                                           "council_score", "trade_type_label",
                                           "livermore_state_4h", "livermore_state_1h",
-                                          "livermore_state_age_4h", "livermore_state_age_1h"]
+                                          "livermore_state_age_4h", "livermore_state_age_1h",
+                                          "initial_stop_loss"]
                             for field in new_fields:
                                 update_data.pop(field, None)
                             result = (
@@ -259,6 +266,7 @@ class TradingDatabaseManager:
                 "livermore_state_1h": livermore_state_1h,
                 "livermore_state_age_4h": livermore_state_age_4h,
                 "livermore_state_age_1h": livermore_state_age_1h,
+                "initial_stop_loss": float(initial_stop_loss) if initial_stop_loss else None,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "status": "open",
                 "metadata": self._serialize_safely(metadata) if metadata else None,
@@ -274,7 +282,8 @@ class TradingDatabaseManager:
                     new_fields = ["regime_at_entry", "session_quality", "aggregator_mode",
                                   "council_score", "trade_type_label",
                                   "livermore_state_4h", "livermore_state_1h",
-                                  "livermore_state_age_4h", "livermore_state_age_1h"]
+                                  "livermore_state_age_4h", "livermore_state_age_1h",
+                                  "initial_stop_loss"]
                     for field in new_fields:
                         trade_data.pop(field, None)
                     result = self.supabase.table("trades").insert(trade_data).execute()

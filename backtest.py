@@ -6,6 +6,7 @@ Supports all assets defined in config/config.json
 import json
 import logging
 import argparse
+import os
 from pathlib import Path
 import sys
 import pandas as pd
@@ -49,6 +50,19 @@ def _setup_run_log(run_tag: str) -> Path:
     logging.getLogger().addHandler(fh)
 
     return log_path
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """
+    Dashboard backtest wiring: write-temp-then-os.replace so a poller reading
+    status.json/result.json (from server.py, a different process) never sees
+    a half-written file mid-write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, default=str)
+    os.replace(tmp_path, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data file mapping: derived from config/config.json — single source of truth.
@@ -773,6 +787,18 @@ class MLStrategy(bt.Strategy):
         self.next_call_count = 0
         self.entry_price  = None
 
+        # Dashboard backtest wiring: per-trade and equity-curve accumulation.
+        # notify_trade() only sees backtrader's Trade object (pnl, open/close
+        # time) -- side and exit_reason live in next()'s own locals at the
+        # moment the order is placed, so they're stashed on self here and
+        # picked up when the trade actually closes.
+        self.trades_list   = []
+        self.equity_curve  = []
+        self._trade_side        = None
+        self._trade_type        = None
+        self._exit_reason       = None
+        self._trade_entry_size  = None
+
         self.ai_stats = {
             "total_signals": 0, "ai_approved": 0, "ai_rejected": 0,
             "rejected_no_sr": 0, "rejected_no_pattern": 0,
@@ -865,9 +891,40 @@ class MLStrategy(bt.Strategy):
 
     def notify_trade(self, trade):
         if trade.isclosed:
-            pnl_pct = (trade.pnl / trade.value) * 100 if trade.value else 0
+            # Dashboard backtest wiring: trade.value was found (via a real
+            # end-to-end run) to be 0/falsy for every trade in this setup --
+            # pnl_pct always computed to 0.00%, silently, even in the
+            # pre-existing log line below. Confirmed via a real end-to-end
+            # run that trade.size ALSO reads 0 for a closed trade (no
+            # position remains once closed, so the delta nets to zero) --
+            # same ordering trap as self.entry_price below. Use the entry
+            # size stashed in next() (self._trade_entry_size) instead of
+            # trusting the Trade object's post-close state for either value.
+            notional = abs(trade.price * self._trade_entry_size) if trade.price and self._trade_entry_size else 0
+            pnl_pct = (trade.pnl / notional) * 100 if notional else 0
             logger.info(f"💰 TRADE CLOSED  PnL=${trade.pnl:.2f} ({pnl_pct:+.2f}%)  net=${trade.pnlcomm:.2f}")
             self.trade_count += 1
+            try:
+                self.trades_list.append({
+                    "entry_time":  bt.num2date(trade.dtopen).isoformat(),
+                    "exit_time":   bt.num2date(trade.dtclose).isoformat(),
+                    "side":        self._trade_side or "unknown",
+                    "trade_type":  self._trade_type or "unknown",
+                    "entry_price": trade.price,
+                    "pnl":         trade.pnl,
+                    "pnl_net":     trade.pnlcomm,
+                    "pnl_pct":     pnl_pct,
+                    "exit_reason": self._exit_reason or "unknown",
+                })
+            except Exception as e:
+                logger.debug(f"[BACKTEST-RESULTS] trade record failed (non-fatal): {e}")
+            finally:
+                # Reset per-trade stash so a missing signal on the NEXT trade
+                # can't silently inherit this one's side/reason.
+                self._trade_side       = None
+                self._trade_type       = None
+                self._exit_reason      = None
+                self._trade_entry_size = None
 
     def next(self):
         self.next_call_count += 1
@@ -968,6 +1025,7 @@ class MLStrategy(bt.Strategy):
                     reason = exit_signal.get("reason", "unknown")
                     reason_str = reason.value if hasattr(reason, "value") else str(reason)
                     price = exit_signal.get("price", current_price)
+                    self._exit_reason = reason_str
                     if frac >= 0.999:
                         self.order = self.close()
                         logger.info(f"🛑 VTM EXIT ({reason_str}) @ ${price:.5f}")
@@ -1012,6 +1070,13 @@ class MLStrategy(bt.Strategy):
                     "signal": signal,
                     "details": details,
                 })
+                # Dashboard backtest wiring: equity-curve sample, same 10-bar
+                # stride as the signal log right above (keeps result.json's
+                # equity_curve array a manageable size on a ~9000-bar run).
+                self.equity_curve.append({
+                    "t": self.data.datetime.datetime(0).isoformat(),
+                    "equity": self.broker.getvalue(),
+                })
                 regime  = details.get("regime", "?")
                 buy_s   = details.get("buy_score", 0)
                 sell_s  = details.get("sell_score", 0)
@@ -1027,6 +1092,14 @@ class MLStrategy(bt.Strategy):
                     size = self._calculate_position_size()
                     if size > 0:
                         side_str = "long" if signal == 1 else "short"
+                        self._trade_side = side_str
+                        # Confirmed via a real end-to-end run: trade.size on
+                        # the backtrader Trade object passed to notify_trade
+                        # reads 0 for a CLOSED trade (no position remains once
+                        # closed, so the delta nets to zero) -- same ordering
+                        # trap as self.entry_price. Stash the real entry size
+                        # here, while it's still known, for pnl_pct's notional.
+                        self._trade_entry_size = size
                         # Council mode: get_aggregated_signal's own details dict
                         # never carries trade_type (unlike PerformanceWeighted's,
                         # set above at signal-generation time) — main.py derives
@@ -1040,6 +1113,7 @@ class MLStrategy(bt.Strategy):
                                 details["trade_type"] = "TREND"
                             elif _lsm1h is not None:
                                 details["trade_type"] = "REVERSION"
+                        self._trade_type = details.get("trade_type", "TREND")
                         signal_details = {**details, "composite_state": _cs_dict}
                         try:
                             self.trade_manager = VeteranTradeManager(
@@ -1073,6 +1147,7 @@ class MLStrategy(bt.Strategy):
                     is_long  = self.position.size > 0
                     is_short = self.position.size < 0
                     if (is_long and signal == -1) or (is_short and signal == 1):
+                        self._exit_reason = "opposite_signal"
                         self.order = self.close()
                         logger.info(
                             f"🔵 OPPOSITE-SIGNAL EXIT @ ${current_price:.5f} | "
@@ -1252,6 +1327,12 @@ def run_backtest(
         "trades":         closed,
         "win_rate":       win_rate,
         "avg_pnl":        avg_pnl,
+        # Dashboard backtest wiring: additive keys only, so any existing
+        # caller (run_comparison's table, etc.) reading the fields above is
+        # unaffected. "trades" above stays the closed-trade COUNT (int) for
+        # backward compatibility; the per-trade list lives here instead.
+        "trades_detail":  getattr(strat, "trades_list", []),
+        "equity_curve":   getattr(strat, "equity_curve", []),
     }
 
 
@@ -1404,6 +1485,18 @@ Examples:
                         help="Bars of OHLCV history fed to strategies per step "
                              "(≥200 required for EMA200 warmup; default: 300)")
     parser.add_argument("--diagnose",       action="store_true", help="Enable DEBUG logging")
+    parser.add_argument(
+        "--run-id", type=str, default=None,
+        help="Dashboard wiring: explicit run identifier. When set (together "
+             "with --output-dir), status.json/result.json are written for a "
+             "single-asset run so a separate process (the dashboard) can poll "
+             "progress and fetch structured results.",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default="logs/backtests",
+        help="Dashboard wiring: parent directory for <run-id>/status.json and "
+             "<run-id>/result.json. Only used when --run-id is set.",
+    )
 
     args = parser.parse_args()
 
@@ -1431,6 +1524,31 @@ Examples:
     use_gov        = not args.no_gov
     use_gatekeeper = not args.no_gatekeeper
 
+    # Dashboard backtest wiring: --run-id opts into status.json/result.json.
+    # Only meaningful for a single-asset, non-comparison run (the dashboard
+    # never launches --compare-both or multi-asset sweeps -- see plan) --
+    # warn rather than silently ignore if someone combines them from the CLI.
+    _dash_run = bool(args.run_id) and not args.compare_both and len(asset_list) == 1
+    if args.run_id and not _dash_run:
+        logger.warning(
+            "[BACKTEST-RESULTS] --run-id given with --compare-both or multiple "
+            "--assets — status.json/result.json will NOT be written (dashboard "
+            "wiring only supports a single asset, single aggregator run)."
+        )
+    _run_dir = Path(args.output_dir) / args.run_id if _dash_run else None
+    _dash_params = {
+        "asset": asset_list[0], "aggregator": args.aggregator,
+        "preset": args.preset, "capital": args.capital, "lookback": args.lookback,
+        "no_ai": args.no_ai, "no_gov": args.no_gov, "no_gatekeeper": args.no_gatekeeper,
+    } if _dash_run else None
+    _dash_started_at = datetime.now(timezone.utc).isoformat() if _dash_run else None
+    if _dash_run:
+        _write_json_atomic(_run_dir / "status.json", {
+            "run_id": args.run_id, "state": "running",
+            "started_at": _dash_started_at, "finished_at": None,
+            "pid": os.getpid(), "params": _dash_params, "error": None,
+        })
+
     if args.compare_both:
         run_comparison(
             assets=asset_list,
@@ -1442,16 +1560,40 @@ Examples:
             lookback=args.lookback,
         )
     else:
-        for asset in asset_list:
-            run_backtest(
-                asset_key=asset,
-                aggregator_type=args.aggregator,
-                aggregator_preset=_resolve_preset(asset, args.aggregator, args.preset),
-                use_ai=not args.no_ai,
-                use_macro_gov=use_gov,
-                use_gatekeeper=use_gatekeeper,
-                initial_capital=args.capital,
-                lookback=args.lookback,
-            )
+        try:
+            for asset in asset_list:
+                result = run_backtest(
+                    asset_key=asset,
+                    aggregator_type=args.aggregator,
+                    aggregator_preset=_resolve_preset(asset, args.aggregator, args.preset),
+                    use_ai=not args.no_ai,
+                    use_macro_gov=use_gov,
+                    use_gatekeeper=use_gatekeeper,
+                    initial_capital=args.capital,
+                    lookback=args.lookback,
+                )
+            if _dash_run:
+                # result.json written BEFORE status flips to "completed" so a
+                # poller never observes "completed" with a missing result file.
+                _write_json_atomic(_run_dir / "result.json", result)
+                _write_json_atomic(_run_dir / "status.json", {
+                    "run_id": args.run_id, "state": "completed",
+                    "started_at": _dash_started_at, "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "pid": os.getpid(), "params": _dash_params, "error": None,
+                })
+        except (Exception, SystemExit) as _run_err:
+            # SystemExit (not a subclass of Exception -- bare except:Exception
+            # would miss it) is what run_backtest() actually raises on a
+            # missing/bad data file (sys.exit(1), a few lines into loading
+            # the CSV) -- without catching it explicitly here, that failure
+            # mode would silently skip writing status.json's "failed" state.
+            if _dash_run:
+                _write_json_atomic(_run_dir / "status.json", {
+                    "run_id": args.run_id, "state": "failed",
+                    "started_at": _dash_started_at, "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "pid": os.getpid(), "params": _dash_params,
+                    "error": str(_run_err) or f"{type(_run_err).__name__} (no message)",
+                })
+            raise
 
     logger.info(f"💾 Full run log saved → {log_path}")
