@@ -48,6 +48,9 @@ except ImportError:
 
 import pandas as pd
 
+from src.utils.range_presets import RANGE_PRESETS, resolve_lookback_days
+from src.utils.run_status import write_json_atomic, read_run_status
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -181,6 +184,31 @@ def audit_all(data_dir: Path, config: dict):
     print()
 
 
+GROWTH_LOG_PATH = PROJECT_ROOT / "data" / "data_growth_log.jsonl"
+
+
+def record_growth_snapshot(entries: list, trigger: str) -> None:
+    """
+    Append growth-tracking lines to data/data_growth_log.jsonl -- one per
+    (asset, timeframe) actually touched by a refresh. Each entry is a dict
+    already carrying asset/timeframe/bars/start/end (reuses the post-refresh
+    audit's own _audit_file() results, no duplicate CSV reads).
+
+    Called only from refresh() (an actual --full/--update run that touched
+    real data), never from --audit alone -- --audit is read-only by design,
+    and a growth log should reflect real fetch activity, not every time
+    someone checks status. No history exists before this function's first
+    call; the log starts empty and there is nothing to backfill.
+    """
+    if not entries:
+        return
+    ts = datetime.now(timezone.utc).isoformat()
+    GROWTH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(GROWTH_LOG_PATH, "a", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps({**e, "ts": ts, "trigger": trigger}) + "\n")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Refresh logic
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,6 +284,8 @@ def refresh(
     data_dir: Path,
     force_full: bool = False,
     asset_filter: str = None,
+    range_preset: str = None,
+    trigger: str = "refresh_data",
 ):
     """
     Initialise connections and run the historical updater.
@@ -265,6 +295,13 @@ def refresh(
         data_dir:     data/raw/ Path
         force_full:   True = wipe and re-download; False = incremental only
         asset_filter: If set, only refresh this asset (e.g. "GOLD")
+        range_preset: Dashboard "Data" section wiring -- e.g. "6m"/"2y". Only
+            takes effect on a full/new-file refresh (see
+            update_asset_timeframe's docstring); None = today's hardcoded
+            per-timeframe default (unchanged behavior).
+        trigger:      Recorded in the growth-log entries this call produces --
+            "refresh_data" for manual/cron CLI runs, "dashboard_refresh" for
+            dashboard-triggered ones.
     """
     from src.update.historical_updater import HistoricalDataUpdater
 
@@ -280,6 +317,10 @@ def refresh(
     else:
         logger.info("Mode: INCREMENTAL — only appending missing bars")
 
+    lookback_days_override = resolve_lookback_days(range_preset) if range_preset else None
+    if range_preset:
+        logger.info(f"Range preset: {range_preset} ({lookback_days_override} days)")
+
     if asset_filter:
         asset_filter = asset_filter.upper()
         logger.info(f"Scope: single asset → {asset_filter}")
@@ -291,11 +332,15 @@ def refresh(
             asset_filter: updater.update_asset_history(
                 asset_name=asset_filter,
                 force_full_refresh=force_full,
+                lookback_days_override=lookback_days_override,
             )
         }
     else:
         logger.info("Scope: all enabled assets")
-        results = updater.update_all_enabled_assets(force_full_refresh=force_full)
+        results = updater.update_all_enabled_assets(
+            force_full_refresh=force_full,
+            lookback_days_override=lookback_days_override,
+        )
 
     # Post-refresh audit
     print()
@@ -303,6 +348,7 @@ def refresh(
     print("  POST-REFRESH STATUS")
     print("─" * 60)
     all_ok = True
+    growth_entries = []
     for asset_name, tf_results in results.items():
         for tf, success in tf_results.items():
             exchange = config["assets"].get(asset_name, {}).get("exchange", "binance")
@@ -323,6 +369,12 @@ def refresh(
                 f"{audit['bars']:>6} bars  "
                 f"{audit['start'] or '—'} → {audit['end'] or '—'}"
             )
+            growth_entries.append({
+                "asset": asset_name, "timeframe": tf,
+                "bars": audit["bars"], "start": audit["start"], "end": audit["end"],
+            })
+
+    record_growth_snapshot(growth_entries, trigger=trigger)
 
     print("─" * 60)
     if all_ok:
@@ -359,6 +411,22 @@ Examples:
     parser.add_argument("--full",   action="store_true", help="Force full re-download (overwrites existing CSVs)")
     parser.add_argument("--update", action="store_true", help="Incremental update — append missing bars only")
     parser.add_argument("--asset",  type=str, default=None, help="Restrict to a single asset (e.g. GOLD)")
+    parser.add_argument(
+        "--range-preset", type=str, default=None, choices=list(RANGE_PRESETS),
+        help="Restrict a --full refresh's lookback to this window instead of "
+             "the hardcoded per-timeframe default. No effect on --update.",
+    )
+    parser.add_argument(
+        "--run-id", type=str, default=None,
+        help="Dashboard wiring: explicit run identifier. When set (together "
+             "with --output-dir), status.json is written so a separate "
+             "process (the dashboard) can poll progress.",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default="logs/data_refresh",
+        help="Dashboard wiring: parent directory for <run-id>/status.json. "
+             "Only used when --run-id is set.",
+    )
     args = parser.parse_args()
 
     if not any([args.audit, args.full, args.update]):
@@ -386,11 +454,60 @@ Examples:
         audit_all(data_dir, config)
         return
 
-    if args.full:
-        audit_all(data_dir, config)   # show before state
-        refresh(config, data_dir, force_full=True,  asset_filter=args.asset)
-    elif args.update:
-        refresh(config, data_dir, force_full=False, asset_filter=args.asset)
+    # Dashboard wiring: --run-id opts into status.json, mirroring backtest.py's
+    # identical pattern (write "running" with our own PID before the real
+    # work starts, "completed"/"failed" in a try/finally around it) so
+    # server.py can poll progress from a separate process.
+    _dash_run = bool(args.run_id)
+    _run_dir = Path(args.output_dir) / args.run_id if _dash_run else None
+    _dash_params = {
+        "asset": args.asset, "full": args.full, "update": args.update,
+        "range_preset": args.range_preset,
+    } if _dash_run else None
+    _dash_started_at = datetime.now(timezone.utc).isoformat() if _dash_run else None
+    if _dash_run:
+        write_json_atomic(_run_dir / "status.json", {
+            "run_id": args.run_id, "state": "running",
+            "started_at": _dash_started_at, "finished_at": None,
+            "pid": os.getpid(), "params": _dash_params, "error": None,
+        })
+
+    try:
+        if args.full:
+            audit_all(data_dir, config)   # show before state
+            refresh(
+                config, data_dir, force_full=True, asset_filter=args.asset,
+                range_preset=args.range_preset,
+                trigger="dashboard_refresh" if _dash_run else "refresh_data",
+            )
+        elif args.update:
+            refresh(
+                config, data_dir, force_full=False, asset_filter=args.asset,
+                range_preset=args.range_preset,
+                trigger="dashboard_refresh" if _dash_run else "refresh_data",
+            )
+        if _dash_run:
+            write_json_atomic(_run_dir / "status.json", {
+                "run_id": args.run_id, "state": "completed",
+                "started_at": _dash_started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(), "params": _dash_params, "error": None,
+            })
+    except BaseException as e:
+        # BaseException, not Exception: refresh() itself calls sys.exit(1) on
+        # real, actionable failures (unknown asset, MT5 connection failure),
+        # which raises SystemExit -- letting that propagate unhandled would
+        # leave a dashboard-launched run stuck at "running" (only caught 30s
+        # later by read_run_status's dead-PID fallback) instead of reporting
+        # the actual reason immediately.
+        if _dash_run:
+            write_json_atomic(_run_dir / "status.json", {
+                "run_id": args.run_id, "state": "failed",
+                "started_at": _dash_started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(), "params": _dash_params, "error": str(e),
+            })
+        raise
 
 
 if __name__ == "__main__":

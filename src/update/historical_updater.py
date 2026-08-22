@@ -74,19 +74,28 @@ class HistoricalDataUpdater:
         return filename_map.get(asset_name.upper(), f"{asset_name}_{timeframe}.csv")
 
     def update_asset_timeframe(
-        self, 
-        asset_name: str, 
+        self,
+        asset_name: str,
         timeframe: str,
-        force_full_refresh: bool = False
+        force_full_refresh: bool = False,
+        lookback_days_override: Optional[int] = None,
     ) -> bool:
         """
         Update historical data for a specific asset and timeframe.
-        
+
         Args:
             asset_name: Asset name (e.g., "BTC", "GOLD")
             timeframe: Timeframe key ("1h", "4h", "1d")
             force_full_refresh: If True, re-download all data
-        
+            lookback_days_override: Dashboard "Data" section wiring -- when set,
+                used in place of this timeframe's hardcoded lookback_days for a
+                full/new-file refresh (see the branch below). Only meaningful
+                together with force_full_refresh=True (or a brand-new file) --
+                an incremental update always starts from "last existing date +
+                1 period" and never reaches the lookback branch at all, so this
+                param has no effect there. None (default) preserves today's
+                behavior for every existing non-dashboard caller.
+
         Returns:
             True if successful
         """
@@ -192,7 +201,7 @@ class HistoricalDataUpdater:
             
             # If no existing data or forced refresh, use lookback
             if start_time is None:
-                lookback_days = tf_config['lookback_days']
+                lookback_days = lookback_days_override if lookback_days_override is not None else tf_config['lookback_days']
                 start_time = end_time - timedelta(days=lookback_days)
                 logger.info(f"Status:   {'Full refresh' if force_full_refresh else 'Creating new file'}")
                 logger.info(f"Lookback: {lookback_days} days")
@@ -270,28 +279,36 @@ class HistoricalDataUpdater:
             logger.error(f"[UPDATE] Failed to update {asset_name} {timeframe}: {e}", exc_info=True)
             return False
 
-    def update_asset_history(self, asset_name: str, force_full_refresh: bool = False) -> Dict[str, bool]:
+    def update_asset_history(
+        self,
+        asset_name: str,
+        force_full_refresh: bool = False,
+        lookback_days_override: Optional[int] = None,
+    ) -> Dict[str, bool]:
         """
         Update all timeframes for a specific asset.
-        
+
         Args:
             asset_name: Asset name (e.g., "BTC", "GOLD")
             force_full_refresh: If True, re-download all data
-        
+            lookback_days_override: Applied uniformly across 1h/4h/1d -- see
+                update_asset_timeframe's docstring.
+
         Returns:
             Dict mapping timeframe to success status
         """
         logger.info(f"\n{'#'*70}")
         logger.info(f"# UPDATING {asset_name} - ALL TIMEFRAMES")
         logger.info(f"{'#'*70}")
-        
+
         results = {}
-        
+
         for timeframe in ['1h', '4h', '1d']:
             success = self.update_asset_timeframe(
                 asset_name=asset_name,
                 timeframe=timeframe,
-                force_full_refresh=force_full_refresh
+                force_full_refresh=force_full_refresh,
+                lookback_days_override=lookback_days_override,
             )
             results[timeframe] = success
         
@@ -301,13 +318,23 @@ class HistoricalDataUpdater:
         
         return results
 
-    def update_all_enabled_assets(self, force_full_refresh: bool = False) -> Dict[str, Dict[str, bool]]:
+    def update_all_enabled_assets(
+        self,
+        force_full_refresh: bool = False,
+        lookback_days_override: Optional[int] = None,
+        assets: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, bool]]:
         """
         Update historical data for all enabled assets across all timeframes.
-        
+
         Args:
             force_full_refresh: If True, re-download all data
-        
+            lookback_days_override: Applied uniformly across 1h/4h/1d -- see
+                update_asset_timeframe's docstring.
+            assets: Restrict to this subset of enabled asset names (dashboard
+                "single asset" refresh). None = every enabled asset (unchanged
+                default).
+
         Returns:
             Nested dict: {asset: {timeframe: success}}
         """
@@ -315,7 +342,9 @@ class HistoricalDataUpdater:
             name for name, cfg in self.config["assets"].items()
             if cfg.get("enabled", False)
         ]
-        
+        if assets:
+            enabled = [a for a in enabled if a in assets]
+
         logger.info(f"\n{'='*70}")
         logger.info(f"MULTI-TIMEFRAME HISTORICAL DATA UPDATE")
         logger.info(f"{'='*70}")
@@ -323,13 +352,14 @@ class HistoricalDataUpdater:
         logger.info(f"Timeframes: 1H, 4H, 1D")
         logger.info(f"Mode:       {'Full Refresh' if force_full_refresh else 'Incremental'}")
         logger.info(f"{'='*70}\n")
-        
+
         all_results = {}
-        
+
         for asset_name in enabled:
             results = self.update_asset_history(
                 asset_name=asset_name,
-                force_full_refresh=force_full_refresh
+                force_full_refresh=force_full_refresh,
+                lookback_days_override=lookback_days_override,
             )
             all_results[asset_name] = results
         
