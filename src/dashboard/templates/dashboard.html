@@ -980,6 +980,7 @@
         <button class="sidebar-item" data-tab="closed"><span class="sidebar-icon">📉</span>Closed Trades</button>
         <button class="sidebar-item" data-tab="signals"><span class="sidebar-icon">📡</span>Signals</button>
         <button class="sidebar-item" data-tab="livermore"><span class="sidebar-icon">🌊</span>Livermore</button>
+        <button class="sidebar-item" data-tab="charts"><span class="sidebar-icon">🖼️</span>Charts</button>
         <button class="sidebar-item" data-tab="backtest"><span class="sidebar-icon">🧪</span>Backtest</button>
         <button class="sidebar-item" data-tab="data"><span class="sidebar-icon">📊</span>Data</button>
         <button class="sidebar-item" data-tab="funnel"><span class="sidebar-icon">🔻</span>Funnel</button>
@@ -1189,6 +1190,18 @@
                     <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--green2);"></span>MAIN watermark</div>
                     <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--yellow2);"></span>Natural high/low</div>
                     <div class="lv-legend-item"><span class="lv-legend-swatch" style="background:var(--red2);"></span>1H counterpart</div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="tab-panel" id="tab-charts">
+                <div class="shadow-header">
+                    <span class="shadow-title" style="color:var(--accent2);">🖼️ Decision Charts</span>
+                    <span class="shadow-meta" id="chart-last-updated">—</span>
+                </div>
+                <div class="lv-chart-toolbar" id="chart-asset-picker"></div>
+                <div id="chart-body" style="padding:14px;">
+                    <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
             </div>
 
@@ -1482,6 +1495,8 @@ let shadowChart    = null;
 const LV_ASSETS = ['BTC', 'GOLD', 'USTEC', 'EURUSD', 'USOIL', 'GBPAUD', 'EURJPY', 'GBPUSD', 'USDJPY'];
 let livermoreChart = null;
 let livermoreAsset = 'BTC';
+let chartAsset = 'BTC';
+let chartPickerBuilt = false;
 let livermoreLoaded = false;
 
 // Signal state
@@ -2776,6 +2791,7 @@ function setupTabs() {
             if (btn.dataset.tab === 'config')    loadConfig();
             if (btn.dataset.tab === 'control')   loadControlCenter();
             if (btn.dataset.tab === 'livermore') loadLivermoreSection();
+            if (btn.dataset.tab === 'charts')    loadChartsSection();
             if (btn.dataset.tab === 'funnel')    loadFunnelSection();
             if (btn.dataset.tab === 'backtest')  loadBacktestSection();
             if (btn.dataset.tab === 'data')      loadDataSection();
@@ -3203,6 +3219,54 @@ document.addEventListener('DOMContentLoaded', () => {
         if (panel && panel.classList.contains('active')) loadLivermoreSection();
     }, 30000);
 });
+
+// Same convention for the Charts section -- the underlying PNG only
+// changes once per ~5min bot cycle (main.py saves it alongside the
+// composite_state/shadow dumps), so 30s is headroom, not aggressive polling.
+document.addEventListener('DOMContentLoaded', () => {
+    setInterval(() => {
+        const panel = document.getElementById('tab-charts');
+        if (panel && panel.classList.contains('active')) loadChartsSection();
+    }, 30000);
+});
+
+// ────────────────────────────────────────────────────────────
+// DECISION CHARTS (dashboard parity with Telegram's /chart)
+// ────────────────────────────────────────────────────────────
+function renderChartAssetPicker() {
+    const el = document.getElementById('chart-asset-picker');
+    el.innerHTML = LV_ASSETS.map(a =>
+        `<button class="mode-btn${a === chartAsset ? ' active' : ''}" onclick="selectChartAsset('${a}')">${a}</button>`
+    ).join('');
+    chartPickerBuilt = true;
+}
+
+async function selectChartAsset(asset) {
+    chartAsset = asset;
+    document.querySelectorAll('#chart-asset-picker .mode-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent === asset);
+    });
+    await loadChartsSection();
+}
+
+async function loadChartsSection() {
+    if (!chartPickerBuilt) renderChartAssetPicker();
+    const body = document.getElementById('chart-body');
+    try {
+        const meta = await fetchJSON(API + '/api/chart/' + chartAsset + '/meta');
+        if (!meta.exists) {
+            body.innerHTML = emptyState('🖼️', `No chart yet for ${chartAsset} — appears after the bot's next cycle`);
+            document.getElementById('chart-last-updated').textContent = 'No data yet';
+            return;
+        }
+        document.getElementById('chart-last-updated').textContent =
+            'Updated ' + timeAgo(new Date(meta.updated_at).getTime());
+        const bust = Date.now();
+        body.innerHTML = `<img src="${API}/api/chart/${chartAsset}?t=${bust}" alt="${chartAsset} decision chart" style="width:100%;border-radius:8px;display:block;">`;
+    } catch (e) {
+        body.innerHTML = emptyState('🖼️', 'Could not load chart');
+    }
+}
 
 // ────────────────────────────────────────────────────────────
 // LIVERMORE STATE MACHINE

@@ -906,6 +906,45 @@ def get_livermore_state(asset):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/chart/<asset>")
+def get_chart_image(asset):
+    """
+    Serves the decision chart PNG main.py saves every cycle to
+    logs/charts/<ASSET>.png -- the same AIVisualizationGenerator output
+    /chart sends to Telegram, just saved automatically instead of only on
+    request. See /api/chart/<asset>/meta for existence/freshness before
+    rendering an <img> tag.
+    """
+    from flask import send_file
+
+    asset_u = asset.upper()
+    if asset_u not in _ASSETS:
+        return jsonify({"error": "unknown asset"}), 404
+    chart_path = os.path.join(project_root, "logs", "charts", f"{asset_u}.png")
+    if not os.path.exists(chart_path):
+        return jsonify({"error": "no chart for this asset yet"}), 404
+    resp = send_file(chart_path, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/chart/<asset>/meta")
+def get_chart_meta(asset):
+    """Existence + freshness for the chart image, without transferring the PNG itself."""
+    asset_u = asset.upper()
+    if asset_u not in _ASSETS:
+        return jsonify({"error": "unknown asset"}), 404
+    chart_path = os.path.join(project_root, "logs", "charts", f"{asset_u}.png")
+    if not os.path.exists(chart_path):
+        return jsonify({"asset": asset_u, "exists": False, "updated_at": None})
+    mtime = os.path.getmtime(chart_path)
+    return jsonify({
+        "asset": asset_u,
+        "exists": True,
+        "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+    })
+
+
 @app.route("/api/config/overview")
 def get_config_overview():
     """
