@@ -5148,6 +5148,38 @@ class TradingBot:
 
             details["price"] = current_price
 
+            # Dashboard Charts section: save the exact same decision chart
+            # /chart renders on demand, automatically every cycle, so the
+            # dashboard always has a fresh one without anyone having to ask
+            # for it. Reuses main.py's own live chart_sender/visualizer --
+            # never a second, independently-computed rendering of the bot's
+            # decision. Wrapped in its own try/except so a chart failure can
+            # never affect trading, matching the shadow/composite_state dump
+            # sites' pattern.
+            if self.chart_sender and self.chart_sender.visualizer:
+                try:
+                    _pos = self.portfolio_manager.get_position(asset_name)
+                    _position = None
+                    if _pos:
+                        _tm = _pos.trade_manager  # VTM owns the live, trailed SL/TP
+                        _position = {
+                            "side": _pos.side,
+                            "entry_price": _pos.entry_price,
+                            "stop_loss": _tm.current_stop_loss if _tm else _pos.stop_loss,
+                            "take_profit": (
+                                _tm.take_profit_levels[-1]
+                                if _tm and _tm.take_profit_levels
+                                else _pos.take_profit
+                            ),
+                        }
+                    self.chart_sender.visualizer.generate_decision_chart(
+                        asset_name, df, mtf_regime.get("df_4h"), signal, details, current_price,
+                        save_path=f"logs/charts/{asset_name}.png",
+                        position=_position,
+                    )
+                except Exception as _chart_err:
+                    logger.debug(f"[CHART] Dashboard chart generation failed for {asset_name}: {_chart_err}")
+
             # Personal scalp-alignment alert (off by default, see
             # config["scalp_alerts"]). Pure observer — never affects signal,
             # sizing, or execution. Moved here (was right after the MTF

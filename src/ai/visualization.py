@@ -67,6 +67,7 @@ class AIVisualizationGenerator:
         details: Dict,
         current_price: float,
         save_path: Optional[str] = None,
+        position: Optional[Dict] = None,
     ) -> Optional[io.BytesIO]:
         """
         Generate comprehensive decision visualization
@@ -79,6 +80,12 @@ class AIVisualizationGenerator:
             details: Signal details from aggregator
             current_price: Current market price
             save_path: Optional path to save image file
+            position: Optional open-position summary for entry/SL/TP markers
+                on the main chart -- {"side", "entry_price", "stop_loss",
+                "take_profit"}. None (default) renders exactly as before;
+                the Telegram /chart caller never passes this, so its output
+                is unchanged. Dashboard-driven calls pass it when a position
+                is open on this asset.
 
         Returns:
             BytesIO buffer containing the chart image
@@ -99,7 +106,7 @@ class AIVisualizationGenerator:
 
             # Main chart: 15min candlesticks with overlays
             ax_main = fig.add_subplot(gs[0:2, :])
-            self._plot_main_chart(ax_main, df_15min, asset_name, current_price, details)
+            self._plot_main_chart(ax_main, df_15min, asset_name, current_price, details, position=position)
 
             # Support/Resistance levels from 4H
             ax_sr = fig.add_subplot(gs[2, 0])
@@ -170,7 +177,8 @@ class AIVisualizationGenerator:
             return None
 
     def _plot_main_chart(
-        self, ax, df: pd.DataFrame, asset_name: str, current_price: float, details: Dict
+        self, ax, df: pd.DataFrame, asset_name: str, current_price: float, details: Dict,
+        position: Optional[Dict] = None,
     ):
         """Plot main 1H candlestick chart with overlays"""
         try:
@@ -238,6 +246,29 @@ class AIVisualizationGenerator:
                 alpha=0.8,
                 label=f"Current: ${current_price:,.2f}",
             )
+
+            # Open-position markers (dashboard only -- Telegram's /chart never
+            # passes `position`, so this block is a no-op there).
+            if position:
+                _side = position.get("side", "?")
+                _entry = position.get("entry_price")
+                _sl = position.get("stop_loss")
+                _tp = position.get("take_profit")
+                if _entry is not None:
+                    ax.axhline(
+                        y=_entry, color="0.8", linestyle="--", linewidth=1.5,
+                        label=f"Entry ({_side}): ${_entry:,.2f}",
+                    )
+                if _sl is not None:
+                    ax.axhline(
+                        y=_sl, color="red", linestyle="--", linewidth=1.5,
+                        label=f"SL: ${_sl:,.2f}",
+                    )
+                if _tp is not None:
+                    ax.axhline(
+                        y=_tp, color="lime", linestyle="--", linewidth=1.5,
+                        label=f"TP: ${_tp:,.2f}",
+                    )
 
             # ✨ NEW: Advanced Overlays (Divergence, B&R, Liquidity)
             viz_overlay = details.get("viz_overlay", {})
