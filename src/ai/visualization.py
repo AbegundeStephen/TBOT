@@ -434,13 +434,19 @@ class AIVisualizationGenerator:
             # creation time (composite_state_builder._update_zone_levels) --
             # not a cosmetic guess. Levels created before that field existed
             # get width=0 and fall back to a thin line, honestly.
-            # Bug fix (confirmed live on BTC, ~30 tracked levels): giving
-            # every level its own legend label made ax.legend() stack ~30
-            # entries in one box that grew past this subplot's own bounds
-            # and overlapped the title/main chart above it. All levels
-            # still get drawn (line + band) -- only the legend is capped,
-            # to the levels actually closest to current price, since those
-            # are what a viewer needs labeled to read the chart.
+            # Bug fixes (confirmed live on BTC, 78 tracked levels):
+            # 1) giving every level its own legend label made ax.legend()
+            #    stack ~30-80 entries in one box that grew past this
+            #    subplot's own bounds and overlapped the title/main chart.
+            # 2) giving every level its own semi-transparent axhspan band
+            #    meant 78 overlapping bands alpha-stacked into a solid
+            #    muddy wash that drowned the price line entirely.
+            # Both are fixed the same way: the 5 levels nearest current
+            # price get full treatment (band + label) since those are what
+            # a viewer actually needs to read the chart. Every other level
+            # still gets a plain, subtler dashed line -- so the overall
+            # density of tracked levels is still visible -- just no band,
+            # no label, and no risk of alpha-stacking into mud.
             _visible = [lvl for lvl in ladder if price_min - buffer <= lvl["price"] <= price_max + buffer]
             _labeled_prices = {
                 lvl["price"] for lvl in sorted(_visible, key=lambda l: abs(l["price"] - current_price))[:5]
@@ -453,21 +459,22 @@ class AIVisualizationGenerator:
                 color = "red" if is_resistance else "lime"
                 role_label = "Resistance" if is_resistance else "Support"
                 flipped = " (flipped)" if lvl.get("role_flipped_at") else ""
-                if width > 0:
+                _is_near = price in _labeled_prices
+                if width > 0 and _is_near:
                     ax.axhspan(
                         price - width, price + width, color=color,
                         alpha=min(0.10 + 0.03 * tests, 0.30), zorder=2,
                     )
                 _label = (
                     f"{role_label}{flipped}: ${price:,.4g} ({tests}x)"
-                    if price in _labeled_prices else None
+                    if _is_near else None
                 )
                 ax.axhline(
                     y=price, color=color, linestyle="--",
-                    linewidth=min(1.0 + 0.5 * tests, 3.5),
-                    alpha=min(0.5 + 0.1 * tests, 0.95),
+                    linewidth=(min(1.0 + 0.5 * tests, 3.5) if _is_near else 0.6),
+                    alpha=(min(0.5 + 0.1 * tests, 0.95) if _is_near else 0.25),
                     label=_label,
-                    zorder=3,
+                    zorder=(3 if _is_near else 2),
                 )
 
             # Real trendlines -- connect the two most recent swing highs
