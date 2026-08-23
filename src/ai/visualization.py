@@ -434,10 +434,19 @@ class AIVisualizationGenerator:
             # creation time (composite_state_builder._update_zone_levels) --
             # not a cosmetic guess. Levels created before that field existed
             # get width=0 and fall back to a thin line, honestly.
-            for lvl in ladder:
+            # Bug fix (confirmed live on BTC, ~30 tracked levels): giving
+            # every level its own legend label made ax.legend() stack ~30
+            # entries in one box that grew past this subplot's own bounds
+            # and overlapped the title/main chart above it. All levels
+            # still get drawn (line + band) -- only the legend is capped,
+            # to the levels actually closest to current price, since those
+            # are what a viewer needs labeled to read the chart.
+            _visible = [lvl for lvl in ladder if price_min - buffer <= lvl["price"] <= price_max + buffer]
+            _labeled_prices = {
+                lvl["price"] for lvl in sorted(_visible, key=lambda l: abs(l["price"] - current_price))[:5]
+            }
+            for lvl in _visible:
                 price = lvl["price"]
-                if not (price_min - buffer <= price <= price_max + buffer):
-                    continue
                 tests = int(lvl.get("tests", 0) or 0)
                 width = float(lvl.get("zone_width", 0) or 0)
                 is_resistance = lvl.get("type") == "swing_high"
@@ -449,11 +458,15 @@ class AIVisualizationGenerator:
                         price - width, price + width, color=color,
                         alpha=min(0.10 + 0.03 * tests, 0.30), zorder=2,
                     )
+                _label = (
+                    f"{role_label}{flipped}: ${price:,.4g} ({tests}x)"
+                    if price in _labeled_prices else None
+                )
                 ax.axhline(
                     y=price, color=color, linestyle="--",
                     linewidth=min(1.0 + 0.5 * tests, 3.5),
                     alpha=min(0.5 + 0.1 * tests, 0.95),
-                    label=f"{role_label}{flipped}: ${price:,.4g} ({tests}x)",
+                    label=_label,
                     zorder=3,
                 )
 
