@@ -1333,7 +1333,7 @@
                         </div>
                     </div>
                     <div class="card">
-                        <div class="chart-wrap" style="height:220px;"><canvas id="dataGrowthChart"></canvas></div>
+                        <div class="chart-wrap" style="height:220px;" id="data-growth-chart-wrap"><canvas id="dataGrowthChart"></canvas></div>
                     </div>
                 </div>
             </div>
@@ -3785,17 +3785,24 @@ function dataSetGrowthTf(tf) {
 
 async function dataLoadGrowthChart() {
     if (!dataSelectedAsset) return;
+    const wrap = document.getElementById('data-growth-chart-wrap');
     try {
         const points = await fetchJSON(API + `/api/data/growth?asset=${encodeURIComponent(dataSelectedAsset)}&timeframe=${dataGrowthTf}`);
-        const ctx = document.getElementById('dataGrowthChart').getContext('2d');
-        if (dataGrowthChart) dataGrowthChart.destroy();
-        if (!points.length) {
+        if (dataGrowthChart) { dataGrowthChart.destroy(); dataGrowthChart = null; }
+        if (points.length < 2) {
             // No snapshots recorded yet for this (asset, timeframe) -- the
             // growth log only gets entries from an actual refresh; nothing
-            // to backfill. Leave the canvas blank rather than fake a line.
-            dataGrowthChart = null;
+            // to backfill, and one point alone can't draw a trend line.
+            // Say so explicitly rather than leaving a silent blank box.
+            wrap.innerHTML = emptyState('📈',
+                points.length === 0
+                    ? `No growth snapshots yet for ${dataSelectedAsset} (${dataGrowthTf.toUpperCase()}) — run a refresh to record the first one`
+                    : `Only 1 snapshot recorded for ${dataSelectedAsset} (${dataGrowthTf.toUpperCase()}) — need at least 2 to draw a trend`
+            );
             return;
         }
+        wrap.innerHTML = '<canvas id="dataGrowthChart"></canvas>';
+        const ctx = document.getElementById('dataGrowthChart').getContext('2d');
         const labels = points.map(p => new Date(p.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'}));
         const values = points.map(p => p.bars);
         dataGrowthChart = new Chart(ctx, {
