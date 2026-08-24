@@ -3302,6 +3302,19 @@ class TradingBot:
                 _pc = self.config.get("phase_config", {})
                 new_aggregator.phase_config = _pc
                 lsm_companion.phase_config = _pc
+                # Confirmed live (25-Aug): this branch (pure "council" mode
+                # reinit, as opposed to the "hybrid" branch above) never set
+                # risk_config at all, unlike every other construction site in
+                # this file. getattr(self, "risk_config", {}) silently
+                # returned {} for any asset reinitialized through here, so
+                # _check_profit_economics_adaptive's .get("min_rr", 1.5)
+                # fell through to the hardcoded default -- completely
+                # ignoring the asset's real configured min_rr (observed live:
+                # BTC logged "min_rr 1.500" despite config.json/config.prod.json
+                # both saying 0.6). Same fix as the three other sites.
+                new_aggregator.risk_config = (
+                    self.config.get("assets", {}).get(asset_name, {}).get("risk", {})
+                )
                 logger.info(
                     f"[AUTO PRESET] ✓ Council aggregator + LSM companion refreshed for {asset_name}"
                 )
