@@ -793,7 +793,18 @@ class InstitutionalCouncilAggregator:
                         first_tp_mult = (float(_partial_targets[0]) * atr_fast) / risk
 
                 expected_reward = risk * first_tp_mult
-                min_required = 0.5 * atr_fast
+                # Was a hardcoded 0.5x ATR for every asset -- confirmed live
+                # (24-Aug) that this alone was blocking ~100 GBPAUD trades/day:
+                # GBPAUD's friction (0.05% round-trip) runs ~67% of its own
+                # typical ATR (vs. ~3% for BTC), so friction alone consumes
+                # most of the room between the 1.0x-ATR reward ceiling and a
+                # 0.5x-ATR floor, leaving next to nothing regardless of setup
+                # quality. Now reads assets.<ASSET>.risk.min_reward_atr_mult,
+                # same pattern as min_rr just below -- default 0.5 reproduces
+                # today's behavior byte-for-byte for every asset that doesn't
+                # explicitly override it.
+                _min_reward_atr_mult = float(_risk_cfg_tp.get("min_reward_atr_mult", 0.5))
+                min_required = _min_reward_atr_mult * atr_fast
 
                 _friction_cost = 0.0
                 if asset_name:
@@ -805,8 +816,8 @@ class InstitutionalCouncilAggregator:
                 if expected_reward < min_required:
                     logger.info(
                         f"[PROFIT GATE] ❌ Blocked - Low Reward after real friction "
-                        f"(reward {expected_reward:.4f} < {min_required:.4f}, "
-                        f"friction_cost={_friction_cost:.4f})"
+                        f"(reward {expected_reward:.4f} < {min_required:.4f} "
+                        f"[{_min_reward_atr_mult:.2f}x ATR], friction_cost={_friction_cost:.4f})"
                     )
                     return False
 
