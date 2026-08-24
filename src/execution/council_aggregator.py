@@ -811,7 +811,22 @@ class InstitutionalCouncilAggregator:
                     return False
 
                 _min_rr = float(getattr(self, "risk_config", {}).get("min_rr", 1.5))
-                return (expected_reward / risk) >= _min_rr
+                _computed_rr = expected_reward / risk
+                if _computed_rr < _min_rr:
+                    # This branch previously logged nothing on rejection --
+                    # unlike the ATR-floor branch above, a min_rr-ratio
+                    # failure was only ever visible as the bare caller-side
+                    # "[VETO] R:R Gate" line, with no reward/risk/R:R numbers
+                    # to actually diagnose it. Confirmed live (24-Aug):
+                    # chasing one such rejection required cross-referencing
+                    # funnel timestamps against trading_bot.log, which had
+                    # already rotated the relevant window away.
+                    logger.info(
+                        f"[PROFIT GATE] ❌ Blocked - R:R {_computed_rr:.3f} < min_rr "
+                        f"{_min_rr:.3f} (reward={expected_reward:.4f}, risk={risk:.4f}, "
+                        f"friction_cost={_friction_cost:.4f})"
+                    )
+                return _computed_rr >= _min_rr
 
             # ── A1: pure cost test ──────────────────────────────────────
             # cost_R = spread_used / ATR; veto only if cost_R > cost_cap.
