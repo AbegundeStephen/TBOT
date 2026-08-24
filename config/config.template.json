@@ -145,7 +145,7 @@
           "old_state_min_age": 20
         },
         "min_sl_pct": 0.006,
-        "min_rr": 1.0,
+        "min_rr": 0.6,
         "structural_stop_allowance_atr": 0.3
       },
       "asset_type": "crypto",

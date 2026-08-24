@@ -135,7 +135,7 @@
         "early_lock_atr_multiplier": 0.5,
         "runner_trail_atr_multiplier": 0.8,
         "min_sl_pct": 0.006,
-        "min_rr": 1.0,
+        "min_rr": 0.6,
         "structural_stop_allowance_atr": 0.3,
         "livermore_atr_adjustments": {
           "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
