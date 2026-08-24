@@ -23,6 +23,21 @@ project_root = os.path.dirname(src_dir)  # TBOT root
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+
+def _subprocess_env():
+    """
+    Env for python scripts we spawn (backtest.py, refresh_data.py). They log
+    emoji status markers (checkmarks/warnings); on Windows, a subprocess's
+    stdout/stderr default to the console's cp1252 codepage rather than UTF-8
+    even when redirected to DEVNULL, so any raw print() of those characters
+    raises UnicodeEncodeError and kills the child before it can do anything.
+    """
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 from src.analysis.storyteller import TradeStoryteller
 from src.analysis.gemini_exporter import GeminiExporter
 from src.database.database_manager import TradingDatabaseManager
@@ -1485,7 +1500,7 @@ def run_backtest_route():
             cmd += ["--no-gatekeeper"]
 
         subprocess.Popen(
-            cmd, cwd=project_root,
+            cmd, cwd=project_root, env=_subprocess_env(),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         logger.info(f"[BACKTEST] Launched run {run_id}: {asset} / {aggregator} / {preset or 'recommended'}")
@@ -1701,7 +1716,7 @@ def data_refresh_route():
             cmd += ["--range-preset", range_preset]
 
         subprocess.Popen(
-            cmd, cwd=project_root,
+            cmd, cwd=project_root, env=_subprocess_env(),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         logger.info(f"[DATA-REFRESH] Launched run {run_id}: asset={asset or 'all enabled'} range={range_preset or 'default'}")
