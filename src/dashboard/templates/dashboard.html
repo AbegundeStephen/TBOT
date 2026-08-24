@@ -3314,6 +3314,34 @@ function lvStateClass(state) {
     return '';
 }
 
+// BRC = Break-Retest-Close, the proof-of-setup gate the council waits on
+// before it will convene at all ("HOLD (no proof — council not convened)"
+// is the single most common reasoning line across every backtest this
+// session -- 53-57% of bars on BTC/GBPAUD). composite_state.json already
+// carries the full proof lifecycle (structural break -> retest -> confirmed
+// proof); this was computed every cycle but never surfaced on the dashboard.
+function brcProofRow(s) {
+    if (s.brc_confirmed) {
+        const dir = s.brc_direction === 1 ? 'LONG' : (s.brc_direction === -1 ? 'SHORT' : '—');
+        const kindLabel = s.brc_kind === 'MR_REV' ? 'MR reversal'
+            : s.brc_kind === 'TF_CONT' ? 'trend continuation'
+            : (s.brc_kind || '');
+        const tier = s.brc_tier ? ` · ${s.brc_tier}` : '';
+        const age = s.brc_age ?? 0;
+        return `<div class="lv-card-row"><span class="label">Proof</span><span class="lv-state lv-state-main">✓ ${dir}</span></div>
+            <div class="lv-card-row" style="color:var(--muted);font-size:10px;">${kindLabel}${tier} · confirmed ${age} bar${age === 1 ? '' : 's'} ago</div>`;
+    }
+    const breaks = [];
+    if (s.choch_bullish) breaks.push('CHoCH ↑');
+    if (s.choch_bearish) breaks.push('CHoCH ↓');
+    if (s.bos_bullish) breaks.push('BOS ↑');
+    if (s.bos_bearish) breaks.push('BOS ↓');
+    if (breaks.length > 0) {
+        return `<div class="lv-card-row"><span class="label">Proof</span><span class="lv-state lv-state-natural">${breaks.join(', ')} · awaiting retest</span></div>`;
+    }
+    return `<div class="lv-card-row"><span class="label">Proof</span><span style="color:var(--muted);">— no break yet</span></div>`;
+}
+
 function renderLivermoreStrip(states) {
     const strip = document.getElementById('lv-strip');
     const assets = Object.keys(states);
@@ -3330,6 +3358,7 @@ function renderLivermoreStrip(states) {
         const age1h = s.livermore_state_age_1h ?? '—';
         const dual = s.livermore_dual_confirmation ? '✓ confirmed' : '— unconfirmed';
         const silent = s.is_silent_zone ? ' · 🔇 silent zone' : '';
+        const entryType = s.entry_type ? ` · ${s.entry_type}` : '';
         const activeCls = asset === livermoreAsset ? ' active' : '';
         h += `<div class="lv-card${activeCls}" onclick="selectLivermoreAsset('${asset}')">
             <div class="lv-card-asset">${asset}</div>
@@ -3338,7 +3367,8 @@ function renderLivermoreStrip(states) {
             <div class="lv-card-row"><span class="label">1H</span><span class="lv-state ${lvStateClass(st1h)}">${st1h}</span></div>
             <div class="lv-card-row"><span class="label">1H age</span><span>${age1h} bars</span></div>
             <div class="lv-card-row"><span class="label">Dual confirm</span><span>${dual}</span></div>
-            <div class="lv-card-row" style="color:var(--muted);font-size:10px;">${s.range_classification || ''}${silent}</div>
+            ${brcProofRow(s)}
+            <div class="lv-card-row" style="color:var(--muted);font-size:10px;">${s.range_classification || ''}${entryType}${silent}</div>
         </div>`;
     }
     strip.innerHTML = h;
