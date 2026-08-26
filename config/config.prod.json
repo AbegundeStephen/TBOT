@@ -1453,7 +1453,7 @@
     "r_breakeven_lock": 0.2,
     "trail_mult_floor": 0.0,
     "trail_start_progress_r": 0.25,
-    "gate4_pure_cost_enabled": false,
+    "gate4_pure_cost_enabled": true,
     "gate4_cost_cap_r": 0.15,
     "dead_ceiling_discount": 0.15,
     "per_tick_livermore_enabled": true,

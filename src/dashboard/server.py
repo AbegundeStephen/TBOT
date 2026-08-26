@@ -219,8 +219,6 @@ def get_history(asset):
         "EURUSD": "EURUSDm_1h.csv",
         "USOIL":  "USOILm_1h.csv",
         "GBPAUD": "GBPAUDm_1h.csv",
-        "GBPUSD": "GBPUSDm_1h.csv",
-        "USDJPY": "USDJPYm_1h.csv",
     }
 
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1073,7 +1071,10 @@ _EDITABLE_FIELDS = [
     ("trading.place_vtm_tp_on_exchange",  "Place VTM Take Profit on Exchange", "bool", {}),
 ]
 
-_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY"]
+# BATCH-W1 SEG 11: GBPUSD/USDJPY are not in config.json at all -- the
+# dashboard was requesting regime data for assets that do not exist,
+# erroring roughly every 30s all day. EURJPY stays (disabled stub in config).
+_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD"]
 _ASSET_FIELDS = [
     # (sub_path,                            label,                           type,    extra)
     ("enabled",                             "Enabled",                       "bool",  {}),
