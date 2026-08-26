@@ -286,6 +286,13 @@ class Position:
                     risk_config.update(vtm_overrides)
                     logger.info(f"[VTM] Overrides applied: {vtm_overrides}")
 
+                # BATCH-W1 SEG 1: defensive phase_config injection. Callers of
+                # this method are not guaranteed to have added it. Harmless
+                # no-op when already present.
+                risk_config = dict(risk_config or {})
+                if not risk_config.get("phase_config"):
+                    risk_config["phase_config"] = self.config.get("phase_config", {})
+
                 self.trade_manager = VeteranTradeManager(
                     entry_price=entry_price,
                     side=side,
@@ -2902,6 +2909,7 @@ class PortfolioManager:
                     else "TREND"
                 ),
                 "position_id": position.position_id,
+                "record_source": "portfolio",
             },
         )
 

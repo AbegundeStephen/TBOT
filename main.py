@@ -40,7 +40,9 @@ import sys as _g_sys
 from pathlib import Path as _g_Path
 _VENV = (_g_Path(__file__).resolve().parent / "venv" / "Scripts" / "python.exe")
 if _g_Path(_g_sys.executable).resolve() != _VENV:
+    print(f"[GUARD] REJECTED — {_g_sys.executable} is not {_VENV}")
     _g_sys.exit(0)
+print(f"[GUARD] OK — running under {_g_sys.executable}")
 
 # Load environment variables from .env file at startup
 load_dotenv()
@@ -397,6 +399,12 @@ class TradingBot:
         self.daily_loss = 0.0
         self.last_trade_date = None
         self.last_trade_times = {}
+        # BATCH-W1 SEG 3: used-proof ledger. Keyed asset|side|ref.
+        # Persisted to disk so a restart cannot forget which proofs have
+        # already funded a trade -- same failure the cooldown clock had
+        # before STEP 4.6 was added.
+        self.used_proofs: dict = {}
+        self._used_proofs_path = Path("logs/used_proofs.json")
         self.last_market_status_log = {}  # Per-asset logging dictionary
         # Startup warmup: block all new trade executions until the first complete
         # trading cycle has finished. This prevents the startup race condition where
@@ -856,6 +864,9 @@ class TradingBot:
                 restored = self.db_manager.get_last_trade_times(
                     lookback_hours=int(max_cooldown_h) + 1
                 )
+                # BATCH-W1 SEG 3: restore the used-proof ledger in the same
+                # startup step that restores the cooldown clock.
+                self._load_used_proofs()
                 if restored:
                     self.last_trade_times.update(restored)
                     for asset, ts in restored.items():
@@ -2820,8 +2831,27 @@ class TradingBot:
                _target_agg._cached_composite is not None:
                 try:
                     _comp_state_dict = _target_agg._cached_composite.to_dict()
-                except Exception:
-                    pass
+                except Exception as _cs_e:
+                    logger.warning(
+                        f"[SHADOW-S6] {asset_name}: composite to_dict() failed ({_cs_e})"
+                    )
+            # BATCH-W1 SEG 7 (S6): fall back to the live cache, which main.py
+            # populates on four separate paths (2098/5104/5155/6714). Without
+            # this the shadow record writes composite_state={} and every
+            # blocked-trade study -- including the new proof rule -- is blind.
+            if not _comp_state_dict:
+                _comp_state_dict = (self._latest_composite_state or {}).get(
+                    asset_name, {}
+                ) or {}
+                if _comp_state_dict:
+                    logger.info(
+                        f"[SHADOW-S6] {asset_name}: composite_state recovered from live cache"
+                    )
+                else:
+                    logger.warning(
+                        f"[SHADOW-S6] {asset_name}: composite_state EMPTY — "
+                        f"shadow record will be blind"
+                    )
             self.shadow_trader.open_position(
                 asset=asset_name,
                 side=_side,
@@ -4064,7 +4094,12 @@ class TradingBot:
                         logger.info(f"[VTM LOOP] Attempting to re-initialize missing VTM for {position_id}...")
                         try:
                             asset_cfg = self.config["assets"].get(asset_name, {})
-                            risk_cfg = asset_cfg.get("risk", {})
+                            risk_cfg = dict(asset_cfg.get("risk", {}))
+                            # BATCH-W1 SEG 1: phase_config lives at the TOP LEVEL of config.json, not
+                            # inside the per-asset "risk" block. Without this line every phase flag the
+                            # VTM reads resolves to its default -- trail-start 0.0, r_breakeven OFF, and
+                            # the trailing stop never arms. This ran live and cost trade #1 its profit.
+                            risk_cfg["phase_config"] = self.config.get("phase_config", {})
 
                             # Prepare ohlc_data using 1H history (same timeframe VTM was born with)
                             ohlc_data = {
@@ -4196,6 +4231,20 @@ class TradingBot:
                             # trade fire as soon as all positions were manually closed.
                             if pyramid_ok:
                                 self.last_trade_times[asset_name] = datetime.now()
+                                # BATCH-W1 SEG 3: retire the proof that funded this entry.
+                                # `signal`/`details` are not in scope at this pyramid
+                                # scale-in site -- using the local equivalents
+                                # (`pyramid_signal`/`sig_details`) instead, per the
+                                # spec's explicit fallback instruction.
+                                try:
+                                    self._mark_proof_used(
+                                        asset_name,
+                                        "long" if pyramid_signal > 0 else "short",
+                                        float(sig_details.get("setup_ref") or 0.0),
+                                        int(sig_details.get("setup_age") or 0),
+                                    )
+                                except Exception as _pe:
+                                    logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used (pyramid) ({_pe})")
                                 # Snapshot Livermore state for pyramid entries too.
                                 _pyr_cs = self._current_regime_data.get(asset_name, {}).get("composite_state") if hasattr(self, "_current_regime_data") else None
                                 if _pyr_cs is not None:
@@ -4544,6 +4593,48 @@ class TradingBot:
 
         return True
 
+    def _load_used_proofs(self):
+        """BATCH-W1 SEG 3: restore the used-proof ledger across restarts.
+
+        Entries older than 72h are dropped -- a proof that old is not
+        going to be re-presented, and the file should not grow forever.
+        """
+        try:
+            if self._used_proofs_path.exists():
+                import json as _json
+                _raw = _json.loads(self._used_proofs_path.read_text())
+                _cut = datetime.now() - timedelta(hours=72)
+                self.used_proofs = {
+                    k: v for k, v in _raw.items()
+                    if datetime.fromisoformat(v["ts"]) > _cut
+                }
+                logger.info(
+                    f"[PROOF-GATE] Restored {len(self.used_proofs)} used proof(s) from disk"
+                )
+            else:
+                logger.info("[PROOF-GATE] No used-proof ledger on disk — starting empty")
+        except Exception as _e:
+            logger.warning(f"[PROOF-GATE] Could not restore used-proof ledger: {_e}")
+            self.used_proofs = {}
+
+    def _mark_proof_used(self, asset_name: str, side: str, ref: float, age: int):
+        """BATCH-W1 SEG 3: record that this proof has funded an entry."""
+        try:
+            _key = f"{asset_name}|{side}|{ref:.5f}"
+            self.used_proofs[_key] = {
+                "ts": datetime.now().isoformat(),
+                "age_at_entry": age,
+                "ref": ref,
+            }
+            import json as _json
+            self._used_proofs_path.parent.mkdir(parents=True, exist_ok=True)
+            self._used_proofs_path.write_text(_json.dumps(self.used_proofs, indent=2))
+            logger.info(
+                f"[PROOF-GATE] {asset_name}: proof ref={ref:.5g} age={age} marked USED"
+            )
+        except Exception as _e:
+            logger.warning(f"[PROOF-GATE] Could not persist used-proof ledger: {_e}")
+
     def check_min_time_between_trades(
         self, asset_name: str, current_lsm_state: str | None = None
     ) -> bool:
@@ -4568,6 +4659,7 @@ class TradingBot:
 
         # If the asset has never traded this session it cannot be in cooldown.
         if asset_name not in self.last_trade_times:
+            logger.info(f"[COOLDOWN] {asset_name}: PASS — no prior trade recorded")
             return True
 
         # Adaptive cooldown: genuine Livermore state transition → shorter window.
@@ -4606,6 +4698,13 @@ class TradingBot:
             return False
 
         # Cooldown period has fully elapsed — allow trading.
+        # BATCH-W1 SEG 4: the cooldown was silent on pass, so on 25 Aug two
+        # BTC entries 5h59m apart cleared the 240min window with no record
+        # of the decision. Desire had to spot it on a chart.
+        logger.info(
+            f"[COOLDOWN] {asset_name}: PASS — {elapsed.total_seconds()/60:.0f}min "
+            f"since last ENTRY (limit {min_minutes:.0f}min)"
+        )
         return True
 
     def _check_natural_cycle_gate(
@@ -5904,6 +6003,81 @@ class TradingBot:
                         pass
                 return
 
+            # ── BATCH-W1 SEG 3: ONE PROOF, ONE TRADE ─────────────────────
+            # Ratified 25 Aug. A proof may fund ONE entry. A second entry
+            # needs a NEW PROOF EVENT -- detected by setup_age resetting.
+            # Identity keys already arrive in `details`; shadow_trader.py:
+            # 605-611 reads the same ones. No new plumbing.
+            _pr_ref = float(details.get("setup_ref") or 0.0)
+            _pr_age = int(details.get("setup_age") or 0)
+            _pr_side = "long" if signal > 0 else "short"
+            _pr_key = f"{asset_name}|{_pr_side}|{_pr_ref:.5f}"
+            _pr_used = self.used_proofs.get(_pr_key)
+
+            if _pr_ref > 0 and _pr_used is not None \
+               and _pr_age >= int(_pr_used.get("age_at_entry", 0)):
+                logger.info(
+                    f"[PROOF-GATE] {asset_name}: BLOCKED — proof ref={_pr_ref:.5g} "
+                    f"already funded a trade at {_pr_used.get('ts')} "
+                    f"(age then={_pr_used.get('age_at_entry')}, now={_pr_age}). "
+                    f"A new proof event is required."
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "proof_reused", asset_cfg,
+                )
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Proof Gate",
+                    block_reason=(
+                        f"Proof {_pr_ref:.5g} already used — a new proof event "
+                        f"is required before re-entry"
+                    ),
+                    details=details,
+                    price=details.get("price"),
+                )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(
+                            asset_name, 0, {"reasoning": "proof_reused"}
+                        )
+                    except Exception:
+                        pass
+                return
+
+            logger.info(
+                f"[PROOF-GATE] {asset_name}: PASS — ref={_pr_ref:.5g} age={_pr_age} "
+                f"({'first use' if _pr_used is None else 'new proof event'})"
+            )
+
+            # ── BATCH-W1 SEG 5: ENTRY MEASUREMENT (records only) ─────────
+            # Four fields that answer the proof-distance and proof-reuse
+            # questions at the 20-trade review. No behaviour change.
+            try:
+                _m_tier = details.get("setup_ref_tier") or ""
+                _m_tests = int(details.get("setup_ref_tests") or 0)
+                _m_retest = details.get("retest_type") or ""
+                # BATCH-W1 SEG 5 note: doc's suggested key "atr" is not present
+                # anywhere in `details` -- confirmed the council aggregator's
+                # own reasoning dict carries it as "atr_fast" (council_aggregator.py:3783),
+                # merged alongside CompositeState's setup_ref/setup_age fields.
+                # Using the real key so dist doesn't read a constant -1.00.
+                _m_atr = float(details.get("atr_fast") or 0.0)
+                _m_dist = (
+                    abs(current_price - _pr_ref) / _m_atr
+                    if (_pr_ref > 0 and _m_atr > 0) else -1.0
+                )
+                logger.info(
+                    f"[ENTRY-MEASURE] {asset_name}: entry={current_price:.5g} "
+                    f"proof_ref={_pr_ref:.5g} dist={_m_dist:.2f}ATR "
+                    f"age={_pr_age}bars tier={_m_tier} tests={_m_tests} "
+                    f"retest_type={_m_retest} "
+                    f"proof_reused={'yes' if _pr_used is not None else 'no'}"
+                )
+            except Exception as _me:
+                logger.warning(f"[ENTRY-MEASURE] {asset_name}: could not record ({_me})")
+
             # ── Natural cycle elapsed gate ────────────────────────────────────
             # Block MR re-entries in the same Livermore NATURAL phase until
             # the state has aged sufficiently (≥ natural_cycle_min_bars, default 8).
@@ -6111,6 +6285,16 @@ class TradingBot:
                 # Update internal counters
                 self.trade_count_today += 1
                 self.last_trade_times[asset_name] = datetime.now()
+                # BATCH-W1 SEG 3: retire the proof that funded this entry.
+                try:
+                    self._mark_proof_used(
+                        asset_name,
+                        "long" if signal > 0 else "short",
+                        float(details.get("setup_ref") or 0.0),
+                        int(details.get("setup_age") or 0),
+                    )
+                except Exception as _pe:
+                    logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used ({_pe})")
                 # Record Livermore state at entry — used by adaptive cooldown on next signal.
                 if _current_lsm is not None:
                     self._last_livermore_states[asset_name] = _current_lsm
@@ -6827,8 +7011,28 @@ class TradingBot:
                         _target_agg2._cached_composite is not None:
                             try:
                                 _comp_state_dict2 = _target_agg2._cached_composite.to_dict()
-                            except Exception:
-                                pass
+                            except Exception as _cs_e2:
+                                logger.warning(
+                                    f"[SHADOW-S6] {asset_name}: composite to_dict() failed ({_cs_e2})"
+                                )
+                        # BATCH-W1 SEG 7 (S6) follow-up: identical silent-swallow bug
+                        # as the other shadow-open call site (~line 2830), found while
+                        # implementing that fix but out of the doc's stated scope --
+                        # fixed now on explicit instruction. Same fallback: the live
+                        # cache main.py populates on four separate paths.
+                        if not _comp_state_dict2:
+                            _comp_state_dict2 = (self._latest_composite_state or {}).get(
+                                asset_name, {}
+                            ) or {}
+                            if _comp_state_dict2:
+                                logger.info(
+                                    f"[SHADOW-S6] {asset_name}: composite_state recovered from live cache"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[SHADOW-S6] {asset_name}: composite_state EMPTY — "
+                                    f"shadow record will be blind"
+                                )
                         self.shadow_trader.open_position(
                             asset=asset_name,
                             side=_side,

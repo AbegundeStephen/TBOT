@@ -983,7 +983,8 @@ class MT5ExecutionHandler:
                     "price": execution_price,
                     "size": volume_lots,
                     "trade_type": trade_type,
-                    "position_id": str(mt5_ticket)
+                    "position_id": str(mt5_ticket),
+                    "record_source": "broker",
                 })
 
                 # ✅ Update last trade time for cooldown

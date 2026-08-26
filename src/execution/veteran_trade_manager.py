@@ -475,6 +475,15 @@ class VeteranTradeManager:
         # existed under phase_config. Invisible until now because the
         # shipped value was 0.0 either way (floor disabled by design).
         _phase_cfg_init = self.risk_config.get("phase_config", {}) or {}
+        # BATCH-W1 SEG 1: this block silently defaulted for the entire live
+        # period and nothing surfaced it. If phase_config is ever missing
+        # again, say so loudly at trade construction.
+        if not _phase_cfg_init:
+            logger.warning(
+                f"[VTM-CONFIG] {self.asset}: phase_config MISSING from risk_config — "
+                f"ALL phase flags will use defaults (trail-start 0.0, "
+                f"r_breakeven OFF, trail will NOT arm). Caller did not inject it."
+            )
         # R-batch: floor under all downward trail mutations (0.0 = disabled)
         self._trail_mult_floor = float(_phase_cfg_init.get("trail_mult_floor", 0.0))
         # Window-G Segment D: neither trail mechanism may move the stop until
@@ -483,6 +492,13 @@ class VeteranTradeManager:
         # trail -- proven live that an early trail pre-empts a wide structural
         # stop before the thesis has any room to work.
         self._trail_start_progress_r = float(_phase_cfg_init.get("trail_start_progress_r", 0.0))
+        # BATCH-W1 SEG 4: print the values ACTUALLY in force at construction.
+        # This single line is how Desire verifies the batch worked.
+        logger.info(
+            f"[VTM-CONFIG] {self.asset}: trail_start={self._trail_start_progress_r:.2f}R "
+            f"trail_mult_floor={self._trail_mult_floor:.2f} "
+            f"r_breakeven={_phase_cfg_init.get('r_breakeven_enabled', False)}"
+        )
         # Time-based break-even: move SL to entry after N bars if pnl >= threshold
         self.breakeven_after_bars = self.risk_config.get("breakeven_after_bars", None)
         self.breakeven_profit_threshold = self.risk_config.get("breakeven_profit_threshold", 0.01)
@@ -2350,6 +2366,15 @@ class VeteranTradeManager:
             # read above) rather than as a top-level risk_config key.
             _phase_cfg = self.risk_config.get("phase_config", {}) or {}
             if not _phase_cfg.get("r_breakeven_enabled", False):
+                # BATCH-W1 SEG 4: this returned silently for the entire live
+                # period. Once per trade, say so -- this step also ARMS THE
+                # TRAIL, so when it's off there is no profit protection at all.
+                if not getattr(self, "_r_be_off_logged", False):
+                    logger.warning(
+                        f"[VTM] R-breakeven DISABLED for {self.asset} — "
+                        f"phase_config empty or flag false. TRAIL WILL NOT ARM."
+                    )
+                    self._r_be_off_logged = True
                 return False
             # R2: fire once per trade -- the lock price itself is idempotent
             # (only ever tightens), but without this guard the log line and
