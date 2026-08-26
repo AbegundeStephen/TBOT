@@ -79,10 +79,6 @@
       "lookback_days": 730,
       "weight": 0.5,
       "force_min_lot": false,
-      "fixed_risk_usd": {
-        "TREND": 25,
-        "SCALP": 20
-      },
       "min_position_usd": 100,
       "max_position_usd": 75000,
       "strategies": {

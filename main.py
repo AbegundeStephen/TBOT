@@ -2803,7 +2803,13 @@ class TradingBot:
                         _atr = _a14
             except Exception:
                 _atr = None
-            _risk_cfg = asset_cfg.get("risk_management", asset_cfg)
+            # BATCH-15: config stores per-asset risk under "risk", not
+            # "risk_management". The old lookup fell back to the whole asset
+            # block, found nothing at that level, and silently used defaults --
+            # atr_multiplier 1.8 for every asset (BTC is 1.5, GOLD 2.5) and
+            # partial_targets [2.5,4.0,6.0] (BTC is [1.5,2.5,4.0]). Same fix
+            # already applied at main.py:4097 in Batch W1.
+            _risk_cfg = asset_cfg.get("risk", {})
             _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
             _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
             _trail_mult = float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
@@ -6988,7 +6994,8 @@ class TradingBot:
                             _atr = None
 
                         # Read VTM multipliers from asset config risk block
-                        _risk_cfg   = asset_cfg.get("risk_management", asset_cfg)
+                        # BATCH-15: see main.py:2806 -- same lookup bug, same fix.
+                        _risk_cfg   = asset_cfg.get("risk", {})
                         _atr_mult   = float(_risk_cfg.get("atr_multiplier", 1.8))
                         _tp_mults   = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
                         _trail_mult = float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
