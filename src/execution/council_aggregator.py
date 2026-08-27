@@ -3346,21 +3346,42 @@ class InstitutionalCouncilAggregator:
                     asset_name=self.asset_type, trade_type=trade_type,
                     governor_data=governor_data,
                 ):
+                    # BATCH-610 ITEM 7: this wrapper always labelled the veto
+                    # "R:R Gate" regardless of which internal branch of
+                    # _check_profit_economics_adaptive actually fired. Since
+                    # Batch W1 that's usually the honest cost gate (logs as
+                    # [GATE-③ COST]), not the legacy min_rr ratio check --
+                    # but Telegram kept reporting "R:R Gate" either way. Real
+                    # example, 27 Aug 05:02: GBPAUD blocked by the cost gate,
+                    # Telegram said "R:R Gate", cost a day of doubting Batch
+                    # W1's switch had taken effect. main.py:5881-5884 extracts
+                    # this label straight out of decision_type's parens, so
+                    # fixing it here (the actual source of the generic label)
+                    # reaches Telegram without touching main.py at all.
+                    _gate4_on = bool(
+                        (getattr(self, "phase_config", {}) or {}).get(
+                            "gate4_pure_cost_enabled", False
+                        )
+                    )
+                    _veto_label = "Cost Gate" if _gate4_on else "R:R Gate"
                     logger.info(
-                        f"[VETO] ❌ BLOCKED - R:R Gate ({trade_type}): reward doesn't "
-                        f"clear the minimum R:R after friction."
+                        f"[VETO] ❌ BLOCKED - {_veto_label} ({trade_type}): reward doesn't "
+                        f"clear the minimum {'cost cap' if _gate4_on else 'R:R'} after friction."
                     )
                     return 0, {
                         "timestamp": timestamp,
                         "signal": 0,
                         "asset": self.asset_type,
-                        "decision_type": "BLOCKED (R:R Gate)",
+                        "decision_type": f"BLOCKED ({_veto_label})",
                         "action": "rejected",
                         "original_signal": signal,
                         "reasoning": (
-                            "rr_gate_rejected_trend" if trade_type == "TREND"
-                            else "rr_gate_rejected_reversion" if trade_type == "REVERSION"
-                            else "rr_gate_rejected"
+                            ("cost_gate_rejected_trend" if trade_type == "TREND"
+                             else "cost_gate_rejected_reversion" if trade_type == "REVERSION"
+                             else "cost_gate_rejected") if _gate4_on else
+                            ("rr_gate_rejected_trend" if trade_type == "TREND"
+                             else "rr_gate_rejected_reversion" if trade_type == "REVERSION"
+                             else "rr_gate_rejected")
                         ),
                         "final_signal": 0,
                         "signal_quality": 0.0,
