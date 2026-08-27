@@ -531,6 +531,19 @@ class VeteranTradeManager:
         # this field, it just wasn't extracted into VTM until now.
         self.brc_tier                   = _cs.get("brc_tier")
 
+        # BATCH-610 ITEM 1: the real zone ladder -- 4H levels with genuine test
+        # history, role-flip tracking and 90-day memory. Targets previously used
+        # a 30-bar local pivot scan instead; the bot entered against one map and
+        # exited against another.
+        _zl = None
+        if _cs is not None:
+            _zl = (_cs.get("zone_ladder_4h") if isinstance(_cs, dict)
+                   else getattr(_cs, "zone_ladder_4h", None))
+        self.zone_ladder_4h = list(_zl) if _zl else []
+        logger.info(
+            f"[VTM-LADDER] {asset}: zone ladder carries {len(self.zone_ladder_4h)} level(s)"
+        )
+
         # 7.4: Populate _mfe_target_r from real trade history once enough
         # exists. Stays None (safely skipped by _blend_single_tp, see the
         # getattr fallback at its call site) until then. NOTE: this is inert
@@ -1379,13 +1392,50 @@ class VeteranTradeManager:
                 # and flagpole ladder was not used)
                 if not _flagpole_used and self.use_structure_targets:
                     tolerance = 0.5 * atr
-                    structure_levels = find_resistance_levels(self.high, self.low, self.close, self.entry_price, self.side, self.pivot_lookback, tolerance=tolerance)
+                    # ── BATCH-610 ITEM 1: prefer the real zone ladder ──────
+                    # The ladder is 4H, 90-day, test-counted and role-flip
+                    # aware. Filter to the correct side of entry -- the old
+                    # pivot scan did that internally; the ladder returns both
+                    # sides, so a long could otherwise "target" a level below
+                    # its own entry.
+                    _ladder = getattr(self, "zone_ladder_4h", []) or []
+                    structure_levels = []
+                    if _ladder:
+                        for _lvl in _ladder:
+                            try:
+                                _p = float(_lvl.get("price"))
+                            except Exception:
+                                continue
+                            if self.side == "long" and _p > self.entry_price:
+                                structure_levels.append(_p)
+                            elif self.side == "short" and _p < self.entry_price:
+                                structure_levels.append(_p)
+                    _src_name = "zone-ladder"
+                    if not structure_levels:
+                        # Ladder empty or nothing on the right side -- fall back
+                        # to the legacy pivot scan rather than losing targets.
+                        structure_levels = find_resistance_levels(
+                            self.high, self.low, self.close, self.entry_price,
+                            self.side, self.pivot_lookback, tolerance=tolerance
+                        )
+                        _src_name = "pivot-scan-fallback"
+
+                    # ── BATCH-610 ITEM 1: per-asset bar, was hardcoded 2.0 ──
+                    # 2.0R put the qualifying bar further away than price
+                    # normally travels, so every tier printed
+                    # "[Structure too close]" and fell back to R-multiples.
+                    _struct_min_rr = float(
+                        self.risk_config.get("structure_target_min_rr", 1.0)
+                    )
                     raw_targets, self.partial_sizes = calculate_hybrid_targets(
                         self.entry_price, self.initial_stop_loss, self.side, structure_levels,
                         self.partial_targets, self.partial_sizes,
-                        min_rr=2.0  # Standard TREND requirement
+                        min_rr=_struct_min_rr
                     )
-                    logger.debug(f"[VTM] Structure targets active: {len(structure_levels)} levels found")
+                    logger.info(
+                        f"[VTM] Structure targets active: {len(structure_levels)} level(s) "
+                        f"from {_src_name}, min_rr={_struct_min_rr:.2f}"
+                    )
                 else:
                     # Pure ATR-multiple targets, no pivot hunting
                     raw_targets = [

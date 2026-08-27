@@ -142,6 +142,7 @@
         },
         "min_sl_pct": 0.006,
         "min_rr": 0.6,
+        "structure_target_min_rr": 1.0,
         "structural_stop_allowance_atr": 0.3
       },
       "asset_type": "crypto",
@@ -228,6 +229,7 @@
         "min_stop_atr_mult": 2.0,
         "min_sl_pct": 0.0035,
         "min_rr": 0.48,
+        "structure_target_min_rr": 1.0,
         "structural_stop_allowance_atr": 0.3
       }
     },
@@ -309,6 +311,7 @@
         "tp_ratio": 2.5,
         "min_sl_pct": 0.0025,
         "min_rr": 0.67,
+        "structure_target_min_rr": 1.0,
         "structural_stop_allowance_atr": 0.3
       }
     },
@@ -392,6 +395,7 @@
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0015,
         "min_rr": 0.5,
+        "structure_target_min_rr": 0.8,
         "structural_stop_allowance_atr": 0.3
       }
     },
@@ -475,6 +479,7 @@
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0012,
         "min_rr": 0.5,
+        "structure_target_min_rr": 0.8,
         "structural_stop_allowance_atr": 0.3
       }
     },
@@ -559,6 +564,7 @@
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0055,
         "min_rr": 0.48,
+        "structure_target_min_rr": 1.0,
         "structural_stop_allowance_atr": 0.3
       }
     },
@@ -643,6 +649,7 @@
         "min_stop_atr_mult": 1.0,
         "min_sl_pct": 0.0025,
         "min_rr": 0.5,
+        "structure_target_min_rr": 0.8,
         "structural_stop_allowance_atr": 0.3
       }
     }
@@ -1473,7 +1480,7 @@
     "mr_rebound_short_enabled": true,
     "mr_vetoes_as_dampeners_enabled": true,
     "tf_drives_trend_judge_enabled": true,
-    "ema_confirmer_mode_enabled": false,
+    "ema_confirmer_mode_enabled": true,
     "mr_reversal_scoring_in_trend_enabled": true,
     "tf_brc_gate_enabled": true,
     "mr_mode2_brc_gate_enabled": true,

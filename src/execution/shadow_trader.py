@@ -110,6 +110,9 @@ class ShadowPosition:
     setup_age_at_entry: int = 0     # bars from birth to entry
     retest_type: str = ""           # CLEAN | WICK | BREAKOUT | CHASE_* | NO_LEVEL
     stop_source: str = "atr"        # "structural" | "atr"
+    # BATCH-610 ITEM 4: ATR at entry, retained so entry_distance_atr can be
+    # computed at to_dict() time -- mirrors live's [ENTRY-MEASURE] dist field.
+    entry_atr: float = 0.0
     initial_stop_loss: float = 0.0   # S7d: entry-time SL, never mutated — R-units anchor
     friction_source: str = "map"     # S7d: "map" | "default" | "learned"
     gate_code: str = ""              # S7e: machine-stable gate identity
@@ -319,6 +322,19 @@ class ShadowPosition:
             "net_pnl_r":        self._net_r(),
             "gate_code":        self.gate_code,          # S7e
             "outcome_class":    self.outcome_class,       # S7b
+            # BATCH-610 ITEM 4: mirror the live [ENTRY-MEASURE] fields so
+            # blocked trades and taken trades can be compared directly. These
+            # were already captured as attributes at open time (setup_ref
+            # etc., S7d/T4) but never reached the persisted record.
+            "proof_ref":        self.setup_ref,
+            "proof_ref_tier":   self.setup_ref_tier,
+            "proof_ref_tests":  self.setup_ref_tests,
+            "proof_age_bars":   self.setup_age_at_entry,
+            "retest_type":      self.retest_type,
+            "entry_distance_atr": (
+                round(abs(self.entry_price - self.setup_ref) / self.entry_atr, 4)
+                if self.setup_ref and self.entry_atr else -1.0
+            ),
         }
 
     def _net_r(self):
@@ -500,7 +516,19 @@ class ShadowTradingEngine:
             # Prefer the setup's own frozen reference when available; fall back
             # to the ATR stop only when there is no structural level, and mark
             # which was used so the archive is honest about it.
-            _t4_struct_ref = float(signal_details.get("setup_ref") or 0.0)
+            # BATCH-610 ITEM 2: setup_ref lives on composite_state, not on
+            # signal_details. This read has silently returned 0.0 for the
+            # entire life of the archive, so the structural branch below has
+            # never once executed and every shadow stop has been an ATR
+            # fallback. Confirmed via a live shadow record carrying
+            # "setup_ref": 80.679 nested under its composite_state key.
+            _t4_cs_ref = signal_details.get("composite_state") or {}
+            _t4_struct_ref = float(
+                signal_details.get("setup_ref")
+                or (_t4_cs_ref.get("setup_ref") if isinstance(_t4_cs_ref, dict)
+                    else getattr(_t4_cs_ref, "setup_ref", 0.0))
+                or 0.0
+            )
             _t4_use_struct = False
 
             # ── Segment 4 (17-Aug): mirror VTM's tier-conditional gate, same
@@ -526,6 +554,24 @@ class ShadowTradingEngine:
                 elif side == "short" and _t4_struct_ref > entry_price:
                     sl_dist = (_t4_struct_ref - entry_price) + _t4_buf
                     _t4_use_struct = True
+
+            # BATCH-610 ITEM 3: give the structural path the same protection the
+            # ATR path already has. It previously bottomed out at 0.15*atr, three
+            # times tighter than the ATR path's floor. Live also honours a
+            # per-asset min_stop_atr_mult (GBPAUD sets 1.0) which the shadow
+            # never read.
+            if _t4_use_struct:
+                _min_mult = float(
+                    (signal_details.get("min_stop_atr_mult") or 0.5)
+                )
+                _floor = max(0.5, _min_mult) * atr
+                if sl_dist < _floor:
+                    logger.info(
+                        f"[T4-SHADOW-SL] {asset}: structural stop {sl_dist:.5g} "
+                        f"below floor {_floor:.5g} -- raised"
+                    )
+                    sl_dist = _floor
+                sl_dist = min(sl_dist, 5.0 * atr)
 
             if not _t4_use_struct:
                 # Match VTM clamp: min 0.5×atr, max 5.0×atr
@@ -605,10 +651,24 @@ class ShadowTradingEngine:
 
         _t4_brc = bool(signal_details.get("brc_confirmed", False))
         _t4_kind = signal_details.get("brc_kind") or ""
-        _t4_ref = float(signal_details.get("setup_ref") or 0.0)
-        _t4_tier = signal_details.get("setup_ref_tier") or ""
-        _t4_tests = int(signal_details.get("setup_ref_tests") or 0)
-        _t4_age = int(signal_details.get("setup_age") or 0)
+        # BATCH-610 ITEM 2: same composite_state-nesting issue as the SL-calc
+        # read above -- setup_ref/setup_ref_tier/setup_ref_tests/setup_age are
+        # all genuine CompositeState fields (composite_state.py:330-336), so
+        # they can be missing flat on signal_details the same way. retest_type
+        # is NOT a CompositeState field (set elsewhere, by retest_engine) --
+        # left as a plain flat read, unaffected by this bug.
+        _t4_cs_sib = signal_details.get("composite_state") or {}
+        def _t4_sib(key, cast, default):
+            _flat = signal_details.get(key)
+            if _flat is not None:
+                return cast(_flat)
+            _nested = (_t4_cs_sib.get(key) if isinstance(_t4_cs_sib, dict)
+                       else getattr(_t4_cs_sib, key, None))
+            return cast(_nested) if _nested is not None else default
+        _t4_ref = _t4_sib("setup_ref", float, 0.0)
+        _t4_tier = _t4_sib("setup_ref_tier", str, "")
+        _t4_tests = _t4_sib("setup_ref_tests", int, 0)
+        _t4_age = _t4_sib("setup_age", int, 0)
         _t4_retest = signal_details.get("retest_type") or ""
 
         # S7e: machine-stable gate identity — text before the first "(",
@@ -634,6 +694,7 @@ class ShadowTradingEngine:
             setup_age_at_entry=_t4_age,
             retest_type=_t4_retest,
             stop_source=_t4_stop_source,
+            entry_atr=float(atr) if atr else 0.0,   # BATCH-610 ITEM 4
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),

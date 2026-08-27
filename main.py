@@ -124,12 +124,18 @@ def setup_logging(config):
 
     Path(log_file).parent.mkdir(exist_ok=True)
 
-    # ✨  Add log rotation
-    from logging.handlers import RotatingFileHandler
+    # BATCH-610 ITEM 6: size-based rotation gave ~4 days of history at this
+    # bot's ~36MB/day volume, then silently deleted the oldest. Date-based
+    # rotation keeps one file per day for 30 days and produces filenames that
+    # match the day they contain — the wrapper's fixed-at-launch names caused
+    # repeated forensic misses.
+    from logging.handlers import TimedRotatingFileHandler
 
-    file_handler = RotatingFileHandler(
-        log_file, encoding="utf-8", maxBytes=10 * 1024 * 1024, backupCount=5  # 10MB
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", interval=1, backupCount=30,
+        encoding="utf-8", utc=False
     )
+    file_handler.suffix = "%Y%m%d"
     file_handler.setLevel(log_level)
 
     console_handler = logging.StreamHandler(sys.stdout)
@@ -5089,6 +5095,14 @@ class TradingBot:
                 # both without touching either call site.
                 self._current_regime_data[asset_name]["df_1d"] = self._df_1d_cache.get(asset_name)
 
+            # BATCH-610 ITEM 5: the write above is CONDITIONAL. If the asset
+            # is not already a key in _current_regime_data, both df_4h and
+            # df_1d are silently skipped. Say which happened.
+            logger.info(
+                f"[1D-DIAG] {asset_name}: cache={'yes' if self._df_1d_cache.get(asset_name) is not None else 'NO'} "
+                f"| in_regime_dict={'yes' if asset_name in self._current_regime_data else 'NO'}"
+            )
+
             if len(df) < 250:
                 _diag = ""
                 if len(df) == 0:
@@ -6624,6 +6638,14 @@ class TradingBot:
             if df_1d.index[-1] >= _now_floor_1d:
                 df_1d = df_1d.iloc[:-1]
 
+            # BATCH-610 ITEM 5: N3 diagnostic. This function has never logged
+            # anything (0 [1D] lines in the archive), so we cannot tell whether
+            # it succeeds and the result is lost downstream, or whether it is
+            # never called on the pass that matters.
+            logger.info(
+                f"[1D-DIAG] {asset_name}: fetch returned "
+                f"{0 if df_1d is None or df_1d.empty else len(df_1d)} bars"
+            )
             return df_1d if not df_1d.empty else None
 
         except Exception as e:
