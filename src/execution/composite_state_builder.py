@@ -374,6 +374,14 @@ class CompositeStateBuilder:
 
         if _df_1d is not None:
             self._update_zone_levels(self.asset_type, _df_1d, "1D", _atr_now, _price_now)
+            # BATCH-DATA-1D ITEM 3: expose the daily ladder the same way
+            # line 373 exposes the 4H one. Until DATA-1 Item 7 landed, the
+            # line above never ran, so there was nothing to expose.
+            state.zone_ladder_1d = self.get_zone_ladder(self.asset_type, "1D")
+            logger.info(
+                f"[ZONE-1D] {self.asset_type}: daily ladder built — "
+                f"{len(state.zone_ladder_1d)} level(s)"
+            )
             _v1 = self._build_zone_view(_df_1d, self.asset_type, "1D", _price_now)
             # N3: TEMPORARY DIAGNOSTIC. Remove once the cause is identified.
             # zone_1d_current_upper/lower have returned None on every asset,
@@ -3597,14 +3605,27 @@ class CompositeStateBuilder:
         so a chart and the live scoring fields never disagree about which
         levels are "real". Sorted highest price first.
 
-        tf="4H" -> 4H levels only. tf="1D" -> 4H and 1D levels together
-        (the same "1D sees 4H's lines" rule _build_zone_view uses).
+        tf="4H" -> 4H levels only. tf="1D" -> 1D levels only.
+        BATCH-DATA-1D ITEM 1: this used to special-case "4H" and map
+        everything else (including "1D") to None, which disables the
+        timeframe filter entirely -- a tf="1D" call silently returned every
+        level in the store, 4H and 1D mixed. Deliberately NOT the same rule
+        _build_zone_view uses (that function's own "1D sees 4H's lines" is a
+        separate, intentional design for its single-nearest-level context
+        fields, untouched by this fix). This method now needs a clean,
+        timeframe-pure list per call so DATA-1D Item 4 can merge
+        zone_ladder_4h and zone_ladder_1d without double-counting every 4H
+        level. Confirmed safe: the only existing caller before this batch
+        passed tf="4H", so nothing depended on the mixed "1D" behavior.
         """
         import time as _time
         _now = _time.time()
         _days = 180 if extended else 90
         _window = _days * 24 * 3600
-        _visible = "4H" if tf == "4H" else None
+        # BATCH-DATA-1D ITEM 1: was `"4H" if tf == "4H" else None` -- None
+        # disables the tf filter below entirely, so tf="1D" returned 4H AND
+        # 1D levels mixed together.
+        _visible = tf if tf in ("4H", "1D") else None
 
         _cands = [
             {
