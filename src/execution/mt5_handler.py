@@ -985,6 +985,7 @@ class MT5ExecutionHandler:
                     "trade_type": trade_type,
                     "position_id": str(mt5_ticket),
                     "record_source": "broker",
+                    "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
                 })
 
                 # ✅ Update last trade time for cooldown

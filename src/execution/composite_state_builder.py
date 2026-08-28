@@ -2187,6 +2187,16 @@ class CompositeStateBuilder:
                                 _bars_since_break, len(_touch_idxs),
                                 len(_pre_break), len(_post_break), _retested,
                             )
+                    # DATA-1 ITEM 3B: retested/post_break existed only as log
+                    # text above. Set unconditionally (every evaluation, not
+                    # gated behind brc_confirmed) since these are computed
+                    # every cycle regardless of whether a proof confirms.
+                    # Doc's snippet used int(_post_break) -- _post_break is a
+                    # list here (same one the log line above counts with
+                    # len()), so using len() to match its real type.
+                    state.retested = bool(_retested)
+                    state.post_break_touches = len(_post_break)
+                    state.bars_since_break = int(_bars_since_break)
 
                     # E4: the RUNNER — a pullback that never reaches the level.
                     # Only evaluated when the normal retest did not qualify.

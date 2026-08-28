@@ -1372,7 +1372,8 @@ class BinanceExecutionHandler:
                     "price": executed_price,
                     "size": quantity,
                     "trade_type": trade_type,
-                    "position_id": order_id
+                    "position_id": order_id,
+                    "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
                 })
 
                 # ✅ Update last trade time for cooldown
