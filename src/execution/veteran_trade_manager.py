@@ -333,9 +333,18 @@ class VeteranTradeManager:
         entry_retest_type: Optional[str] = None,       # Item 5: RetestEngine tier at entry
         telegram=None,  # Brain rebuild Part 0.3
         council_ref=None,  # Gate Tier 4.1 — reuses _check_lifecycle_phase in the alert layer
+        episode_id: Optional[str] = None,  # DATA-3 ITEM 1C
     ):
         self.entry_price = entry_price
         self.side = side.lower()
+        # DATA-3 ITEM 1C: a dedicated attribute rather than reading
+        # self.signal_details.get("episode_id") -- signal_details is {} on a
+        # restart-recreated VTM (confirmed: portfolio_manager.py's "VTM
+        # missing" path never had a real dict to give it), so a read through
+        # signal_details would silently lose the id on the exact trades that
+        # most need it (the ones that survive a restart). The caller now
+        # always sources this from Position.episode_id instead.
+        self.episode_id = episode_id
         self.asset = asset.upper()
         self.risk_config = risk_config
         self.high = high
@@ -3620,9 +3629,12 @@ class VeteranTradeManager:
                 "asset": self.asset, "side": self.side, "kind": kind,
                 "old": old, "new": new, "reason": reason, "source": source,
                 "entry": self.entry_price,
-                # DATA-1 ITEM 1B: same dict originally passed into this VTM
-                # at construction -- joins this move row back to its episode.
-                "episode_id": (self.signal_details or {}).get("episode_id"),
+                # DATA-3 ITEM 1C: read the dedicated attribute (set at
+                # construction from Position.episode_id), not signal_details
+                # -- that dict is {} on a restart-recreated VTM, which would
+                # have silently dropped the id on exactly the trades that
+                # span a restart (was DATA-1's original implementation).
+                "episode_id": getattr(self, "episode_id", None),
             }
             self._move_history = (getattr(self, "_move_history", []) + [rec])[-50:]
             _os_ram.makedirs("logs/vtm_moves", exist_ok=True)

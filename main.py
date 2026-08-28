@@ -5195,6 +5195,19 @@ class TradingBot:
                 except Exception:
                     pass  # Bench telemetry is a bonus — never block execution
 
+            # ── DATA-3 ITEM 4: mint the episode id HERE, before the aggregator
+            # dispatch, not only at the post-dispatch convergence point (DATA-1
+            # ITEM 1's original location). Gates that decide inside the
+            # aggregator itself -- the cost gate in council_aggregator.py is
+            # the concrete case -- run before that convergence point is ever
+            # reached, so they had no id to tag their gate-ledger rows with.
+            # Injecting into mtf_regime (== governor_data inside the
+            # aggregator) makes it readable from there. The convergence point
+            # below now reuses this same id instead of minting a second one.
+            import uuid as _uuid
+            _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+            mtf_regime["episode_id"] = _episode_id
+
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
@@ -5318,17 +5331,21 @@ class TradingBot:
 
             details["price"] = current_price
 
-            # ── DATA-1 ITEM 1: episode id ──────────────────────────────
-            # One id minted per signal evaluation, stamped onto every record
-            # that follows: gate decisions, shadow open, vtm_moves rows,
-            # trade events, exit. Without it, reconstructing a single trade
-            # means matching timestamps across five separate files by eye.
-            # Placed here (not earlier): this is the first point where
-            # `details` is a stable dict common to every aggregator branch
-            # (hybrid/council/performance), confirmed before any gate below
-            # inspects it.
-            import uuid as _uuid
-            _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+            # ── DATA-1 ITEM 1 / DATA-3 ITEM 4: episode id ──────────────
+            # Stamped onto every record that follows: gate decisions, shadow
+            # open, vtm_moves rows, trade events, exit. Without it,
+            # reconstructing a single trade means matching timestamps across
+            # five separate files by eye.
+            # DATA-3: reuse the id already minted before the aggregator
+            # dispatch (mtf_regime["episode_id"], above) instead of minting a
+            # second one here -- gates inside the aggregator (the cost gate)
+            # need it before this point is ever reached. Falls back to
+            # minting fresh only if that injection is somehow missing
+            # (defensive; every branch above sets it).
+            _episode_id = mtf_regime.get("episode_id") if isinstance(mtf_regime, dict) else None
+            if not _episode_id:
+                import uuid as _uuid
+                _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
             details["episode_id"] = _episode_id
             logger.info(f"[EPISODE] {asset_name}: {_episode_id} opened")
 
@@ -5555,6 +5572,19 @@ class TradingBot:
                             _inst_pattern is None and _net_conviction <= _pattern_veto_threshold
                         )
 
+                        # DATA-3 ITEM 4: record this gate's decision either way.
+                        try:
+                            from src.utils.gate_ledger import write_gate_decision
+                            write_gate_decision(
+                                details.get("episode_id"), asset_name, "confidence_gate",
+                                "BLOCKED" if _pattern_unanimous_reject else "PASS",
+                                {"confidence": _regime_conf, "minimum": _min_conf,
+                                 "score_normalised": _score_normalised,
+                                 "net_conviction": _net_conviction},
+                            )
+                        except Exception:
+                            pass
+
                         if _pattern_unanimous_reject:
                             logger.info(
                                 f"[CONFIDENCE GATE] {asset_name}: Bypass VETOED — "
@@ -5573,6 +5603,15 @@ class TradingBot:
                                 f"4H detector likely lagging post-event."
                             )
                     else:
+                        # DATA-3 ITEM 4: record this gate's decision.
+                        try:
+                            from src.utils.gate_ledger import write_gate_decision
+                            write_gate_decision(
+                                details.get("episode_id"), asset_name, "confidence_gate",
+                                "BLOCKED", {"confidence": _regime_conf, "minimum": _min_conf},
+                            )
+                        except Exception:
+                            pass
                         logger.info(
                             f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
                             f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
@@ -6108,6 +6147,16 @@ class TradingBot:
 
             if _pr_ref > 0 and _pr_used is not None \
                and _pr_age >= int(_pr_used.get("age_at_entry", 0)):
+                # DATA-3 ITEM 4: record this gate's decision.
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(
+                        details.get("episode_id"), asset_name, "proof_gate", "BLOCKED",
+                        {"proof_ref": _pr_ref, "age": _pr_age, "previously_used": True,
+                         "age_at_prior_use": _pr_used.get("age_at_entry")},
+                    )
+                except Exception:
+                    pass
                 logger.info(
                     f"[PROOF-GATE] {asset_name}: BLOCKED — proof ref={_pr_ref:.5g} "
                     f"already funded a trade at {_pr_used.get('ts')} "
@@ -6138,6 +6187,15 @@ class TradingBot:
                         pass
                 return
 
+            # DATA-3 ITEM 4: record this gate's decision.
+            try:
+                from src.utils.gate_ledger import write_gate_decision
+                write_gate_decision(
+                    details.get("episode_id"), asset_name, "proof_gate", "PASS",
+                    {"proof_ref": _pr_ref, "age": _pr_age, "previously_used": _pr_used is not None},
+                )
+            except Exception:
+                pass
             logger.info(
                 f"[PROOF-GATE] {asset_name}: PASS — ref={_pr_ref:.5g} age={_pr_age} "
                 f"({'first use' if _pr_used is None else 'new proof event'})"
@@ -7641,6 +7699,64 @@ class TradingBot:
         except Exception as e:
             logger.debug(f"[HEALTH DIGEST] send_daily_health_digest failed: {e}")
 
+    def _validate_episodes(self):
+        """DATA-3 ITEM 5: check yesterday's episodes are joinable.
+
+        Item 1 exists because the episode id was minted, never verified, and
+        found null a week later. Every failure this project has had has been
+        silent; this is the one place that is explicitly not allowed to be.
+        """
+        try:
+            import json as _json
+            from datetime import timedelta as _td
+            _day = (datetime.now() - _td(days=1)).strftime("%Y-%m-%d")
+            _ep_path = Path(f"logs/episodes/episodes_{_day}.jsonl")
+            if not _ep_path.exists():
+                logger.info(f"[EP-VALID] {_day}: no episodes closed")
+                return
+
+            _eps = [_json.loads(l) for l in open(_ep_path, encoding="utf-8") if l.strip()]
+            _null_ids = sum(1 for e in _eps if not e.get("episode_id"))
+
+            _moves_path = Path(f"logs/vtm_moves/moves_{_day}.jsonl")
+            _move_ids = set()
+            if _moves_path.exists():
+                for l in open(_moves_path, encoding="utf-8"):
+                    if l.strip():
+                        _move_ids.add(_json.loads(l).get("episode_id"))
+
+            _gates_path = Path(f"logs/gates/gates_{_day}.jsonl")
+            _gate_ids = set()
+            if _gates_path.exists():
+                for l in open(_gates_path, encoding="utf-8"):
+                    if l.strip():
+                        _gate_ids.add(_json.loads(l).get("episode_id"))
+
+            _live = sum(1 for e in _eps if e.get("source") == "live")
+            _shadow = sum(1 for e in _eps if e.get("source") == "shadow")
+            _joined = sum(1 for e in _eps
+                          if e.get("episode_id") in _move_ids
+                          or e.get("episode_id") in _gate_ids)
+
+            logger.info(
+                f"[EP-VALID] {_day}: {len(_eps)} episode(s) "
+                f"({_live} live, {_shadow} shadow) | "
+                f"null ids={_null_ids} | joined to moves/gates={_joined}"
+            )
+            if _null_ids:
+                logger.warning(
+                    f"[EP-VALID] {_day}: {_null_ids} episode(s) have NO id — "
+                    f"these cannot be replayed or analysed"
+                )
+            _missing_atr = sum(1 for e in _eps if not e.get("entry_atr"))
+            if _missing_atr:
+                logger.warning(
+                    f"[EP-VALID] {_day}: {_missing_atr} episode(s) missing "
+                    f"entry_atr — replay cannot normalise these"
+                )
+        except Exception as _ve:
+            logger.warning(f"[EP-VALID] validation failed: {_ve}")
+
     # ── Phase 1: Livermore warm-start ─────────────────────────────────────────
 
     def _load_lsm_csv(self, asset_name: str, symbol: str, tf_suffix: str, expected_hours: int):
@@ -7984,6 +8100,8 @@ class TradingBot:
             schedule.every(5).minutes.do(self._run_connection_watchdog)
             # Part 1.8 (Brain Rebuild): daily judge/cadence/connection health digest
             schedule.every().day.at("07:00").do(self.send_daily_health_digest)
+            # DATA-3 ITEM 5: episode-ledger validator, after the digest.
+            schedule.every().day.at("07:05").do(self._validate_episodes)
 
             self.is_running = True
             self._main_loop_running = True

@@ -114,11 +114,14 @@ def fix_csv_smart(input_file: str, output_file: str = None) -> bool:
                 has_date = True
 
         if not has_date:
-            logger.warning(
-                "⚠ No valid timestamp/date column - will create index-based date"
-            )
-            df["date"] = pd.date_range(
-                start="2020-01-01", periods=len(df), freq="15min"
+            # DATA-3 ITEM 2: this line regenerated the index from a hardcoded
+            # 2020-01-01 start, destroying real timestamps on every 15m export
+            # and making them unusable for replay. Left in place but guarded
+            # -- a repair that invents data is worse than the corruption it
+            # replaces.
+            raise RuntimeError(
+                "Synthetic timestamp regeneration is disabled (DATA-3). "
+                "Re-download via download_multi_tf_data.py instead."
             )
 
         # Step 2: Clean OHLC data

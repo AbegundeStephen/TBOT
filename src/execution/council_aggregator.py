@@ -872,7 +872,33 @@ class InstitutionalCouncilAggregator:
             _cost_R = _spread_used / _atr_for_cost
             _cost_cap = float(_phase_cfg_g4.get("gate4_cost_cap_r", 0.15))
 
-            if _cost_R > _cost_cap:
+            # DATA-3 ITEM 4: record the decision with its numbers. This is
+            # the dataset the 0.15R cap question needs -- one row per gate
+            # decision, keyed to the episode, whether it blocked or passed.
+            # episode_id is injected into governor_data (== mtf_regime) before
+            # the aggregator dispatch (main.py DATA-3 ITEM 4) specifically so
+            # it's available here, since this gate decides before main.py's
+            # own convergence point is ever reached.
+            _cost_gate_numbers = {
+                "cost_r": round(_cost_R, 5), "cap": _cost_cap,
+                "spread_used": _spread_used, "atr": atr_fast,
+                "spread_source": ("live" if _live_spread > 0
+                                   else "btc_placeholder" if _asset_u == "BTC"
+                                   else "measured_table"),
+            }
+            _cost_gate_blocked = _cost_R > _cost_cap
+            try:
+                from src.utils.gate_ledger import write_gate_decision
+                write_gate_decision(
+                    (governor_data or {}).get("episode_id"),
+                    _asset_u, "cost_gate",
+                    "BLOCKED" if _cost_gate_blocked else "PASS",
+                    _cost_gate_numbers,
+                )
+            except Exception:
+                pass
+
+            if _cost_gate_blocked:
                 logger.info(
                     f"[GATE-③ COST] ❌ Blocked - {_asset_u}: cost {_cost_R:.3f}R "
                     f"> cap {_cost_cap:.2f}R (spread_used={_spread_used:.5g}, atr={atr_fast:.5g})"
