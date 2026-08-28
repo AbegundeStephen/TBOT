@@ -252,9 +252,23 @@ def calibrate(result_json="logs/backtests/20260822_164803/result.json"):
             bucket[0] += 1
         else:
             bucket[2].append((t["entry_time"], t["exit_reason"], reason))
-        expected_r = t["pnl"] / (abs(t["entry_price"] - stop) * 1.0) \
-                     if stop else None
-        if r is not None and expected_r and abs(r - expected_r) < 0.15:
+        # CALIBRATION FIX #3 (28 Aug, post-third-run): the previous
+        # expected_r = pnl / risk_distance divided a dollar P&L by a price
+        # distance -- only a clean R-multiple at exactly 1 unit position
+        # size. trades_detail carries no quantity, so this was silently
+        # wrong for every trade with any real position size (confirmed:
+        # matched_pnl stayed ~0/85 across all three calibration runs, even
+        # for TREND trades with the otherwise-correct stop formula, which
+        # is the tell that this metric itself was broken, not the exit
+        # modeling). Fixed by using pnl_pct instead -- confirmed directly
+        # in backtest.py: pnl_pct = (trade.pnl / notional) * 100 where
+        # notional = entry_price * quantity, so quantity cancels out of
+        # trade.pnl / notional exactly. pnl_pct is therefore already a
+        # clean, quantity-independent, correctly-signed price-return
+        # percentage -- comparable to risk expressed the same way.
+        risk_pct = abs(t["entry_price"] - stop) / t["entry_price"] * 100 if stop else None
+        expected_r = (t.get("pnl_pct") / risk_pct) if risk_pct else None
+        if r is not None and expected_r is not None and abs(r - expected_r) < 0.15:
             bucket[1] += 1
 
     print()
