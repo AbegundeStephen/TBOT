@@ -3906,6 +3906,15 @@ class TradingBot:
                     f"  Current Modes:       {active_modes}"
                 )  # <-- Now uses active_modes
 
+                # DATA-4 ITEM 4: path capture. Runs once per ~5-minute cycle,
+                # after this cycle's decisions are in, so every open episode
+                # gets one real observed price point per cycle -- no post-hoc
+                # reconstruction needed for any future replay.
+                try:
+                    self._capture_open_position_paths()
+                except Exception as _pc_err:
+                    logger.debug(f"[PATH-CAPTURE] Skipped this cycle: {_pc_err}")
+
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
 
@@ -3945,6 +3954,49 @@ class TradingBot:
                     component="main",
                 )
                 time.sleep(300)
+
+    def _capture_open_position_paths(self):
+        """DATA-4 ITEM 4: record one real price observation per open episode
+        per cycle, for both live and shadow positions. Self-contained --
+        deliberately does not thread through the deep VTM check-and-update
+        call chain (mt5_handler.py/binance_handler.py), so it can never
+        interfere with an exit decision. A missing episode_id is silently
+        skipped (write_path_point no-ops on it) rather than logged loudly --
+        pre-DATA-3 positions and any position opened before this feature
+        existed simply have no path record, which is expected, not an error.
+        """
+        from src.utils.path_ledger import write_path_point
+
+        # Live positions.
+        for position in list(self.portfolio_manager.positions.values()):
+            try:
+                asset_name = position.asset
+                asset_cfg = self.config.get("assets", {}).get(asset_name, {})
+                if not asset_cfg.get("enabled", False):
+                    continue
+                exchange = asset_cfg.get("exchange", "binance")
+                handler = self.binance_handler if exchange == "binance" else self.mt5_handler
+                if not handler:
+                    continue
+                symbol = self._resolve_symbol(asset_name)
+                price = handler.get_current_price(symbol, force_live=False)
+                write_path_point(
+                    getattr(position, "episode_id", None), asset_name, price, "live"
+                )
+            except Exception as _lp_err:
+                logger.debug(f"[PATH-CAPTURE] live position skipped: {_lp_err}")
+
+        # Shadow positions -- current_price is already maintained by the
+        # shadow engine's own tick/candle update methods, no extra fetch.
+        if getattr(self, "shadow_trader", None):
+            for pos in list(self.shadow_trader.open_positions):
+                try:
+                    write_path_point(
+                        getattr(pos, "episode_id", None), pos.asset,
+                        getattr(pos, "current_price", None), "shadow"
+                    )
+                except Exception as _sp_err:
+                    logger.debug(f"[PATH-CAPTURE] shadow position skipped: {_sp_err}")
 
     def _vtm_management_loop(self):
         """
