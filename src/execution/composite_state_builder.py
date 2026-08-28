@@ -3642,7 +3642,15 @@ class CompositeStateBuilder:
             for lvl in self._zone_levels.get(asset, [])
             if (_now - lvl.get("first_seen", _now)) < _window
             and (_visible is None or lvl["tf"] == _visible)
-            and lvl.get("tests", 0) >= 1
+            # BATCH-DATA-2 ITEM 2: 4H keeps its "must be retested once"
+            # rule. Daily does not -- a daily retest can take weeks, so the
+            # same threshold filtered on AGE rather than quality and left
+            # three of six assets with no daily tier at all on 28 Aug.
+            # A daily level is significant by construction: it is where a
+            # full day's trading turned. The test count is retained on
+            # every level and used to RANK candidates downstream (2B),
+            # not to veto them.
+            and lvl.get("tests", 0) >= (0 if tf == "1D" else 1)
         ]
         _cands.sort(key=lambda l: l["price"], reverse=True)
         return _cands

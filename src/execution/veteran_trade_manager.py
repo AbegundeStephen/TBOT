@@ -1454,12 +1454,34 @@ class VeteranTradeManager:
                         )
                         _src_name = "pivot-scan-fallback"
 
+                    # ── BATCH-DATA-2 ITEM 2B: rank by evidence before dedup ──
+                    # Where two levels collide within tolerance, prefer the
+                    # better-evidenced one. Daily beats 4H; among equals, more
+                    # tests wins. Item 2 admits untested daily levels, so this
+                    # is what stops an untested level displacing a defended
+                    # one at the same price.
+                    _lvl_meta = {}
+                    for _l in (getattr(self, "zone_ladder_4h", []) or []):
+                        try:
+                            _lvl_meta[round(float(_l.get("price", 0)), 8)] = (
+                                1 if _l.get("tf") == "1D" else 0,
+                                int(_l.get("tests", 0) or 0),
+                            )
+                        except Exception:
+                            continue
+                    def _rank(_p):
+                        return _lvl_meta.get(round(float(_p), 8), (0, 0))
+                    structure_levels = sorted(structure_levels, key=_rank, reverse=True)
+
                     # ── BATCH-DATA-1D ITEM 5: dedup near-identical levels ──
                     # A 4H and a daily level can sit within a few ticks of each
                     # other. Left alone they consume two tier slots and produce
                     # two targets at effectively the same price. Daily levels
                     # come first in the merged list, so keeping the first
                     # occurrence prefers the more significant one.
+                    # DATA-2 ITEM 2B: structure_levels is now ranked by
+                    # evidence (above) rather than merge-order position, so
+                    # "first occurrence" here means "best-evidenced".
                     _tol = 0.25 * atr if atr > 0 else 0.0
                     _dedup = []
                     for _p in structure_levels:
@@ -1500,7 +1522,14 @@ class VeteranTradeManager:
                                 _d = abs(float(_l.get("price", 0)) - float(_t))
                                 if _bd is None or _d < _bd:
                                     _bd, _best = _d, _l.get("tf", "?")
-                            _tags.append(_best if (_bd is not None and _bd <= _tol) else "R-mult")
+                            # BATCH-DATA-2 ITEM 2C: carry the test count
+                            # alongside the timeframe -- turns the threshold
+                            # into a measured decision (does 1D/t0 underperform
+                            # 1D/t2 at the 20-trade review).
+                            _tags.append(
+                                f"{_best}/t{_lvl_meta.get(round(float(_t), 8), (0, 0))[1]}"
+                                if (_bd is not None and _bd <= _tol) else "R-mult"
+                            )
                         self.target_tf_tags = _tags
                         logger.info(f"[VTM-LADDER] {self.asset}: target sources = {_tags}")
                     except Exception as _tt:
