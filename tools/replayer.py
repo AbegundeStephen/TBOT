@@ -146,24 +146,58 @@ def replay(entry, stop, side, atr, path, mult):
 
 
 def replay_verbose(entry, stop, side, atr, path, mult):
-    """Same exit stack as replay(), but also returns which stage fired:
-    "stop_loss" (before the trail ever armed), "break_even" (armed, hit
-    exactly at the lock price before the trail advanced past it), or
-    "trailing_stop" (hit after the trail had moved beyond the lock).
+    """Same exit stack as replay(), but also returns which stage fired.
+
+    CALIBRATION FIX #4 (28 Aug, post-fourth-run): the real classification
+    rule is nothing like an "armed" flag -- confirmed directly against
+    VeteranTradeManager._check_exit_locked's STEP 2 stop-loss check
+    (veteran_trade_manager.py:2708-2777). At the moment the stop is hit, it
+    classifies purely by WHERE the stop currently sits relative to entry,
+    using a fixed 0.125*ATR band -- not by tracking whether some trailing
+    mechanism was ever "armed":
+
+      offset = 0.125 * atr
+      long:  stop >  entry + offset  -> TRAILING_STOP
+             stop >= entry - offset  -> BREAK_EVEN
+             else                    -> STOP_LOSS
+      (mirrored for short)
+
+    This matters because the R-lock price itself (entry + BE_LOCK_R*risk =
+    entry + 0.20*1.5*atr = entry + 0.30*atr for BTC) already sits PAST the
+    0.125*ATR band -- so a trade that stops exactly at the R-lock, having
+    never advanced further, is real-classified TRAILING_STOP, not
+    BREAK_EVEN. The previous armed/be_lock_price equality check got this
+    backwards for exactly that case, which was the dominant mismatch
+    pattern in every calibration run so far (break_even -> trailing_stop).
+
+    Log evidence confirming which mechanism actually fires (28 Aug, against
+    this backtest's own log): "R-lock:" appears 52 times; soft_risk_cut /
+    intermediate_trail / breakeven_atr (the older, separate ATR-profit-
+    triggered mechanism) all appear zero times. So the R-based trigger/lock
+    this script already modeled (BE_TRIGGER_R=0.75, BE_LOCK_R=0.20) is
+    confirmed correct -- only the exit-reason label was wrong.
+
     Returns (r, reason) -- either may be None if the path is unusable.
     """
     risk = abs(entry - stop)
     if risk <= 0 or path is None or path.empty:
         return None, None
     cur, armed, peak = stop, False, entry
-    be_lock_price = None
+    _offset = 0.125 * atr
 
     def _classify(cur_price):
-        if not armed:
+        if side == "long":
+            if cur_price > entry + _offset:
+                return "trailing_stop"
+            if cur_price >= entry - _offset:
+                return "break_even"
             return "stop_loss"
-        if be_lock_price is not None and cur_price == be_lock_price:
-            return "break_even"
-        return "trailing_stop"
+        else:
+            if cur_price < entry - _offset:
+                return "trailing_stop"
+            if cur_price <= entry + _offset:
+                return "break_even"
+            return "stop_loss"
 
     for _, bar in path.iterrows():
         hi, lo = float(bar["high"]), float(bar["low"])
@@ -175,7 +209,6 @@ def replay_verbose(entry, stop, side, atr, path, mult):
         if not armed and prog >= BE_TRIGGER_R:
             armed = True
             cur = entry + BE_LOCK_R * risk * (1 if side == "long" else -1)
-            be_lock_price = cur
         if armed:
             t = peak - mult * atr if side == "long" else peak + mult * atr
             cur = max(cur, t) if side == "long" else min(cur, t)
