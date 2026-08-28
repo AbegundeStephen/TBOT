@@ -190,6 +190,16 @@ class Position:
         self.position_id = (
             position_id or f"{asset}_{side}_{int(entry_time.timestamp())}"
         )
+        # DATA-3 ITEM 1: carry the episode id on the position itself, not
+        # just inside signal_details. Confirmed (28 Aug) that Position never
+        # actually got a self.signal_details attribute despite a nearby
+        # docstring claiming it did -- and even where signal_details is
+        # available, a restart that recreates a "missing" VTM rebuilds it
+        # from getattr(position, "signal_details", {}), which always falls
+        # back to {} today. A plain string survives that gap and is
+        # trivially picklable (unlike the full signal_details dict, which is
+        # why _sanitize_for_pickle exists at all).
+        self.episode_id = (signal_details or {}).get("episode_id")
         self.leverage = leverage
         self.margin_type = margin_type
         self.is_futures = is_futures
@@ -317,6 +327,11 @@ class Position:
                     # which doesn't exist on Position (only on PortfolioManager) — crashed
                     # VTM init on every fresh position open, leaving it stop-loss-less.
                     council_ref=self.council_ref,  # Gate Tier 4.1
+                    # DATA-3 ITEM 1C: read from self.episode_id (the Position's
+                    # own attribute, set just above in __init__), not from
+                    # signal_details -- keeps the VTM's copy consistent with
+                    # the one source of truth that survives restart/pickling.
+                    episode_id=self.episode_id,
                 )
 
                 # ✅ Sync VTM's calculated levels back to the Position object
@@ -1070,6 +1085,12 @@ class PortfolioManager:
                                     entry_retest_type=signal_details.get("retest_type"),
                                     telegram=self.telegram_bot,  # Brain rebuild Part 0.3
                                     council_ref=self._resolve_council_ref(position.asset),  # Gate Tier 4.1
+                                    # DATA-3 ITEM 1C: this is the exact path that
+                                    # loses episode_id on restart -- signal_details
+                                    # here is always {} (Position never retains it).
+                                    # position.episode_id survives independently
+                                    # (DATA-3 ITEM 1B), so read from there instead.
+                                    episode_id=getattr(position, "episode_id", None),
                                 )
                                 logger.info(
                                     f"[STATE] VTM for {position_id} successfully created."
@@ -3851,12 +3872,33 @@ class PortfolioManager:
         _bars_open = None
         _peak_bar = None
         _gross_r = None
+        # DATA-3 ITEM 1: read episode_id from the position itself (set at
+        # entry, survives VTM recreation and pickling) -- the VTM's
+        # signal_details path is kept only as a fallback for positions that
+        # opened before this fix deployed.
+        _episode_id = getattr(position, "episode_id", None)
         try:
             if _exit_vtm is not None:
-                _episode_id = (getattr(_exit_vtm, "signal_details", None) or {}).get("episode_id")
+                if not _episode_id:
+                    _episode_id = (getattr(_exit_vtm, "signal_details", None) or {}).get("episode_id")
                 if exit_event_type == "SL_HIT":
-                    _intended_price = getattr(_exit_vtm, "current_stop_loss", None)
+                    # DATA-3 ITEM 3B: fall back to the frozen initial stop if
+                    # current_stop_loss is somehow unavailable. Note:
+                    # position.current_stop_loss / position.initial_stop_loss /
+                    # position.current_take_profit (the spec's literal
+                    # attribute names) don't exist anywhere on Position --
+                    # verified directly. Position only ever gets a single
+                    # synced `stop_loss` field; the VTM is still the real
+                    # source of truth for both values, so reading from
+                    # _exit_vtm (as DATA-1 already did) is correct.
+                    _intended_price = (
+                        getattr(_exit_vtm, "current_stop_loss", None)
+                        or getattr(_exit_vtm, "initial_stop_loss", None)
+                    )
                 elif exit_event_type == "TP_HIT":
+                    # Same note: no current_take_profit attribute exists
+                    # anywhere (VTM or Position) -- take_profit_levels[0] is
+                    # the real equivalent, unchanged from DATA-1.
                     _tp_levels = getattr(_exit_vtm, "take_profit_levels", None) or []
                     _intended_price = _tp_levels[0] if _tp_levels else None
                 _frozen_stop = getattr(_exit_vtm, "initial_stop_loss", None)
