@@ -202,13 +202,40 @@ def calibrate(result_json="logs/backtests/20260822_164803/result.json"):
     # trusting a pass -- a wrong assumption here invalidates the test.
     RUN_MULT = 0.8   # runner_trail_atr_multiplier at the time of the run
 
-    matched_reason, matched_pnl, mismatches = 0, 0, []
+    # CALIBRATION FIX #2 (28 Aug, post-second-run): the flat entry -/+
+    # atr*mult stop formula below is only what the real system uses for
+    # TREND trades -- confirmed directly against
+    # VeteranTradeManager._calculate_initial_levels()
+    # (veteran_trade_manager.py:1006-1160). REVERSION trades get an
+    # entirely different stop: the nearest tested 4H zone-ladder line
+    # (self.zone_current_lower/upper), wick-buffered by 0.5*atr, only
+    # falling back to the ATR formula if that geometry is invalid. That
+    # zone-ladder state is a function of the FULL historical price/level
+    # history up to the trade's entry moment -- it is not reconstructable
+    # from result.json's stored fields, and re-deriving it would mean
+    # rebuilding the entire zone-building pipeline (arguably as much work
+    # as the path-capture alternative this replayer exists to avoid).
+    #
+    # So: report TREND and REVERSION separately. Only TREND trades test
+    # what this script can actually claim to model; REVERSION trades are
+    # scored too (for visibility) but flagged as using a known-wrong stop,
+    # and do not count toward the pass bar.
+    #
+    # Also worth knowing before trusting a TREND-only pass: the ATR
+    # baseline can be widened further by a "MA Shield" step
+    # (use_ema_structure) that tucks the stop behind a nearby EMA/zone
+    # line. NOT replicated here. Confirmed inert for BTC specifically
+    # (assets.BTC.use_ema_structure is false, per DATA-1D's own appendix
+    # note on this exact asymmetry) -- so a BTC calibration run is not
+    # affected by this gap, but a run on any other asset would be.
+    by_type = {"TREND": [0, 0, []], "REVERSION": [0, 0, []]}
     for t in trades:
         path = load_path(asset, t["entry_time"], t["exit_time"])
         if path is None or path.empty:
             continue
         # The backtest does not store the stop, so derive it the way the
-        # bot does: entry -/+ atr * per-asset atr_multiplier.
+        # bot does for TREND trades: entry -/+ atr * per-asset
+        # atr_multiplier. Known wrong for REVERSION -- see note above.
         atr = estimate_atr_at(asset, t["entry_time"])
         if not atr:
             continue
@@ -218,31 +245,43 @@ def calibrate(result_json="logs/backtests/20260822_164803/result.json"):
 
         r, reason = replay_verbose(t["entry_price"], stop, t["side"],
                                    atr, path, RUN_MULT)
+        bucket = by_type.get(t.get("trade_type"), by_type.setdefault(
+            t.get("trade_type", "UNKNOWN"), [0, 0, []]
+        ))
         if reason == t["exit_reason"]:
-            matched_reason += 1
+            bucket[0] += 1
         else:
-            mismatches.append((t["entry_time"], t["exit_reason"], reason))
+            bucket[2].append((t["entry_time"], t["exit_reason"], reason))
         expected_r = t["pnl"] / (abs(t["entry_price"] - stop) * 1.0) \
                      if stop else None
         if r is not None and expected_r and abs(r - expected_r) < 0.15:
-            matched_pnl += 1
+            bucket[1] += 1
 
-    n = len(mismatches) + matched_reason
-    print(f"\nexit reason matched : {matched_reason}/{n} "
-          f"({100*matched_reason/max(n,1):.0f}%)")
-    print(f"net R within 0.15   : {matched_pnl}/{max(n,1)}")
+    print()
+    for ttype, (matched, matched_pnl, mism) in by_type.items():
+        n = matched + len(mism)
+        if n == 0:
+            continue
+        tag = "" if ttype == "TREND" else "  (known-wrong stop formula, informational only)"
+        print(f"{ttype}: exit reason matched {matched}/{n} "
+              f"({100*matched/max(n,1):.0f}%), net R within 0.15: "
+              f"{matched_pnl}/{max(n,1)}{tag}")
+        if mism:
+            print(f"  MISMATCH PATTERN (expected -> replayed):")
+            for k, v in Counter((m[1], m[2]) for m in mism).most_common():
+                print(f"    {k[0]:>14} -> {k[1]:<14} {v}")
 
-    if mismatches:
-        print("\nMISMATCH PATTERN (expected -> replayed):")
-        for k, v in Counter((m[1], m[2]) for m in mismatches).most_common():
-            print(f"  {k[0]:>14} -> {k[1]:<14} {v}")
-        print("\nIf these cluster on 'break_even', the trail-arming assumption "
-              "(3D) is wrong -- try arming at trail_start_progress_r (0.25R) "
-              "rather than r_breakeven_trigger (0.75R).")
+    trend_matched, _, trend_mism = by_type.get("TREND", [0, 0, []])
+    trend_n = trend_matched + len(trend_mism)
+    if trend_mism:
+        print("\nIf TREND mismatches cluster on 'break_even', the trail-arming "
+              "assumption (3D) is wrong -- try arming at trail_start_progress_r "
+              "(0.25R) rather than r_breakeven_trigger (0.75R).")
 
-    passed = matched_reason >= 0.80 * max(n, 1)
+    passed = trend_n > 0 and trend_matched >= 0.80 * trend_n
     print(f"\nCALIBRATION {'PASSED' if passed else 'FAILED'} "
-          f"(bar: 80% of exit reasons reproduced)")
+          f"(bar: 80% of TREND exit reasons reproduced -- REVERSION excluded, "
+          f"known-wrong stop formula)")
     if not passed:
         print("No proposals may be made. The replayer does not model the "
               "exit stack faithfully enough to be trusted.")
