@@ -4258,11 +4258,25 @@ class TradingBot:
                                 # (`pyramid_signal`/`sig_details`) instead, per the
                                 # spec's explicit fallback instruction.
                                 try:
+                                    # BATCH-DATA-2 ITEM 1D: same composite_state
+                                    # fallback as 1A/1C -- this site is in a
+                                    # different function from _cs_get's
+                                    # definition, so inlined rather than reached
+                                    # across scopes, per the spec's instruction.
+                                    # Dormant today (pyramiding_enabled=false)
+                                    # but fixed so the defect doesn't resurface
+                                    # if pyramiding is ever enabled.
+                                    _pyr_cs = sig_details.get("composite_state") or {}
+                                    _pyr_cs_get = (
+                                        (lambda n, d=None: _pyr_cs.get(n, d))
+                                        if isinstance(_pyr_cs, dict)
+                                        else (lambda n, d=None: getattr(_pyr_cs, n, d))
+                                    )
                                     self._mark_proof_used(
                                         asset_name,
                                         "long" if pyramid_signal > 0 else "short",
-                                        float(sig_details.get("setup_ref") or 0.0),
-                                        int(sig_details.get("setup_age") or 0),
+                                        float(sig_details.get("setup_ref") or _pyr_cs_get("setup_ref") or 0.0),
+                                        int(sig_details.get("setup_age") or _pyr_cs_get("setup_age") or 0),
                                     )
                                 except Exception as _pe:
                                     logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used (pyramid) ({_pe})")
@@ -6069,8 +6083,25 @@ class TradingBot:
             # needs a NEW PROOF EVENT -- detected by setup_age resetting.
             # Identity keys already arrive in `details`; shadow_trader.py:
             # 605-611 reads the same ones. No new plumbing.
-            _pr_ref = float(details.get("setup_ref") or 0.0)
-            _pr_age = int(details.get("setup_age") or 0)
+            # ── BATCH-DATA-2 ITEM 1: setup_ref lives on composite_state, not
+            # on details. Reading details alone returned 0 on the 27 Aug live
+            # trade, which made the proof-retirement rule inert and left every
+            # entry measurement blank. Batch 610 Item 2 applied this same
+            # fallback to the shadow; the live path was missed.
+            _pr_cs = details.get("composite_state") or {}
+            def _cs_get(_n, _d=None):
+                if isinstance(_pr_cs, dict):
+                    return _pr_cs.get(_n, _d)
+                return getattr(_pr_cs, _n, _d)
+
+            _pr_ref = float(details.get("setup_ref") or _cs_get("setup_ref") or 0.0)
+            _pr_age = int(details.get("setup_age") or _cs_get("setup_age") or 0)
+
+            if _pr_ref <= 0:
+                logger.warning(
+                    f"[PROOF-GATE] {asset_name}: setup_ref unavailable in details "
+                    f"AND composite_state — proof retirement cannot key this signal"
+                )
             _pr_side = "long" if signal > 0 else "short"
             _pr_key = f"{asset_name}|{_pr_side}|{_pr_ref:.5f}"
             _pr_used = self.used_proofs.get(_pr_key)
@@ -6116,15 +6147,21 @@ class TradingBot:
             # Four fields that answer the proof-distance and proof-reuse
             # questions at the 20-trade review. No behaviour change.
             try:
-                _m_tier = details.get("setup_ref_tier") or ""
-                _m_tests = int(details.get("setup_ref_tests") or 0)
-                _m_retest = details.get("retest_type") or ""
+                # BATCH-DATA-2 ITEM 1: same fallback as 1A. These were blank
+                # on the 27 Aug live trade for the same reason. retest_type's
+                # composite_state fallback is inert -- confirmed (Batch 610
+                # Item 2) it is not a CompositeState field, set elsewhere --
+                # kept anyway to match the pattern; harmless no-op if absent.
+                _m_tier = details.get("setup_ref_tier") or _cs_get("setup_ref_tier") or ""
+                _m_tests = int(details.get("setup_ref_tests") or _cs_get("setup_ref_tests") or 0)
+                _m_retest = details.get("retest_type") or _cs_get("retest_type") or ""
                 # BATCH-W1 SEG 5 note: doc's suggested key "atr" is not present
                 # anywhere in `details` -- confirmed the council aggregator's
                 # own reasoning dict carries it as "atr_fast" (council_aggregator.py:3783),
                 # merged alongside CompositeState's setup_ref/setup_age fields.
                 # Using the real key so dist doesn't read a constant -1.00.
-                _m_atr = float(details.get("atr_fast") or 0.0)
+                # DATA-2: composite_state fallback chain added per this batch.
+                _m_atr = float(details.get("atr_fast") or _cs_get("atr_1h") or _cs_get("atr") or 0.0)
                 _m_dist = (
                     abs(current_price - _pr_ref) / _m_atr
                     if (_pr_ref > 0 and _m_atr > 0) else -1.0
@@ -6384,11 +6421,15 @@ class TradingBot:
                 self.last_trade_times[asset_name] = datetime.now()
                 # BATCH-W1 SEG 3: retire the proof that funded this entry.
                 try:
+                    # BATCH-DATA-2 ITEM 1C: this is the site that wrote ref=0
+                    # into the used-proof ledger. Same composite_state
+                    # fallback as 1A/1B (_cs_get, defined there, in scope for
+                    # the rest of this function call).
                     self._mark_proof_used(
                         asset_name,
                         "long" if signal > 0 else "short",
-                        float(details.get("setup_ref") or 0.0),
-                        int(details.get("setup_age") or 0),
+                        float(details.get("setup_ref") or _cs_get("setup_ref") or 0.0),
+                        int(details.get("setup_age") or _cs_get("setup_age") or 0),
                     )
                 except Exception as _pe:
                     logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used ({_pe})")
