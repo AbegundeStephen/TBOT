@@ -50,37 +50,74 @@ def load_path(asset, start, end):
     return df.loc[str(start):str(end)]
 
 
-def estimate_atr_at(asset, entry_time, period=14, lookback_bars=40):
-    """14-period ATR on 15m bars, from the window ending at entry_time.
+def estimate_atr_at(asset, entry_time, lookback_bars=40):
+    """Regime-adaptive ATR from 1H bars, matching VTM exactly. Returns the
+    entry-time ATR the real system would have computed for this trade.
 
-    Needs its own load (not the entry-to-exit `path` calibrate()/report()
-    already have) because ATR requires history BEFORE entry, which a path
-    sliced from entry_time onward does not carry.
+    CALIBRATION FIX (28 Aug, post-first-run): the original version of this
+    function computed a flat period-14 True Range average from 15m bars.
+    That does not match what the real system computes at all -- confirmed
+    directly against VeteranTradeManager._calculate_atr()
+    (veteran_trade_manager.py:913-960):
+
+      1. It's regime-adaptive, not flat: ATR(7)/ATR(14)/ATR(28) are all
+         computed, and the one actually used is chosen by the fast/slow
+         ratio -- ratio > 1.30 -> ATR(7), ratio < 0.70 -> ATR(28), else
+         ATR(14). (A squeeze-aware ATR(50) override exists too, gated on
+         BB/KC squeeze state; not replicated here -- squeeze detection is a
+         separate indicator this script has no cheap way to reconstruct,
+         and the ratio-based selection is almost certainly the dominant
+         effect. Residual gap, stated rather than hidden.)
+
+      2. It runs on 1H bars, not 15m -- confirmed via backtest.py:97/800
+         (DATA_FILE_MAP maps every asset to *_1h.csv, the feed VTM's
+         high/low/close arrays are built from). A flat 15m ATR(14) and a
+         regime-adaptive 1H ATR are not close approximations of each other;
+         they're different numbers computed a different way from different
+         data. This was very likely the dominant cause of the first
+         calibration run's near-total R mismatch (3/85 within 0.15R, worse
+         than the 66% exit-reason match rate alone suggested) -- a wrong
+         ATR corrupts both the stop distance (denominator of every R) and
+         the trail distance in the same direction.
+
+    The PATH WALK (replay/replay_verbose) still uses 15m bars, per Desire's
+    ruling that hourly simulation inflates expectancy -- only the ATR
+    VALUE itself needs to match what the real system computed it on. Those
+    are two different concerns: how coarse the price path is sampled at
+    (15m, deliberately) vs what timeframe produced the ATR number being
+    walked against (1H, because that's what actually happened).
     """
+    import talib
     sym = SYMBOL_MAP.get(asset)
     if not sym:
         return None
-    p = Path(f"data/raw/{sym}_15m.csv")
+    p = Path(f"data/raw/{sym}_1h.csv")
     if not p.exists():
         return None
     df = pd.read_csv(p, parse_dates=[0], index_col=0)
     if df.index.min().year < 2023:
         raise RuntimeError(
-            f"{p} carries pre-2023 timestamps — the 2020-epoch corruption. "
-            f"Run DATA-4 Item 2 before replaying."
+            f"{p} carries pre-2023 timestamps — check this file's integrity "
+            f"before replaying."
         )
-    window = df.loc[:str(entry_time)].tail(lookback_bars)
-    if len(window) < period + 1:
+    window = df.loc[:str(entry_time)].tail(max(lookback_bars, 40))
+    if len(window) < 29:   # need at least 28 bars + 1 for the slow ATR
         return None
-    high, low, close = window["high"], window["low"], window["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.iloc[-period:].mean()
-    return float(atr) if pd.notna(atr) else None
+    high, low, close = (window["high"].values, window["low"].values,
+                         window["close"].values)
+    atr_fast = talib.ATR(high, low, close, timeperiod=7)[-1]
+    atr_mid  = talib.ATR(high, low, close, timeperiod=14)[-1]
+    atr_slow = talib.ATR(high, low, close, timeperiod=28)[-1]
+    if pd.isna(atr_mid) or not atr_slow:
+        return None
+    ratio = atr_fast / atr_slow
+    if ratio > 1.30:
+        selected = atr_fast
+    elif ratio < 0.70:
+        selected = atr_slow
+    else:
+        selected = atr_mid
+    return float(selected) if pd.notna(selected) else None
 
 
 def replay(entry, stop, side, atr, path, mult):
