@@ -535,13 +535,39 @@ class VeteranTradeManager:
         # history, role-flip tracking and 90-day memory. Targets previously used
         # a 30-bar local pivot scan instead; the bot entered against one map and
         # exited against another.
-        _zl = None
-        if _cs is not None:
-            _zl = (_cs.get("zone_ladder_4h") if isinstance(_cs, dict)
-                   else getattr(_cs, "zone_ladder_4h", None))
-        self.zone_ladder_4h = list(_zl) if _zl else []
+        # ── BATCH-DATA-1D ITEM 4: merge the 4H and daily ladders ──────────
+        # 610 read only zone_ladder_4h. The daily tier now exists, and Desire
+        # ruled it should serve as target candidates. Each level keeps its
+        # "tf" tag through the merge so the chosen anchor can be logged and
+        # later analysed.
+        def _pull(_src, _name):
+            if _src is None:
+                return []
+            _v = (_src.get(_name) if isinstance(_src, dict)
+                  else getattr(_src, _name, None))
+            return list(_v) if _v else []
+
+        _zl_4h = _pull(_cs, "zone_ladder_4h")
+        _zl_1d = _pull(_cs, "zone_ladder_1d")
+
+        # Tag defensively -- the store sets "tf", but a level that arrived
+        # without one must not become untraceable after the merge.
+        for _l in _zl_4h:
+            _l.setdefault("tf", "4H")
+        for _l in _zl_1d:
+            _l.setdefault("tf", "1D")
+
+        # Daily levels first so they win the dedup below: where a 4H and a
+        # daily level sit at effectively the same price, the daily one is the
+        # more significant.
+        _merged = list(_zl_1d) + list(_zl_4h)
+        self.zone_ladder_4h = _merged        # name kept: 610 and its callers read it
+        self.zone_ladder_1d_count = len(_zl_1d)
+        self.zone_ladder_4h_count = len(_zl_4h)
+
         logger.info(
-            f"[VTM-LADDER] {asset}: zone ladder carries {len(self.zone_ladder_4h)} level(s)"
+            f"[VTM-LADDER] {asset}: zone ladder carries {len(_merged)} level(s) "
+            f"({len(_zl_4h)} x 4H, {len(_zl_1d)} x 1D)"
         )
 
         # 7.4: Populate _mfe_target_r from real trade history once enough
@@ -1428,6 +1454,24 @@ class VeteranTradeManager:
                         )
                         _src_name = "pivot-scan-fallback"
 
+                    # ── BATCH-DATA-1D ITEM 5: dedup near-identical levels ──
+                    # A 4H and a daily level can sit within a few ticks of each
+                    # other. Left alone they consume two tier slots and produce
+                    # two targets at effectively the same price. Daily levels
+                    # come first in the merged list, so keeping the first
+                    # occurrence prefers the more significant one.
+                    _tol = 0.25 * atr if atr > 0 else 0.0
+                    _dedup = []
+                    for _p in structure_levels:
+                        if not any(abs(_p - _k) <= _tol for _k in _dedup):
+                            _dedup.append(_p)
+                    if len(_dedup) != len(structure_levels):
+                        logger.info(
+                            f"[VTM-LADDER] {self.asset}: {len(structure_levels)} level(s) "
+                            f"deduped to {len(_dedup)} at {_tol:.5g} tolerance"
+                        )
+                    structure_levels = _dedup
+
                     # ── BATCH-610 ITEM 1: per-asset bar, was hardcoded 2.0 ──
                     # 2.0R put the qualifying bar further away than price
                     # normally travels, so every tier printed
@@ -1444,6 +1488,23 @@ class VeteranTradeManager:
                         f"[VTM] Structure targets active: {len(structure_levels)} level(s) "
                         f"from {_src_name}, min_rr={_struct_min_rr:.2f}"
                     )
+                    # BATCH-DATA-1D ITEM 5B: record which timeframe supplied
+                    # each chosen target. Without this, "do daily-anchored
+                    # targets outperform 4H ones" is unanswerable.
+                    try:
+                        _lad = getattr(self, "zone_ladder_4h", []) or []
+                        _tags = []
+                        for _t in (raw_targets or []):
+                            _best, _bd = "R-mult", None
+                            for _l in _lad:
+                                _d = abs(float(_l.get("price", 0)) - float(_t))
+                                if _bd is None or _d < _bd:
+                                    _bd, _best = _d, _l.get("tf", "?")
+                            _tags.append(_best if (_bd is not None and _bd <= _tol) else "R-mult")
+                        self.target_tf_tags = _tags
+                        logger.info(f"[VTM-LADDER] {self.asset}: target sources = {_tags}")
+                    except Exception as _tt:
+                        logger.warning(f"[VTM-LADDER] {self.asset}: could not tag targets ({_tt})")
                 else:
                     # Pure ATR-multiple targets, no pivot hunting
                     raw_targets = [
@@ -3760,6 +3821,52 @@ class VeteranTradeManager:
             "runner_active":  getattr(self, "runner_activated", False),
         }
 
+    def _nearest_structural_anchor(self, level_4h, fallback_tf_label="4H"):
+        """BATCH-DATA-1D ITEM 6: pick the nearest valid anchor across timeframes.
+
+        Returns the 4H level unchanged when no daily level is available, or
+        when the daily level sits on the wrong side of entry. Logs which
+        timeframe won so the choice is auditable.
+        """
+        try:
+            _cs = getattr(self, "_live_cs", None) or {}
+            def _get(_n):
+                return (_cs.get(_n) if isinstance(_cs, dict)
+                        else getattr(_cs, _n, None))
+
+            # For a long the stop sits below entry, so the relevant daily level
+            # is the one beneath price; for a short, the one above.
+            _lvl_1d = _get("zone_1d_current_lower") if self.side == "long" \
+                      else _get("zone_1d_current_upper")
+
+            if _lvl_1d is None:
+                return level_4h
+
+            # The anchor must be on the correct side of entry to invalidate.
+            if self.side == "long" and _lvl_1d >= self.entry_price:
+                return level_4h
+            if self.side == "short" and _lvl_1d <= self.entry_price:
+                return level_4h
+
+            if level_4h is None:
+                logger.info(
+                    f"[STOP-ANCHOR] {self.asset}: no {fallback_tf_label} level — "
+                    f"using 1D level {_lvl_1d:.5g}"
+                )
+                return _lvl_1d
+
+            _d4 = abs(self.entry_price - level_4h)
+            _d1 = abs(self.entry_price - _lvl_1d)
+            _chosen, _tf = (_lvl_1d, "1D") if _d1 < _d4 else (level_4h, fallback_tf_label)
+            logger.info(
+                f"[STOP-ANCHOR] {self.asset}: {_tf} wins — "
+                f"4H={level_4h:.5g} (d={_d4:.5g}) vs 1D={_lvl_1d:.5g} (d={_d1:.5g})"
+            )
+            return _chosen
+        except Exception as _e:
+            logger.warning(f"[STOP-ANCHOR] {self.asset}: anchor selection failed ({_e}) — using 4H")
+            return level_4h
+
     def _compute_structural_stop(self, atr: float) -> "Optional[float]":
         """
         Phase 4 — Structural Stop Router.
@@ -3801,7 +3908,15 @@ class VeteranTradeManager:
 
         if entry_type == "RANGE_BOUNDARY":
             # Stop behind the defended 4H level.
-            level = getattr(self, "nearby_4h_level", None)
+            # BATCH-DATA-1D ITEM 6: consider the daily level too. Use whichever
+            # valid level sits NEAREST on the correct side -- not "always daily",
+            # which would widen every stop mechanically. Structural stops are
+            # already ~48% wider than the ATR path (BTC 1,172 vs ~792 on
+            # 28 Aug shadow data).
+            level = self._nearest_structural_anchor(
+                getattr(self, "nearby_4h_level", None),
+                fallback_tf_label="4H",
+            )
             if level is not None and atr > 0:
                 buf = 0.5 * atr
                 return (level - buf) if side == "long" else (level + buf)
@@ -3837,7 +3952,12 @@ class VeteranTradeManager:
         if entry_type == "MR_PULLBACK":
             # Ensure the stop is BEYOND the nearby_4h_level (level stays between stop
             # and entry — otherwise the stop is sitting inside the "active zone").
-            level = getattr(self, "nearby_4h_level", None)
+            # BATCH-DATA-1D ITEM 6: same cross-timeframe anchor selection as
+            # RANGE_BOUNDARY above.
+            level = self._nearest_structural_anchor(
+                getattr(self, "nearby_4h_level", None),
+                fallback_tf_label="4H",
+            )
             if level is not None and atr > 0:
                 buf = 0.5 * atr
                 return (level - buf) if side == "long" else (level + buf)

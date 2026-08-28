@@ -292,6 +292,11 @@ class CompositeState:
     zone_1d_outer_high: Optional[float] = None
     zone_1d_outer_low: Optional[float] = None
     zone_1d_extended: bool = False
+    # BATCH-DATA-1D ITEM 2: the daily counterpart to zone_ladder_4h (line 283).
+    # Populated alongside zone_1d_current_* in _build_composite_state.
+    # Each entry carries its own "tf" tag so consumers can tell a daily level
+    # from a 4-hour one after the two are merged.
+    zone_ladder_1d: List[Dict] = field(default_factory=list)
 
     # ── MA extension (mirrors ema_50_status/ema_50_reclassified above) ──
     ema_200_status: str = "UNTESTED"
