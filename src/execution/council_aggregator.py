@@ -3320,7 +3320,19 @@ class InstitutionalCouncilAggregator:
                     )
 
                 # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
-                if not self._check_volatility_gate_adaptive(df, atr_fast, atr_slow):
+                _vol_gate_passed = self._check_volatility_gate_adaptive(df, atr_fast, atr_slow)
+                # DATA-4 ITEM 1C: record this gate's decision either way.
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(
+                        (governor_data or {}).get("episode_id"), self.asset_type,
+                        "volatility_gate", "PASS" if _vol_gate_passed else "BLOCKED",
+                        {"atr_fast": atr_fast, "atr_slow": atr_slow,
+                         "ratio": (atr_fast / atr_slow) if atr_slow else None},
+                    )
+                except Exception:
+                    pass
+                if not _vol_gate_passed:
                     logger.info(f"[VETO] ❌ BLOCKED - Dead Market Volatility.")
                     return 0, {
                         "timestamp": timestamp,

@@ -353,8 +353,45 @@ class DynamicPresetSelector:
                 # A rising ADX (trend establishing) stays NEUTRAL — no veto fires.
                 market_regime_type = "RANGE"
 
+            # DATA-4 ITEM 1B: the rising-ADX exception. When adx < 20 but
+            # rising, the RANGE branch above is deliberately skipped and
+            # market_regime_type stays NEUTRAL, so score-based selection
+            # proceeds unvetoed. A veto that sometimes declines to fire is
+            # two decisions, not one -- only the firing half left a trace
+            # before this.
+            if adx < 20 and adx_is_rising:
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(
+                        None, asset_name, "selector_alignment_veto", "EXCEPTION",
+                        {
+                            "from_preset": new_preset, "to_preset": new_preset,
+                            "score": score, "regime": market_regime_type,
+                            "adx": adx, "adx_slope_4bar": adx_slope_4bar,
+                            "adx_is_rising": adx_is_rising,
+                        },
+                    )
+                except Exception:
+                    pass
+
             # A. Trend Veto: No MR in a trending market — redirect to conservative
             if market_regime_type == "TREND" and new_preset == "mr":
+                # DATA-4 ITEM 1A: the selector reroutes presets BEFORE any
+                # ledgered gate sees the signal. Unrecorded, "mr episodes"
+                # become a mix of different setups under one label.
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(
+                        None, asset_name, "selector_alignment_veto", "REROUTED",
+                        {
+                            "from_preset": new_preset, "to_preset": "conservative",
+                            "score": score, "regime": market_regime_type,
+                            "adx": adx, "adx_slope_4bar": adx_slope_4bar,
+                            "adx_is_rising": adx_is_rising,
+                        },
+                    )
+                except Exception:
+                    pass
                 logger.warning(
                     f"[SELECTOR] 🛡️ ALIGNMENT VETO: MR blocked in TREND (ADX: {adx:.1f})"
                     f" — redirecting to conservative"
@@ -363,6 +400,23 @@ class DynamicPresetSelector:
 
             # B. Range Veto: No high-conviction trend presets in flat/falling range — redirect to MR
             if market_regime_type == "RANGE" and new_preset in ["balanced", "aggressive"]:
+                # DATA-4 ITEM 1A: see note on branch A above. This is the
+                # branch the log-history count (3,642 reroutes, all into mr)
+                # actually measured -- 1,956 from balanced, 1,686 from
+                # aggressive, none in the reverse direction.
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(
+                        None, asset_name, "selector_alignment_veto", "REROUTED",
+                        {
+                            "from_preset": new_preset, "to_preset": "mr",
+                            "score": score, "regime": market_regime_type,
+                            "adx": adx, "adx_slope_4bar": adx_slope_4bar,
+                            "adx_is_rising": adx_is_rising,
+                        },
+                    )
+                except Exception:
+                    pass
                 logger.warning(
                     f"[SELECTOR] 🛡️ ALIGNMENT VETO: {new_preset} blocked in RANGE "
                     f"(ADX: {adx:.1f}, slope={adx_slope_4bar:+.1f}) — redirecting to mr"
