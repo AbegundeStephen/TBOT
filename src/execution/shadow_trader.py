@@ -38,6 +38,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from src.utils.episode_ledger import write_episode  # DATA-1 ITEM 6
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +115,9 @@ class ShadowPosition:
     # BATCH-610 ITEM 4: ATR at entry, retained so entry_distance_atr can be
     # computed at to_dict() time -- mirrors live's [ENTRY-MEASURE] dist field.
     entry_atr: float = 0.0
+    # DATA-1 ITEM 1: single id that joins this record to the funnel, trade
+    # events, move ledger and episode ledger for the same signal evaluation.
+    episode_id: str = ""
     initial_stop_loss: float = 0.0   # S7d: entry-time SL, never mutated — R-units anchor
     friction_source: str = "map"     # S7d: "map" | "default" | "learned"
     gate_code: str = ""              # S7e: machine-stable gate identity
@@ -335,6 +340,7 @@ class ShadowPosition:
                 round(abs(self.entry_price - self.setup_ref) / self.entry_atr, 4)
                 if self.setup_ref and self.entry_atr else -1.0
             ),
+            "episode_id": self.episode_id,   # DATA-1 ITEM 1
         }
 
     def _net_r(self):
@@ -446,6 +452,7 @@ class ShadowTradingEngine:
         composite_state: dict = None,   # J2.1 — from CompositeState.to_dict()
         trail_mult: float = 0.8,        # S7c: was hardcoded 1.5
         be_r: float = 0.75,             # S7c: was TP1-touch trigger
+        episode_id: str = "",           # DATA-1 ITEM 1B
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -695,6 +702,7 @@ class ShadowTradingEngine:
             retest_type=_t4_retest,
             stop_source=_t4_stop_source,
             entry_atr=float(atr) if atr else 0.0,   # BATCH-610 ITEM 4
+            episode_id=episode_id or "",            # DATA-1 ITEM 1B
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
@@ -781,6 +789,12 @@ class ShadowTradingEngine:
         """Move a closed position to results store (in-memory + durable JSONL)."""
         _rec = pos.to_dict()
         self.closed_results.append(_rec)
+        # DATA-1 ITEM 6: close the episode into the shared daily ledger,
+        # tagged "shadow" so it's distinguishable from live closes when both
+        # feed the trail-multiplier learner (Desire's ruling, 27 Aug -- both
+        # sources feed it, tagged separately, live weighted). _rec already
+        # carries episode_id via to_dict() (Item 1B).
+        write_episode({**_rec, "source": "shadow"})
         # Keep results bounded
         if len(self.closed_results) > self._max_closed:
             self.closed_results = self.closed_results[-self._max_closed:]

@@ -971,6 +971,14 @@ class VeteranTradeManager:
     def _calculate_initial_levels(self):
         try:
             atr = self._calculate_atr()
+            # DATA-1 ITEM 4: freeze the ATR used at entry. Every R calculation
+            # divides by risk distance, and every distance-in-ATR measure
+            # divides by ATR at entry -- re-reading it later means it has
+            # moved and the numbers silently drift. Runs exactly once, here,
+            # at construction (this method's only call site). Mirrors the
+            # shadow's entry_atr (Batch 610 Item 4) so live and shadow
+            # records can finally be compared on the same basis.
+            self.entry_atr = float(atr) if atr else -1.0
 
             # STEP 1 — Venue Adaptive Leverage Ceiling
             # Reason: Prevents over-exposure based on venue-specific risk rules.
@@ -3522,6 +3530,9 @@ class VeteranTradeManager:
                 "asset": self.asset, "side": self.side, "kind": kind,
                 "old": old, "new": new, "reason": reason, "source": source,
                 "entry": self.entry_price,
+                # DATA-1 ITEM 1B: same dict originally passed into this VTM
+                # at construction -- joins this move row back to its episode.
+                "episode_id": (self.signal_details or {}).get("episode_id"),
             }
             self._move_history = (getattr(self, "_move_history", []) + [rec])[-50:]
             _os_ram.makedirs("logs/vtm_moves", exist_ok=True)

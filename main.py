@@ -2075,6 +2075,14 @@ class TradingBot:
             # judges (rewired in Phase 3B to read governor_data["composite_state"])
             # get Livermore state, hard-veto flags, and retest-engine entry_type.
             # This is the fix for GOLD/USOIL/GBPAUD/GBPUSD always running in legacy mode.
+            #
+            # DATA-1 ITEM 7 (N3, site 1 of 3): this call site already tops up
+            # df_1d/df_4h from the caches above (lines ~2060-2070) before this
+            # point -- functionally identical to Item 7's proposed patch, just
+            # pre-existing. No additional code needed here; verified directly
+            # rather than duplicating a working guard. Sites 2 and 3 (the
+            # council/LSM-companion builds further down) lacked this and were
+            # patched.
             _perf_agg = aggregators.get("performance")
             _cs = None
             if _perf_agg is not None and hasattr(_perf_agg, '_build_composite_state'):
@@ -2877,6 +2885,7 @@ class TradingBot:
                 composite_state=_comp_state_dict,
                 trail_mult=_trail_mult,   # S7c
                 be_r=_be_r,               # S7c
+                episode_id=details.get("episode_id"),   # DATA-1 ITEM 1B
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -5186,6 +5195,21 @@ class TradingBot:
                 # MR/TF strategy routing and council judges receive Livermore context.
                 _lsm_comp = aggregator.get("livermore")
                 _cs = None
+                # DATA-1 ITEM 7 (N3, site 2 of 3): mtf_regime arrives as a
+                # reference, a .copy() or a freshly-built dict depending on
+                # the branch above. Only the reference carries df_1d, because
+                # the write into _current_regime_data happens after the
+                # copies are taken. Top up from the cache so the builder gets
+                # the daily frame regardless of which branch ran. 610's
+                # [1D-DIAG] proved the fetch succeeds and the write lands;
+                # the failure was purely that the builder read a different
+                # dict. df_4h is included deliberately -- it survives today
+                # only by accident of ordering.
+                if isinstance(mtf_regime, dict):
+                    if mtf_regime.get("df_1d") is None:
+                        mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
+                    if mtf_regime.get("df_4h") is None:
+                        mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
@@ -5279,6 +5303,20 @@ class TradingBot:
                     }
 
             details["price"] = current_price
+
+            # ── DATA-1 ITEM 1: episode id ──────────────────────────────
+            # One id minted per signal evaluation, stamped onto every record
+            # that follows: gate decisions, shadow open, vtm_moves rows,
+            # trade events, exit. Without it, reconstructing a single trade
+            # means matching timestamps across five separate files by eye.
+            # Placed here (not earlier): this is the first point where
+            # `details` is a stable dict common to every aggregator branch
+            # (hybrid/council/performance), confirmed before any gate below
+            # inspects it.
+            import uuid as _uuid
+            _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+            details["episode_id"] = _episode_id
+            logger.info(f"[EPISODE] {asset_name}: {_episode_id} opened")
 
             # Dashboard Charts section: save the exact same decision chart
             # /chart renders on demand, automatically every cycle, so the
@@ -5822,7 +5860,7 @@ class TradingBot:
                     )
                     if getattr(self, "funnel_logger", None) is not None:
                         try:
-                            self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_same_direction"})
+                            self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_same_direction", "episode_id": details.get("episode_id")})
                         except Exception:
                             pass
                     return
@@ -5970,7 +6008,10 @@ class TradingBot:
                     try:
                         self.funnel_logger.record(
                             asset_name, 0,
-                            {"reasoning": self._last_limit_reason or "blocked_trading_limits"},
+                            {
+                                "reasoning": self._last_limit_reason or "blocked_trading_limits",
+                                "episode_id": details.get("episode_id"),
+                            },
                         )
                     except Exception:
                         pass
@@ -6018,7 +6059,7 @@ class TradingBot:
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
-                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_cooldown"})
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_cooldown", "episode_id": details.get("episode_id")})
                     except Exception:
                         pass
                 return
@@ -6060,7 +6101,7 @@ class TradingBot:
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
                         self.funnel_logger.record(
-                            asset_name, 0, {"reasoning": "proof_reused"}
+                            asset_name, 0, {"reasoning": "proof_reused", "episode_id": details.get("episode_id")}
                         )
                     except Exception:
                         pass
@@ -6095,8 +6136,44 @@ class TradingBot:
                     f"retest_type={_m_retest} "
                     f"proof_reused={'yes' if _pr_used is not None else 'no'}"
                 )
+                # ── DATA-1 ITEM 3A: store what W1 only logged. A log line
+                # cannot be joined or aggregated; every proof question in the
+                # queue needs these as fields.
+                details["entry_measure"] = {
+                    "proof_ref": _pr_ref,
+                    "proof_age_bars": _pr_age,
+                    "proof_ref_tier": _m_tier,
+                    "proof_ref_tests": _m_tests,
+                    "retest_type": _m_retest,
+                    "entry_distance_atr": _m_dist,
+                    "entry_atr": _m_atr,
+                    "proof_reused": bool(_pr_used is not None),
+                    "brc_kind": details.get("brc_kind", ""),
+                    "brc_confirmed": bool(details.get("brc_confirmed", False)),
+                }
             except Exception as _me:
                 logger.warning(f"[ENTRY-MEASURE] {asset_name}: could not record ({_me})")
+
+            # ── DATA-1 ITEM 2: live records get what shadow records already
+            # have. Until now the paper-trading system carried richer context
+            # than the real trades it was meant to be compared against.
+            try:
+                _ep_ctx = {
+                    "episode_id": details.get("episode_id"),
+                    "composite_state": (self._latest_composite_state or {}).get(asset_name, {}),
+                    "strategy_votes": details.get("strategy_votes", {}),
+                    "regime_name": details.get("regime_name"),
+                    "regime_score": details.get("regime_score"),
+                    "phase_config": self.config.get("phase_config", {}),
+                }
+                details["episode_context"] = _ep_ctx
+                if not _ep_ctx["composite_state"]:
+                    logger.warning(
+                        f"[EPISODE] {asset_name}: composite_state EMPTY at entry — "
+                        f"this episode will be unanalysable"
+                    )
+            except Exception as _ec:
+                logger.warning(f"[EPISODE] {asset_name}: could not attach context ({_ec})")
 
             # ── Natural cycle elapsed gate ────────────────────────────────────
             # Block MR re-entries in the same Livermore NATURAL phase until
@@ -6128,7 +6205,7 @@ class TradingBot:
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
-                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_natural_cycle"})
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_natural_cycle", "episode_id": details.get("episode_id")})
                     except Exception:
                         pass
                 return
@@ -6889,6 +6966,21 @@ class TradingBot:
                 # COUNCIL MODE with LSM companion — build composite_state first.
                 _lsm_comp = aggregator.get("livermore")
                 _cs = None
+                # DATA-1 ITEM 7 (N3, site 3 of 3): mtf_regime arrives as a
+                # reference, a .copy() or a freshly-built dict depending on
+                # the branch above. Only the reference carries df_1d, because
+                # the write into _current_regime_data happens after the
+                # copies are taken. Top up from the cache so the builder gets
+                # the daily frame regardless of which branch ran. 610's
+                # [1D-DIAG] proved the fetch succeeds and the write lands;
+                # the failure was purely that the builder read a different
+                # dict. df_4h is included deliberately -- it survives today
+                # only by accident of ordering.
+                if isinstance(mtf_regime, dict):
+                    if mtf_regime.get("df_1d") is None:
+                        mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
+                    if mtf_regime.get("df_4h") is None:
+                        mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)

@@ -54,6 +54,14 @@ class CompositeState:
     brc_direction: int = 0                # +1 long / -1 short
     brc_kind: Optional[str] = None        # "TF_CONT" (BOS) / "MR_REV" (CHoCH)
     brc_tier: Optional[str] = None        # RetestEngine tier if available
+    # DATA-1 ITEM 3B: retested/post_break_touches/bars_since_break previously
+    # existed only as [MEASURE-8.7-ORDERING] log text -- the pair that answers
+    # the retest-vs-runner question (Desire's ruling on that is closed; this
+    # only ensures the data exists to describe what happened). Computed every
+    # evaluation, not gated behind brc_confirmed.
+    retested: bool = False
+    post_break_touches: int = 0
+    bars_since_break: int = 0
     # ── BTC-FLOW (17-Aug): bench material only, no live consumer yet ────
     # Public Binance data (src/data/btc_flow_harvester.py). Missing data is
     # None, never zero, per the 2.6 rule — a harvester outage or an

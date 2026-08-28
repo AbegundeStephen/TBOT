@@ -16,6 +16,7 @@ import copy
 from pathlib import Path
 from src.execution.veteran_trade_manager import VeteranTradeManager, ExitReason
 from src.utils.trade_logger import log_trade_event
+from src.utils.episode_ledger import write_episode  # DATA-1 ITEM 6
 from src.utils.state_manager import save_system_state, load_system_state
 from src.analytics.performance_tracker import PerformanceTracker
 from src.audit_logger.audit_logger import log_trade
@@ -2910,6 +2911,7 @@ class PortfolioManager:
                 ),
                 "position_id": position.position_id,
                 "record_source": "portfolio",
+                "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
             },
         )
 
@@ -3830,6 +3832,58 @@ class PortfolioManager:
         elif "take_profit" in str(reason).lower():
             exit_event_type = "TP_HIT"
 
+        # ── DATA-1 ITEM 5: close the episode. self.signal_details on the VTM
+        # is the same dict originally passed at open -- position itself does
+        # not reliably retain it (no assignment in Position.__init__).
+        # intended_stop uses current_stop_loss (the live, possibly-trailed
+        # level that actually triggers a close), NOT initial_stop_loss (the
+        # frozen entry-time stop, confirmed never mutated after construction
+        # -- used instead as the risk-distance denominator for gross_r).
+        # A manual/other exit has no single "intended" price by definition;
+        # left None rather than guessing, per the spec's own instruction not
+        # to substitute the fill price (that would silently record zero
+        # slippage forever).
+        _exit_vtm = getattr(position, "trade_manager", None)
+        _episode_id = None
+        _intended_price = None
+        _mfe_r = None
+        _mae_r = None
+        _bars_open = None
+        _peak_bar = None
+        _gross_r = None
+        try:
+            if _exit_vtm is not None:
+                _episode_id = (getattr(_exit_vtm, "signal_details", None) or {}).get("episode_id")
+                if exit_event_type == "SL_HIT":
+                    _intended_price = getattr(_exit_vtm, "current_stop_loss", None)
+                elif exit_event_type == "TP_HIT":
+                    _tp_levels = getattr(_exit_vtm, "take_profit_levels", None) or []
+                    _intended_price = _tp_levels[0] if _tp_levels else None
+                _frozen_stop = getattr(_exit_vtm, "initial_stop_loss", None)
+                if (
+                    _frozen_stop is not None
+                    and getattr(_exit_vtm, "highest_price_reached", None) is not None
+                ):
+                    _risk = abs(_exit_vtm.entry_price - _frozen_stop) or 1e-9
+                    if _exit_vtm.side == "long":
+                        _mfe_r = (_exit_vtm.highest_price_reached - _exit_vtm.entry_price) / _risk
+                        _mae_r = (_exit_vtm.entry_price - _exit_vtm.lowest_price_reached) / _risk
+                    else:
+                        _mfe_r = (_exit_vtm.entry_price - _exit_vtm.lowest_price_reached) / _risk
+                        _mae_r = (_exit_vtm.highest_price_reached - _exit_vtm.entry_price) / _risk
+                    _risk_dollars = _risk * position.quantity
+                    if _risk_dollars:
+                        _gross_r = pnl / _risk_dollars
+                # bars_open / peak_bar: NOT tracked anywhere on the live VTM
+                # today (unlike shadow's explicit per-candle counters) --
+                # left None rather than fabricated, per the spec's own rule.
+                # friction_paid / net_r: friction is not measured on the live
+                # path at all today (confirmed absent) -- left None; net_r
+                # cannot be netted out from a friction figure that doesn't
+                # exist without silently implying it was accounted for.
+        except Exception as _epx_e:
+            logger.debug(f"[EPISODE] Exit-record fields skipped: {_epx_e}")
+
         # ✅ Standardized Log
         log_trade_event(
             exit_event_type,
@@ -3844,8 +3898,51 @@ class PortfolioManager:
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
                 "position_id": position_id,
+                # DATA-1 ITEM 5
+                "episode_id": _episode_id,
+                "exit_reason": reason,
+                "exit_price": exit_price,
+                "intended_stop": _intended_price,
+                "exit_slippage": (
+                    abs(exit_price - _intended_price) if _intended_price else None
+                ),
+                "gross_r": _gross_r,
+                "net_r": None,          # friction not tracked on live path -- see note above
+                "friction_paid": None,  # not tracked on live path -- see note above
+                "bars_open": _bars_open,
+                "mfe_r": round(_mfe_r, 3) if _mfe_r is not None else None,
+                "mae_r": round(_mae_r, 3) if _mae_r is not None else None,
+                "peak_bar": _peak_bar,
+                "phase_config_at_exit": self.config.get("phase_config", {}),
             },
         )
+
+        # DATA-1 ITEM 6: close the episode into the shared daily ledger,
+        # tagged "live" so it's distinguishable from shadow closes when
+        # both feed the trail-multiplier learner (Desire's ruling, 27 Aug --
+        # both sources feed it, tagged separately, live weighted).
+        write_episode({
+            "episode_id": _episode_id,
+            "source": "live",
+            "asset": position.asset,
+            "side": position.side,
+            "entry_price": position.entry_price,
+            "exit_price": exit_price,
+            "quantity": position.quantity,
+            "entry_time": position.entry_time,
+            "exit_time": datetime.now(),
+            "exit_event_type": exit_event_type,
+            "exit_reason": reason,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "gross_r": _gross_r,
+            "mfe_r": round(_mfe_r, 3) if _mfe_r is not None else None,
+            "mae_r": round(_mae_r, 3) if _mae_r is not None else None,
+            "intended_stop": _intended_price,
+            "exit_slippage": (
+                abs(exit_price - _intended_price) if _intended_price else None
+            ),
+        })
 
         logger.info(
             f"✓ Position closed successfully:\n"
