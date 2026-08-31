@@ -586,33 +586,84 @@ class DataManager:
 
             tf = timeframe_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
 
+            # ── FRAME-1 SEG 1: THE TWO-HOUR LAG ──────────────────────────────
+            # copy_rates_range reads a NAIVE datetime as LOCAL wall-clock and
+            # converts it to server time itself (verified 31 Aug: a naive local
+            # 6h window returned 6 H1 bars ending on the forming bar). Every
+            # caller here builds its window from datetime.now(timezone.utc), so
+            # a UTC value was handed over as if it were local -- on a UTC+2 box
+            # that asked for data ending TWO HOURS AGO, on every fetch, every
+            # asset, every timeframe, since 2025-11-15. The frame the whole bot
+            # reasons from was missing its most recent completed bar(s), while
+            # entries filled at live price.
+            # Fixed at the single door so all 17 callers are corrected at once
+            # and none of them changes.
+            _LOCAL_TZ = datetime.now().astimezone().tzinfo
+
             start_dt = pd.to_datetime(start_date)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.tz_localize("UTC")   # callers pass UTC values
+            start_dt = start_dt.tz_convert(_LOCAL_TZ).tz_localize(None).to_pydatetime()
+
             if end_date:
                 end_dt = pd.to_datetime(end_date)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.tz_localize("UTC")
+                end_dt = end_dt.tz_convert(_LOCAL_TZ).tz_localize(None).to_pydatetime()
             else:
+                # No end_date supplied: datetime.now() is ALREADY local
+                # wall-clock, which is what MT5 wants. Do NOT shift this one.
                 end_dt = datetime.now()
 
-            start_dt = (
-                start_dt.to_pydatetime()
-                if hasattr(start_dt, "to_pydatetime")
-                else start_dt
+            # FRAME-1 SEG 1: print the UTC clock alongside the local window we
+            # actually send. This line printed the wrong window for ten months
+            # and nobody could see it, because it never showed what it MEANT.
+            logger.info(
+                f"Fetching {symbol} {timeframe} from MT5: {start_dt} to {end_dt} "
+                f"[local] | utc_now={datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}"
             )
-            end_dt = (
-                end_dt.to_pydatetime() if hasattr(end_dt, "to_pydatetime") else end_dt
-            )
-
-            logger.info(f"Fetching {symbol} from MT5: {start_dt} to {end_dt}")
 
             rates = mt5.copy_rates_range(symbol, tf, start_dt, end_dt)
 
-            if rates is None or len(rates) == 0:
-                logger.error(f"No MT5 data for {symbol}")
+            if rates is None:
+                # FRAME-1 SEG 2: None means the CALL failed. That is a real error.
+                logger.error(
+                    f"No MT5 data for {symbol}: copy_rates_range failed, "
+                    f"mt5.last_error={mt5.last_error()}"
+                )
+                return pd.DataFrame()
+            if len(rates) == 0:
+                # FRAME-1 SEG 2: an empty window is routine -- no bar has closed
+                # yet, or the market is shut. This logged as ERROR ~24x/day and
+                # buried the real ones. Not an error; say so quietly.
+                logger.debug(
+                    f"No new {symbol} {timeframe} bars in {start_dt} -> {end_dt} "
+                    f"(empty range, not an error)"
+                )
                 return pd.DataFrame()
 
             df = pd.DataFrame(rates)
             df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df[["timestamp", "open", "high", "low", "close", "tick_volume"]]
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
+
+            # FRAME-1 SEG 1: this fault hid for ten months because the call
+            # SUCCEEDS -- it just answers a question nobody meant to ask.
+            # Nothing in this system ever compared the newest bar to the clock.
+            # Now something does.
+            try:
+                _tf_min = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                           "H1": 60, "H4": 240, "D1": 1440}.get(timeframe.upper(), 60)
+                _newest = df["timestamp"].iloc[-1]
+                _age_min = (pd.Timestamp.now(tz="UTC") - _newest).total_seconds() / 60.0
+                if _age_min > (2 * _tf_min):
+                    logger.warning(
+                        f"[DATA-FRESH] {symbol} {timeframe}: newest bar {_newest} is "
+                        f"{_age_min:.0f} min old (> 2 x {_tf_min} min bar) — the frame "
+                        f"the bot reasons from is behind the market."
+                    )
+            except Exception:
+                pass
 
             # ── BTC VOLUME OVERLAY (17-Aug): the VOLUME judge was calibrated
             # for real exchange volume; Exness tick counts never surge past its

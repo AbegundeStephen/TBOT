@@ -341,6 +341,7 @@ class ShadowPosition:
                 if self.setup_ref and self.entry_atr else -1.0
             ),
             "episode_id": self.episode_id,   # DATA-1 ITEM 1
+            "entry_atr":  self.entry_atr,    # FRAME-1 SEG 6: captured at open since 610 ITEM 4, never persisted
         }
 
     def _net_r(self):
@@ -713,7 +714,13 @@ class ShadowTradingEngine:
             regime_name=signal_details.get("regime", "UNKNOWN"),
             stop_loss=_stop_loss,
             initial_stop_loss=_stop_loss,   # S7d: freeze entry-time risk
-            take_profit=_take_profit,
+            # FRAME-1 SEG 12: hard TP retired. It fired at tp_multiples[0]
+            # (1.5x ATR) and cut both weekend shadow wins at 0.64R and 1.04R,
+            # while a live trade trails to a far rung. Shadow exits must match
+            # live exits or the episode dataset teaches us about a machine we
+            # do not run. 0.0 disables the branch at :245; trail, R-breakeven
+            # and stop are untouched.
+            take_profit=0.0,
             strategy_votes={
                 "mr_signal":    signal_details.get("mr_signal", 0),
                 "mr_conf":      signal_details.get("mr_confidence", 0.0),

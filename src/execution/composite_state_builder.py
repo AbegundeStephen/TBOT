@@ -383,30 +383,6 @@ class CompositeStateBuilder:
                 f"{len(state.zone_ladder_1d)} level(s)"
             )
             _v1 = self._build_zone_view(_df_1d, self.asset_type, "1D", _price_now)
-            # N3: TEMPORARY DIAGNOSTIC. Remove once the cause is identified.
-            # zone_1d_current_upper/lower have returned None on every asset,
-            # every cycle, since July — 87 of 87 convergence observations.
-            # The call path above runs. Three candidates: the 1D frame arrives
-            # empty; it arrives but no daily fractal survives the tests>=1
-            # filter; or levels exist and _build_zone_view filters them out.
-            # This prints enough to tell which.
-            try:
-                _n3_store = self._zone_levels.get(self.asset_type, [])
-                _n3_1d = [l for l in _n3_store if l.get("tf") == "1D"]
-                logger.info(
-                    "[N3-1D] %s: df_1d_bars=%s atr=%.5g price=%.5g | "
-                    "store_total=%d store_1d=%d | "
-                    "1d_tests=%s | view_upper=%s view_lower=%s",
-                    self.asset_type,
-                    len(_df_1d) if _df_1d is not None else None,
-                    float(_atr_now or 0.0), float(_price_now or 0.0),
-                    len(_n3_store), len(_n3_1d),
-                    sorted([int(l.get("tests", 0) or 0) for l in _n3_1d])[-5:],
-                    _v1.get("current_upper"), _v1.get("current_lower"),
-                )
-            except Exception as _n3_err:
-                logger.info("[N3-1D] %s: probe error: %s",
-                            self.asset_type, _n3_err)
             state.zone_1d_current_upper = _v1["current_upper"]
             state.zone_1d_current_lower = _v1["current_lower"]
             state.zone_1d_current_upper_tests = _v1["current_upper_tests"]

@@ -100,6 +100,12 @@ class FunnelLogger:
             "circuit breaker": "blocked_circuit_breaker",
             "blocked_total_risk_cap": "blocked_total_risk_cap",
             "risk_capped_shared_budget": "risk_capped_shared_budget",
+            # FRAME-1 SEG 4: gate 4 emits rr_gate_rejected_* (old R:R maths) or
+            # cost_gate_rejected_* (honest cost maths). Both contain "rejected",
+            # so every gate-4 kill was filed as blocked_low_score. Name them,
+            # BEFORE the generic keys below -- first match wins.
+            "cost_gate_rejected": "blocked_cost_gate",
+            "rr_gate_rejected": "blocked_rr_gate",
             "quality": "blocked_low_quality",
             "score": "blocked_low_score",
             "rejected": "blocked_low_score",
