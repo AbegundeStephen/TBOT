@@ -110,7 +110,9 @@ def validate_candle_structure(
     )
 
     _wick_blocked = upper_wick > (wick_multiplier * atr) or lower_wick > (wick_multiplier * atr)
-    logger.debug(
+    # FRAME-1 SEG 9: this telemetry has been at debug since it shipped -- zero
+    # visible lines, ever, in any log.
+    logger.info(
         f"[TRAP-TELEMETRY] wick_max={max(upper_wick, lower_wick):.4f} "
         f"threshold={wick_multiplier * atr:.4f} atr={atr:.4f} result={'BLOCK' if _wick_blocked else 'PASS'}"
     )

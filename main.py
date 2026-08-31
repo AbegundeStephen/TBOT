@@ -139,7 +139,15 @@ def setup_logging(config):
     file_handler.setLevel(log_level)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
+    # FRAME-1 SEG 3: stdout is tee'd into logs/bot_YYYYMMDD.log by run_bot.ps1,
+    # so an INFO console handler duplicates every line into a second file
+    # (~20MB/day, 3GB of history). The rotating file handler owns the full log;
+    # the tee file keeps warnings, errors and anything printed before logging
+    # is configured -- which is what a wrapper log is for.
+    console_handler.setLevel(max(log_level, logging.WARNING))
+    # FRAME-1 SEG 3: httpx logs full request URLs at INFO, and Telegram's URL
+    # carries the bot token. It has been written to the log in plain text.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -2885,7 +2893,7 @@ class TradingBot:
                 composite_state=_comp_state_dict,
                 trail_mult=_trail_mult,   # S7c
                 be_r=_be_r,               # S7c
-                episode_id=details.get("episode_id"),   # DATA-1 ITEM 1B
+                episode_id=self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -3913,7 +3921,7 @@ class TradingBot:
                 try:
                     self._capture_open_position_paths()
                 except Exception as _pc_err:
-                    logger.debug(f"[PATH-CAPTURE] Skipped this cycle: {_pc_err}")
+                    logger.warning(f"[PATH-CAPTURE] Skipped this cycle: {_pc_err}")
 
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
@@ -3955,6 +3963,26 @@ class TradingBot:
                 )
                 time.sleep(300)
 
+    def _episode_id_for(self, asset_name, details):
+        """FRAME-1 SEG 5: return this evaluation's episode id, minting one if
+        the caller's `details` predates the trade-pass mint (DATA-3 ITEM 4).
+        The recording pass opens shadows ~1.5s BEFORE the trade pass mints, so
+        both weekend shadows were written with episode_id "" and path capture
+        silently skipped them. An id minted here is parked so the trade pass
+        reuses it -- one id per asset per cycle, shared by the shadow record,
+        the gate rows and the path file.
+        """
+        _ep = details.get("episode_id") if isinstance(details, dict) else None
+        if not _ep:
+            import uuid as _uuid
+            _ep = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+            if isinstance(details, dict):
+                details["episode_id"] = _ep
+        if not hasattr(self, "_pending_episode_ids"):
+            self._pending_episode_ids = {}
+        self._pending_episode_ids[asset_name] = (_ep, time.time())
+        return _ep
+
     def _capture_open_position_paths(self):
         """DATA-4 ITEM 4: record one real price observation per open episode
         per cycle, for both live and shadow positions. Self-contained --
@@ -3967,6 +3995,12 @@ class TradingBot:
         """
         from src.utils.path_ledger import write_path_point
 
+        # FRAME-1 SEG 7: id-less positions were skipped in silence by design and
+        # two days of shadow paths were lost. Count them and say so ONCE per
+        # cycle at WARNING.
+        _pc_missing = 0
+        _pc_errors = 0
+
         # Live positions.
         for position in list(self.portfolio_manager.positions.values()):
             try:
@@ -3978,25 +4012,36 @@ class TradingBot:
                 handler = self.binance_handler if exchange == "binance" else self.mt5_handler
                 if not handler:
                     continue
+                if not getattr(position, "episode_id", None):
+                    _pc_missing += 1
+                    continue
                 symbol = self._resolve_symbol(asset_name)
                 price = handler.get_current_price(symbol, force_live=False)
-                write_path_point(
-                    getattr(position, "episode_id", None), asset_name, price, "live"
-                )
+                write_path_point(position.episode_id, asset_name, price, "live")
             except Exception as _lp_err:
+                _pc_errors += 1
                 logger.debug(f"[PATH-CAPTURE] live position skipped: {_lp_err}")
 
-        # Shadow positions -- current_price is already maintained by the
-        # shadow engine's own tick/candle update methods, no extra fetch.
+        # Shadow positions -- current_price is maintained by the shadow engine.
         if getattr(self, "shadow_trader", None):
             for pos in list(self.shadow_trader.open_positions):
                 try:
+                    if not getattr(pos, "episode_id", None):
+                        _pc_missing += 1
+                        continue
                     write_path_point(
-                        getattr(pos, "episode_id", None), pos.asset,
+                        pos.episode_id, pos.asset,
                         getattr(pos, "current_price", None), "shadow"
                     )
                 except Exception as _sp_err:
+                    _pc_errors += 1
                     logger.debug(f"[PATH-CAPTURE] shadow position skipped: {_sp_err}")
+
+        if _pc_missing or _pc_errors:
+            logger.warning(
+                f"[PATH-CAPTURE] no path recorded for {_pc_missing} id-less "
+                f"and {_pc_errors} errored open position(s) this cycle"
+            )
 
     def _vtm_management_loop(self):
         """
@@ -5257,8 +5302,28 @@ class TradingBot:
             # aggregator) makes it readable from there. The convergence point
             # below now reuses this same id instead of minting a second one.
             import uuid as _uuid
-            _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+            # FRAME-1 SEG 5: reuse an id parked by the recording pass (a shadow
+            # opened seconds ago) so both passes share one id. 120s guard --
+            # anything older belongs to a different cycle and must not be inherited.
+            _episode_id = None
+            _pend = getattr(self, "_pending_episode_ids", {}).pop(asset_name, None)
+            if _pend and (time.time() - _pend[1]) < 120:
+                _episode_id = _pend[0]
+            if not _episode_id:
+                _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
             mtf_regime["episode_id"] = _episode_id
+
+            # FRAME-1 SEG 10: the recording pass injects the observed spread at
+            # ~7088-7091; this pass never did, so council_aggregator.py:863 fell
+            # through to the hardcoded map/placeholder for every asset and the
+            # gate decided on a number nobody measured.
+            try:
+                _sd = getattr(self.mt5_handler, "_last_spread", {}) if getattr(self, "mt5_handler", None) else {}
+                _sy = self.config.get("assets", {}).get(asset_name, {}).get("symbol", "")
+                if _sy and _sy in _sd and _sd[_sy]:
+                    mtf_regime["current_spread"] = _sd[_sy]
+            except Exception:
+                pass  # spread injection is a bonus -- never block execution
 
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
@@ -5655,21 +5720,42 @@ class TradingBot:
                                 f"4H detector likely lagging post-event."
                             )
                     else:
-                        # DATA-3 ITEM 4: record this gate's decision.
+                        # ── FRAME-1 SEG 11: ADVISORY CONVERSION (ruled 31 Aug) ──
+                        # Confidence is abs(4H regime score). In a range it is
+                        # honestly 0.0, so this gate banned BTC from every
+                        # ranging market (145 blocks last week, all BTC, all 0%,
+                        # no feed errors). The 18-Aug study on 1,690 proofs
+                        # measured counter-macro proofs at +0.110R vs +0.023R
+                        # aligned -- a low macro read is not evidence of a bad
+                        # trade. It speaks; it does not spend money.
+                        _cg_advisory = bool(
+                            self.config.get("phase_config", {}).get(
+                                "confidence_gate_advisory_enabled", False
+                            )
+                        )
                         try:
                             from src.utils.gate_ledger import write_gate_decision
                             write_gate_decision(
                                 details.get("episode_id"), asset_name, "confidence_gate",
-                                "BLOCKED", {"confidence": _regime_conf, "minimum": _min_conf},
+                                "ADVISORY" if _cg_advisory else "BLOCKED",
+                                {"confidence": _regime_conf, "minimum": _min_conf,
+                                 "advisory": _cg_advisory},
                             )
                         except Exception:
                             pass
-                        logger.info(
-                            f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
-                            f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
-                        )
-                        signal = 0
-                        details["reasoning"] = "low_regime_confidence"
+                        if _cg_advisory:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: ADVISORY — regime "
+                                f"confidence {_regime_conf:.0%} < {_min_conf:.0%} "
+                                f"minimum. Signal ALLOWED (advisory mode)."
+                            )
+                        else:
+                            logger.info(
+                                f"[CONFIDENCE GATE] {asset_name}: Signal blocked — "
+                                f"regime confidence {_regime_conf:.0%} < {_min_conf:.0%} minimum"
+                            )
+                            signal = 0
+                            details["reasoning"] = "low_regime_confidence"
 
             # Log Signal Quality
             logger.info(
@@ -7318,6 +7404,7 @@ class TradingBot:
                             composite_state=_comp_state_dict2,
                             trail_mult=_trail_mult,   # S7c
                             be_r=_be_r,               # S7c
+                            episode_id=self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5 (argument was MISSING here -- both weekend shadows came through this site)
                         )
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")
