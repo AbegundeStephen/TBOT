@@ -392,7 +392,8 @@ class CompositeStateBuilder:
             state.zone_1d_outer_high = _v1["outer_high"]
             state.zone_1d_outer_low = _v1["outer_low"]
         else:
-            logger.info("[N3-1D] %s: _df_1d is None — 1D frame never reached "
+            # FRAME-1 SEG 8: success probe removed; THIS alarm stays, at WARNING.
+            logger.warning("[N3-1D] %s: _df_1d is None — 1D frame never reached "
                         "the zone builder.", self.asset_type)
 
         # ── E.4: Parabolic Space (Dynamic Z-Score) ────────────────────────
