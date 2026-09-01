@@ -173,6 +173,9 @@ class ShadowPosition:
     breakeven_applied: bool = False
 
     lane: str = "A"                 # LANES L1: which shadow lane produced this
+    resumed: bool = False               # MEASURE-2 S1: survived at least one restart
+    resume_count: int = 0               # MEASURE-2 S1: how many
+    restart_gap_minutes: float = 0.0    # MEASURE-2 S1: blind window -- MFE/MAE unknown across it
 
     def _profit_pct(self, price: float) -> float:
         """Current unrealised P&L as a fraction of entry price."""
@@ -345,6 +348,9 @@ class ShadowPosition:
             "episode_id": self.episode_id,   # DATA-1 ITEM 1
             "entry_atr":  self.entry_atr,    # FRAME-1 SEG 6: captured at open since 610 ITEM 4, never persisted
             "lane":       self.lane,         # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
+            "resumed":             self.resumed,               # MEASURE-2 S1
+            "resume_count":        self.resume_count,          # MEASURE-2 S1
+            "restart_gap_minutes": self.restart_gap_minutes,   # MEASURE-2 S1
         }
 
     def _net_r(self):
@@ -802,6 +808,129 @@ class ShadowTradingEngine:
             else:
                 still_open.append(pos)
         self.open_positions = still_open
+
+    def save_open_positions(self) -> int:
+        """MEASURE-2 S1: snapshot every OPEN position so a restart resumes
+        instead of discarding.
+
+        Written every cycle, NOT on exit: the bot is killed with taskkill /F
+        (TerminateProcess -- no signal, no cleanup), so no shutdown hook can
+        ever run. A crash or VPS reboot behaves the same way.
+
+        On 1-Sept six shadows opened and only two closed records exist -- the
+        rest were destroyed by four restarts, leaving no trace they existed.
+
+        asdict() is used deliberately: it captures every dataclass field
+        including ones added later, so this cannot silently drift as the
+        dataclass grows.
+        """
+        try:
+            import os as _os
+            from dataclasses import asdict as _asdict
+            from src.utils.run_status import write_json_atomic
+            _rows = []
+            for _p in self.open_positions:
+                try:
+                    _d = _asdict(_p)
+                    for _k, _v in list(_d.items()):
+                        if hasattr(_v, "isoformat"):
+                            _d[_k] = _v.isoformat()
+                    _rows.append(_d)
+                except Exception:
+                    continue
+            write_json_atomic(
+                _os.path.join(self._archive_dir, "open_positions.json"),
+                {
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "count": len(_rows),
+                    "positions": _rows,
+                },
+            )
+            return len(_rows)
+        except Exception as _e:
+            logger.warning(f"[SHADOW] save_open_positions failed: {_e}")
+            return 0
+
+    def restore_open_positions(self, price_map: dict = None,
+                               max_gap_min: int = 720) -> dict:
+        """MEASURE-2 S1: rehydrate open positions after a restart.
+
+        Three outcomes per position:
+          resumed   -- back in open_positions, gap recorded
+          gapped    -- price moved beyond the stop while down; closed at the
+                       stop as stop_loss_gap_inferred, NOT silently continued
+          abandoned -- snapshot older than max_gap_min; resuming is meaningless
+
+        MFE/MAE are restored untouched. They are running maxima and must never
+        be recomputed -- only advanced by the normal tick loop.
+        """
+        _out = {"resumed": 0, "gapped": 0, "abandoned": 0, "gap_min": 0.0}
+        try:
+            import os as _os, json as _json
+            _path = _os.path.join(self._archive_dir, "open_positions.json")
+            if not _os.path.exists(_path):
+                return _out
+            _snap = _json.load(open(_path, encoding="utf-8"))
+            _saved = datetime.fromisoformat(_snap.get("saved_at"))
+            if _saved.tzinfo is None:
+                _saved = _saved.replace(tzinfo=timezone.utc)
+            _gap = (datetime.now(timezone.utc) - _saved).total_seconds() / 60.0
+            _out["gap_min"] = round(_gap, 1)
+
+            for _row in _snap.get("positions", []):
+                try:
+                    for _k in ("entry_time", "close_time"):
+                        if _row.get(_k):
+                            _row[_k] = datetime.fromisoformat(_row[_k])
+                    _row["resumed"] = True
+                    _row["resume_count"] = int(_row.get("resume_count", 0)) + 1
+                    _row["restart_gap_minutes"] = round(_gap, 1)
+                    _pos = ShadowPosition(**_row)
+
+                    if _gap > max_gap_min:
+                        _pos.closed = True
+                        _pos.close_reason = "abandoned_restart_gap"
+                        _pos.close_price = _pos.current_price
+                        _pos.close_time = datetime.now(timezone.utc)
+                        self._archive(_pos)
+                        _out["abandoned"] += 1
+                        continue
+
+                    _now_px = (price_map or {}).get(_pos.asset)
+                    _through = False
+                    if _now_px and _pos.stop_loss:
+                        _through = (
+                            (_pos.side == "long" and _now_px <= _pos.stop_loss)
+                            or (_pos.side == "short" and _now_px >= _pos.stop_loss)
+                        )
+                    if _through:
+                        # The stop WAS hit. We cannot know when, so record the
+                        # stop price and flag the blind window rather than
+                        # inventing a clean exit.
+                        _pos.closed = True
+                        _pos.close_reason = "stop_loss_gap_inferred"
+                        _pos.close_price = _pos.stop_loss
+                        _pos.close_time = datetime.now(timezone.utc)
+                        self._archive(_pos)
+                        _out["gapped"] += 1
+                        continue
+
+                    if _now_px:
+                        _pos.current_price = _now_px
+                    self.open_positions.append(_pos)
+                    self._last_close_time.pop(_pos.asset.upper(), None)
+                    _out["resumed"] += 1
+                except Exception as _re:
+                    logger.warning(f"[SHADOW] resume failed for one position: {_re}")
+
+            logger.warning(
+                f"[SHADOW-RESUME] gap={_out['gap_min']:.0f}min | "
+                f"resumed={_out['resumed']} gapped={_out['gapped']} "
+                f"abandoned={_out['abandoned']}"
+            )
+        except Exception as _e:
+            logger.warning(f"[SHADOW] restore_open_positions failed: {_e}")
+        return _out
 
     def _archive(self, pos: ShadowPosition) -> None:
         """Move a closed position to results store (in-memory + durable JSONL)."""

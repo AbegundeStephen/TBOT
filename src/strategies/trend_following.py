@@ -674,6 +674,10 @@ class TrendFollowingStrategy(BaseStrategy):
                         "same_direction": (_brc_dir == signal),
                         "reason": "tf_no_continuation_proof",
                     }
+                    logger.debug(
+                        "[LANE-B-DIAG] %s TF: intent SET on id=%s",
+                        getattr(self, "asset", "?"), id(self),
+                    )
                     return 0, 0.0
 
         return signal, confidence
