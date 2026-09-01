@@ -172,6 +172,8 @@ class ShadowPosition:
     be_r: float = 0.75
     breakeven_applied: bool = False
 
+    lane: str = "A"                 # LANES L1: which shadow lane produced this
+
     def _profit_pct(self, price: float) -> float:
         """Current unrealised P&L as a fraction of entry price."""
         if self.entry_price == 0:
@@ -342,6 +344,7 @@ class ShadowPosition:
             ),
             "episode_id": self.episode_id,   # DATA-1 ITEM 1
             "entry_atr":  self.entry_atr,    # FRAME-1 SEG 6: captured at open since 610 ITEM 4, never persisted
+            "lane":       self.lane,         # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
         }
 
     def _net_r(self):
@@ -454,6 +457,8 @@ class ShadowTradingEngine:
         trail_mult: float = 0.8,        # S7c: was hardcoded 1.5
         be_r: float = 0.75,             # S7c: was TP1-touch trigger
         episode_id: str = "",           # DATA-1 ITEM 1B
+        lane: str = "A",                # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
+        bypass_guards: bool = False,    # LANES L1: Lane C only -- see L1b
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -481,7 +486,11 @@ class ShadowTradingEngine:
         now = datetime.now(timezone.utc)
 
         # S5.1 — Dedup: skip if a shadow position already open for same asset+side
-        for _existing in self.open_positions:
+        # LANES L1: Lane C bypasses this. A random control group must hold several
+        # independent samples on one asset at once; deduping it would silently
+        # collapse a 24/day cap into ~6/day and bias the sample toward quiet
+        # periods -- the exact bias the control exists to remove.
+        for _existing in (self.open_positions if not bypass_guards else []):
             if _existing.asset.upper() == asset_key and _existing.side == side:
                 logger.debug(
                     f"[SHADOW] Dedup: {asset_key} {side.upper()} already open, skipping"
@@ -489,7 +498,8 @@ class ShadowTradingEngine:
                 return None
 
         # S5.2 — Cooldown: skip if a shadow closed for this asset within cooldown window
-        _last_close = self._last_close_time.get(asset_key)
+        # LANES L1: bypassed for Lane C, same reasoning as the dedup above.
+        _last_close = None if bypass_guards else self._last_close_time.get(asset_key)
         if _last_close is not None:
             from datetime import timedelta as _td
             _elapsed = (now - _last_close).total_seconds() / 60
@@ -704,6 +714,7 @@ class ShadowTradingEngine:
             stop_source=_t4_stop_source,
             entry_atr=float(atr) if atr else 0.0,   # BATCH-610 ITEM 4
             episode_id=episode_id or "",            # DATA-1 ITEM 1B
+            lane=lane,                              # LANES L1
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
@@ -819,6 +830,47 @@ class ShadowTradingEngine:
                 _f.write(_json.dumps(_rec, default=str) + "\n")
         except Exception as _e:
             logger.debug(f"[SHADOW] archive append failed: {_e}")
+
+        # LANES L5c: one flat row per closed trade alongside the full record.
+        # ~200 bytes vs ~10KB -- a year of every lane fits in ~2MB and opens
+        # instantly in a spreadsheet. The JSONL stays the source of truth;
+        # this is the working file.
+        # LANES: _rec is already pos.to_dict() (assigned above at line 808) --
+        # reused directly rather than recomputing it a second time.
+        try:
+            import csv as _csv, os as _os2
+            _sum_path = _os2.path.join(self._archive_dir, "summary.csv")
+            _new = not _os2.path.exists(_sum_path)
+            _d = _rec
+            _row = {
+                "close_time":   _d.get("close_time"),
+                "lane":         _d.get("lane"),
+                "asset":        _d.get("asset"),
+                "side":         _d.get("side"),
+                "entry_price":  _d.get("entry_price"),
+                "close_price":  _d.get("close_price"),
+                "close_reason": _d.get("close_reason"),
+                "net_pnl_r":    _d.get("net_pnl_r"),
+                "net_pnl_pct":  _d.get("net_pnl_pct"),
+                "mfe_pct":      _d.get("mfe_pct"),
+                "mae_pct":      _d.get("mae_pct"),
+                "bars_open":    _d.get("bars_open"),
+                "brc_kind":     _d.get("brc_kind"),
+                "stop_source":  _d.get("stop_source"),
+                "retest_type":  _d.get("retest_type"),
+                "entry_distance_atr": _d.get("entry_distance_atr"),
+                "regime_name":  _d.get("regime_name"),
+                "trend_angle_deg": (_d.get("composite_state") or {}).get("trend_angle_deg"),
+                "gate_blocked_by": str(_d.get("gate_blocked_by"))[:60],
+                "episode_id":   _d.get("episode_id"),
+            }
+            with open(_sum_path, "a", newline="", encoding="utf-8") as _f:
+                _w = _csv.DictWriter(_f, fieldnames=list(_row.keys()))
+                if _new:
+                    _w.writeheader()
+                _w.writerow(_row)
+        except Exception as _csv_err:
+            logger.debug(f"[SHADOW] summary.csv append failed: {_csv_err}")
 
     def load_state(self, lookback_days: int = 30) -> int:
         """
