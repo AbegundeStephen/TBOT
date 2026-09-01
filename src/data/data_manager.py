@@ -690,6 +690,12 @@ class DataManager:
                                df["timestamp"].dt.tz_localize("UTC").dt.floor("h")
                         _m = _key.map(_fv.set_index("_hr")["volume"])
                         _swapped = int(_m.notna().sum())
+                        # BATCH-A A4: MT5 tick_volume arrives as an integer dtype;
+                        # Binance volumes are floats. Assigning floats into an int
+                        # column raised a FutureWarning with a full array dump on
+                        # every overlay (~3,913 per weekend) and becomes a hard
+                        # error in a future pandas. Cast once, then assign.
+                        df["volume"] = df["volume"].astype("float64")
                         df.loc[_m.notna(), "volume"] = _m[_m.notna()].values
                     logger.info(f"[VOL-SOURCE] BTC: binance overlay on {_swapped}/{len(df)} bars"
                                 + ("" if _swapped else " — tick-volume fallback"))

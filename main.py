@@ -5218,7 +5218,9 @@ class TradingBot:
             # BATCH-610 ITEM 5: the write above is CONDITIONAL. If the asset
             # is not already a key in _current_regime_data, both df_4h and
             # df_1d are silently skipped. Say which happened.
-            logger.info(
+            # BATCH-A A6: N3 closed 28 Aug; this diagnostic printed 4,873
+            # lines. Kept at debug so it can be re-enabled without a rebuild.
+            logger.debug(
                 f"[1D-DIAG] {asset_name}: cache={'yes' if self._df_1d_cache.get(asset_name) is not None else 'NO'} "
                 f"| in_regime_dict={'yes' if asset_name in self._current_regime_data else 'NO'}"
             )
@@ -5917,7 +5919,29 @@ class TradingBot:
                             f"V_SHAPE exception already granted by macro governor."
                         )
                     elif is_counter_trend:
-                        logger.warning(f"[MTF FILTER] ✗ BLOCKED: Counter-trend trade")
+                        # ── BATCH-A A1: ADVISORY CONVERSION (ruled 31 Aug) ──
+                        # allow_counter_trend is False whenever the 4H regime
+                        # reads hard BULLISH/BEARISH (mtf_integration.py:311-320),
+                        # so a clean trend banned every counter-trend trade
+                        # outright. The 18-Aug study on 1,690 proofs measured
+                        # counter-macro proofs at +0.110R vs +0.023R aligned --
+                        # a directional macro read is not evidence of a bad
+                        # trade. Third macro veto made advisory, after the
+                        # governor (20 Aug) and the confidence gate (FRAME-1).
+                        # The shadow still opens either way: in advisory mode
+                        # the live trade and its shadow both exist, which keeps
+                        # the before/after comparison against the existing
+                        # mtf_counter_trend shadow archive intact.
+                        _ct_advisory = bool(
+                            self.config.get("phase_config", {}).get(
+                                "counter_trend_veto_advisory_enabled", False
+                            )
+                        )
+                        _ct_verdict = "ADVISORY" if _ct_advisory else "BLOCKED"
+                        logger.warning(
+                            f"[MTF FILTER] {'⚠ ADVISORY' if _ct_advisory else '✗ BLOCKED'}: "
+                            f"Counter-trend trade"
+                        )
                         logger.info(
                             f"  Signal Direction: {'LONG' if signal == 1 else 'SHORT'}"
                         )
@@ -5926,24 +5950,42 @@ class TradingBot:
                         )
                         logger.info(
                             f"  Reason:           MTF confidence {mtf_regime.get('confidence', 0):.2%} "
-                            f"blocks counter-trend in {regime_str} regime."
+                            f"{'would block' if _ct_advisory else 'blocks'} counter-trend "
+                            f"in {regime_str} regime."
                         )
-                        self._notify_blocked(
-                            asset=asset_name,
-                            signal=signal,
-                            block_source="MTF Counter-Trend",
-                            block_reason=(
-                                f"{'LONG' if signal == 1 else 'SHORT'} rejected in {regime_str} regime "
-                                f"(MTF confidence {mtf_regime.get('confidence', 0):.0%})"
-                            ),
-                            details=details,
-                            price=details.get("price"),
-                        )
+                        try:
+                            from src.utils.gate_ledger import write_gate_decision
+                            write_gate_decision(
+                                details.get("episode_id"), asset_name,
+                                "counter_trend_veto", _ct_verdict,
+                                {"regime": regime_str,
+                                 "confidence": mtf_regime.get("confidence", 0),
+                                 "signal": signal,
+                                 "advisory": _ct_advisory},
+                            )
+                        except Exception:
+                            pass
                         self._shadow_open_blocked(
                             asset_name, signal, details, df, current_price,
                             "mtf_counter_trend", asset_cfg,
                         )
-                        return  # ← Block the trade
+                        if not _ct_advisory:
+                            self._notify_blocked(
+                                asset=asset_name,
+                                signal=signal,
+                                block_source="MTF Counter-Trend",
+                                block_reason=(
+                                    f"{'LONG' if signal == 1 else 'SHORT'} rejected in {regime_str} regime "
+                                    f"(MTF confidence {mtf_regime.get('confidence', 0):.0%})"
+                                ),
+                                details=details,
+                                price=details.get("price"),
+                            )
+                            return  # ← Block the trade
+                        logger.info(
+                            f"[MTF FILTER] {asset_name}: counter-trend ALLOWED "
+                            f"(advisory mode) — signal proceeds to execution."
+                        )
 
                 # --------------------------------------------------------
                 # Filter 2: Max positions limit
@@ -6956,7 +6998,9 @@ class TradingBot:
             # anything (0 [1D] lines in the archive), so we cannot tell whether
             # it succeeds and the result is lost downstream, or whether it is
             # never called on the pass that matters.
-            logger.info(
+            # BATCH-A A6: N3 closed 28 Aug; this diagnostic printed 4,873
+            # lines. Kept at debug so it can be re-enabled without a rebuild.
+            logger.debug(
                 f"[1D-DIAG] {asset_name}: fetch returned "
                 f"{0 if df_1d is None or df_1d.empty else len(df_1d)} bars"
             )
