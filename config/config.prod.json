@@ -1518,7 +1518,14 @@
     "runner_atr_mult_flat": 2.0,
     "btc_flow_harvester_enabled": true,
     "asset_aware_ceiling_enabled": true,
-    "dead_judge_streak_n": 20
+    "dead_judge_streak_n": 20,
+    "lane_b_enabled": true,
+    "lane_c_enabled": true,
+    "lane_c_per_asset_per_day": 4,
+    "lane_c_biased_pct": 0.30,
+    "p1_refusal_ledger_enabled": true,
+    "trend_angle_capture_enabled": true,
+    "trend_angle_period": 50
   },
   "btc_volume_source": "binance"
 }

@@ -135,6 +135,9 @@ class CompositeState:
     distance_zscore: float = 0.0
     squeeze_active: bool = False
     squeeze_strength: float = 0.0
+    trend_angle_deg: float = 0.0        # MEASURE M3: normalised 1H regression angle
+    trend_angle_deg_4h: float = 0.0     # MEASURE M3: same on the 4H frame
+    trend_angle_r2: float = 0.0         # MEASURE M3: fit quality 0..1 -- a steep angle on a noisy fit means nothing
     coiled_spring: bool = False
     reversal_imminent: bool = False
     inside_bar: bool = False

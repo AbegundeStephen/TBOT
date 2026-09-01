@@ -437,6 +437,8 @@ class TrendFollowingStrategy(BaseStrategy):
 
     def _generate_live_signal(self, df: pd.DataFrame, df_4h: pd.DataFrame = None, silent: bool = False, composite_state=None) -> tuple[int, float]:
         """Generate live signal without lookahead"""
+        # LANES L2: clear last cycle's intent so a stale one is never reused.
+        self._lane_b_intent = None
         if len(df) < self.get_warmup_period():
             return 0, 0.0
 
@@ -654,6 +656,24 @@ class TrendFollowingStrategy(BaseStrategy):
                             getattr(self, "name", "TF"), signal, _brc_ok,
                             _brc_kind, _brc_dir, _brc_age, _brc_max_age,
                         )
+                    # ── LANES L2: record the intent so main.py can open a Lane B
+                    # shadow. The signal dies here, inside the strategy, before
+                    # the council and before any existing shadow site -- so this
+                    # near-miss has never been recorded anywhere. 838 events last
+                    # week, 650 of them a same-direction MR_REV proof the trend
+                    # lane was not allowed to use.
+                    # Stashed on the instance rather than returned, so no caller
+                    # signature changes and no other lane is affected.
+                    self._lane_b_intent = {
+                        "signal": signal,
+                        "confidence": confidence,
+                        "brc_kind": _brc_kind,
+                        "brc_direction": _brc_dir,
+                        "brc_age": _brc_age,
+                        "brc_confirmed": _brc_ok,
+                        "same_direction": (_brc_dir == signal),
+                        "reason": "tf_no_continuation_proof",
+                    }
                     return 0, 0.0
 
         return signal, confidence

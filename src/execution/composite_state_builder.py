@@ -1281,6 +1281,56 @@ class CompositeStateBuilder:
                 state.activity_ladder_dist_atr if state.activity_ladder_dist_atr is not None else -1.0,
             )
 
+        # ── MEASURE M3: trend angle (measurement only) ───────────────────
+        # Normalised regression slope in degrees. Scaling follows the March
+        # math_utils convention so historical intent is preserved: 0.1% price
+        # change per bar maps to 45 degrees. r2 is carried alongside because
+        # a steep angle on a poor fit is noise, not a trend -- any future
+        # rule must read both or neither.
+        def _angle(_series, _period=50):
+            try:
+                import numpy as _np
+                if _series is None or len(_series) < _period:
+                    return 0.0, 0.0
+                _y = _np.asarray(_series[-_period:], dtype=float)
+                _x = _np.arange(_period, dtype=float)
+                _avg = float(_np.mean(_y))
+                if _avg == 0:
+                    return 0.0, 0.0
+                _n = _period
+                _den = _n * float(_np.sum(_x * _x)) - float(_np.sum(_x)) ** 2
+                if _den == 0:
+                    return 0.0, 0.0
+                _slope = (
+                    _n * float(_np.sum(_x * _y))
+                    - float(_np.sum(_x)) * float(_np.sum(_y))
+                ) / _den
+                _norm = (_slope / _avg) * 100.0
+                _deg = float(_np.degrees(_np.arctan(_norm * 10.0)))
+                _pred = _slope * _x + (float(_np.mean(_y)) - _slope * float(_np.mean(_x)))
+                _ss_res = float(_np.sum((_y - _pred) ** 2))
+                _ss_tot = float(_np.sum((_y - _avg) ** 2))
+                _r2 = 1.0 - (_ss_res / _ss_tot) if _ss_tot > 0 else 0.0
+                return round(_deg, 2), round(max(0.0, min(1.0, _r2)), 3)
+            except Exception:
+                return 0.0, 0.0
+
+        try:
+            _a1, _r1 = _angle(df["close"].values if df is not None else None)
+            state.trend_angle_deg = _a1
+            state.trend_angle_r2 = _r1
+            if df_4h is not None and len(df_4h) >= 50:
+                _a4, _ = _angle(df_4h["close"].values)
+                state.trend_angle_deg_4h = _a4
+        except Exception:
+            pass
+
+        logger.info(
+            "[ANGLE] %s: 1H=%.1f deg (r2=%.2f) 4H=%.1f deg",
+            self.asset_type, state.trend_angle_deg,
+            state.trend_angle_r2, state.trend_angle_deg_4h,
+        )
+
         # ═══════════════════════════════════════════════════════════════
         # TRAJECTORY LAYER (Plan 1B) — track a setup across cycles.
         # Writes setup_* readouts. CONSUMED: BRC reads setup_active/kind/dir
@@ -1661,18 +1711,63 @@ class CompositeStateBuilder:
                         except Exception:
                             _p1_weak = False
 
+                        # ── MEASURE M1: is this a NEW level or a re-poke? ──────
+                        # Cross-referencing 48 refusals against [SETUP-BORN] on
+                        # 1-Sept showed three behaviours wearing one label:
+                        #   DELAYED  -- USTEC 29178 refused 14:02/15:00, BORN 16:03
+                        #   RE-POKE  -- BTC 78499 BORN 00:00, then refused 6x after
+                        #   PREVENTED -- the residual, the only genuine cost
+                        # "REFUSED" read as prevention and was misread twice.
+                        # Name what actually happened.
+                        # LANES/MEASURE: the spec assumed a flat
+                        # self._setup_queue[self.asset_type] accessor; the real
+                        # structure is the per-lane `_q` list already in scope
+                        # here (this whole block runs inside _process_lane, and
+                        # the [SETUP-DUPLICATE] check just below already walks
+                        # this exact `_q` the same way) -- reused directly
+                        # rather than guessing a second accessor.
+                        _p1_existing = False
+                        if _p1_weak:
+                            try:
+                                for _s in _q:
+                                    if (
+                                        _s.get("kind") == _candidate["kind"]
+                                        and int(_s.get("dir", 0)) == int(_candidate["dir"])
+                                        and _s.get("ref") is not None
+                                        and abs(float(_s["ref"]) - float(_f1_ref))
+                                            <= (float(_atr or 0.0) * 0.10)
+                                    ):
+                                        _p1_existing = True
+                                        break
+                            except Exception:
+                                _p1_existing = False
+                        _p1_class = "RE-POKE (setup already live)" if _p1_existing \
+                            else "NO SETUP YET"
+
                         if _p1_weak:
                             logger.info(
                                 "[P1-MAGNITUDE] %s: %s dir=%+d ref=%.5g "
                                 "px=%.5g dist=%.5g band=%.5g (%.2f x ATR "
-                                "x %.1f tier=%s) — WEAK BREAK%s",
+                                "x %.1f tier=%s) — WEAK BREAK%s class=%s",
                                 self.asset_type, _candidate["kind"],
                                 int(_candidate["dir"]), _f1_ref, _f1_px,
                                 _p1_dist if _p1_dist is not None else -1.0,
                                 _p1_band, _p1_mult, _p1_scale, _f1_tier,
                                 " — REFUSED" if _p1_on
                                 else " — would refuse (filter OFF)",
+                                _p1_class,
                             )
+                            # MEASURE M2: same numbers, queryable.
+                            try:
+                                from src.utils.p1_ledger import write_refusal
+                                write_refusal(
+                                    self.asset_type, _candidate["kind"],
+                                    _candidate["dir"], _f1_ref, _f1_px,
+                                    _p1_dist, _p1_band, _f1_tier,
+                                    _p1_mult, _p1_scale, _p1_class, _atr,
+                                )
+                            except Exception:
+                                pass
 
                         if _p1_weak and _p1_on:
                             pass          # refused: no setup is created

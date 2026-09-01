@@ -2792,6 +2792,8 @@ class TradingBot:
         current_price: float,
         gate_label: str,
         asset_cfg: dict,
+        lane: str = "A",              # LANES L1: default keeps all 12 existing sites on Lane A
+        bypass_guards: bool = False,  # LANES L1: Lane C only
     ):
         """
         Open a shadow (virtual) position for any signal that was blocked
@@ -2880,6 +2882,26 @@ class TradingBot:
                         f"[SHADOW-S6] {asset_name}: composite_state EMPTY — "
                         f"shadow record will be blind"
                     )
+
+            # LANES L5b: the zone ladders are ~70% of a record's size (89 4H
+            # rungs + 57 1D rungs) and are the field least likely to be queried
+            # on a control-group trade. Keep the 10 nearest rungs for Lane C;
+            # Lanes A and B keep everything.
+            if lane.startswith("C") and isinstance(_comp_state_dict, dict):
+                for _lk in ("zone_ladder_4h", "zone_ladder_1d"):
+                    _lv = _comp_state_dict.get(_lk)
+                    if isinstance(_lv, list) and len(_lv) > 10:
+                        try:
+                            _sorted = sorted(
+                                _lv,
+                                key=lambda z: abs(float(z.get("price", 0)) - current_price)
+                                if isinstance(z, dict) else 1e18,
+                            )
+                            _comp_state_dict[_lk] = _sorted[:10]
+                            _comp_state_dict[_lk + "_trimmed"] = True
+                        except Exception:
+                            pass
+
             self.shadow_trader.open_position(
                 asset=asset_name,
                 side=_side,
@@ -2894,6 +2916,8 @@ class TradingBot:
                 trail_mult=_trail_mult,   # S7c
                 be_r=_be_r,               # S7c
                 episode_id=self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5
+                lane=lane,                       # LANES L1
+                bypass_guards=bypass_guards,     # LANES L1
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -3914,6 +3938,21 @@ class TradingBot:
                     f"  Current Modes:       {active_modes}"
                 )  # <-- Now uses active_modes
 
+                # ── LANES L4b: Lane C control group ──────────────────────────
+                # Random entries, managed by the SAME exit stack as everything
+                # else. This is the control: if the bot's chosen entries do not
+                # beat a coin flip under identical management, the entry logic is
+                # adding nothing -- and nothing has ever tested that.
+                # 70% pure coin-flip (C-RANDOM, the true control), 30% weighted
+                # toward the current Livermore chapter (C-BIASED, which asks
+                # whether chapter alignment alone beats chance).
+                # EXPECT LANE C TO LOSE ON AVERAGE. It pays the spread and has no
+                # edge. Red records here are the design working.
+                try:
+                    self._lane_c_cycle()
+                except Exception as _lc_err:
+                    logger.warning(f"[LANE-C] generator failed: {_lc_err}")
+
                 # DATA-4 ITEM 4: path capture. Runs once per ~5-minute cycle,
                 # after this cycle's decisions are in, so every open episode
                 # gets one real observed price point per cycle -- no post-hoc
@@ -3983,6 +4022,91 @@ class TradingBot:
         self._pending_episode_ids[asset_name] = (_ep, time.time())
         return _ep
 
+    def _lane_c_cycle(self):
+        """LANES L4c: open random control-group shadows on a per-asset daily cap.
+
+        Fires alongside live positions by design (Desire's ruling, 1 Sept) --
+        suppressing Lane C while a real trade is open would bias the control
+        toward quiet periods, which is exactly the bias it exists to remove.
+        """
+        _cfg = self.config.get("phase_config", {}) or {}
+        if not _cfg.get("lane_c_enabled", False):
+            return
+        _per_asset_per_day = int(_cfg.get("lane_c_per_asset_per_day", 4))
+        _biased_pct = float(_cfg.get("lane_c_biased_pct", 0.30))
+        if _per_asset_per_day <= 0:
+            return
+
+        import random as _rnd
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_lane_c_day", None) != _today:
+            self._lane_c_day = _today
+            self._lane_c_counts = {}
+            logger.info(f"[LANE-C] new day {_today} — counters reset")
+
+        for asset_name, asset_cfg in self.config.get("assets", {}).items():
+            try:
+                if not asset_cfg.get("enabled", False):
+                    continue
+                if self._lane_c_counts.get(asset_name, 0) >= _per_asset_per_day:
+                    continue
+
+                # Spread the quota across the session rather than firing it all
+                # in the first hour: one chance per cycle, sized so the expected
+                # count lands near the cap over a ~14h trading day.
+                _cycles_per_day = 168          # ~5 min cycles over 14h
+                if _rnd.random() > (_per_asset_per_day / _cycles_per_day):
+                    continue
+
+                df = self._df_1h_cache.get(asset_name)
+                if df is None or len(df) < 30:
+                    continue
+                _price = float(df["close"].iloc[-1])
+                if _price <= 0:
+                    continue
+
+                if _rnd.random() < _biased_pct:
+                    _lane_tag = "C-BIASED"
+                    _agg = self.aggregators.get(asset_name)
+                    # LANES L4c: council/hybrid-mode assets store a dict here
+                    # ({"council":..., "livermore":...}), not a bare aggregator --
+                    # unwrap the same way _shadow_open_blocked already does
+                    # (main.py ~2852), otherwise this silently falls through to
+                    # random for every council/hybrid asset.
+                    if isinstance(_agg, dict):
+                        _agg = _agg.get("performance") or _agg.get("livermore")
+                    _lsm = None
+                    if _agg is not None and getattr(_agg, "_cached_composite", None) is not None:
+                        _lsm = getattr(_agg._cached_composite, "livermore_state_1h", None)
+                    if _lsm in ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_REBOUND"):
+                        _signal = 1
+                    elif _lsm in ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_RETRACEMENT"):
+                        _signal = -1
+                    else:
+                        _signal = _rnd.choice([1, -1])
+                else:
+                    _lane_tag = "C-RANDOM"
+                    _signal = _rnd.choice([1, -1])
+
+                _details = {
+                    "reasoning": f"lane_c_control_{_lane_tag.lower()}",
+                    "price": _price,
+                    "aggregator_mode": "CONTROL",
+                }
+                logger.info(
+                    f"[LANE-C] {asset_name}: {_lane_tag} "
+                    f"{'LONG' if _signal > 0 else 'SHORT'} @ {_price:.5f} "
+                    f"({self._lane_c_counts.get(asset_name, 0) + 1}/{_per_asset_per_day} today)"
+                )
+                self._shadow_open_blocked(
+                    asset_name, _signal, _details, df, _price,
+                    f"lane_c_{_lane_tag.lower()}", asset_cfg,
+                    lane=_lane_tag, bypass_guards=True,
+                )
+                self._lane_c_counts[asset_name] = self._lane_c_counts.get(asset_name, 0) + 1
+            except Exception as _lc_asset_err:
+                logger.debug(f"[LANE-C] {asset_name} skipped: {_lc_asset_err}")
+
     def _capture_open_position_paths(self):
         """DATA-4 ITEM 4: record one real price observation per open episode
         per cycle, for both live and shadow positions. Self-contained --
@@ -4024,10 +4148,20 @@ class TradingBot:
 
         # Shadow positions -- current_price is maintained by the shadow engine.
         if getattr(self, "shadow_trader", None):
+            _now_min = datetime.now(timezone.utc).minute
             for pos in list(self.shadow_trader.open_positions):
                 try:
                     if not getattr(pos, "episode_id", None):
                         _pc_missing += 1
+                        continue
+                    # LANES L5a: Lane C samples every ~30 min instead of every
+                    # cycle. A control group needs its shape, not its texture --
+                    # and at 24 Lane C trades/day, full-rate sampling would
+                    # dominate both the path files and the per-cycle write cost.
+                    # Lanes A and B keep 5-min fidelity: those are the records
+                    # that get replayed under alternative exit rules.
+                    _lane = getattr(pos, "lane", "A")
+                    if _lane.startswith("C") and (_now_min % 30) >= 5:
                         continue
                     write_path_point(
                         pos.episode_id, pos.asset,
@@ -5467,6 +5601,51 @@ class TradingBot:
                 _episode_id = f"{asset_name}-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{_uuid.uuid4().hex[:6]}"
             details["episode_id"] = _episode_id
             logger.info(f"[EPISODE] {asset_name}: {_episode_id} opened")
+
+            # ── LANES L4a: Lane B capture ────────────────────────────────────
+            # Both lanes stash a suppressed intent when a completed proof exists
+            # but belongs to the other lane. One shadow per PROOF, not per cycle
+            # -- the same suppression re-fires every ~5 minutes for hours, and
+            # without this guard 650 cycles would look like 650 samples.
+            try:
+                for _lane_obj, _lane_tag in (
+                    (self.strategies.get(asset_name, {}).get("trend_following"), "B-TF"),
+                    (self.strategies.get(asset_name, {}).get("mean_reversion"), "B-MR"),
+                ):
+                    _intent = getattr(_lane_obj, "_lane_b_intent", None) if _lane_obj else None
+                    if not _intent or not _intent.get("signal"):
+                        continue
+                    _proof_key = (
+                        f"{asset_name}|{_lane_tag}|{_intent.get('brc_kind')}"
+                        f"|{_intent.get('brc_direction')}|{details.get('setup_ref', 0)}"
+                    )
+                    if not hasattr(self, "_lane_b_seen"):
+                        self._lane_b_seen = {}
+                    if _proof_key in self._lane_b_seen:
+                        continue
+                    self._lane_b_seen[_proof_key] = time.time()
+                    if len(self._lane_b_seen) > 500:
+                        _cutoff = time.time() - 86400
+                        self._lane_b_seen = {
+                            k: v for k, v in self._lane_b_seen.items() if v > _cutoff
+                        }
+                    logger.info(
+                        f"[LANE-B] {asset_name}: capturing {_lane_tag} suppressed "
+                        f"signal={_intent['signal']:+d} "
+                        f"(proof={_intent.get('brc_kind')} "
+                        f"dir={_intent.get('brc_direction')} "
+                        f"same_dir={_intent.get('same_direction')})"
+                    )
+                    _lane_b_details = dict(details)
+                    _lane_b_details["reasoning"] = _intent["reason"]
+                    _lane_b_details["lane_b_intent"] = _intent
+                    self._shadow_open_blocked(
+                        asset_name, _intent["signal"], _lane_b_details, df,
+                        current_price, f"lane_b_{_intent['reason']}", asset_cfg,
+                        lane=_lane_tag,
+                    )
+            except Exception as _lb_err:
+                logger.warning(f"[LANE-B] {asset_name}: capture failed: {_lb_err}")
 
             # Dashboard Charts section: save the exact same decision chart
             # /chart renders on demand, automatically every cycle, so the
@@ -7937,6 +8116,22 @@ class TradingBot:
                     f"[EP-VALID] {_day}: {_missing_atr} episode(s) missing "
                     f"entry_atr — replay cannot normalise these"
                 )
+
+            # LANES L5d: growth must be visible in week one, not month three.
+            try:
+                import os as _os
+                if datetime.now(timezone.utc).weekday() == 0:   # Monday
+                    _sizes = {}
+                    for _dname in ("logs/paths", "logs/shadow", "logs/episodes",
+                                   "logs/gates", "logs/p1_refusals"):
+                        _tot = 0
+                        if _os.path.isdir(_dname):
+                            for _f2 in _os.listdir(_dname):
+                                _tot += _os.path.getsize(_os.path.join(_dname, _f2))
+                        _sizes[_dname] = round(_tot / 1048576.0, 1)
+                    logger.warning(f"[LANES-SIZE] weekly: {_sizes} MB")
+            except Exception:
+                pass
         except Exception as _ve:
             logger.warning(f"[EP-VALID] validation failed: {_ve}")
 
