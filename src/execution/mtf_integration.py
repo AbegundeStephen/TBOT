@@ -183,7 +183,12 @@ class MTFRegimeIntegration:
             logger.info(f"[MTF DB] ✓ Logged {regime_status.asset} regime to database")
 
         except Exception as e:
-            logger.error(f"[MTF DB] Failed to log regime: {e}")
+            # BATCH-A A5: the hosted DB returns an HTML error page on outage,
+            # so `e` carried a full page into the log (~2KB x10 last weekend).
+            # Telemetry write only -- the regime is computed locally and this
+            # failure never affects a trading decision.
+            _msg = str(e).replace("\n", " ")[:200]
+            logger.error(f"[MTF DB] Failed to log regime: {_msg}")
 
     def _update_ai_context(self, regime_status: RegimeStatus): # Updated parameter type
         """

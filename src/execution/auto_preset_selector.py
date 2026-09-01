@@ -138,54 +138,30 @@ class DynamicPresetSelector:
                 logger.warning(f"[REGIME] {asset_name}: Failed to calculate metrics")
                 return None
 
-            # ================================================================
-            # DIRTY RANGE OVERRIDE: Persistent Sideways Chop
-            # Force Mean Reversion preset during low-quality sideways markets.
-            # ================================================================
+            # BATCH-A A2: DIRTY RANGE OVERRIDE REMOVED (ruled 31 Aug).
+            # ADX<20 for 4 bars + volatility 0.45-1.0 + volume_trend<=5 forced
+            # the "mr" preset and returned before the multi-factor scoring below
+            # ever ran -- 134 fires last week, no ratification trail. Presets are
+            # now chosen by score in all conditions. The scoring block below
+            # already rewards low volatility (+15) and weak ADX, so genuine chop
+            # still tends toward mean reversion; it now has to earn it.
+            #
+            # adx_current/adx_prev3/adx_slope_4bar/adx_is_rising are kept --
+            # they were NOT part of the removed override logic itself. The
+            # REGIME ALIGNMENT VETO section further down (and its gate-ledger
+            # recording, DATA-4 ITEM 1) reuses this exact slope computation;
+            # deleting it as the spec's literal instruction described would
+            # raise NameError on every cycle. Confirmed directly: adx_prev1,
+            # adx_prev2, volatility_ratio and volume_trend (the four variables
+            # that fed ONLY the removed override condition) are unused
+            # anywhere else in this file and were safe to remove.
             adx_current = metrics['adx_series'].iloc[-1]
-            adx_prev1 = metrics['adx_series'].iloc[-2]
-            adx_prev2 = metrics['adx_series'].iloc[-3]
             adx_prev3 = metrics['adx_series'].iloc[-4]
-            volatility_ratio = metrics['volatility_ratio']
-            volume_trend = metrics.get('volume_trend', 0)
-            
-            # If ADX is rising meaningfully (> 2 pts over 4 bars), a new trend is
-            # establishing — skip the chop override regardless of the raw ADX level.
+
+            # Rising ADX (> 2 pts over 4 bars) signals a new trend establishing.
+            # Read by the Regime Alignment Veto section below.
             adx_slope_4bar = adx_current - adx_prev3
             adx_is_rising = adx_slope_4bar > 2.0
-
-            if (
-                adx_current < 20 and
-                adx_prev1 < 20 and
-                adx_prev2 < 20 and
-                adx_prev3 < 20 and
-                not adx_is_rising and
-                0.45 <= volatility_ratio <= 1.0 and
-                volume_trend <= 5.0
-            ):
-                logger.info(f"[PRESET] {asset_name} Persistent Sideways Chop: Mean Reversion forced.")
-                
-                # Update state to ensure the override is persistent
-                old_preset = self.current_presets.get(asset_name)
-                if old_preset != "mr":
-                    self._record_preset_change(
-                        asset=asset_name,
-                        old_preset=old_preset,
-                        new_preset="mr",
-                        reason="Dirty Range Override: Persistent Sideways Chop (ADX < 20 for 4 bars)",
-                        metrics=metrics
-                    )
-                    # Send notification for forced change
-                    self._send_preset_change_notification(
-                        asset=asset_name,
-                        old_preset=old_preset,
-                        new_preset="mr",
-                        reason="Forced Mean Reversion: Low-quality sideways market",
-                        metrics=metrics,
-                        score=0
-                    )
-                
-                return "mr"
 
             # Extract MTF Regime Context for Gating
             regime_name = "NEUTRAL"
