@@ -1449,6 +1449,9 @@
     "dead_ceiling_discount": 0.15,
     "per_tick_livermore_enabled": true,
     "bb_kc_squeeze_gate_enabled": true,
+    "nr7_gate_enabled": true,
+    "continuation_targets_enabled": false,
+    "min_sl_pct_enabled": false,
     "min_rr_enabled": true,
     "single_tp_blend_enabled": true,
     "rr_gate_consistency_enabled": true,
@@ -1510,7 +1513,9 @@
     "lane_c_biased_pct": 0.30,
     "p1_refusal_ledger_enabled": true,
     "trend_angle_capture_enabled": true,
-    "trend_angle_period": 50
+    "trend_angle_period": 50,
+    "shadow_persist_enabled": true,
+    "shadow_resume_max_gap_min": 720
   },
   "btc_volume_source": "binance"
 }

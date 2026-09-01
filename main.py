@@ -3690,6 +3690,25 @@ class TradingBot:
             # T3.1: Shadow candle-tier update — every trading cycle (~5min)
             try:
                 if self.shadow_trader and current_prices:
+                    # MEASURE-2 S1: resume shadows open at the last shutdown.
+                    # Runs on the FIRST cycle only, here rather than at engine
+                    # construction (main.py:8326) because current_prices does
+                    # not exist until this point -- and the gap check needs a
+                    # live price to know whether a stop was hit while down.
+                    if not getattr(self, "_shadow_resume_done", False):
+                        self._shadow_resume_done = True
+                        try:
+                            _rs = self.shadow_trader.restore_open_positions(
+                                price_map=current_prices,
+                                max_gap_min=int(
+                                    self.config.get("phase_config", {})
+                                    .get("shadow_resume_max_gap_min", 720)
+                                ),
+                            )
+                            if any(_rs.get(k) for k in ("resumed", "gapped", "abandoned")):
+                                logger.warning(f"[SHADOW-RESUME] {_rs}")
+                        except Exception as _rs_err:
+                            logger.warning(f"[SHADOW] restore skipped: {_rs_err}")
                     self.shadow_trader.candle_update_all(current_prices)
                     self.shadow_trader.tick_update_all(current_prices)
                     logger.debug(f"[SHADOW] {self.shadow_trader.summary}")
@@ -3962,6 +3981,19 @@ class TradingBot:
                 except Exception as _pc_err:
                     logger.warning(f"[PATH-CAPTURE] Skipped this cycle: {_pc_err}")
 
+                # MEASURE-2 S1: snapshot open shadows every cycle. taskkill /F
+                # gives no shutdown hook, so this is the only point at which
+                # state can be preserved. Six shadows opened on 1-Sept and only
+                # two closed records exist -- four restarts ate the rest.
+                try:
+                    if getattr(self, "shadow_trader", None):
+                        _n_saved = self.shadow_trader.save_open_positions()
+                    if getattr(self, "scalp_alert_engine", None) and \
+                       getattr(self.scalp_alert_engine, "_shadow", None):
+                        self.scalp_alert_engine._shadow.save_open_positions()
+                except Exception as _sp_err:
+                    logger.debug(f"[SHADOW] periodic save skipped: {_sp_err}")
+
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
 
@@ -4044,6 +4076,22 @@ class TradingBot:
             self._lane_c_counts = {}
             logger.info(f"[LANE-C] new day {_today} — counters reset")
 
+        # MEASURE-2 S2: 168 assumed a 14h session. The bot runs 24h, and
+        # measured cycle spacing on 1-Sept was ~5m50s (17:18:21, 17:24:13,
+        # 17:29:59, 17:35:48 ...) = ~247/day. Derive it from the observed
+        # inter-cycle interval instead of guessing, so it cannot drift again
+        # when cycle timing changes. Measured ONCE per call (not per asset
+        # inside the loop below) -- this method runs once per trading cycle,
+        # so per-asset measurement would collapse to ~0s for every asset
+        # after the first.
+        _now_ts = time.time()
+        _last_ts = getattr(self, "_lane_c_last_cycle_ts", None)
+        self._lane_c_last_cycle_ts = _now_ts
+        _interval_s = (_now_ts - _last_ts) if _last_ts else 350.0
+        if not (60.0 <= _interval_s <= 1800.0):
+            _interval_s = 350.0          # sane fallback
+        _cycles_per_day = max(1.0, 86400.0 / _interval_s)
+
         for asset_name, asset_cfg in self.config.get("assets", {}).items():
             try:
                 if not asset_cfg.get("enabled", False):
@@ -4053,8 +4101,7 @@ class TradingBot:
 
                 # Spread the quota across the session rather than firing it all
                 # in the first hour: one chance per cycle, sized so the expected
-                # count lands near the cap over a ~14h trading day.
-                _cycles_per_day = 168          # ~5 min cycles over 14h
+                # count lands near the cap over a ~24h trading day.
                 if _rnd.random() > (_per_asset_per_day / _cycles_per_day):
                     continue
 
@@ -5613,6 +5660,20 @@ class TradingBot:
                     (self.strategies.get(asset_name, {}).get("mean_reversion"), "B-MR"),
                 ):
                     _intent = getattr(_lane_obj, "_lane_b_intent", None) if _lane_obj else None
+                    # MEASURE-2 S3: Lane B has never fired. Two candidates:
+                    #   (A) no ownership suppressions have occurred at all
+                    #   (B) the aggregator runs its OWN strategy instances, so
+                    #       the intent is set on one object and read from another
+                    # Log enough to tell them apart instead of guessing. Fires
+                    # once per asset per cycle at DEBUG; promote to INFO for a
+                    # day if the question is still open.
+                    logger.debug(
+                        "[LANE-B-DIAG] %s %s: obj=%s id=%s intent=%s",
+                        asset_name, _lane_tag,
+                        type(_lane_obj).__name__ if _lane_obj else "None",
+                        id(_lane_obj) if _lane_obj else 0,
+                        "SET" if _intent else "none",
+                    )
                     if not _intent or not _intent.get("signal"):
                         continue
                     _proof_key = (

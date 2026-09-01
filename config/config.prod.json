@@ -891,7 +891,7 @@
           "class_weight": "balanced_subsample"
         },
         "mr_mode2_counter_trend_enabled": true,
-        "mr_mode3_climax_fade_enabled": true
+        "mr_mode3_climax_fade_enabled": false
       }
     },
     "trend_following": {
@@ -1465,14 +1465,16 @@
     "bb_kc_squeeze_gate_enabled": true,
     "nr7_gate_enabled": true,
     "continuation_targets_enabled": false,
-    "min_sl_pct_enabled": true,
-    "min_rr_enabled": true,
+    "min_sl_pct_enabled": false,
+    "min_rr_enabled": false,
     "single_tp_blend_enabled": true,
     "rr_gate_consistency_enabled": true,
     "pullback_completion_enabled": false,
     "mfe_logging_enabled": true,
     "partials_enabled": false,
     "pyramiding_enabled": false,
+    "ai_third_path_structural_anchor_enabled": false,
+    "ai_validator_gates_performance_mode": false,
     "mr_mode2_counter_trend_enabled": true,
     "mr_mode3_climax_fade_enabled": true,
     "structural_stops_enabled": true,
@@ -1481,7 +1483,7 @@
     "vtm_structural_exit_awareness_enabled": false,
     "ml_livermore_features_enabled": false,
     "council_min_score_margin": 0.35,
-    "council_trend_judge_livermore_confirmation_enabled": true,
+    "council_trend_judge_livermore_confirmation_enabled": false,
     "council_lifecycle_livermore_guard_enabled": true,
     "strategy_livermore_awareness_enabled": false,
     "pyramid_livermore_maturity_gate_enabled": true,
@@ -1525,7 +1527,10 @@
     "lane_c_biased_pct": 0.30,
     "p1_refusal_ledger_enabled": true,
     "trend_angle_capture_enabled": true,
-    "trend_angle_period": 50
+    "trend_angle_period": 50,
+    "shadow_persist_enabled": true,
+    "shadow_resume_max_gap_min": 720
   },
   "btc_volume_source": "binance"
 }
+

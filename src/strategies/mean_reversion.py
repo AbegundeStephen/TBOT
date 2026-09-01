@@ -883,6 +883,10 @@ class MeanReversionStrategy(BaseStrategy):
                         "same_direction": (_brc_dir2 == _intended_dir),
                         "reason": "mr_no_reversal_proof",
                     }
+                    logger.debug(
+                        "[LANE-B-DIAG] %s MR: intent SET on id=%s",
+                        getattr(self, "asset", "?"), id(self),
+                    )
                     return 0, 0.0
                 logger.info(
                     "[MR Mode2] %s: break-retest-close confirmed dir=%+d — proof met.",

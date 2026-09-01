@@ -399,6 +399,9 @@ class CompositeState:
             "distance_zscore",
             "squeeze_strength",
             "activity_compression",
+            "trend_angle_deg",        # MEASURE-2 S4: regression output -- NaN on degenerate series
+            "trend_angle_deg_4h",     # MEASURE-2 S4
+            "trend_angle_r2",         # MEASURE-2 S4
             "effort_result_zscore",
             "divergence_strength",
             "rejection_strength",
