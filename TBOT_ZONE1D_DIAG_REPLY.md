@@ -86,4 +86,71 @@ itself — a different investigation, not this one.
 
 ---
 
+## Round 2 result — confirmed, not a guess
+
+The `GATE CLOSED` line fired on every asset, every cycle, with the **same
+`id(self)` as that asset's own working 4H line**:
+
+```
+[ZONE-DIAG] EURUSD 4H: store=561 cands=48 above=42 below=6 px=1.15869 id=2314298167120
+[ZONE-DIAG] EURUSD 1D: GATE CLOSED (id=2314298167120) — governor_data['df_1d'] is None ...
+[ZONE-DIAG] BTC 4H: store=602 cands=90 above=34 below=56 px=77130.79 id=2314197735792
+[ZONE-DIAG] BTC 1D: GATE CLOSED (id=2314197735792) — governor_data['df_1d'] is None ...
+```
+(GOLD, USTEC, USOIL identical pattern.)
+
+This is the same aggregator instance, in the same `_build_composite_state()`
+call, where `df_4h` arrives populated and `df_1d` does not. That rules out an
+instance mismatch entirely — it's the same object.
+
+`_build_composite_state` has two live council-mode call sites, both carrying
+an identical "DATA-1 Item 7" top-up (`if mtf_regime.get("df_1d") is None:
+mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)`):
+
+- **site2**, `trade_asset()` (main.py:5654-5674) — runs *after* its own
+  fresh `self._df_1d_cache[asset_name] = self._fetch_1d_data(asset_name)`
+  fetch in the same method call (main.py:5517).
+- **site3**, `_update_asset_signal()` (main.py:7619-7639) — and critically,
+  `_update_asset_signal()` runs **before** `trade_asset()` every cycle
+  (main.py:3751 vs :3972). If site3 is the one firing, it's reading
+  whatever `self._df_1d_cache` held before *this* cycle's fetch ran —
+  either stale-by-one-cycle, or genuinely empty if the cache isn't
+  surviving between cycles.
+
+Since both sites' top-up code is identical, I can't yet tell from the
+`GATE CLOSED` line alone which one is producing it, or whether the cache is
+merely stale-by-a-cycle (would resolve as trade_asset catches up) versus
+never actually persisting (would need a real fix). This also revisits a
+"Batch 610" finding that already tried a similar top-up and believed it
+had landed — worth knowing this is the second time this exact symptom has
+needed a fix here.
+
+## Round 3 — shipped
+
+Added one more temporary line to each call site (not inside
+`_build_composite_state` this time — directly at site2 and site3), tagging
+which one fires and showing both `self._df_1d_cache.get(asset_name)` and
+`mtf_regime.get("df_1d")` at that exact point:
+
+```
+[ZONE-DIAG] <asset> site2(trade_asset): df_1d_cache=<present|None> mtf_df_1d=<present|None>
+[ZONE-DIAG] <asset> site3(_update_asset_signal): df_1d_cache=<present|None> mtf_df_1d=<present|None>
+```
+
+Reading it:
+
+| Pattern | Meaning |
+|---|---|
+| site2 shows `df_1d_cache=None` | the fetch/cache write itself is failing for this asset — contradicts the "fetch succeeds" finding and needs re-checking directly |
+| site2 shows `df_1d_cache=present` but only site3 logs `GATE CLOSED` | confirms the cross-pass timing gap: `_update_asset_signal` reads before `trade_asset` refreshes the cache each cycle — fix is either reordering the two passes or giving `_update_asset_signal` its own guaranteed-fresh read |
+| both sites show `df_1d_cache=present` yet `_build_composite_state` still logs `df_1d is None` | the top-up itself, or the dict identity between top-up and build call, has a bug — narrower fix, inside `_build_composite_state`'s own read |
+
+Same restart-and-capture as before:
+
+```powershell
+Select-String -Path logs\trading_bot.log -Pattern "ZONE-DIAG" | Select -Last 30 | ForEach-Object { ($_.Line -split " - ",4)[3] }
+```
+
+---
+
 Compiled, imported, JSON/py_compile clean. Committed and pushed.

@@ -5666,6 +5666,17 @@ class TradingBot:
                         mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
                     if mtf_regime.get("df_4h") is None:
                         mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+                # TEMP ZONE-DIAG round 3: which of the two council build sites
+                # (site2=trade_asset, site3=_update_asset_signal) produces the
+                # df_1d=None reads. site2 runs right after its own fresh
+                # fetch in the same call, so it should never see None unless
+                # the cache itself or the asset_name key is the real problem.
+                logger.warning(
+                    "[ZONE-DIAG] %s site2(trade_asset): df_1d_cache=%s mtf_df_1d=%s",
+                    asset_name,
+                    "present" if self._df_1d_cache.get(asset_name) is not None else "None",
+                    "present" if mtf_regime.get("df_1d") is not None else "None",
+                )
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
@@ -7631,6 +7642,18 @@ class TradingBot:
                         mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
                     if mtf_regime.get("df_4h") is None:
                         mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
+                # TEMP ZONE-DIAG round 3: _update_asset_signal (this method)
+                # runs BEFORE trade_asset each cycle (main.py:3751 vs :3972),
+                # so if site3 fires with df_1d_cache=None, it means the cache
+                # hasn't been (re)populated yet at this point in the cycle --
+                # i.e. trade_asset's fetch for THIS asset hasn't run yet this
+                # cycle, and whatever was cached last cycle is also gone.
+                logger.warning(
+                    "[ZONE-DIAG] %s site3(_update_asset_signal): df_1d_cache=%s mtf_df_1d=%s",
+                    asset_name,
+                    "present" if self._df_1d_cache.get(asset_name) is not None else "None",
+                    "present" if mtf_regime.get("df_1d") is not None else "None",
+                )
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
