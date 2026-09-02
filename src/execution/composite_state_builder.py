@@ -3336,6 +3336,9 @@ class CompositeStateBuilder:
                 "current_upper_type": None, "current_lower_type": None,
                 "outer_high": None, "outer_low": None}
         if df_tf is None or len(df_tf) < 10:
+            logger.warning("[ZONE-DIAG] %s %s: EARLY RETURN df=%s len=%s",
+                           asset, tf, type(df_tf).__name__,
+                           (len(df_tf) if df_tf is not None else "None"))
             return _out
 
         _days = 180 if extended else 90
@@ -3366,6 +3369,10 @@ class CompositeStateBuilder:
 
         _above = [l for l in _cands if l["price"] > current_price]
         _below = [l for l in _cands if l["price"] < current_price]
+
+        logger.warning("[ZONE-DIAG] %s %s: store=%d cands=%d above=%d below=%d px=%s",
+                       asset, tf, len(self._zone_levels.get(asset, [])),
+                       len(_cands), len(_above), len(_below), current_price)
 
         if _above:
             # Keep the whole level dict — we need its test-count and type,
