@@ -153,4 +153,84 @@ Select-String -Path logs\trading_bot.log -Pattern "ZONE-DIAG" | Select -Last 30 
 
 ---
 
+## Round 3 result — a real surprise, and no exceptions
+
+`site3(_update_asset_signal)` fired on every asset, every cycle, and this
+time it showed something new: `df_1d_cache=None` — not just the `mtf_regime`
+copy, the **actual `self._df_1d_cache` dict itself** is empty when
+`_update_asset_signal` reads it. And `site2(trade_asset)` still never
+appeared, not once, across two full capture rounds.
+
+Checked the obvious explanation first — is `trade_asset()` silently crashing
+before reaching its own council block?
+
+```powershell
+Select-String -Path logs\trading_bot.log -Pattern "\[ERROR\].*trade failed" | Select -Last 20
+```
+
+Empty. No exceptions. `trade_asset()` runs clean for every asset, every
+cycle — it just never takes the branch containing site2.
+
+Traced the dispatch itself (main.py:5640-5648):
+
+```python
+if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
+    ...
+elif isinstance(aggregator, dict) and aggregator.get("mode") == "council":
+    # site2 lives here
+    ...
+else:
+    # PERFORMANCE / plain council (non-dict) mode
+    signal, details = aggregator.get_aggregated_signal(df, ..., governor_data=mtf_regime, ...)
+```
+
+Both places `self.aggregators[asset_name]` gets constructed as council mode
+(main.py:1582 and :3473) correctly include `"mode": "council"` in the dict —
+verified directly, not assumed. But `main.py:1489` and `:3543` both assign a
+**bare** aggregator object (no dict, no "mode" key) to
+`self.aggregators[asset_name]` under other conditions (plain "performance"
+mode construction, and what looks like the auto-preset reinit fallback).
+
+If `aggregator` is a bare object when `trade_asset()` reads it, dispatch
+falls straight to the bottom `else:` — which calls
+`aggregator.get_aggregated_signal()` directly and **never rebuilds
+composite_state at all**. `InstitutionalCouncilAggregator` has no
+`_build_composite_state` method of its own (verified — plain class, no
+mixin). That branch just reads back whatever `mtf_regime["composite_state"]`
+already holds — which, this cycle, is whatever `_update_asset_signal()`'s
+site3 already built, df_1d=None bug and all.
+
+That would explain everything at once: no exception (it's a valid, if
+unintended, code path), site2 never firing (it's simply not the branch being
+taken), and the None propagating through to real trading decisions instead
+of being locally contained.
+
+**Not yet confirmed** — I don't have direct proof `aggregator` really is a
+bare object at this read site, only that it's the one explanation consistent
+with every piece of evidence so far.
+
+## Round 4 — shipped
+
+One line directly at the trade_asset dispatch point, before the if/elif/else,
+logging `type(aggregator).__name__`, whether it's a dict, and its `mode` key
+if so:
+
+```
+[ZONE-DIAG] <asset> trade_asset dispatch: type=<...> is_dict=<True|False> mode=<...>
+```
+
+If `is_dict=False`, that's confirmed — the fix is finding why
+`self.aggregators[asset_name]` isn't the council dict it was constructed as
+by the time `trade_asset()` reads it (likely the auto-preset reinit path at
+main.py:3543, or a per-asset mode override). If `is_dict=True mode=council`,
+this whole branch-mismatch theory is wrong and the search moves elsewhere.
+
+Same restart-and-capture:
+
+```powershell
+Select-String -Path logs\trading_bot.log -Pattern "ZONE-DIAG" | Select -Last 30 | ForEach-Object { ($_.Line -split " - ",4)[3] }
+```
+
+---
+
 Compiled, imported, JSON/py_compile clean. Committed and pushed.

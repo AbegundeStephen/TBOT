@@ -5637,6 +5637,20 @@ class TradingBot:
             except Exception:
                 pass  # spread injection is a bonus -- never block execution
 
+            # TEMP ZONE-DIAG round 4: site2 has never fired in two full
+            # capture rounds despite trade_asset running clean (no
+            # [ERROR] trade failed lines). If `aggregator` isn't a dict
+            # here, dispatch silently falls to the bottom `else:` branch
+            # (main.py ~5740), which calls aggregator.get_aggregated_signal()
+            # directly and never rebuilds composite_state -- it just reuses
+            # whatever mtf_regime["composite_state"] already holds from
+            # _update_asset_signal's earlier pass this cycle (site3, which
+            # we've already confirmed has df_1d=None).
+            logger.warning(
+                "[ZONE-DIAG] %s trade_asset dispatch: type=%s is_dict=%s mode=%s",
+                asset_name, type(aggregator).__name__, isinstance(aggregator, dict),
+                aggregator.get("mode") if isinstance(aggregator, dict) else "N/A",
+            )
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
