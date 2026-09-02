@@ -372,14 +372,6 @@ class CompositeStateBuilder:
             state.zone_4h_outer_low = _v4["outer_low"]
             state.zone_ladder_4h = self.get_zone_ladder(self.asset_type, "4H")
 
-        if _df_1d is None:
-            logger.warning(
-                "[ZONE-DIAG] %s 1D: GATE CLOSED (id=%s) — governor_data['df_1d'] is None "
-                "at this _build_composite_state call, so _build_zone_view is never "
-                "invoked (explains zone1d lo=None hi=None without a build_zone_view "
-                "EARLY RETURN/store/cands line ever firing).",
-                self.asset_type, id(self),
-            )
         if _df_1d is not None:
             self._update_zone_levels(self.asset_type, _df_1d, "1D", _atr_now, _price_now)
             # BATCH-DATA-1D ITEM 3: expose the daily ladder the same way
@@ -3344,9 +3336,6 @@ class CompositeStateBuilder:
                 "current_upper_type": None, "current_lower_type": None,
                 "outer_high": None, "outer_low": None}
         if df_tf is None or len(df_tf) < 10:
-            logger.warning("[ZONE-DIAG] %s %s: EARLY RETURN df=%s len=%s id=%s",
-                           asset, tf, type(df_tf).__name__,
-                           (len(df_tf) if df_tf is not None else "None"), id(self))
             return _out
 
         _days = 180 if extended else 90
@@ -3377,10 +3366,6 @@ class CompositeStateBuilder:
 
         _above = [l for l in _cands if l["price"] > current_price]
         _below = [l for l in _cands if l["price"] < current_price]
-
-        logger.warning("[ZONE-DIAG] %s %s: store=%d cands=%d above=%d below=%d px=%s id=%s",
-                       asset, tf, len(self._zone_levels.get(asset, [])),
-                       len(_cands), len(_above), len(_below), current_price, id(self))
 
         if _above:
             # Keep the whole level dict — we need its test-count and type,
