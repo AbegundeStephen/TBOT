@@ -1515,7 +1515,8 @@
     "trend_angle_capture_enabled": true,
     "trend_angle_period": 50,
     "shadow_persist_enabled": true,
-    "shadow_resume_max_gap_min": 720
+    "shadow_resume_max_gap_min": 720,
+    "legacy_engine_enabled": false
   },
   "btc_volume_source": "binance"
 }

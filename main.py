@@ -175,6 +175,34 @@ class TradingBot:
         with open(config_path, encoding="utf-8") as f:
             self.config = json.load(f)
 
+        # ── FIX-1 F2: CONFIG STRUCTURE GUARD ──────────────────────────────
+        # On 1-Sept a misplaced closing brace nested 13 top-level sections
+        # inside strategy_configs. The file stayed VALID JSON -- same byte
+        # count, every parse check passed -- but at runtime every one of those
+        # sections was unreachable. The bot ran for 90 minutes on defaults.
+        # A parse proves syntax. This proves shape.
+        _REQUIRED_SECTIONS = [
+            "assets", "trading", "risk_management", "phase_config",
+            "aggregator_settings", "telegram", "logging", "performance",
+            "data", "ml",
+        ]
+        _missing = [k for k in _REQUIRED_SECTIONS if k not in self.config]
+        if _missing:
+            logger.critical(
+                "[STARTUP] ❌ config.json is STRUCTURALLY BROKEN — missing "
+                "top-level sections: %s. The file may still be valid JSON: "
+                "this is what a misplaced brace looks like (1-Sept incident). "
+                "Found only %d top-level keys: %s. REFUSING TO START.",
+                _missing, len(self.config), list(self.config.keys()),
+            )
+            raise RuntimeError(
+                f"config.json missing top-level sections: {_missing} (FIX-1 F2)"
+            )
+        logger.info(
+            "[STARTUP] ✅ config structure OK — %d top-level keys, %d phase flags",
+            len(self.config), len(self.config.get("phase_config", {})),
+        )
+
         # ── Startup quarantine: session-start timestamp (Change 1.1) ─────────
         self._session_start_time = datetime.now()
         self._quarantine_cleared_logged: Dict[str, bool] = {}
@@ -1211,28 +1239,84 @@ class TradingBot:
         # ================================================================
         # STEP 1: Load Configuration
         # ================================================================
+        # ── FIX-1 F1a: LEGACY ENGINE LOCK (ruled 2 Sept) ─────────────────
+        # This line defaulted to "performance". On 1-Sept a hand edit nested
+        # aggregator_settings inside strategy_configs, so .get() returned {},
+        # mode became "performance", and the legacy single-lane engine ran for
+        # 90 minutes and took two live trades that bypassed the council, the
+        # cost gate, the threshold table and the honest ceiling.
+        # A missing section now means UNKNOWN, not "run the old engine".
         aggregator_cfg = self.config.get("aggregator_settings", {})
-        mode = aggregator_cfg.get("mode", "performance").lower()
+        mode = str(aggregator_cfg.get("mode") or "").lower()
         preset = aggregator_cfg.get("preset", "auto")
+
+        if not mode:
+            logger.critical(
+                "[STARTUP] ❌ aggregator_settings.mode is MISSING or empty. "
+                "This usually means config.json is structurally broken (a "
+                "section nested in the wrong place still parses as valid JSON). "
+                "REFUSING TO BUILD ANY AGGREGATOR — the bot will not trade. "
+                "Check the top-level keys in config/config.json."
+            )
+            try:
+                if self.telegram_bot:
+                    self._send_telegram_notification(
+                        self.telegram_bot.notify_error(
+                            "TBOT HALTED — aggregator_settings.mode missing from config. "
+                            "Bot will not trade until config is fixed."
+                        )
+                    )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "aggregator_settings.mode missing — refusing to start (FIX-1 F1a)"
+            )
 
         logger.info(f"\nMode:   {mode.upper()}")
         logger.info(f"Preset: {preset.upper()}")
 
         # Validate mode
+        # FIX-1 F1b: an unrecognised mode used to silently become "performance".
+        # Same failure class as F1a: a config problem quietly changed which
+        # engine trades. An unknown mode is now fatal.
         valid_modes = ["performance", "council", "hybrid"]
         if mode not in valid_modes:
-            logger.warning(f"Invalid mode '{mode}', defaulting to 'performance'")
-            mode = "performance"
+            logger.critical(
+                f"[STARTUP] ❌ Invalid aggregator_settings.mode={mode!r}. "
+                f"Valid: {valid_modes}. REFUSING TO START."
+            )
+            raise RuntimeError(f"Invalid aggregator mode {mode!r} (FIX-1 F1b)")
 
-        # Item 3: mode-drift tripwire. "hybrid" (and "performance") are still
-        # accepted by valid_modes above, so the existing check doesn't catch
-        # a config quietly drifting away from the intended production mode —
-        # only a fully invalid value. This applies to every asset (mode is
-        # read once, globally, before per-asset aggregator setup below), so
-        # a silent drift here silently affects all of them.
+        # Item 3: mode-drift tripwire (17-Aug). It fired on 1-Sept exactly as
+        # designed -- and was ignored, because a WARNING in a log nobody reads
+        # during a deploy does not stop anything. The system knew, said so
+        # quietly, and traded anyway for 90 minutes.
+        #
+        # FIX-1 F1c: the tripwire now has teeth. Anything other than "council"
+        # requires legacy_engine_enabled to be explicitly true in phase_config.
+        # The flag defaults to FALSE in code, so an unreadable config disables
+        # the legacy path rather than enabling it -- which is the exact reverse
+        # of what happened on 1-Sept.
         if mode != "council":
+            _legacy_ok = bool(
+                self.config.get("phase_config", {}).get("legacy_engine_enabled", False)
+            )
+            if not _legacy_ok:
+                logger.critical(
+                    f"[STARTUP] ❌ aggregator_settings.mode={mode!r} is a LEGACY engine "
+                    f"and phase_config.legacy_engine_enabled is not true. "
+                    f"REFUSING TO START. On 1-Sept this path ran unrequested "
+                    f"after a config error and took two live trades outside the "
+                    f"council. Set legacy_engine_enabled=true to run it deliberately."
+                )
+                raise RuntimeError(
+                    f"Legacy mode {mode!r} requires legacy_engine_enabled=true (FIX-1 F1c)"
+                )
             logger.warning(
-                f"[STARTUP] aggregator_settings.mode={mode!r}, expected 'council' — check config."
+                f"[STARTUP] ⚠️ LEGACY ENGINE ACTIVE: mode={mode!r}, enabled by "
+                f"phase_config.legacy_engine_enabled=true. The council, the cost "
+                f"gate, the threshold table and the honest ceiling do NOT apply "
+                f"on this path."
             )
 
         # ================================================================
@@ -2025,6 +2109,16 @@ class TradingBot:
         # ================================================================
         # STEP 2: Get signal from selected aggregator
         # ================================================================
+        # FIX-1 F1e: F1d makes the selector return 'none' when it has no basis
+        # for a recommendation. Honour it -- do not fall through to the legacy
+        # branch below.
+        if selected_mode == "none":
+            logger.info(
+                f"[HYBRID] {asset_name}: no mode recommendation "
+                f"(insufficient data) — holding, no signal this cycle."
+            )
+            return 0, {"reasoning": "no_mode_recommendation", "final_signal": 0}
+
         if selected_mode == "council":
             aggregator = aggregators["council"]
 
@@ -3993,6 +4087,41 @@ class TradingBot:
                         self.scalp_alert_engine._shadow.save_open_positions()
                 except Exception as _sp_err:
                     logger.debug(f"[SHADOW] periodic save skipped: {_sp_err}")
+
+                # FIX-1 F4: DynamicThresholds.save_cache() is called at ~:8731
+                # in the shutdown path, which taskkill /F never reaches -- so
+                # data/dynamic_thresholds_cache.json has never been written and
+                # every restart rebuilds z-score baselines from zero. Same
+                # problem MEASURE-2 S1 fixed for shadow positions; same fix.
+                # The method is atomic (tmp + os.replace) and swallows its own
+                # exceptions, so it is safe on the cycle path.
+                # FIX-1 deviations from the literal spec:
+                # (1) dynamic_thresholds lives on PerformanceWeightedAggregator
+                #     (signal_aggregator.py:366, injected via the
+                #     CompositeStateBuilder mixin), not on
+                #     InstitutionalCouncilAggregator -- so a dict-form
+                #     aggregator must be unwrapped via "performance"/
+                #     "livermore", not "council" (the spec's guess). Matches
+                #     the unwrap pattern already used at _shadow_open_blocked
+                #     (main.py ~2852) and MEASURE-1's Lane C generator.
+                # (2) every asset's DynamicThresholds defaults to the SAME
+                #     cache_path (dynamic_thresholds.py:27) but holds its own
+                #     independent in-memory _cache -- they are six separate
+                #     objects sharing one file, not one shared instance. The
+                #     spec's `break` after the first save would silently drop
+                #     the other five assets' Z-score samples on every save.
+                #     Saving all of them (id-deduped, in case of aliasing)
+                #     instead.
+                try:
+                    _dt_saved_ids = set()
+                    for _agg in (self.aggregators or {}).values():
+                        _dt = getattr(_agg, "dynamic_thresholds", None) if not isinstance(_agg, dict) \
+                              else getattr(_agg.get("performance") or _agg.get("livermore"), "dynamic_thresholds", None)
+                        if _dt and hasattr(_dt, "save_cache") and id(_dt) not in _dt_saved_ids:
+                            _dt.save_cache()
+                            _dt_saved_ids.add(id(_dt))
+                except Exception as _dt_err:
+                    logger.debug(f"[DT] periodic save skipped: {_dt_err}")
 
                 logger.info("[OK] Trading cycle complete")
                 logger.info("=" * 70)
