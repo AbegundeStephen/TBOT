@@ -233,4 +233,80 @@ Select-String -Path logs\trading_bot.log -Pattern "ZONE-DIAG" | Select -Last 30 
 
 ---
 
+## Confirmed root cause — not a permanent bug
+
+Round 4's data showed something new: earlier in the capture window, `site2`
+had fired *successfully* (`df_1d_cache=present`, real zone data) for
+GOLD/USTEC/EURUSD/USOIL — contradicting the "wrong branch, every cycle"
+theory from round 3. That meant intermittent, not deterministic — a timing
+question, not a misconfiguration.
+
+Checked the two most likely fetch-failure paths directly against the
+existing (non-diagnostic) log lines already in `_fetch_1d_data()`:
+
+```powershell
+Select-String -Path logs\trading_bot.log -Pattern "\[1D\].*Insufficient daily data"
+Select-String -Path logs\trading_bot.log -Pattern "\[1D\].*Failed to fetch daily data"
+```
+
+Both empty. The fetch itself was never failing.
+
+Asked for one more capture, with timestamps, after a genuinely patient wait
+(10+ minutes) instead of an immediate restart-and-grep. That settled it:
+
+```
+20:13:53  USOIL 1D: store=295 ... (from the tail of an earlier, already-working state)
+20:13:54  BTC trade_asset dispatch: type=dict is_dict=True mode=council
+20:13:54  BTC site2(trade_asset): df_1d_cache=present mtf_df_1d=present
+... (all six assets succeed, first trade_asset pass since the restart)
+20:19:33  BTC site3(_update_asset_signal): df_1d_cache=present mtf_df_1d=present
+... (stable from here on, both passes healthy every cycle)
+```
+
+**Root cause: a cold-start race, not a permanent defect.**
+`_update_asset_signal()` runs first every cycle (main.py:3751), before
+`trade_asset()` (main.py:3972) — and only `trade_asset()`'s own fetch
+populates `self._df_1d_cache`/`self._df_4h_cache` for the first time.
+`self._df_1d_cache = {}` starts genuinely empty on every process start (no
+cross-restart persistence), so on the very first cycle after *any* restart,
+`_update_asset_signal()` legitimately reads `None` — not a bug, a real gap
+that self-heals the moment `trade_asset()` completes its first pass, usually
+within about five minutes.
+
+This explains every piece of evidence from all four rounds without
+contradiction: `_build_zone_view` was always healthy, the store was never
+empty, the filter was never wrong, no exception ever fired, and the
+"wrong branch" observation in round 3 was real but incomplete — it's the
+*expected* state before `trade_asset()`'s first pass, not a permanent
+misrouting.
+
+**Why it looked permanent on 1 September specifically**: four restarts that
+day. If the bot rarely got much past this ~5-minute warm-up window before
+being restarted again, a one-cycle gap would look like an every-cycle
+failure to anyone sampling the log at the wrong moment — which is exactly
+what happened, repeatedly, across this whole investigation's own early
+captures.
+
+## The fix
+
+Closed the gap directly rather than leaving it to self-heal: in
+`_update_asset_signal()`'s DATA-1 Item 7 top-up block (main.py, "site 3"),
+a cache miss now falls through to a direct `self._fetch_1d_data(asset_name)`
+/ `self._fetch_4h_data(asset_name)` call and populates the cache right
+there, instead of accepting `None` for that cycle. Applied to both df_1d and
+df_4h for symmetry, even though df_4h was never observed failing — same
+class of gap, same fix, cheap to close preventively.
+
+Not applied at `trade_asset()`'s own site (site2): its cache is always warm
+by the time it reads it, since it does its own fetch moments earlier in the
+same call — no evidence it ever needs the fallback, so it wasn't added
+there.
+
+All four rounds of temporary `[ZONE-DIAG]` logging have been reverted, per
+the original instruction to revert once the cause is known. Verified zero
+remaining `ZONE-DIAG` log statements — the only remaining trace is an
+explanatory code comment at the fix site.
+
+---
+
 Compiled, imported, JSON/py_compile clean. Committed and pushed.

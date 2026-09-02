@@ -5637,20 +5637,6 @@ class TradingBot:
             except Exception:
                 pass  # spread injection is a bonus -- never block execution
 
-            # TEMP ZONE-DIAG round 4: site2 has never fired in two full
-            # capture rounds despite trade_asset running clean (no
-            # [ERROR] trade failed lines). If `aggregator` isn't a dict
-            # here, dispatch silently falls to the bottom `else:` branch
-            # (main.py ~5740), which calls aggregator.get_aggregated_signal()
-            # directly and never rebuilds composite_state -- it just reuses
-            # whatever mtf_regime["composite_state"] already holds from
-            # _update_asset_signal's earlier pass this cycle (site3, which
-            # we've already confirmed has df_1d=None).
-            logger.warning(
-                "[ZONE-DIAG] %s trade_asset dispatch: type=%s is_dict=%s mode=%s",
-                asset_name, type(aggregator).__name__, isinstance(aggregator, dict),
-                aggregator.get("mode") if isinstance(aggregator, dict) else "N/A",
-            )
             if isinstance(aggregator, dict) and aggregator.get("mode") == "hybrid":
                 signal, details = self.get_aggregated_signal_hybrid_dynamic(
                     asset_name,
@@ -5680,17 +5666,6 @@ class TradingBot:
                         mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
                     if mtf_regime.get("df_4h") is None:
                         mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
-                # TEMP ZONE-DIAG round 3: which of the two council build sites
-                # (site2=trade_asset, site3=_update_asset_signal) produces the
-                # df_1d=None reads. site2 runs right after its own fresh
-                # fetch in the same call, so it should never see None unless
-                # the cache itself or the asset_name key is the real problem.
-                logger.warning(
-                    "[ZONE-DIAG] %s site2(trade_asset): df_1d_cache=%s mtf_df_1d=%s",
-                    asset_name,
-                    "present" if self._df_1d_cache.get(asset_name) is not None else "None",
-                    "present" if mtf_regime.get("df_1d") is not None else "None",
-                )
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
@@ -7651,23 +7626,36 @@ class TradingBot:
                 # the failure was purely that the builder read a different
                 # dict. df_4h is included deliberately -- it survives today
                 # only by accident of ordering.
+                # ZONE-DIAG root cause (confirmed 2-Sept via a 4-round live
+                # diagnostic, since reverted): _update_asset_signal (this
+                # method) runs BEFORE trade_asset every cycle (main.py:3751
+                # vs :3972), and only trade_asset's own fetch populates
+                # self._df_1d_cache/self._df_4h_cache for the first time. On
+                # the very first cycle after ANY restart, this method reads
+                # both caches before trade_asset has ever run once, so
+                # governor_data["df_1d"] is legitimately None -- not a bug,
+                # just a real gap that self-heals after trade_asset's first
+                # pass. On 1-Sept, with four restarts that day, the bot may
+                # rarely have gotten past this ~5min window, making a
+                # one-cycle warm-up gap look like a permanent failure.
+                # Closing the gap directly: fetch here on a cache miss
+                # instead of accepting None and silently disabling the daily
+                # zone tier for that cycle.
                 if isinstance(mtf_regime, dict):
                     if mtf_regime.get("df_1d") is None:
                         mtf_regime["df_1d"] = self._df_1d_cache.get(asset_name)
+                        if mtf_regime.get("df_1d") is None:
+                            _fresh_1d = self._fetch_1d_data(asset_name)
+                            if _fresh_1d is not None:
+                                self._df_1d_cache[asset_name] = _fresh_1d
+                                mtf_regime["df_1d"] = _fresh_1d
                     if mtf_regime.get("df_4h") is None:
                         mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
-                # TEMP ZONE-DIAG round 3: _update_asset_signal (this method)
-                # runs BEFORE trade_asset each cycle (main.py:3751 vs :3972),
-                # so if site3 fires with df_1d_cache=None, it means the cache
-                # hasn't been (re)populated yet at this point in the cycle --
-                # i.e. trade_asset's fetch for THIS asset hasn't run yet this
-                # cycle, and whatever was cached last cycle is also gone.
-                logger.warning(
-                    "[ZONE-DIAG] %s site3(_update_asset_signal): df_1d_cache=%s mtf_df_1d=%s",
-                    asset_name,
-                    "present" if self._df_1d_cache.get(asset_name) is not None else "None",
-                    "present" if mtf_regime.get("df_1d") is not None else "None",
-                )
+                        if mtf_regime.get("df_4h") is None:
+                            _fresh_4h = self._fetch_4h_data(asset_name)
+                            if _fresh_4h is not None:
+                                self._df_4h_cache[asset_name] = _fresh_4h
+                                mtf_regime["df_4h"] = _fresh_4h
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
