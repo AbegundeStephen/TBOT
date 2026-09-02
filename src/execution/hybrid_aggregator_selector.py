@@ -459,13 +459,20 @@ class MarketRegimeAnalyzer:
         return nearest, distance_pct
     
     def _default_analysis(self) -> Dict:
-        """Fallback analysis when data is insufficient"""
+        """Fallback analysis when data is insufficient.
+
+        FIX-1 F1d: this returned 'performance' and called it a "conservative
+        default". It is not conservative -- it hands the bot to the legacy
+        single-lane engine whenever len(df) < 200 or the analysis raises.
+        Insufficient data means NO OPINION, not an old opinion. main.py's
+        caller treats 'none' as "do not trade this asset this cycle".
+        """
         return {
             'timestamp': datetime.now(),
-            'recommended_mode': 'performance',  # Conservative default
-            'confidence': 0.3,
+            'recommended_mode': 'none',   # FIX-1 F1d: was 'performance'
+            'confidence': 0.0,
             'regime_type': 'unknown',
-            'reasoning': 'Insufficient data - defaulting to Performance mode',
+            'reasoning': 'Insufficient data - no mode recommendation',
             'metrics': {},
         }
 

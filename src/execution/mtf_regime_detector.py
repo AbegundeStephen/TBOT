@@ -125,11 +125,29 @@ class MultiTimeFrameRegimeDetector:
         df_copy[f"ema_{FAST_EMA}"] = ta.EMA(df_copy["close"], timeperiod=FAST_EMA)
         df_copy[f"ema_{SLOW_EMA}"] = ta.EMA(df_copy["close"], timeperiod=SLOW_EMA)
         
-        # ✅ TASK 17: EMA-200 Burn-in (Strict 400-bar minimum)
-        if len(df_copy) < 400:
-            # We enforce strict burn-in to ensure indicator stability.
-            logger.warning(f"[REGIME] ⚠️ CRITICAL: Insufficient bars for EMA-200 burn-in ({len(df_copy)}/400).")
+        # FIX-1 F3: Item 19a replaced the strict 400-bar minimum with a
+        # graduated read, but this hard block survived and returned an empty
+        # frame first -- so 19a's logic never ran. The caller at :388 documents
+        # the result: "the log was correct in intent but the empty-df crash
+        # made it a lie."
+        # EMA-200 needs ~200 bars to be meaningful, not 400. Below 200 it
+        # cannot be computed at all; above it, the caller's existing
+        # `if pd.isna(ema_200)` guard is the honest safety net.
+        # Measured cost of the old rule (1-2 Sept): GOLD/USTEC/EURUSD/USOIL all
+        # sat at 387-389 daily bars, so all four were forced NEUTRAL AND lost
+        # their 1D zone tier (empty df_daily -> df_1d None -> [N3-1D] every build).
+        if len(df_copy) < 200:
+            logger.warning(
+                f"[REGIME] Insufficient bars for EMA-200 "
+                f"({len(df_copy)}/200 minimum) — cannot compute baseline."
+            )
             return pd.DataFrame()
+        if len(df_copy) < 400:
+            logger.info(
+                f"[REGIME] EMA-200 computed on {len(df_copy)}/400 bars "
+                f"({len(df_copy)/400:.0%} mature) — real read, immature. "
+                f"Gated by Livermore agreement downstream (Item 19b)."
+            )
 
         df_copy[f"ema_{BASELINE_EMA}"] = ta.EMA(df_copy["close"], timeperiod=BASELINE_EMA)
         
