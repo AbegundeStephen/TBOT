@@ -176,6 +176,7 @@ class ShadowPosition:
     resumed: bool = False               # MEASURE-2 S1: survived at least one restart
     resume_count: int = 0               # MEASURE-2 S1: how many
     restart_gap_minutes: float = 0.0    # MEASURE-2 S1: blind window -- MFE/MAE unknown across it
+    rolls_taken: int = 0            # TARGET-1 T9c: how many times the target rolled
 
     def _profit_pct(self, price: float) -> float:
         """Current unrealised P&L as a fraction of entry price."""
@@ -245,6 +246,33 @@ class ShadowPosition:
                 return self._close(current_price, "stop_loss")
             elif self.side == "short" and current_price >= self.stop_loss:
                 return self._close(current_price, "stop_loss")
+
+        # TARGET-1 T9c: roll the target instead of closing at it, up to 2R.
+        # The trail is already armed by this point (R-breakeven at 0.75R above,
+        # trailing after 1.0x ATR), so a roll gives back open profit, never
+        # capital. Stops at 2R: only 38% of 1R trades reach 3R.
+        if self.take_profit > 0 and self.initial_stop_loss:
+            _risk_t9c = abs(self.entry_price - self.initial_stop_loss)
+            if _risk_t9c > 0:
+                _reached = (
+                    (self.side == "long" and current_price >= self.take_profit)
+                    or (self.side == "short" and current_price <= self.take_profit)
+                )
+                _cur_r_t9c = abs(self.take_profit - self.entry_price) / _risk_t9c
+                if _reached and _cur_r_t9c < 2.0:
+                    _step = 0.5 * _risk_t9c
+                    _new_tp = (self.take_profit + _step) if self.side == "long" \
+                              else (self.take_profit - _step)
+                    _new_r = abs(_new_tp - self.entry_price) / _risk_t9c
+                    if _new_r <= 2.05:
+                        self.rolls_taken = getattr(self, "rolls_taken", 0) + 1
+                        self.take_profit = _new_tp
+                        logger.info(
+                            "[SHADOW-ROLL] %s %s: reached %.2fR — target rolled to "
+                            "%.5f (%.2fR), roll #%d",
+                            self.asset, self.side.upper(), _cur_r_t9c,
+                            _new_tp, _new_r, self.rolls_taken,
+                        )
 
         # Check take profit hit
         if self.take_profit > 0:
@@ -351,6 +379,7 @@ class ShadowPosition:
             "resumed":             self.resumed,               # MEASURE-2 S1
             "resume_count":        self.resume_count,          # MEASURE-2 S1
             "restart_gap_minutes": self.restart_gap_minutes,   # MEASURE-2 S1
+            "rolls_taken": self.rolls_taken,     # TARGET-1 T9c
         }
 
     def _net_r(self):
@@ -626,6 +655,12 @@ class ShadowTradingEngine:
             else:
                 _stop_loss   = entry_price + sl_dist
                 _take_profit = entry_price - tp_dist
+
+            # TARGET-1 T9c: middle-rung target, mirroring live T8b.
+            _tp_mult_t9c = float(_tp_mults[1]) if len(_tp_mults) >= 2 else _first_tp
+            _tp_dist_t9c = _tp_mult_t9c * atr
+            _take_profit_t9c = (entry_price + _tp_dist_t9c) if side == "long" \
+                               else (entry_price - _tp_dist_t9c)
         else:
             # S7h: refuse an unmeasurable shadow rather than open a degenerate one.
             logger.warning("[SHADOW] open refused for %s: atr unavailable — no risk anchor", asset)
@@ -731,13 +766,13 @@ class ShadowTradingEngine:
             regime_name=signal_details.get("regime", "UNKNOWN"),
             stop_loss=_stop_loss,
             initial_stop_loss=_stop_loss,   # S7d: freeze entry-time risk
-            # FRAME-1 SEG 12: hard TP retired. It fired at tp_multiples[0]
-            # (1.5x ATR) and cut both weekend shadow wins at 0.64R and 1.04R,
-            # while a live trade trails to a far rung. Shadow exits must match
-            # live exits or the episode dataset teaches us about a machine we
-            # do not run. 0.0 disables the branch at :245; trail, R-breakeven
-            # and stop are untouched.
-            take_profit=0.0,
+            # TARGET-1 T9c: hard TP restored, at the MIDDLE rung.
+            # SEG 12 retired it because firing at tp_multiples[0] (1.5x ATR)
+            # cut two winners at 0.64R and 1.04R. That was right about rung
+            # one. 388 records: of 197 trades reaching 1R, 81% reached 2R but
+            # only 38% reached 3R -- so the answer is rung two, and it rolls
+            # (T9c-2) rather than sitting fixed.
+            take_profit=_take_profit_t9c,
             strategy_votes={
                 "mr_signal":    signal_details.get("mr_signal", 0),
                 "mr_conf":      signal_details.get("mr_confidence", 0.0),
@@ -934,6 +969,16 @@ class ShadowTradingEngine:
 
     def _archive(self, pos: ShadowPosition) -> None:
         """Move a closed position to results store (in-memory + durable JSONL)."""
+        # TARGET-1 T2: idempotency guard. _archive is reachable from four
+        # sites -- the two normal close paths and MEASURE-2 S1's
+        # gapped/abandoned branches. A position that closed on the same cycle
+        # it was restored was written twice (BTC 2-Sept 13:45:18.907440,
+        # identical to the microsecond).
+        if getattr(pos, "_archived", False):
+            logger.debug("[SHADOW] %s already archived — skipping duplicate",
+                         getattr(pos, "episode_id", "?"))
+            return
+        pos._archived = True
         _rec = pos.to_dict()
         self.closed_results.append(_rec)
         # DATA-1 ITEM 6: close the episode into the shared daily ledger,

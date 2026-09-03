@@ -3658,7 +3658,11 @@ class InstitutionalCouncilAggregator:
                     )
                     required_score = _bar_cap
 
-                if total_score < required_score:
+                # TARGET-1 T10: a score exactly equal to its bar was being
+                # rejected ("(3.15) < 3.15", 3-Sept 12:01) -- float
+                # representation, not logic. Same epsilon the R:R gate in
+                # veteran_trade_manager.py already uses.
+                if total_score < required_score - 1e-9:
                     logger.info(
                         f"[SIGNAL] ❌ REJECTED - Score after penalties ({total_score:.2f}) < {required_score:.2f}"
                     )
@@ -3770,6 +3774,27 @@ class InstitutionalCouncilAggregator:
 
             if bonus_tags:
                 main_reasoning += " | " + " | ".join(bonus_tags[:2])
+
+            # TARGET-1 T3: the council's own verdict was never written to the
+            # gate ledger -- only the cost gate and the volatility gate were.
+            # "What bar did this face, and how much was the RSM delta?" was
+            # unanswerable by query, which made T1's before/after an eyeball
+            # comparison instead of a measurement.
+            try:
+                from src.utils.gate_ledger import write_gate_decision
+                write_gate_decision(
+                    (governor_data or {}).get("episode_id"), self.asset_type,
+                    "council_verdict", decision_type,
+                    {
+                        "total_score": float(total_score),
+                        "required_score": float(required_score),
+                        "rsm_delta": float(_rsm_delta_council),
+                        "rsm_state": _rsm_state_council,
+                        "achievable_max": float(_achievable_max),
+                    },
+                )
+            except Exception:
+                pass
 
             # Build details dict
             _judge_scores_src = (

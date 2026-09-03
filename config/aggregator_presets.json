@@ -890,14 +890,14 @@
     }
   },
   "REQUIRED_SCORE_MODIFIER": {
-    "_comment": "Phase 2: Livermore state-conditional threshold deltas. Applied additively to BOTH buy and sell thresholds after regime-adjusted thresholds are computed. Full retest-type modifiers (CLEAN/BREAKOUT/WICK/CHASE_SOFT/CHASE_HARD) are wired in Phase 3B. SECONDARY states raise the bar — entries still allowed but harder to clear. NATURAL states are gated by the Hard Veto + Gatekeeper HOLD before reaching this modifier.",
+    "_comment": "Phase 2: Livermore state-conditional threshold deltas, applied additively to BOTH buy and sell thresholds. SECONDARY states were +0.40 until 3-Sept 2026; set to 0.0 because rider (3) symmetrised the council doors on 20-Aug and this modifier re-imposed the same macro tax downstream by a different route. The 18-Aug study (1,690 proofs, two periods) measured counter-macro proofs at +0.110R vs aligned +0.023R. Illustrated 1-Sept: a GOLD short scored 3.42 with trend at its 1.5 maximum, was refused against a 4.0 bar (base 3.1 + this 0.4 + further raises), then won as a shadow and won again live six hours later. Retest Engine deltas (Layer 2) untouched. Read by council_aggregator:2365 and signal_aggregator:3012.",
     "state_modifiers": {
       "MAIN_UP": 0.0,
       "MAIN_DOWN": 0.0,
       "NATURAL_RETRACEMENT": 0.0,
       "NATURAL_REBOUND": 0.0,
-      "SECONDARY_RETRACEMENT": 0.4,
-      "SECONDARY_REBOUND": 0.4
+      "SECONDARY_RETRACEMENT": 0.0,
+      "SECONDARY_REBOUND": 0.0
     },
     "modifier_cap": 1.5,
     "vtm_circuit_breaker_atr_mult": 3.0,

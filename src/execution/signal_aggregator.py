@@ -363,7 +363,14 @@ class PerformanceWeightedAggregator:
         # B.3: Dynamic thresholds
         from src.utils.dynamic_thresholds import DynamicThresholds
 
-        self.dynamic_thresholds = DynamicThresholds(lookback=100, min_samples=5)
+        # TARGET-1 T4: per-asset cache file. Six instances previously wrote the
+        # same path, so each save clobbered the other five assets' histories.
+        # Keys are already (asset, metric) so they never collide in memory --
+        # the collision was purely at the file level.
+        self.dynamic_thresholds = DynamicThresholds(
+            lookback=100, min_samples=5,
+            cache_path=f"data/dynamic_thresholds_{self.asset_type}.json",
+        )
 
         # Composite state builder — owns Livermore + builds CompositeState.
         # Shares dynamic_thresholds so persisted threshold history stays a

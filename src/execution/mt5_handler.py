@@ -850,42 +850,14 @@ class MT5ExecutionHandler:
             # Fetch OHLC for VTM initialization
             ohlc_data, df = self._fetch_ohlc_for_vtm(symbol, asset)
 
-            # ── STRUCTURE TARGET DIAGNOSTIC (log-only, no blocking) ─────────────
-            # Logs how many TP tiers have structural anchors for post-trade analysis.
-            # Previously this was a blocking check but it produced too many false
-            # rejections in strong trending markets where price breaks fresh lows/highs
-            # and no prior pivot levels exist in the short VTM data window.
-            # The dynamic weight sample-size guard (10-trade minimum) already prevents
-            # the weak-signal cases (NEUTRAL regime, inflated scores) this was targeting.
-            if risk_config.get("use_structure_targets", True) and ohlc_data is not None:
-                try:
-                    from src.execution.veteran_trade_manager import find_resistance_levels
-                    _atr_val = (
-                        signal_details.get("atr_fast") if signal_details else None
-                    ) or current_price * 0.01
-                    _pf_lookback = min(len(ohlc_data["high"]), 100)
-                    _struct_levels = find_resistance_levels(
-                        ohlc_data["high"], ohlc_data["low"], ohlc_data["close"],
-                        current_price, side,
-                        lookback=_pf_lookback,
-                        tolerance=0.5 * _atr_val,
-                    )
-                    _risk = abs(current_price - initial_stop)
-                    _r_mults = risk_config.get("partial_targets", [0.8, 1.6, 3.0])
-                    _anchored = 0
-                    for _r in _r_mults:
-                        _tp = current_price + _risk * _r if side == "long" else current_price - _risk * _r
-                        if _struct_levels:
-                            _cl = min(_struct_levels, key=lambda x: abs(x - _tp))
-                            _srr = (_cl - current_price) / _risk if side == "long" else (current_price - _cl) / _risk
-                            if _srr >= _r * 0.5 and abs(_cl - _tp) / max(abs(_tp), 1e-9) < 0.25:
-                                _anchored += 1
-                    logger.info(
-                        f"[STRUCTURE DIAG] {asset} {side.upper()}: {_anchored}/{len(_r_mults)} "
-                        f"TP tiers structurally anchored ({len(_struct_levels)} levels found)."
-                    )
-                except Exception as _sp_err:
-                    logger.debug(f"[STRUCTURE DIAG] Check skipped ({_sp_err})")
+            # TARGET-1 T6: the STRUCTURE TARGET DIAGNOSTIC that used to sit here
+            # ran its own independent pivot scan (find_resistance_levels) over a
+            # 187-bar window BEFORE VTM ever initialised, and reported 0 levels
+            # from that unused scan one second before [VTM-LADDER] correctly
+            # anchored to 111 real ones (GBPAUD 2-Sept). It misdirected a full
+            # day of investigation. [VTM-LADDER] target sources = [...] already
+            # carries the same information accurately, with per-target
+            # timeframe and test-count tags -- deleted rather than fixed.
 
             # Margin validation
             small_account_active = signal_details.get("small_account_protocol_active", False) if signal_details else False

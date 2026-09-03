@@ -3511,6 +3511,7 @@ class TradingTelegramBot:
         vtm_is_active: bool = False,
         entry_type: str = None,
         stop_type: str = None,
+        sl_placed_on_exchange: bool = False,
     ):
         """
         ✅ FIXED: Notify when a trade is opened with correct futures/spot detection
@@ -3609,8 +3610,14 @@ class TradingTelegramBot:
                 )
                 msg += f"📈 Risk/Reward: 1:{rr_ratio:.2f}\n\n"
             
-            # ✅ NEW: Add VTM warning if applicable
-            if vtm_is_active:
+            # TARGET-1 T5: this banner used to fire unconditionally whenever
+            # VTM was active, regardless of whether the exchange SL push
+            # actually happened -- on GBPAUD it was sent one second after
+            # [VTM-TP] confirmed a successful push, reporting the opposite of
+            # the truth on a live trade. Mirrors binance_handler.py's Fix 14c
+            # banner: keyed on the same place_vtm_sl_on_exchange config flag,
+            # only warns when the exchange placement is genuinely not active.
+            if vtm_is_active and not sl_placed_on_exchange:
                 msg += "⚠ *SL Management: VTM Only (No Exchange SL)*\n\n"
 
             # Add timestamp

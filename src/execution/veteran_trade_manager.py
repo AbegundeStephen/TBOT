@@ -253,9 +253,33 @@ class VeteranTradeManager:
             # Using only TP1 as the R:R measure is wrong for partial-exit systems:
             # with TP1 at 1.0R (deliberate close first exit), the check always
             # fires even though weighted R:R across [1.0, 1.8, 3.0] is ~1.74.
+            # TARGET-1 T8a: measure the R:R the trade will ACTUALLY realise.
+            # The weighted figure below is correct for a partial-exit system.
+            # partials_enabled defaults to False (:683) and reads False in live
+            # config, so every trade takes ONE exit -- and this gate was
+            # approving trades on a blend across three rungs that never happen.
+            # GBPAUD 2-Sept: weighted 1.50 passed, the realised target was
+            # 0.50R, and the trade ran 1:0.50.
+            # This is also the late-entry fix: a late entry means a wide stop
+            # and a short remaining move, which IS a poor R:R. It gets refused
+            # on its economics rather than on an ATR threshold nobody has yet
+            # justified with data.
+            _single_exit = not bool(
+                (risk_config or {}).get("phase_config", {}).get("partials_enabled", False)
+            )
             n = min(len(risk_multiples), len(partial_sizes))
             total_weight = sum(partial_sizes[:n])
-            if total_weight > 0:
+            if _single_exit:
+                # One exit: the R:R is that exit's multiple, nothing else.
+                # T8b takes the SECOND rung (TP2), not the first, when one is
+                # available -- matching that here (rather than risk_multiples[0]
+                # as originally specified) so this pre-flight check validates
+                # against the same rung T8b will actually select. Falls back to
+                # rung 0 exactly like T8b does when only one target exists.
+                weighted_rr = float(
+                    risk_multiples[1] if len(risk_multiples) >= 2 else risk_multiples[0]
+                )
+            elif total_weight > 0:
                 weighted_rr = sum(
                     risk_multiples[i] * partial_sizes[i]
                     for i in range(n)
@@ -1271,6 +1295,11 @@ class VeteranTradeManager:
                 # Prevents ATR-derived stops from being dangerously tight during
                 # volatility squeezes or low-spread exotic sessions.
                 # Sourced from risk_config["min_sl_pct"] per asset in config.json.
+                # TARGET-1 T7: persisted for the episode record so "did the
+                # floor widen risk" can be joined to outcomes instead of only
+                # existing as a log line. Defaults False; only set True in the
+                # binds branch below.
+                self.min_sl_bound = False
                 _min_sl_pct = self.risk_config.get("min_sl_pct", 0.0)
                 if _min_sl_pct > 0 and self.entry_price > 0:
                     _min_sl_dist = self.entry_price * _min_sl_pct
@@ -1284,12 +1313,13 @@ class VeteranTradeManager:
                     # this file has no separate "_candidate_stop" variable; the
                     # pre-floor stop lives directly on self.initial_stop_loss.
                     _raw_dist = abs(self.entry_price - self.initial_stop_loss)
+                    self.min_sl_bound = _raw_dist < _min_sl_dist
                     logger.info(
                         f"[MIN-SL] {self.asset}: raw={_raw_dist:.5f} "
                         f"floor={_min_sl_dist:.5f} ({_min_sl_pct:.4%}) "
-                        f"binds={'YES' if _raw_dist < _min_sl_dist else 'no'}"
+                        f"binds={'YES' if self.min_sl_bound else 'no'}"
                         + (f" widened_by={(_min_sl_dist - _raw_dist):.5f}"
-                           if _raw_dist < _min_sl_dist else "")
+                           if self.min_sl_bound else "")
                     )
 
                     if self.side == "long":
@@ -1718,6 +1748,97 @@ class VeteranTradeManager:
             # If composite_state is None, all structural checks in check_exit
             # gracefully skip and ATR behaviour is preserved.
             self._live_cs = composite_state
+
+            # ── TARGET-1 T9a: LIVE ZONE-LADDER REFRESH ──────────────────────
+            # The ladder was read ONCE at __init__ (:518) from the opening
+            # signal's composite_state and never again. VTM is constructed at
+            # three sites (main.py:4543, portfolio_manager.py:307 and :1062);
+            # the re-init paths pass signal_details with no composite_state, so
+            # the ladder arrived empty and the trade silently dropped to
+            # R-multiple targets. Observed on GBPAUD #131983327: 111 levels at
+            # 17:02, 0 at 19:40, same position.
+            # _pull at :551 is a closure inside __init__ and is not reachable
+            # here, so the same two lines are inlined below.
+            # Same treatment PHASE 4 (immediately below) gives the Livermore
+            # state. Structure develops while a trade is open; targets should
+            # see it -- and T9b's roll picks its next rung from this ladder.
+            try:
+                if composite_state:
+                    def _zl(_name):
+                        _v = (composite_state.get(_name)
+                              if isinstance(composite_state, dict)
+                              else getattr(composite_state, _name, None))
+                        return list(_v) if _v else []
+                    _z4, _z1 = _zl("zone_ladder_4h"), _zl("zone_ladder_1d")
+                    for _l in _z4:
+                        if isinstance(_l, dict): _l.setdefault("tf", "4H")
+                    for _l in _z1:
+                        if isinstance(_l, dict): _l.setdefault("tf", "1D")
+                    # Daily first so it wins the dedup downstream -- same
+                    # ordering __init__ uses at :568.
+                    _merged_live = list(_z1) + list(_z4)
+                    if _merged_live:
+                        _prev = len(getattr(self, "zone_ladder_4h", []) or [])
+                        self.zone_ladder_4h = _merged_live
+                        self.zone_ladder_4h_count = len(_z4)
+                        self.zone_ladder_1d_count = len(_z1)
+                        if _prev == 0:
+                            logger.info(
+                                "[VTM-LADDER] %s: ladder refreshed live — "
+                                "%d level(s) (%d x 4H, %d x 1D), was empty",
+                                self.asset, len(_merged_live), len(_z4), len(_z1),
+                            )
+            except Exception as _zl_err:
+                logger.debug("[VTM-LADDER] %s: live refresh skipped: %s",
+                             self.asset, _zl_err)
+
+            # ── TARGET-1 T9b: ROLLING TARGETS ────────────────────────────────
+            # Reach the current target -> aim at the next rung. Stop at 2R.
+            # 388 records: of 197 trades that reached 1R, 92% reached 1.5R and
+            # 81% reached 2R. Only 38% reached 3R -- the 2R ceiling is why this
+            # does not repeat the TP3 experiment that was correctly reverted.
+            # Safe because the trail is armed by 1R (trail_start=0.25R,
+            # r_breakeven=True): a roll gives back open profit, never capital.
+            # Uses the ladder refreshed by T9a, so the next rung reflects
+            # CURRENT structure rather than a price computed at entry.
+            # Deviation from spec: override_take_profit already records via
+            # _record_auto_move internally (default reason "manual_set_tp"/
+            # "MANUAL"); calling it again here as the spec literally showed
+            # would double-record every roll. Passed reason/source through to
+            # override_take_profit instead (now accepts both) so it records
+            # once, correctly tagged.
+            try:
+                if self.take_profit_levels and current_price:
+                    _entry = float(self.entry_price)
+                    _risk = abs(_entry - float(self.initial_stop_loss))
+                    _cap = float(self.risk_config.get("rolling_targets_max_r", 2.0))
+                    if _risk > 0:
+                        _now_r = ((float(current_price) - _entry) if self.side == "long"
+                                  else (_entry - float(current_price))) / _risk
+                        _cur = float(self.take_profit_levels[0])
+                        _cur_r = abs(_cur - _entry) / _risk
+                        if _now_r >= _cur_r - 1e-9 and _cur_r < _cap:
+                            _next = None
+                            for _lvl in sorted(self._roll_candidates(),
+                                               key=lambda p: abs(float(p) - _entry)):
+                                _r = abs(float(_lvl) - _entry) / _risk
+                                if _r > _cur_r + 1e-9 and _r <= _cap + 0.05:
+                                    _next = float(_lvl)
+                                    break
+                            if _next is not None:
+                                _msg = self.override_take_profit(
+                                    _next, target_index=0,
+                                    reason="rolling_target", source="AUTO",
+                                )
+                                logger.warning(
+                                    "[VTM-ROLL] %s %s: reached %.2fR — target rolled "
+                                    "%.5f (%.2fR) -> %.5f (%.2fR). %s",
+                                    self.asset, self.side.upper(), _now_r,
+                                    _cur, _cur_r, _next, abs(_next - _entry) / _risk, _msg,
+                                )
+            except Exception as _roll_err:
+                logger.warning("[VTM-ROLL] %s: roll skipped: %s", self.asset, _roll_err)
+
             # Brain Rebuild Part 3.4: same idea for judge scores — feeds the
             # human-alert layer's (Part 3.5) structure-break-against-position
             # check. {"buy": {...}, "sell": {...}} or None.
@@ -3763,12 +3884,45 @@ class VeteranTradeManager:
             f"  Entry : {self.entry_price:.5f}"
         )
 
-    def override_take_profit(self, new_tp: float, target_index: int = 0) -> str:
+    def _roll_candidates(self) -> list:
+        """TARGET-1 T9b: every price the roll may move to, nearest first.
+
+        Prefers the live zone ladder (refreshed by T9a) so a roll lands on real
+        structure rather than an arithmetic multiple computed at entry. Falls
+        back to the original rungs when no ladder is available -- the same
+        hybrid principle calculate_hybrid_targets already uses.
         """
-        Manually override a specific take profit level via Telegram command.
+        _out = []
+        try:
+            _entry = float(self.entry_price)
+            for _l in (getattr(self, "zone_ladder_4h", []) or []):
+                _p = float(_l.get("price", 0) if isinstance(_l, dict) else _l)
+                if _p <= 0:
+                    continue
+                if (self.side == "long" and _p > _entry) or \
+                   (self.side == "short" and _p < _entry):
+                    _out.append(_p)
+        except Exception:
+            pass
+        for _t in (self.take_profit_levels or []):
+            try:
+                _out.append(float(_t))
+            except Exception:
+                continue
+        return sorted(set(_out))
+
+    def override_take_profit(self, new_tp: float, target_index: int = 0,
+                             reason: str = "manual_set_tp", source: str = "MANUAL") -> str:
+        """
+        Override a specific take profit level -- originally Telegram-only,
+        now also the mechanism TARGET-1 T9b's auto-roll uses.
 
         target_index selects which TP tier to update (0 = first remaining TP,
         1 = second, etc.).  Defaults to the nearest unfilled TP.
+
+        reason/source let a non-Telegram caller (e.g. the T9b roll) tag the
+        move ledger correctly instead of every override reading as a manual
+        Telegram command -- default unchanged for existing callers.
 
         Returns a human-readable status string for the Telegram reply.
         """
@@ -3799,7 +3953,7 @@ class VeteranTradeManager:
         # Instead of refusing, append the new price as the single exit target.
         if not remaining_indices:
             self.take_profit_levels = [new_tp]
-            self._record_auto_move("TP", None, new_tp, "manual_set_tp", source="MANUAL")
+            self._record_auto_move("TP", None, new_tp, reason, source=source)
             logger.info(
                 f"[VTM] 🖊️ Manual TP added (was empty): {self.asset} {self.side.upper()} "
                 f"→ {new_tp:.5f}"
@@ -3815,7 +3969,7 @@ class VeteranTradeManager:
         actual_idx = remaining_indices[target_index]
         old_tp = self.take_profit_levels[actual_idx]
         self.take_profit_levels[actual_idx] = new_tp
-        self._record_auto_move("TP", old_tp, new_tp, "manual_set_tp", source="MANUAL")
+        self._record_auto_move("TP", old_tp, new_tp, reason, source=source)
 
         logger.info(
             f"[VTM] 🖊️ Manual TP override: {self.asset} {self.side.upper()} "
