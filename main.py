@@ -7087,6 +7087,16 @@ class TradingBot:
                                 _vtm = new_pos.trade_manager
                                 vtm_entry_type = getattr(_vtm, "vtm_entry_type", None)
                                 vtm_stop_type = getattr(_vtm, "stop_type", "atr")
+                                # TARGET-1 T5: same flags binance_handler.py's Fix
+                                # 14c banner already keys on, instead of the
+                                # unconditional "VTM Only" warning this path sent
+                                # regardless of whether the exchange placement
+                                # actually succeeded.
+                                sl_placed_on_exchange = bool(
+                                    self.config.get("trading", {}).get(
+                                        "place_vtm_sl_on_exchange", False
+                                    )
+                                )
 
                                 self._send_telegram_notification(
                                     self.telegram_bot.notify_trade_opened(
@@ -7102,6 +7112,7 @@ class TradingBot:
                                         vtm_is_active=vtm_is_active,
                                         entry_type=vtm_entry_type,
                                         stop_type=vtm_stop_type,
+                                        sl_placed_on_exchange=sl_placed_on_exchange,
                                     )
                                 )
 

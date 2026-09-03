@@ -341,25 +341,52 @@ class Position:
                     # all TP tiers so VTM exits the full position via SL/trail
                     # only, rather than force-closing 100% at TP1 every time.
                     if self.disable_partials:
-                        # Keep the last (most conservative/furthest) TP as a
+                        # Keep the middle TP (TARGET-1 T8b) as a
                         # single full-exit target — partial sizes are wiped so
                         # the position exits 100% at that level instead of in
                         # fractions that would round to zero on a 0.01-lot trade.
                         _all_tps = self.trade_manager.take_profit_levels
                         if _all_tps:
-                            # Use TP1 (nearest target) for min-lot positions.
-                            # Previously used TP3 (furthest) which almost never hit —
-                            # a min-lot position cannot partial-exit, so the single exit
-                            # should be the highest-probability target, not the home-run.
-                            self.trade_manager.take_profit_levels = [_all_tps[0]]
+                            # TARGET-1 T8b: use TP2 (middle rung), not TP1.
+                            # The comment this replaces was RIGHT about TP3: 388
+                            # records show only 38% of trades that reach 1R go on to
+                            # 3R, so the home-run rung is a coin flip. But the choice
+                            # was framed as TP1-or-TP3 and TP2 was never tried:
+                            #   of 197 trades that reached 1R, 92% reached 1.5R
+                            #                                  81% reached 2.0R
+                            #                                  38% reached 3.0R
+                            # Taking the nearest rung leaves 2R behind four times in
+                            # five. GBPAUD 2-Sept ran 1:0.50 on rung one.
+                            # Falls back to the furthest available rung if fewer than
+                            # two exist, and to rung one if only one does.
+                            _idx = 1 if len(_all_tps) >= 2 else 0
+                            self.trade_manager.take_profit_levels = [_all_tps[_idx]]
+                            logger.info(
+                                f"[VTM] {asset}: single-exit target = rung {_idx + 1} "
+                                f"of {len(_all_tps)} ({_all_tps[_idx]:,.5f}) — T8b"
+                            )
+                            # TARGET-1 T7: realised single-exit R:R, now that
+                            # T8b has finalised which rung the trade will
+                            # actually take. Computed here rather than at
+                            # entry-measurement time (main.py's [ENTRY-MEASURE]
+                            # block runs before VTM/T8b exist) or inside
+                            # _calculate_initial_levels (runs before T8b picks
+                            # the rung) -- this is the first point the real
+                            # single-exit target is known.
+                            try:
+                                _entry_px = self.trade_manager.entry_price
+                                _init_sl = self.trade_manager.initial_stop_loss
+                                _risk_dist = abs(_entry_px - _init_sl)
+                                self.trade_manager.rr_at_entry = (
+                                    abs(_all_tps[_idx] - _entry_px) / _risk_dist
+                                    if _risk_dist > 0 else None
+                                )
+                            except Exception:
+                                self.trade_manager.rr_at_entry = None
                         else:
                             self.trade_manager.take_profit_levels = []
+                            self.trade_manager.rr_at_entry = None
                         self.trade_manager.partial_sizes = []
-                        logger.info(
-                            f"[VTM] ⚠️ Partials disabled for {asset} (min-lot position) "
-                            f"— single full-exit TP set to "
-                            f"{f'${_all_tps[0]:,.5f}' if _all_tps else 'none'}"
-                        )
 
                     self.stop_loss = self.trade_manager.initial_stop_loss
                     if self.trade_manager.take_profit_levels:
@@ -3984,6 +4011,19 @@ class PortfolioManager:
             "exit_slippage": (
                 abs(exit_price - _intended_price) if _intended_price else None
             ),
+            # TARGET-1 T7: measurement only. [ENTRY-MEASURE] and [MIN-SL]
+            # already compute these at entry time but only as log lines --
+            # this persists both so they can be joined to outcomes.
+            "entry_distance_atr": (
+                (_exit_vtm.signal_details.get("entry_measure") or {}).get("entry_distance_atr")
+                if _exit_vtm else None
+            ),
+            "brc_age_at_entry": (
+                (_exit_vtm.signal_details.get("entry_measure") or {}).get("proof_age_bars")
+                if _exit_vtm else None
+            ),
+            "rr_at_entry": getattr(_exit_vtm, "rr_at_entry", None) if _exit_vtm else None,
+            "min_sl_bound": getattr(_exit_vtm, "min_sl_bound", None) if _exit_vtm else None,
         })
 
         logger.info(
