@@ -1688,6 +1688,35 @@ class VeteranTradeManager:
             self.position_size = final_size
             self._propose_stop(self.initial_stop_loss, "initial_stop")
 
+            # STOP-1 SEG F1: one line covering the whole stop-placement chain.
+            # Today it takes four separate log lines and a code read to work
+            # out why a stop landed where it did. This makes the sequence
+            # auditable and, joined to gross_r on the episode record,
+            # measurable.
+            # Deviation from spec: placed at the true end of this method
+            # (after self.position_size is finalised) rather than right after
+            # the min_sl_pct block as originally specified. self.quantity
+            # does not exist anywhere on this class -- the real attribute is
+            # self.position_size, and it isn't finalised until here; using
+            # the spec's suggested placement and attribute name would have
+            # made risk≈$ permanently read $0.00.
+            try:
+                _sp_dist = abs(self.entry_price - self.initial_stop_loss)
+                _sp_atr  = (_sp_dist / atr) if atr else 0.0
+                _sp_risk = _sp_dist * float(getattr(self, "position_size", 0) or 0)
+                logger.info(
+                    "[STOP-PICK] %s %s entry=%.5g | type=%s stop=%.5g dist=%.5g (%.2fATR) "
+                    "| risk≈$%.2f | floor_bound=%s | atr_mult=%.2f max_mult=%.1f",
+                    self.asset, self.side, self.entry_price,
+                    getattr(self, "stop_type", "unknown"),
+                    self.initial_stop_loss, _sp_dist, _sp_atr, _sp_risk,
+                    getattr(self, "min_sl_bound", False),
+                    float(self.atr_multiplier or 0),
+                    float(self.risk_config.get("max_stop_atr_mult", 5.0)),
+                )
+            except Exception as _sp_err:
+                logger.debug("[STOP-PICK] %s telemetry error: %s", self.asset, _sp_err)
+
         except ValueError as ve:
             raise # Re-raise lot size error to abort
         except Exception as e:
@@ -3828,6 +3857,46 @@ class VeteranTradeManager:
     # T3.2 — Manual Override Methods (Telegram /set_sl /set_tp /vtm_status)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _sl_tp_magnitude_ok(self, value, price, atr, kind):
+        """
+        STOP-1 SEG G1: reject an SL or TP that is not plausibly near the market.
+
+        The existing check is directional only -- it asks which SIDE of price a
+        value sits on and never asks how FAR. On 3 Sep a /set_tp of 87258 on
+        USOIL (price 89.667) passed the direction test and was sent to the
+        broker, leaving the position without a usable take-profit for 61s.
+
+        Distance is measured in ATR because that is the market's own unit of
+        normal movement and it scales across assets without a per-asset table:
+        20 ATR is generous on every instrument the bot trades, and a decimal
+        slip is never within it.
+
+        Returns (ok: bool, dist_atr: float, msg: str).
+        """
+        try:
+            price = float(price); value = float(value); atr = float(atr or 0.0)
+            if price <= 0 or atr <= 0:
+                return True, 0.0, ""      # cannot judge -- do not block
+            dist_atr = abs(value - price) / atr
+            limit = float(self.risk_config.get("sl_tp_max_atr", 20.0))
+            if dist_atr <= limit:
+                return True, dist_atr, ""
+            ratio = value / price if price else 0.0
+            suggestion = ""
+            for div in (10.0, 100.0, 1000.0, 10000.0):
+                if abs((value / div) - price) / atr <= limit:
+                    suggestion = " Did you mean %.5f?" % (value / div)
+                    break
+            msg = (
+                "%s %.5f is %.0f ATR from the current price of %.5f "
+                "(%.0f× price). That is outside the %.0f ATR sanity limit.%s"
+                % (kind, value, dist_atr, price, ratio, limit, suggestion)
+            )
+            return False, dist_atr, msg
+        except Exception as e:
+            logger.error("[SL-TP-SANITY] check errored: %s", e)
+            return True, 0.0, ""          # never block on our own bug
+
     def override_stop_loss(self, new_sl: float) -> str:
         """
         Manually override the current stop loss level via Telegram command.
@@ -3845,21 +3914,47 @@ class VeteranTradeManager:
         # Use current mark price for the sanity check; fall back to entry if
         # live price isn't available yet (position still being opened).
         current_price = getattr(self, "current_price", None) or self.entry_price
+        _sl_atr = self._calculate_atr()
 
         # Reject only when the SL would fire against the current price
         # (i.e. it's already beyond where the market is right now).
+        # STOP-1 SEG G1/G2: a direction failure that is ALSO a magnitude
+        # failure gets the new, magnitude-aware message (never suggesting the
+        # other command -- that sentence is what routed the 3-Sept typo to
+        # the broker). A direction failure that is plausibly near price keeps
+        # the original message, which is correct and useful for a genuine
+        # wrong-side mistake.
         if self.side == "long" and new_sl >= current_price:
+            _ok, _dist, _why = self._sl_tp_magnitude_ok(new_sl, current_price, _sl_atr, "SL")
+            if not _ok:
+                return f"❌ Rejected: {_why}\nSend the corrected value."
             return (
                 f"❌ Rejected: SL {new_sl:.5f} is at or above current price "
                 f"{current_price:.5f} — it would trigger immediately. "
                 f"Use /set_tp to move take profit instead."
             )
         if self.side == "short" and new_sl <= current_price:
+            _ok, _dist, _why = self._sl_tp_magnitude_ok(new_sl, current_price, _sl_atr, "SL")
+            if not _ok:
+                return f"❌ Rejected: {_why}\nSend the corrected value."
             return (
                 f"❌ Rejected: SL {new_sl:.5f} is at or below current price "
                 f"{current_price:.5f} — it would trigger immediately. "
                 f"Use /set_tp to move take profit instead."
             )
+
+        # STOP-1 SEG G1: direction passed -- still check magnitude
+        # independently. This is the case that let the 3-Sept TP typo
+        # through: a value can be on the CORRECT side of price and still be
+        # nowhere near it.
+        _ok, _dist, _why = self._sl_tp_magnitude_ok(new_sl, current_price, _sl_atr, "SL")
+        if not _ok:
+            logger.warning("[SL-TP-SANITY] %s SL REFUSED: %s", self.asset, _why)
+            try:
+                self._safe_send_alert("❌ Refused: " + _why)
+            except Exception:
+                pass
+            return f"❌ Rejected: {_why}\nSend the corrected value."
 
         # A13: third writer of current_stop_loss (Telegram-triggered manual
         # override, its own async context) — same shared lock as the
@@ -3870,7 +3965,7 @@ class VeteranTradeManager:
         self._record_auto_move("SL", old_sl, new_sl, "manual_set_sl", source="MANUAL")
         logger.info(
             f"[VTM] 🖊️ Manual SL override: {self.asset} {self.side.upper()} "
-            f"SL {old_sl:.5f} → {new_sl:.5f}"
+            f"SL {old_sl:.5f} → {new_sl:.5f} dist={_dist:.1f}atr"
         )
         direction = "tighter 🛡️" if (
             (self.side == "long" and new_sl > old_sl) or
@@ -3940,6 +4035,21 @@ class VeteranTradeManager:
                 f"for a SHORT position."
             )
 
+        # STOP-1 SEG G1: the direction check above is exactly what let the
+        # 3-Sept typo through -- 87258 is on the correct side of price for a
+        # LONG's TP, so it passed, and reached the broker. Magnitude check,
+        # independent of direction, closes that gap.
+        _tp_price = getattr(self, "current_price", None) or self.entry_price
+        _tp_atr = self._calculate_atr()
+        _ok, _tp_dist, _tp_why = self._sl_tp_magnitude_ok(new_tp, _tp_price, _tp_atr, "TP")
+        if not _ok:
+            logger.warning("[SL-TP-SANITY] %s TP REFUSED: %s", self.asset, _tp_why)
+            try:
+                self._safe_send_alert("❌ Refused: " + _tp_why)
+            except Exception:
+                pass
+            return f"❌ Rejected: {_tp_why}\nSend the corrected value."
+
         # Find remaining (unhit) TP levels.
         # self.partials_hit is a list of hit *index integers* (e.g. [0, 1] means
         # TP0 and TP1 were hit). The old filter used self.partials_hit[i] as a bool
@@ -3956,7 +4066,7 @@ class VeteranTradeManager:
             self._record_auto_move("TP", None, new_tp, reason, source=source)
             logger.info(
                 f"[VTM] 🖊️ Manual TP added (was empty): {self.asset} {self.side.upper()} "
-                f"→ {new_tp:.5f}"
+                f"→ {new_tp:.5f} dist={_tp_dist:.1f}atr"
             )
             return (
                 f"✅ TP set to {new_tp:.5f} for {self.asset} {self.side.upper()}\n"
@@ -3973,7 +4083,7 @@ class VeteranTradeManager:
 
         logger.info(
             f"[VTM] 🖊️ Manual TP override: {self.asset} {self.side.upper()} "
-            f"TP[{actual_idx}] {old_tp:.5f} → {new_tp:.5f}"
+            f"TP[{actual_idx}] {old_tp:.5f} → {new_tp:.5f} dist={_tp_dist:.1f}atr"
         )
         return (
             f"✅ TP[{actual_idx + 1}] updated\n"

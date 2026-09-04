@@ -893,8 +893,16 @@ class CompositeStateBuilder:
                                 _n2_px = float(df["close"].iloc[-1])
                                 _n2_lo = getattr(state, "livermore_anchor_natural_low_1h", None)
                                 _n2_hi = getattr(state, "livermore_anchor_natural_high_1h", None)
-                                _n2_up_max = getattr(state, "livermore_anchor_main_up_max", None)
-                                _n2_dn_min = getattr(state, "livermore_anchor_main_down_min", None)
+                                # STOP-1 SEG A: these two reads were missing the
+                                # _1h suffix, so a 1H state was being checked
+                                # against 4H anchors. That is not a comparison
+                                # that can be right or wrong -- it is a category
+                                # error, and it produced false STALE/INVALID
+                                # warnings on BTC and GBPAUD while masking the
+                                # one real stale anchor (GOLD natural_low_1h).
+                                # Suffix added; the guard is otherwise untouched.
+                                _n2_up_max = getattr(state, "livermore_anchor_main_up_max_1h", None)
+                                _n2_dn_min = getattr(state, "livermore_anchor_main_down_min_1h", None)
                                 _n2_bad = []
 
                                 if _n2_s in _n2_up:

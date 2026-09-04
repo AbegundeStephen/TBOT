@@ -131,6 +131,49 @@ class LivermoreStateMachine:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    def _retire_stale_pivots(self, close: float, mn: float) -> None:
+        """
+        STOP-1 SEG I: retire a confirmed natural pivot the market has left.
+
+        The existing demotion at _natural_retr / _natural_reb only fires while
+        the machine is IN the state that created the pivot. Once price breaks
+        through and the machine moves to MAIN_UP or MAIN_DOWN, that branch
+        stops running and the pivot is never cleaned up -- confirmed live on
+        GOLD, whose natural_low sat at 4604.957 for 19 hours with price at
+        4462.8, 142 points below it.
+
+        This runs every bar regardless of state. A confirmed natural LOW that
+        price has closed decisively below is not a low any more; likewise a
+        natural HIGH price has closed decisively above. Decisively = beyond one
+        minor pivot unit (mn = self.minor_mult * atr), the same unit the machine
+        already uses to confirm a pivot -- so this reuses the existing per-asset
+        calibration rather than introducing a new number to tune.
+
+        Only _nl_confirmed / _nh_confirmed are cleared. The watermarks
+        (_nl_watermark, _nl_bounce_high, _nh_watermark, _nh_dip_low) are left
+        alone, so the machine can confirm a fresh pivot immediately afterwards.
+        The old level is released as a LIVE anchor, not erased from history --
+        the same treatment the zone ladder already gives a broken level via its
+        role_flipped_at / flip_count fields.
+        """
+        try:
+            if self._nl_confirmed is not None and close < (self._nl_confirmed - mn):
+                logger.info(
+                    "[LSM-RETIRE] %s %s natural_low %.5g released "
+                    "(close %.5g is more than one minor unit below it)",
+                    self.asset, self.timeframe, self._nl_confirmed, close,
+                )
+                self._nl_confirmed = None
+            if self._nh_confirmed is not None and close > (self._nh_confirmed + mn):
+                logger.info(
+                    "[LSM-RETIRE] %s %s natural_high %.5g released "
+                    "(close %.5g is more than one minor unit above it)",
+                    self.asset, self.timeframe, self._nh_confirmed, close,
+                )
+                self._nh_confirmed = None
+        except Exception as e:
+            logger.debug("[LSM-RETIRE] %s check error: %s", self.asset, e)
+
     def update(self, close: float, atr: float) -> LivermoreSnapshot:
         """
         Process one closed bar.  Returns current snapshot after update.
@@ -151,6 +194,11 @@ class LivermoreStateMachine:
 
         maj = self.major_mult * atr
         mn  = self.minor_mult * atr
+
+        # STOP-1 SEG I: release pivots the market has left, in every state.
+        # Must run BEFORE _dispatch so this bar's handler sees the cleared
+        # anchor rather than acting on one price has already invalidated.
+        self._retire_stale_pivots(close, mn)
 
         prev_state = self._state
         self._dispatch(close, atr, maj, mn)

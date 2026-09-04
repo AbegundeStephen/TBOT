@@ -899,11 +899,45 @@ class PortfolioManager:
             return cfg.get("mt5_symbol") or cfg.get("symbol", asset_name)
         return cfg.get("binance_symbol") or cfg.get("symbol", asset_name)
 
+    def _save_system_metrics(self):
+        """
+        STOP-1 SEG C: persist system-wide metrics independently of whether any
+        position is open.
+
+        These four values (peak_equity, loss_streak, realized_pnl_today, mode)
+        are NOT position state -- they are account state, and they drive the
+        drawdown shield and the loss-streak circuit breaker. They were being
+        written only at the tail of save_portfolio_state(), which returns early
+        when self.positions is empty. Result: the moment the last trade closed,
+        these stopped persisting, and any change made while flat (including a
+        /reset_equity re-baseline) was lost on the next restart.
+
+        Cheap, atomic, and safe to call every cycle.
+        """
+        try:
+            system_metrics = {
+                "peak_equity": self.peak_equity,
+                "loss_streak": self.loss_streak,
+                "realized_pnl_today": self.realized_pnl_today,
+                "mode": self.mode,
+                "timestamp": datetime.now().isoformat(),
+            }
+            save_system_state(system_metrics)
+        except Exception as e:
+            logger.error(f"[STATE] Failed to save system metrics: {e}")
+
     def save_portfolio_state(self):
         """Saves the current open positions to a file atomically."""
         if self.is_paper_mode:
             logger.info("[STATE] Paper mode, skipping state save.")
             return
+
+        # STOP-1 SEG C: account state persists regardless of whether any
+        # position is open. Must run before the no-positions early return
+        # below -- placed here (rather than "inside the try:" as originally
+        # specified) because the no-positions early return happens before
+        # that try: block even starts in the real code.
+        self._save_system_metrics()
 
         # If there are no positions, ensure no state file is left
         if not self.positions:
@@ -955,15 +989,8 @@ class PortfolioManager:
                 f"[STATE] Successfully saved {len(self.positions)} open positions to {self.state_file}"
             )
 
-            # ✨ NEW: Save non-picklable system metrics to JSON
-            system_metrics = {
-                "peak_equity": self.peak_equity,
-                "loss_streak": self.loss_streak,
-                "realized_pnl_today": self.realized_pnl_today,
-                "mode": self.mode,  # Save the mode (live/paper)
-                "timestamp": datetime.now().isoformat(),
-            }
-            save_system_state(system_metrics)
+            # STOP-1 SEG C: moved to _save_system_metrics(), called at the top
+            # of this method so it also runs on the no-positions path.
 
         except Exception as e:
             logger.error(f"[STATE] Failed to save portfolio state: {e}", exc_info=True)
