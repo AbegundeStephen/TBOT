@@ -365,6 +365,25 @@ class SystemValidator:
             "BB_KC_SQUEEZE":      ("bb_kc_squeeze_active", 50),
         }
 
+        # STOP-1 SEG H: a rarely-true boolean is not a dead component.
+        #
+        # The entropy check below is correct for continuous values
+        # (livermore_state, vol_down_ratio) and wrong for booleans that are
+        # legitimately False for long stretches -- is_silent_zone and
+        # bb_kc_squeeze_active. Scoring those by output diversity guarantees a
+        # DEAD verdict (unique==1 -> liveness=0.0 per the entropy formula
+        # below) and buries real findings underneath permanent false alarms.
+        #
+        # For a RARE_BOOLEAN the meaningful question is not "does it vary" but
+        # "is it still capable of firing, and has it fired within a window
+        # that makes sense for how rare it is". A component that has never
+        # once fired across its whole observation window is genuinely worth
+        # naming; one that fires occasionally is healthy.
+        _RARE_BOOLEAN = {
+            "IS_SILENT_ZONE": 500,    # cycles without a fire before WATCH
+            "BB_KC_SQUEEZE":  500,
+        }
+
         for name, (attr, buf_size) in _components.items():
             val = getattr(composite_state, attr, None)
             if val is None:
@@ -374,6 +393,25 @@ class SystemValidator:
             self._liveness_buffers[name].append(str(val))
 
             buf = self._liveness_buffers[name]
+
+            if name in _RARE_BOOLEAN:
+                _window = _RARE_BOOLEAN[name]
+                _fires = sum(1 for v in buf if str(v) in ("1", "True", "true"))
+                _seen  = len(buf)
+                if _fires > 0:
+                    liveness = 100.0                      # it fires: healthy
+                    _note = "fired %d/%d in buffer" % (_fires, _seen)
+                elif self._cycle_count < _window:
+                    liveness = 70.0                       # too early to judge
+                    _note = "no fire yet (%d/%d cycles)" % (self._cycle_count, _window)
+                else:
+                    liveness = 30.0                       # never fired: name it
+                    _note = "no fire in %d cycles -- verify wiring" % self._cycle_count
+                ch = self._get_or_create(name)
+                ch.liveness = round(liveness, 1)
+                ch.notes = _note
+                continue
+
             if len(buf) < 5:
                 continue  # Not enough data yet
 
@@ -429,8 +467,14 @@ class SystemValidator:
             if len(buf) >= 20:
                 fire_rate = sum(buf) / len(buf)
                 # Expected 5–30% block rate; outside = calibration concern but not dead
+                # STOP-1 SEG H: a passive bot may legitimately see zero hard
+                # vetoes for a long time -- 0 in 63,322 cycles read as FAILING
+                # under the old 20-observation minimum. Same RARE_BOOLEAN
+                # reasoning as IS_SILENT_ZONE/BB_KC_SQUEEZE: give it a real
+                # window (5000 cycles, matching the other two) before calling
+                # "never fired" suspicious rather than "still calibrating."
                 if fire_rate == 0.0:
-                    _live = 20.0   # Never fired — suspicious
+                    _live = 70.0 if self._cycle_count < 5000 else 20.0
                 elif fire_rate > 0.70:
                     _live = 40.0   # Firing too much — calibration issue
                 else:

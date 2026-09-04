@@ -2621,6 +2621,22 @@ class MT5ExecutionHandler:
                     if pos.mt5_ticket is None:
                         continue  # Position has no ticket (paper / imported without ticket)
                     if pos.mt5_ticket not in live_tickets:
+                        # STOP-1 SEG B: a position whose close has already been
+                        # reconciled must not be reconciled again. Without this,
+                        # a position still present in the portfolio list gets
+                        # re-detected as "missing at broker" on a later sync
+                        # pass and the exit is written to the database a second
+                        # time (confirmed: ticket #132106235 recorded at 10:33
+                        # and again at 15:52 on 3 Sep).
+                        # Deviation from spec: the spec's guard referenced a
+                        # bare `ticket` variable that doesn't exist in this
+                        # scope -- corrected to pos.mt5_ticket.
+                        if getattr(pos, "_close_reconciled", False):
+                            logger.debug(
+                                "[SYNC] Ticket #%s already reconciled — skipping duplicate exit record.",
+                                pos.mt5_ticket,
+                            )
+                            continue
                         logger.warning(
                             f"[SYNC] ⚠️ Ticket #{pos.mt5_ticket} ({asset} {pos.side.upper()}) "
                             f"no longer on MT5 — externally closed, fetching broker close data."
@@ -2668,6 +2684,12 @@ class MT5ExecutionHandler:
                             already_closed_on_exchange=True,
                             preloaded_broker_data=broker_data,
                         )
+                        # STOP-1 SEG B: mark reconciled so a later sync pass
+                        # cannot re-record this same close.
+                        try:
+                            setattr(pos, "_close_reconciled", True)
+                        except Exception:
+                            pass
 
             return True
 
