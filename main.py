@@ -2185,6 +2185,20 @@ class TradingBot:
             # rather than duplicating a working guard. Sites 2 and 3 (the
             # council/LSM-companion builds further down) lacked this and were
             # patched.
+            # REF-1 SEG J: mint the episode id BEFORE the council runs. The
+            # council's own gate logging (council_aggregator.py's
+            # write_gate_decision sites) reads governor_data.get("episode_id")
+            # at call time -- if it's not in mtf_regime yet, those rows are
+            # written with no id and can never be joined back to the shadow
+            # or trade they describe. DATA-3 ITEM 4 already fixed this same
+            # trap at the trade-decision call site further down (~:5630);
+            # this recording/ranking pass never had the equivalent fix.
+            # Reuses _episode_id_for (FRAME-1 SEG 5) rather than duplicating
+            # its mint-or-reuse logic -- it also parks the id into
+            # _pending_episode_ids, so the trade-pass site below picks up
+            # the SAME id instead of minting a second one for this cycle.
+            mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
+
             _perf_agg = aggregators.get("performance")
             _cs = None
             if _perf_agg is not None and hasattr(_perf_agg, '_build_composite_state'):
@@ -2896,6 +2910,16 @@ class TradingBot:
         """
         try:
             if not self.shadow_trader or signal == 0 or current_price <= 0:
+                # REF-1 SEG K4: 6 [LANE-B] captures logged, 0 shadow records
+                # on disk. This method's own except (below) is warning-level
+                # and has never fired -- it returns cleanly, most likely
+                # right here. Make the silent return speak for Lane B calls
+                # specifically so it's visible without guessing further.
+                if str(lane).startswith("B"):
+                    logger.warning(
+                        "[SHADOW] %s lane=%s REFUSED: shadow_trader=%s signal=%s price=%s",
+                        asset_name, lane, bool(self.shadow_trader), signal, current_price,
+                    )
                 return
             _side = "long" if signal > 0 else "short"
             # VTM-style regime-adaptive ATR (same logic used in the main shadow block)
@@ -4377,9 +4401,33 @@ class TradingBot:
 
         _last_reconcile = 0.0
         _last_state_save = 0.0
+        _last_metrics_save = 0.0  # REF-1 SEG K1: separate timer -- see below
 
         while self.is_running:
             try:
+                # REF-1 SEG K1: system metrics are ACCOUNT state, not position
+                # state, and must persist even while flat. This was gated
+                # inside the "positions to manage" branch below, so
+                # peak_equity (drives the drawdown shield) and loss_streak
+                # (drives the circuit breaker) never got saved while flat --
+                # system_state.json sat unchanged across a restart, and a
+                # /reset_equity issued while flat did not survive one.
+                #
+                # Separate timer from _last_state_save on purpose:
+                # save_portfolio_state() below already calls
+                # _save_system_metrics() itself (STOP-1 SEG C), so sharing one
+                # timer would have this branch reset the clock every loop tick
+                # whenever positions ARE open, starving save_portfolio_state()
+                # of its own interval and silently disabling the VTM/position
+                # crash-recovery persistence this loop exists for.
+                _now_k1 = time.time()
+                if self.portfolio_manager and _now_k1 - _last_metrics_save >= state_save_interval:
+                    _last_metrics_save = _now_k1
+                    try:
+                        self.portfolio_manager._save_system_metrics()
+                    except Exception as _sk:
+                        logger.error(f"[VTM LOOP] System metrics save failed: {_sk}")
+
                 # Check if there are any positions to manage to avoid unnecessary work
                 if self.portfolio_manager and self.portfolio_manager.get_open_positions_count() > 0:
                     self._check_VTM_positions()
@@ -4539,37 +4587,51 @@ class TradingBot:
                             
                             # We can re-call the initialization logic or just create the VTM here
                             from src.execution.veteran_trade_manager import VeteranTradeManager
-                            
-                            position.trade_manager = VeteranTradeManager(
-                                entry_price=position.entry_price,
-                                side=position.side,
-                                asset=position.asset,
-                                risk_config=risk_cfg,
-                                high=ohlc_data["high"],
-                                low=ohlc_data["low"],
-                                close=ohlc_data["close"],
-                                volume=ohlc_data["volume"],
-                                quantity=position.quantity,
-                                signal_details=getattr(position, 'signal_details', {}),
-                                trade_type=getattr(position, 'signal_details', {}).get("trade_type", "TREND"),
-                                # Re-init for an already-open position: accept whatever
-                                # size the live trade has, even if it's below the broker
-                                # minimum (e.g. 0.0029 BTC after partial closes).
-                                # The min-lot guard is only meaningful for NEW orders.
-                                min_lot_override=position.quantity,
-                                # Item 5: no producer populates these keys yet — resolves
-                                # to None today, starts flowing once a future tier does.
-                                structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
-                                entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
-                                telegram=self.telegram_bot,  # Brain rebuild Part 0.3
-                                council_ref=(  # Gate Tier 4.1
-                                    self.aggregators.get(position.asset, {}).get("council")
-                                    if isinstance(self.aggregators.get(position.asset), dict)
-                                    else self.aggregators.get(position.asset)
-                                    if hasattr(self.aggregators.get(position.asset), "_check_lifecycle_phase")
-                                    else None
-                                ),
-                            )
+
+                            # REF-1 SEG F: a second construction must not wipe a
+                            # populated one. Confirmed 4 Sep on BTC: 163 ladder
+                            # levels, rebuilt with 0 in the same second, targets
+                            # set from R-multiples off the empty one. T9a
+                            # refreshed the ladder afterwards but the targets
+                            # were already fixed.
+                            _existing_vtm = getattr(position, "trade_manager", None)
+                            if _existing_vtm is not None and getattr(_existing_vtm, "zone_ladder_4h", None):
+                                logger.warning(
+                                    "[VTM-GUARD] %s: refusing to rebuild VTM -- existing one holds "
+                                    "%d ladder level(s). Rebuild would reset targets.",
+                                    position.asset, len(_existing_vtm.zone_ladder_4h),
+                                )
+                            else:
+                                position.trade_manager = VeteranTradeManager(
+                                    entry_price=position.entry_price,
+                                    side=position.side,
+                                    asset=position.asset,
+                                    risk_config=risk_cfg,
+                                    high=ohlc_data["high"],
+                                    low=ohlc_data["low"],
+                                    close=ohlc_data["close"],
+                                    volume=ohlc_data["volume"],
+                                    quantity=position.quantity,
+                                    signal_details=getattr(position, 'signal_details', {}),
+                                    trade_type=getattr(position, 'signal_details', {}).get("trade_type", "TREND"),
+                                    # Re-init for an already-open position: accept whatever
+                                    # size the live trade has, even if it's below the broker
+                                    # minimum (e.g. 0.0029 BTC after partial closes).
+                                    # The min-lot guard is only meaningful for NEW orders.
+                                    min_lot_override=position.quantity,
+                                    # Item 5: no producer populates these keys yet — resolves
+                                    # to None today, starts flowing once a future tier does.
+                                    structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
+                                    entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
+                                    telegram=self.telegram_bot,  # Brain rebuild Part 0.3
+                                    council_ref=(  # Gate Tier 4.1
+                                        self.aggregators.get(position.asset, {}).get("council")
+                                        if isinstance(self.aggregators.get(position.asset), dict)
+                                        else self.aggregators.get(position.asset)
+                                        if hasattr(self.aggregators.get(position.asset), "_check_lifecycle_phase")
+                                        else None
+                                    ),
+                                )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
                             logger.error(f"[VTM LOOP] Failed to auto-initialize VTM for {position_id}: {e}")
@@ -5796,7 +5858,10 @@ class TradingBot:
                     # Log enough to tell them apart instead of guessing. Fires
                     # once per asset per cycle at DEBUG; promote to INFO for a
                     # day if the question is still open.
-                    logger.debug(
+                    # REF-1 SEG K4: promoted DEBUG -> INFO. 6 [LANE-B] captures
+                    # logged, 0 records ever landed on disk -- this line has
+                    # never actually been seen.
+                    logger.info(
                         "[LANE-B-DIAG] %s %s: obj=%s id=%s intent=%s",
                         asset_name, _lane_tag,
                         type(_lane_obj).__name__ if _lane_obj else "None",
@@ -6797,6 +6862,21 @@ class TradingBot:
                 }
             except Exception as _me:
                 logger.warning(f"[ENTRY-MEASURE] {asset_name}: could not record ({_me})")
+
+            # REF-1 SEG K3: diagnostic, not a fix. All 12 live episodes have
+            # had cs_fields=0 AND the empty-context warning below has never
+            # fired -- so either this block doesn't run on the live path, or
+            # episode_context is discarded before the writer. Segment J may
+            # fix this on its own (it now mints episode_id before the
+            # composite_state build runs); watch this line after J's deploy
+            # before writing anything further here.
+            logger.info(
+                "[EPISODE-CTX] %s: cs_fields=%d votes=%s regime=%s episode_id=%s",
+                asset_name,
+                len((self._latest_composite_state or {}).get(asset_name, {}) or {}),
+                bool(details.get("strategy_votes")),
+                details.get("regime_name"), details.get("episode_id"),
+            )
 
             # ── DATA-1 ITEM 2: live records get what shadow records already
             # have. Until now the paper-trading system carried richer context

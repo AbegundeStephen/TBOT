@@ -625,6 +625,9 @@ class VeteranTradeManager:
         # way as everything else off _cs — VTM's own structural SL/TP source.
         self.zone_current_upper         = _cs.get("zone_4h_current_upper")
         self.zone_current_lower         = _cs.get("zone_4h_current_lower")
+        # REF-1 SEG G: the pullback low the setup's proof was measured
+        # against, for the pullback-low TREND stop in _calculate_initial_levels.
+        self.ref_pullback_low           = _cs.get("ref_pullback_low")
         # Squeeze flag — drives wider ATR selection in _calculate_atr()
         self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
         # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
@@ -1157,6 +1160,26 @@ class VeteranTradeManager:
                                     logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
                                     final_sl = buffered_ma_sl
 
+                    # REF-1 SEG G2: TREND gets the treatment REVERSION already
+                    # has (zone_current_lower above). A stop belongs under the
+                    # low that formed during the pullback, with an allowance
+                    # for the wick that tests it — not at an arbitrary ATR
+                    # distance. Placed after the ATR baseline/MA Shield (needs
+                    # final_sl to already exist to override it) and before the
+                    # clamps below, so the same min/max clamps still apply.
+                    _pb_low = getattr(self, "ref_pullback_low", None)
+                    if _pb_low:
+                        _pb_allow = float(self.risk_config.get(
+                            "structural_stop_allowance_atr", 0.3)) * atr
+                        _pb_sl = _pb_low - _pb_allow
+                        if _pb_sl < self.entry_price:
+                            final_sl = _pb_sl
+                            self.stop_type = "pullback_low"
+                            logger.info(
+                                f"[VTM] 🎯 Pullback-low stop: {_pb_sl:.5f} "
+                                f"(low={_pb_low:.5f} allowance={_pb_allow:.5f}) — TREND"
+                            )
+
                     # 3. Apply global clamps
                     final_sl = max(
                         self.entry_price - max_stop_dist,
@@ -1179,6 +1202,20 @@ class VeteranTradeManager:
                                 if buffered_ma_sl < final_sl:
                                     logger.info(f"[VTM] 🛡️ MA Shield Jointly Applied: SL tucked behind MA ${ma:,.2f}")
                                     final_sl = buffered_ma_sl
+
+                    # REF-1 SEG G2: mirror of the long branch above.
+                    _pb_low = getattr(self, "ref_pullback_low", None)
+                    if _pb_low:
+                        _pb_allow = float(self.risk_config.get(
+                            "structural_stop_allowance_atr", 0.3)) * atr
+                        _pb_sl = _pb_low + _pb_allow
+                        if _pb_sl > self.entry_price:
+                            final_sl = _pb_sl
+                            self.stop_type = "pullback_low"
+                            logger.info(
+                                f"[VTM] 🎯 Pullback-low stop: {_pb_sl:.5f} "
+                                f"(low={_pb_low:.5f} allowance={_pb_allow:.5f}) — TREND"
+                            )
 
                     # 3. Apply global clamps
                     final_sl = min(

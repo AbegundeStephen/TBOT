@@ -1113,42 +1113,56 @@ class PortfolioManager:
                                 )
                                 signal_details = getattr(position, "signal_details", {})
 
-                                position.trade_manager = VeteranTradeManager(
-                                    entry_price=position.entry_price,
-                                    side=position.side,
-                                    asset=position.asset,
-                                    risk_config=risk_config,
-                                    high=df["high"].values,
-                                    low=df["low"].values,
-                                    close=df["close"].values,
-                                    volume=(
-                                        df["volume"].values if "volume" in df else None
-                                    ),
-                                    quantity=position.quantity,
-                                    signal_details=signal_details,
-                                    trade_type=signal_details.get(
-                                        "trade_type", "TREND"
-                                    ),
-                                    # Restoring VTM for an already-open position: accept
-                                    # whatever size the live trade actually has, even if it
-                                    # has dipped below broker minimum after partial closes.
-                                    min_lot_override=position.quantity,
-                                    # Item 5: no producer populates these keys yet — resolves
-                                    # to None today, starts flowing once a future tier does.
-                                    structure_levels_ref=signal_details.get("structure_levels_ref"),
-                                    entry_retest_type=signal_details.get("retest_type"),
-                                    telegram=self.telegram_bot,  # Brain rebuild Part 0.3
-                                    council_ref=self._resolve_council_ref(position.asset),  # Gate Tier 4.1
-                                    # DATA-3 ITEM 1C: this is the exact path that
-                                    # loses episode_id on restart -- signal_details
-                                    # here is always {} (Position never retains it).
-                                    # position.episode_id survives independently
-                                    # (DATA-3 ITEM 1B), so read from there instead.
-                                    episode_id=getattr(position, "episode_id", None),
-                                )
-                                logger.info(
-                                    f"[STATE] VTM for {position_id} successfully created."
-                                )
+                                # REF-1 SEG F: a second construction must not wipe
+                                # a populated one. Confirmed 4 Sep on BTC: 163
+                                # ladder levels, rebuilt with 0 in the same
+                                # second, targets set from R-multiples off the
+                                # empty one. T9a refreshed the ladder afterwards
+                                # but the targets were already fixed.
+                                _existing_vtm = getattr(position, "trade_manager", None)
+                                if _existing_vtm is not None and getattr(_existing_vtm, "zone_ladder_4h", None):
+                                    logger.warning(
+                                        "[VTM-GUARD] %s: refusing to rebuild VTM -- existing one holds "
+                                        "%d ladder level(s). Rebuild would reset targets.",
+                                        position.asset, len(_existing_vtm.zone_ladder_4h),
+                                    )
+                                else:
+                                    position.trade_manager = VeteranTradeManager(
+                                        entry_price=position.entry_price,
+                                        side=position.side,
+                                        asset=position.asset,
+                                        risk_config=risk_config,
+                                        high=df["high"].values,
+                                        low=df["low"].values,
+                                        close=df["close"].values,
+                                        volume=(
+                                            df["volume"].values if "volume" in df else None
+                                        ),
+                                        quantity=position.quantity,
+                                        signal_details=signal_details,
+                                        trade_type=signal_details.get(
+                                            "trade_type", "TREND"
+                                        ),
+                                        # Restoring VTM for an already-open position: accept
+                                        # whatever size the live trade actually has, even if it
+                                        # has dipped below broker minimum after partial closes.
+                                        min_lot_override=position.quantity,
+                                        # Item 5: no producer populates these keys yet — resolves
+                                        # to None today, starts flowing once a future tier does.
+                                        structure_levels_ref=signal_details.get("structure_levels_ref"),
+                                        entry_retest_type=signal_details.get("retest_type"),
+                                        telegram=self.telegram_bot,  # Brain rebuild Part 0.3
+                                        council_ref=self._resolve_council_ref(position.asset),  # Gate Tier 4.1
+                                        # DATA-3 ITEM 1C: this is the exact path that
+                                        # loses episode_id on restart -- signal_details
+                                        # here is always {} (Position never retains it).
+                                        # position.episode_id survives independently
+                                        # (DATA-3 ITEM 1B), so read from there instead.
+                                        episode_id=getattr(position, "episode_id", None),
+                                    )
+                                    logger.info(
+                                        f"[STATE] VTM for {position_id} successfully created."
+                                    )
                         else:
                             logger.warning(
                                 f"[STATE] Could not fetch enough OHLC data for {position_id}. VTM may be impaired."

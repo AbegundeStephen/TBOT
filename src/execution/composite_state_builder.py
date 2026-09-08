@@ -81,6 +81,14 @@ class CompositeStateBuilder:
         # writes here; trajectory pops (consumes) it the following cycle.
         # Keyed (asset, setup_kind) so it targets the correct lane.
         self._retest_failed_pending = {}
+        # REF-1 SEG F: same ordering trap as _retest_failed_pending above --
+        # ref_state is set by the BRC block, which runs AFTER the trajectory
+        # death-check loop within the same _build_composite_state call, so a
+        # same-cycle state.ref_state read in the death-check would always see
+        # the freshly-constructed CompositeState's unset default and never
+        # fire. BRC writes here when ref_state goes DEAD; the death-check
+        # pops (consumes) it the following cycle. Keyed (asset, setup_kind).
+        self._ref_dead_pending = {}
         # main.py invokes _build_composite_state twice per ~5min trading cycle
         # per asset (_update_asset_signal's recording pass, then trade_asset's
         # execution pass) against the same closed candle. Tracks the last
@@ -106,6 +114,9 @@ class CompositeStateBuilder:
         # not the setup object — the setup churns (median life 1 bar) but the
         # level it broke does not. {asset: {"ref", "last_ts", "bars"}}
         self._brc_break_ts = {}
+        # REF-1 SEG D: last-logged ref_state per asset, so [REF-STATE] logs
+        # transitions only rather than firing every cycle the proof is alive.
+        self._ref_state_last = {}
         logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
@@ -1604,12 +1615,23 @@ class CompositeStateBuilder:
                                 _death_reason = "OPPOSING_BOS"
                             elif getattr(state, "choch_bullish", False):
                                 _death_reason = "OPPOSING_CHOCH"
-                    # (e) EXPIRED — the setup can no longer satisfy its own
-                    #     proof standard within BRC's 28-candle window.
-                    if _death_reason is None:
-                        _max_age = 28
-                        if int(_s.get("age", 0)) > _max_age:
-                            _death_reason = "EXPIRED_PROOF_WINDOW"
+                    # (e) REF-1 SEG F: EXPIRED_PROOF_WINDOW retired.
+                    # A setup now dies when price CLOSES beyond R1
+                    # (ref_state == DEAD), not when a counter runs out.
+                    # "Sometimes it's a slow grind upwards or downwards" — a
+                    # slow grind that holds its levels is valid, not expired.
+                    #
+                    # Note: _s["age"] was measured in CYCLES, not candles, so
+                    # the old "28-candle window" comment was already wrong.
+                    #
+                    # Consumed from a cross-cycle store the same way (c)
+                    # above consumes RETEST_FAILED: ref_state is set by BRC,
+                    # which runs after this loop within the same call, so a
+                    # same-cycle read would always see the unset default.
+                    if _death_reason is None and self._ref_dead_pending.pop(
+                        (_asset, _s.get("kind")), False
+                    ):
+                        _death_reason = "REF_INVALIDATED"
 
                     if _death_reason is not None:
                         state.setup_died = True
@@ -1810,6 +1832,24 @@ class CompositeStateBuilder:
                                     _p4_tol,
                                 )
                             else:
+                                # REF-1 SEG B: the second reference. R2 (ref,
+                                # above) is the level just broken — losing it
+                                # ends the current leg. R1 is the one behind
+                                # it — losing it kills the move. Frozen
+                                # together, never re-anchored: "we lock in the
+                                # levels and track." Nudged by an epsilon past
+                                # R2 so the ladder filter (strictly beyond the
+                                # price it's given) finds the NEXT level out,
+                                # not R2 itself.
+                                _r1_px = (
+                                    (float(_f1_ref) - 1e-9)
+                                    if int(_candidate["dir"]) == 1
+                                    else (float(_f1_ref) + 1e-9)
+                                )
+                                _r1_ref, _r1_tests = self._pick_ladder_ref(
+                                    _asset, int(_candidate["dir"]), _r1_px, _atr,
+                                )
+
                                 _new_setup = dict(_candidate)
                                 _new_setup.update({
                                     "age": 0,
@@ -1825,6 +1865,8 @@ class CompositeStateBuilder:
                                     "ref_tests": self._ref_tests_at(
                                         _asset, _f1_ref, _atr, _f1_px, _f1_tier
                                     ),
+                                    "ref_1": _r1_ref,
+                                    "ref_1_tests": _r1_tests,
                                 })
 
                                 # P4-EVICT: make room if full.
@@ -1910,6 +1952,8 @@ class CompositeStateBuilder:
                 state.setup_ref = _pub.get("ref")                     # F1
                 state.setup_ref_tier = _pub.get("ref_tier")           # F1
                 state.setup_ref_tests = int(_pub.get("ref_tests", 0) or 0)  # N4
+                state.ref_1 = _pub.get("ref_1")                       # REF-1 SEG B
+                state.ref_1_tests = int(_pub.get("ref_1_tests", 0) or 0)  # REF-1 SEG B
 
             self._prev_compression[_asset] = _comp
         except Exception as _traj_err:
@@ -2139,9 +2183,10 @@ class CompositeStateBuilder:
                             _runner_age - _bars_since_break,
                         )
 
-                    # Window widened 8 -> 28 candles (seven 4H bars' worth of
-                    # hourly candles) so a 4H level has room to be retested.
-                    _WIN = 28
+                    # REF-1 SEG F: was 28. The retest VERDICT is now the R2
+                    # level test (Segment D's ref_state), not a window; this
+                    # only bounds the touch scan.
+                    _WIN = 12
                     _brc_win_high = df["high"].iloc[-(_WIN + 1):-1].values
                     _brc_win_low  = df["low"].iloc[-(_WIN + 1):-1].values
 
@@ -2197,6 +2242,58 @@ class CompositeStateBuilder:
                             for i, _cl in enumerate(_win_close)
                         )
                         _closed_through = _brc_close < _brc_ref
+
+                    # REF-1 SEG C: freeze H at the break and never move it. A
+                    # lower high during the pullback does NOT become a new
+                    # trigger. Either price clears the original high or the
+                    # setup dies at R1 (Segment D/F).
+                    if _closed_through and getattr(state, "ref_h", None) is None:
+                        state.ref_h = float(
+                            state.last_swing_high_4h if _brc_dir == 1
+                            else state.last_swing_low_4h
+                        )
+                        logger.info(
+                            "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g",
+                            self.asset_type, _brc_dir, _brc_ref,
+                            getattr(state, "setup_ref_tests", 0),
+                            ("%.5g" % state.ref_1) if state.ref_1 else "none",
+                            state.ref_h,
+                        )
+
+                    # REF-1 SEG D: the state machine, evaluated on the 4H
+                    # close. Doc referenced _close4 from the Livermore 4H
+                    # update (:736), but that local is only assigned inside
+                    # its own "new 4H candle" branch and is not reliably in
+                    # scope here (most cycles re-process an already-seen 4H
+                    # bar) -- recomputed fresh from df_4h instead, same
+                    # source, no new data dependency.
+                    try:
+                        _close4_now = (
+                            float(df_4h["close"].iloc[-1])
+                            if df_4h is not None and len(df_4h) > 0 else None
+                        )
+                    except Exception:
+                        _close4_now = None
+                    _new_ref_state = self._ref_state(
+                        _close4_now, state.ref_1, _brc_ref, _brc_dir
+                    )
+                    if _new_ref_state != self._ref_state_last.get(self.asset_type):
+                        logger.info(
+                            "[REF-STATE] %s dir=%+d %s → %s | close4=%s R2=%.5g R1=%s",
+                            self.asset_type, _brc_dir,
+                            self._ref_state_last.get(self.asset_type) or "NONE",
+                            _new_ref_state,
+                            ("%.5g" % _close4_now) if _close4_now is not None else "none",
+                            _brc_ref,
+                            ("%.5g" % state.ref_1) if state.ref_1 else "none",
+                        )
+                        self._ref_state_last[self.asset_type] = _new_ref_state
+                    state.ref_state = _new_ref_state
+                    if _new_ref_state == "DEAD":
+                        state.ref_h = None      # re-arm for the next setup
+                        # REF-1 SEG F: cross-cycle handoff to the death-check
+                        # loop -- see _ref_dead_pending's __init__ comment.
+                        self._ref_dead_pending[(self.asset_type, _brc_kind)] = True
 
                     if _retest_failed:
                         state.retest_failed = True
@@ -2286,6 +2383,20 @@ class CompositeStateBuilder:
                     state.post_break_touches = len(_post_break)
                     state.bars_since_break = int(_bars_since_break)
 
+                    # REF-1 SEG G1: the pullback low — the level whose loss
+                    # means the retest failed. Already computable here: the
+                    # window lows and the post-break split are both in scope.
+                    try:
+                        _pb = [v for i, v in enumerate(
+                                   _brc_win_low if _brc_dir == 1 else _brc_win_high)
+                               if (_WIN - i) < _bars_since_break]
+                        if _pb:
+                            state.ref_pullback_low = (
+                                float(min(_pb)) if _brc_dir == 1 else float(max(_pb))
+                            )
+                    except Exception:
+                        pass
+
                     # E4: the RUNNER — a pullback that never reaches the level.
                     # Only evaluated when the normal retest did not qualify.
                     # LATENCY FIX: RUNNER eligibility uses _runner_age (counts
@@ -2361,7 +2472,36 @@ class CompositeStateBuilder:
                                 )
                                 break
 
-                    if _retested and _closed_through:
+                    # ── REF-1 SEG E: the single 1H test in the sequence ──────
+                    # Everything else runs on 4H closes. This runs on the 1H
+                    # close because waiting for a 4H close to confirm the
+                    # resumption gives away up to four hours of the move.
+                    #
+                    # Price must reclaim the ENTIRE breakout structure (H),
+                    # not merely nose back above R2 — so a pullback that
+                    # stalls and rolls over never triggers.
+                    #
+                    # DEFAULT TRUE when references are absent. If the ladder
+                    # has nothing usable for an asset, that asset behaves
+                    # exactly as it does today rather than going silent. This
+                    # batch must not be able to stop all trading.
+                    _ref_trigger = True
+                    if getattr(state, "ref_h", None) is not None \
+                            and getattr(state, "ref_state", None) is not None:
+                        _c1 = float(df["close"].iloc[-1])       # the 1H close
+                        _ref_trigger = (
+                            state.ref_state == "HEALTHY"
+                            and ((_c1 > state.ref_h) if _brc_dir == 1
+                                 else (_c1 < state.ref_h))
+                        )
+                        if _ref_trigger:
+                            logger.info(
+                                "[REF-TRIGGER] %s dir=%+d 1H close %.5g cleared "
+                                "H=%.5g — proof complete.",
+                                self.asset_type, _brc_dir, _c1, state.ref_h,
+                            )
+
+                    if _retested and _closed_through and _ref_trigger:
                         # ── Build 2: age the proof in BARS ────────────────────
                         # Same proof at the same reference across several bars is
                         # ONE proof getting older, not several proofs. A different
@@ -3100,10 +3240,27 @@ class CompositeStateBuilder:
             if df_4h is not None and len(df_4h) >= 10:
                 _4h_highs = df_4h["high"].values
                 _4h_lows = df_4h["low"].values
-                for i in range(len(_4h_highs) - 3, 4, -1):
+                _4h_closes = df_4h["close"].values
+                # REF-1 SEG B: bring the 4H pivot detector up to standard. Was
+                # 1 bar left / 1 bar right with no depth filter -- any
+                # three-bar bump qualified. The 1H scan uses 4/2 plus a 0.3
+                # ATR depth test, so the 4H field was the weaker object of
+                # the two despite sitting on the slower frame.
+                # 2 left / 4 right: four candles of rejection AFTER the peak
+                # is stronger evidence than four before it. Depth reuses the
+                # 0.3 x ATR standard, ATR-based and self-scaling. This feeds
+                # last_swing_high_4h/low_4h (already read live by the BRC
+                # block's TF_CONT tier-1 and MR_REV tier-3 fallback) and the
+                # _structure_levels store (already ranked into
+                # nearby_4h_level* every cycle), so higher-quality pivots
+                # here improve those consumers immediately.
+                _P4_LEFT, _P4_RIGHT = 2, 4
+                _p4_depth = 0.3 * _atr if _atr else 0.0
+                for i in range(len(_4h_highs) - _P4_RIGHT - 1, _P4_LEFT, -1):
                     if (
-                        _4h_highs[i] > _4h_highs[i - 1]
-                        and _4h_highs[i] > _4h_highs[i + 1]
+                        all(_4h_highs[i] > _4h_highs[i - k] for k in range(1, _P4_LEFT + 1))
+                        and all(_4h_highs[i] > _4h_highs[i + k] for k in range(1, _P4_RIGHT + 1))
+                        and (_4h_highs[i] - max(_4h_closes[i - _P4_LEFT:i])) >= _p4_depth
                     ):
                         # ROUTE B: first backward hit = most recent 4H swing high.
                         state.last_swing_high_4h = float(_4h_highs[i])
@@ -3123,8 +3280,12 @@ class CompositeStateBuilder:
                             )
                         break
 
-                for i in range(len(_4h_lows) - 3, 4, -1):
-                    if _4h_lows[i] < _4h_lows[i - 1] and _4h_lows[i] < _4h_lows[i + 1]:
+                for i in range(len(_4h_lows) - _P4_RIGHT - 1, _P4_LEFT, -1):
+                    if (
+                        all(_4h_lows[i] < _4h_lows[i - k] for k in range(1, _P4_LEFT + 1))
+                        and all(_4h_lows[i] < _4h_lows[i + k] for k in range(1, _P4_RIGHT + 1))
+                        and (min(_4h_closes[i - _P4_LEFT:i]) - _4h_lows[i]) >= _p4_depth
+                    ):
                         # ROUTE B: first backward hit = most recent 4H swing low.
                         state.last_swing_low_4h = float(_4h_lows[i])
                         _exists = any(
@@ -3216,6 +3377,80 @@ class CompositeStateBuilder:
             )
         except Exception:
             pass
+
+    def _pick_ladder_ref(self, asset, direction, current_price, atr, min_tests=2):
+        """
+        REF-1 rev 3 SEG A1: pick the reference from the FULL 4H ladder, not
+        the two-edge zone view.
+
+        The resolver's tier lists ask zone_4h_current_lower/_upper -- two
+        levels. The ladder holds a hundred. Measured across 161 stored
+        records with the resolver's own 0.15 x ATR tolerance:
+            two-edge zone usable : 130 (80%)
+            full ladder usable   : 161 (100%)
+        Neither-usable was 0. The ladder always has something on the
+        correct side.
+
+        Sort: tests >= 2, THEN nearest. Not tests-first -- that drifts.
+        Measured on the same records:
+            tests-first        med=0.92 ATR  p75=2.70  max=15.75 ATR
+            tests>=2, nearest  med=0.22 ATR  p75=0.53
+        Tests-first kept returning BTC's 12-test level while price walked
+        1,600 points away from it. N=0 and N=1 are identical (every ladder
+        level has >= 1 test), N=3 starts dropping records, N=5 halves the
+        sample. 2 is the floor that costs nothing.
+
+        Reads self._zone_levels, tf == "4H" -- the same store and timeframe
+        filter _ref_role_at/_ref_tests_at use for the ZONE_LADDER tier.
+
+        Returns (price, tests) or (None, 0).
+        """
+        try:
+            store = self._zone_levels.get(asset, []) or []
+            side = [
+                l for l in store
+                if l.get("tf") == "4H" and l.get("price") is not None
+                and ((float(l["price"]) < current_price) if direction == 1
+                     else (float(l["price"]) > current_price))
+            ]
+            good = [l for l in side if int(l.get("tests", 0) or 0) >= min_tests]
+            pool = good if good else side          # never refuse for want of tests
+            if not pool:
+                return (None, 0)
+            pool.sort(key=lambda l: abs(current_price - float(l["price"])))
+            best = pool[0]
+            return (float(best["price"]), int(best.get("tests", 0) or 0))
+        except Exception as e:
+            logger.debug("[REF-LADDER] %s: %s", asset, e)
+            return (None, 0)
+
+    def _ref_state(self, close4, r1, r2, direction):
+        """
+        REF-1 rev 3 SEG D: the level test that replaces the bar timer.
+
+        A retest is not "did price return within N bars". It is "is price
+        still holding the level it broke". Evaluated on the 4H CLOSE, so an
+        intrabar sweep of R1 that recovers does not kill the proof -- closes
+        decide, wicks do not.
+
+        HEALTHY  -- close is beyond R2. Leg intact, waiting for the trigger.
+        DANGER   -- close is between R2 and R1. Leg broken, move alive.
+        DEAD     -- close is beyond R1 the wrong way. Proof invalidated.
+        """
+        try:
+            if r1 is None or r2 is None or close4 is None:
+                return None
+            if direction == 1:
+                if close4 >= r2: return "HEALTHY"
+                if close4 >= r1: return "DANGER"
+                return "DEAD"
+            else:
+                if close4 <= r2: return "HEALTHY"
+                if close4 <= r1: return "DANGER"
+                return "DEAD"
+        except Exception as e:
+            logger.debug("[REF-STATE] %s: %s", self.asset_type, e)
+            return None
 
     # ── Zone Ladder ──────────────────────────────────────────────────────
 
@@ -3439,6 +3674,22 @@ class CompositeStateBuilder:
                 )
             return _ok
 
+        # REF-1 rev 3 SEG A1: the tier lists asked zone_4h_current_lower/
+        # _upper -- a two-level view. Replaced with the full 4H ladder via
+        # _pick_ladder_ref, filtered to the correct side of price (direction
+        # picks the floor for a long / ceiling for a short; -direction picks
+        # the other side, for TF_CONT's legacy ceiling candidate below).
+        # Measured 100% usable across 161 records vs. 80% for the two-edge
+        # view -- see _pick_ladder_ref's docstring.
+        _ladder_floor = _ladder_ceiling = None
+        if current_price is not None and atr:
+            _ladder_floor = self._pick_ladder_ref(
+                self.asset_type, direction, current_price, atr
+            )[0]
+            _ladder_ceiling = self._pick_ladder_ref(
+                self.asset_type, -direction, current_price, atr
+            )[0]
+
         if kind == "MR_REV":
             _candidates = [
                 (
@@ -3447,8 +3698,7 @@ class CompositeStateBuilder:
                     "ANCHOR_1H",
                 ),
                 (
-                    getattr(state, "zone_4h_current_lower", None) if direction == 1
-                    else getattr(state, "zone_4h_current_upper", None),
+                    _ladder_floor,
                     "ZONE_LADDER",
                 ),
                 (
@@ -3483,8 +3733,7 @@ class CompositeStateBuilder:
             # when they are on the wrong side.
             _candidates = [
                 (
-                    getattr(state, "zone_4h_current_lower", None) if direction == 1
-                    else getattr(state, "zone_4h_current_upper", None),
+                    _ladder_floor,
                     "ZONE_LADDER",
                 ),
                 (
@@ -3493,8 +3742,7 @@ class CompositeStateBuilder:
                     "SWING_4H",
                 ),
                 (
-                    getattr(state, "zone_4h_current_upper", None) if direction == 1
-                    else getattr(state, "zone_4h_current_lower", None),
+                    _ladder_ceiling,
                     "ZONE_LADDER",
                 ),
             ]
@@ -3530,12 +3778,35 @@ class CompositeStateBuilder:
             if _u_legacy_ref is not None else "none"
         )
 
+        # ── REF-1 rev 3 SEG A2: the tier list decides; BUILD U is the fallback ──
+        # This block previously ran the tier loop as a counterfactual and
+        # returned BUILD U whenever it was usable -- which is nearly always.
+        # Result: 157 of 157 references ever frozen were BROKEN_SWING_1H. Not
+        # one ZONE_LADDER, not one ANCHOR_1H, not one SWING_4H. The tier chain
+        # was dead code.
+        #
+        # BUILD U's own comment asked for exactly this decision after "one
+        # week of side-by-side comparison". The week has passed; the
+        # comparison lives in BATCH REF-1 rev 3's "THE MEASURED VERDICT".
+        #
+        # BUILD U is KEPT as the fallback, not deleted. It is the right
+        # answer on the cycle a level is genuinely broken through and the
+        # ladder has not yet caught up.
+        if _u_legacy_ref is not None:
+            logger.info(
+                "[U-REF] %s: %s dir=%+d ACCEPT %s ref=%.5g "
+                "| BUILD U would have picked %s",
+                self.asset_type, kind, direction,
+                _u_legacy_tier, _u_legacy_ref,
+                ("%.5g" % float(_u_broken)) if _u_broken is not None else "none",
+            )
+            return _u_legacy_ref, _u_legacy_tier
+
         if _usable(_u_broken, "BROKEN_SWING_1H"):
             logger.info(
-                "[U-REF] %s: %s dir=%+d ACCEPT BROKEN_SWING_1H ref=%.5g "
-                "| legacy would have picked %s",
-                self.asset_type, kind, direction,
-                float(_u_broken), _u_legacy_txt,
+                "[U-REF] %s: %s dir=%+d FALLBACK BROKEN_SWING_1H ref=%.5g "
+                "— no usable 4H tier",
+                self.asset_type, kind, direction, float(_u_broken),
             )
             return float(_u_broken), "BROKEN_SWING_1H"
 

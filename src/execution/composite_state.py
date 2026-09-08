@@ -106,6 +106,17 @@ class CompositeState:
     # this and RetestEngine reads it — same pattern as nearby_4h_level.
     last_swing_high_4h: Optional[float] = None
     last_swing_low_4h:  Optional[float] = None
+    # ── BATCH REF-1 (rev 3): the two-reference proof ──
+    # R2 (the level just broken) is BRC's own live reference (_brc_ref, a
+    # builder-local var, not stored here — losing it ends the current leg).
+    # ref_1 is the level behind it — losing it kills the move. ref_h is the
+    # swing high/low before the retest began — the entry trigger. Frozen
+    # together at the break, never re-anchored.
+    ref_1: Optional[float] = None            # REF-1 SEG B
+    ref_1_tests: int = 0
+    ref_h: Optional[float] = None            # REF-1 SEG C
+    ref_state: Optional[str] = None          # HEALTHY | DANGER | DEAD
+    ref_pullback_low: Optional[float] = None # REF-1 SEG G
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
     nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
     # A4: level_defended was only ever computed against the single primary
