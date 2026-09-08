@@ -2418,6 +2418,15 @@ class InstitutionalCouncilAggregator:
             try:
                 # Item 3.8: _rt_buy/_rt_sell are now computed earlier (before
                 # the judges run) — this block only consumes them.
+                # REF-1 rev 3 SEG H note: an earlier revision tried loosening
+                # this to `or`, on the reasoning that everything downstream
+                # already null-guards per side. Superseded — this gate also
+                # carries the CHASE_HARD absolute veto and the threshold
+                # modifiers, which DO need both sides to reason about
+                # correctly, so the condition is restored to `and`. The
+                # entry_type write is lifted out into its own block after
+                # this try/except instead (Segment H below) so it only needs
+                # the side that's actually firing.
                 if _rt_buy is not None and _rt_sell is not None:
                     _likely_dir = 1 if buy_total >= sell_total else -1
 
@@ -2530,26 +2539,9 @@ class InstitutionalCouncilAggregator:
                                 self.asset_type,
                             )
 
-
-
-                    # ── WRITE ENTRY_TYPE TO COMPOSITE_STATE ────────────────
-                    # Performance mode writes this in signal_aggregator:4280.
-                    # Council mode must write it here so VTM can route to the
-                    # correct structural stop via _compute_structural_stop.
-                    # Without this, vtm_entry_type is None for every council
-                    # trade and structural stops silently fall back to ATR.
-                    if _buy_type != "CHASE_HARD" and _likely_dir == 1 and _rt_buy is not None:
-                        try:
-                            _composite_state.entry_type = _rt_buy.entry_type
-                        except Exception:
-                            pass
-                    elif _sell_type != "CHASE_HARD" and _likely_dir == -1 and _rt_sell is not None:
-                        try:
-                            _composite_state.entry_type = _rt_sell.entry_type
-                        except Exception:
-                            pass
-
-                    # ───────────────────────────────────────────────────────
+                    # entry_type write moved out to REF-1 SEG H, after this
+                    # try/except — see below. It no longer needs to sit
+                    # inside the both-sides-required gate.
 
 
 
@@ -2558,6 +2550,24 @@ class InstitutionalCouncilAggregator:
                     "[COUNCIL GATE] Gate error (non-blocking): %s", _gate_err
                 )
             # ══════════════════════════════════════════════════════════════════
+
+            # REF-1 SEG H: the entry_type write needs only the side that is
+            # firing, but sat inside a block gated on BOTH classifications.
+            # Result: two structural stops in eleven days of live trading
+            # while the shadow path got them routinely (main.py:5694 already
+            # names this: "council trades blind").
+            #
+            # Lifted out rather than loosening the gate above: that block
+            # also applies the CHASE_HARD absolute veto and the threshold
+            # modifiers, which do need both sides.
+            try:
+                _et_dir = 1 if buy_total >= sell_total else -1
+                if _et_dir == 1 and _rt_buy is not None and _rt_buy.retest_type != "CHASE_HARD":
+                    _composite_state.entry_type = _rt_buy.entry_type
+                elif _et_dir == -1 and _rt_sell is not None and _rt_sell.retest_type != "CHASE_HARD":
+                    _composite_state.entry_type = _rt_sell.entry_type
+            except Exception:
+                pass
 
             # ══════════════════════════════════════════════════════════════════
             # UNIFIED DECISION RESOLUTION
