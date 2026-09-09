@@ -1287,6 +1287,12 @@ class InstitutionalCouncilAggregator:
         Main council decision logic with bidirectional support
         ✅ INSTITUTIONAL PHASE 4: Dynamic Weights & Penalty Shift
         """
+        # TEMP DIAGNOSTIC (remove after confirming): proves whether this
+        # method is entered at all for council-mode assets today, given zero
+        # [COUNCIL]/[COUNCIL GATE] logs and zero cost_gate/volatility_gate/
+        # council_verdict gate-ledger rows despite composite_state building
+        # fine and Livermore warm-start/rebuild both confirmed working.
+        logger.info(f"[COUNCIL-ENTRY] {self.asset_type}")
         self.stats["total_evaluations"] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
