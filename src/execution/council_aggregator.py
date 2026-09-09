@@ -1811,6 +1811,17 @@ class InstitutionalCouncilAggregator:
                     "[COUNCIL GATE] Early RetestEngine classify failed: %s", _rt_early_err
                 )
 
+            # TEMP DIAGNOSTIC (remove after confirming): bisects the ~2500-line
+            # span between method entry and council_verdict's write to find
+            # where execution stops reaching the end. Also logs whether
+            # composite_state/_rt_buy/_rt_sell resolved, to test the "GATE A
+            # never opens" theory directly.
+            logger.info(
+                "[COUNCIL-CP1] %s cs=%s rt_buy=%s rt_sell=%s",
+                self.asset_type, _composite_state is not None,
+                _rt_buy is not None, _rt_sell is not None,
+            )
+
             # Brain Rebuild Part 5.1: dual-track dispatch. tier3_shadow_enabled
             # (default False = new judges live from day one) picks which
             # side actually drives the decision; the other is still computed
@@ -3777,6 +3788,13 @@ class InstitutionalCouncilAggregator:
             #   BTC Jun2026 — MAIN_UP, MR wanted to fade, council bought 4.0
             #     at the top of an extended leg, stopped out. Same → HOLD.
             # ──────────────────────────────────────────────────────────────
+
+            # TEMP DIAGNOSTIC (remove after confirming): second checkpoint,
+            # just before council_verdict's write. Paired with [COUNCIL-CP1].
+            logger.info(
+                "[COUNCIL-CP2] %s signal=%s decision=%s",
+                self.asset_type, signal, decision_type,
+            )
 
             # Enhance reasoning with specific bonuses
             main_reasoning = (
