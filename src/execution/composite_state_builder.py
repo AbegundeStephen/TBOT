@@ -1735,7 +1735,33 @@ class CompositeStateBuilder:
                         _p1_dist = None
                         _p1_weak = False
                         try:
-                            if _f1_px is not None and _p1_band > 0:
+                            # REF-1 fix (found live, 9 Sep): ZONE_LADDER is
+                            # exempt. This filter's 2.0x scale for ZONE_LADDER
+                            # was calibrated when that tier meant "the edge of
+                            # the current 4H zone" (zone_4h_current_lower/
+                            # _upper) -- several ATR from price. BATCH REF-1
+                            # Segment A redefined ZONE_LADDER to mean "the
+                            # nearest ladder level with >=2 tests"
+                            # (_pick_ladder_ref), deliberately close to price
+                            # by design (measured median 0.22 ATR). Against a
+                            # ~1.0 ATR band, EVERY ZONE_LADDER setup for EVERY
+                            # asset was refused as a "weak break" the moment
+                            # this shipped -- confirmed live: BTC dist=62.07
+                            # vs band=397.12, GOLD 2.62 vs 16.22, USTEC 24.25
+                            # vs 77.631, EURUSD 0.00017 vs 0.00075 -- all
+                            # roughly 0.15-0.3 ATR of real separation, all
+                            # refused. A level chosen for being close AND
+                            # already tested twice doesn't need a separate
+                            # distance-from-price test to prove it's real;
+                            # that's what tests>=2 already establishes. No
+                            # replacement multiplier substituted -- inventing
+                            # one without measuring this tier's actual
+                            # distance distribution (the way BROKEN_SWING_1H's
+                            # 1.0x was derived from 20 measured cases) would
+                            # just be a different guess.
+                            if _f1_tier == "ZONE_LADDER":
+                                _p1_weak = False
+                            elif _f1_px is not None and _p1_band > 0:
                                 _p1_dist = abs(float(_f1_px) - float(_f1_ref))
                                 _p1_weak = _p1_dist < _p1_band
                         except Exception:
