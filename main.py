@@ -5744,6 +5744,14 @@ class TradingBot:
                     )
                     signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
                 else:
+                    # HOTFIX v4 Step 3: applied exactly as instructed. NOTE
+                    # (verified live tonight): this call site already had a
+                    # correct, non-null episode_id set at :5688 (DATA-3 ITEM 4
+                    # / FRAME-1 SEG 5, pre-existing, unrelated to REF-1)
+                    # before this branch is ever reached -- so this line is a
+                    # harmless no-op here, not a fix. Kept per instruction;
+                    # the actual gap was in _update_asset_signal (below).
+                    mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
                     signal, details = aggregator["council"].get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
@@ -7763,6 +7771,12 @@ class TradingBot:
                     )
                     signal, details = 0, {"reasoning": "livermore_warmup_council", "final_signal": 0}
                 else:
+                    # HOTFIX v4 Step 4: this function (_update_asset_signal,
+                    # the ranking/caching pass) has NO episode_id mint
+                    # anywhere in it -- confirmed by grep. Unlike the
+                    # trade_asset call site, this one is a genuine gap:
+                    # gate rows written from this pass would have been null.
+                    mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
                     signal, details = aggregator["council"].get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
@@ -7803,6 +7817,10 @@ class TradingBot:
             else:
                 # PERFORMANCE or plain council (non-dict) mode
                 if isinstance(aggregator, InstitutionalCouncilAggregator):
+                    # HOTFIX v4 Step 4: same gap as the council branch above --
+                    # this plain-council path in _update_asset_signal also had
+                    # no episode_id mint.
+                    mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
                     signal, details = aggregator.get_aggregated_signal(
                         df,
                         current_regime=mtf_regime.get("regime", "NEUTRAL"),
