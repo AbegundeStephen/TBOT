@@ -5869,6 +5869,13 @@ class TradingBot:
                     # REF-1 SEG K4: promoted DEBUG -> INFO. 6 [LANE-B] captures
                     # logged, 0 records ever landed on disk -- this line has
                     # never actually been seen.
+                    #
+                    # STOP-2 SEG H: this diagnostic answered on 8 Sep --
+                    # intent=none on both B-TF and B-MR across 84 lines,
+                    # meaning no suppressions are occurring rather than
+                    # shadows failing to open. Kept at INFO because it is
+                    # low-volume and it is the only instrument on the
+                    # question of whether lane ownership costs trades.
                     logger.info(
                         "[LANE-B-DIAG] %s %s: obj=%s id=%s intent=%s",
                         asset_name, _lane_tag,

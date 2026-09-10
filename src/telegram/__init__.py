@@ -3647,6 +3647,41 @@ class TradingTelegramBot:
         Automatic alert when a BUY/SELL signal is generated but blocked/not executed.
         Sent to all admins immediately when the bot vetoes a trade.
         """
+        # STOP-2 SEG C: one card per (asset, reason) per 30 minutes.
+        #
+        # Confirmed 7 Sep: eight near-identical GOLD cards in 38 minutes, one
+        # per cycle, all "Stale Price" on a weekend gap the guard was right
+        # to block. The block is correct and unchanged -- this throttles
+        # only the notification.
+        #
+        # Key is normalized, not just truncated: the real reason string
+        # (council_aggregator.py/signal_aggregator.py T1.5) is
+        # f"stale_price_{minutes:.0f}min" -- e.g. "stale_price_112min" ->
+        # "stale_price_118min" a cycle later. That's short enough that even
+        # a generous length truncation would still include the changing
+        # number, so every cycle would mint a new key and the throttle would
+        # never fire. Digits are stripped from the reason before keying so
+        # the climbing minute count collapses to one key.
+        #
+        # main.py's _notify_blocked has its own, older dedup (_dedup_key =
+        # (signal, block_reason), suppress-until-changed) with the identical
+        # blind spot -- it never fires for stale-price either, for the same
+        # reason. Left as-is: that one's semantics are "silence until the
+        # reason changes," Desire's ruling here is specifically time-boxed
+        # ("per 30 minutes"), so this is the correct place for that rule
+        # rather than a duplicate of the existing mechanism.
+        import re as _re_sb
+        _norm_reason = _re_sb.sub(r"\d+", "", str(block_reason or ""))
+        _key = (asset, _norm_reason)
+        _now_sb = time.time()
+        if not hasattr(self, "_blocked_card_sent"):
+            self._blocked_card_sent = {}
+        _last_sb = self._blocked_card_sent.get(_key, 0)
+        if _now_sb - _last_sb < 1800:          # 30 minutes
+            logger.debug("[TELEGRAM] Signal Blocked card throttled: %s", _key)
+            return
+        self._blocked_card_sent[_key] = _now_sb
+
         try:
             import html as html_lib
             details = details or {}

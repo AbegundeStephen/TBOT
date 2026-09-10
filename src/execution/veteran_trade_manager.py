@@ -563,6 +563,17 @@ class VeteranTradeManager:
         # as every sibling field above; composite_state.py already declares
         # this field, it just wasn't extracted into VTM until now.
         self.brc_tier                   = _cs.get("brc_tier")
+        # STOP-2 SEG F: the references the proof was built on. REF-1 froze
+        # R2 (the level broken), R1 (the origin) and H (the trigger) on the
+        # composite state, but nothing copied them here, so trade management
+        # could not measure against the same levels the entry was proved
+        # against. ref_2 falls back to setup_ref -- REF-1 never published a
+        # separate ref_2 field; R2 IS setup_ref (the broken level), so this
+        # keeps working without one.
+        self.ref_1                      = _cs.get("ref_1")
+        self.ref_2                      = _cs.get("ref_2") or _cs.get("setup_ref")
+        self.ref_h                      = _cs.get("ref_h")
+        self.ref_pullback_low           = _cs.get("ref_pullback_low")
 
         # BATCH-610 ITEM 1: the real zone ladder -- 4H levels with genuine test
         # history, role-flip tracking and 90-day memory. Targets previously used
@@ -625,9 +636,8 @@ class VeteranTradeManager:
         # way as everything else off _cs — VTM's own structural SL/TP source.
         self.zone_current_upper         = _cs.get("zone_4h_current_upper")
         self.zone_current_lower         = _cs.get("zone_4h_current_lower")
-        # REF-1 SEG G: the pullback low the setup's proof was measured
-        # against, for the pullback-low TREND stop in _calculate_initial_levels.
-        self.ref_pullback_low           = _cs.get("ref_pullback_low")
+        # ref_pullback_low moved up to the STOP-2 SEG F block above, grouped
+        # with the other REF-1 reference fields (ref_1/ref_2/ref_h).
         # Squeeze flag — drives wider ATR selection in _calculate_atr()
         self.bb_kc_squeeze_active       = bool(_cs.get("bb_kc_squeeze_active", False))
         # Fix 1: merge runtime phase_config from CompositeState (overrides static config block)
@@ -3760,6 +3770,55 @@ class VeteranTradeManager:
                     f"{candidate:.5f} suppressed (/resume_sl to re-enable)"
                 )
                 return False
+
+            # ── STOP-2 SEG I: pause the arithmetic stop-movers ──────────────
+            # 33 call sites route through this method. Eleven move the stop to
+            # breakeven or better on ENTRY ARITHMETIC -- entry, entry ± R, or
+            # an entry-based ATR fraction -- rather than on anything the
+            # market did. Only r_breakeven_lock has a config flag, so a
+            # config-only pause is not possible; guarding here covers all
+            # eleven at one point.
+            #
+            # Confirmed on USOIL #133323705 (8 Sep): soft_risk_cut at 05:31,
+            # breakeven at 07:26, r_breakeven_lock at 08:18 -- three
+            # tightenings in under three hours, ending with the stop 0.378
+            # above entry. The trade peaked near +$20 and exited at exactly
+            # that stop for +$3.78.
+            #
+            # Paused to gather the unmanaged peak distribution. Structural
+            # and signal-driven movers are deliberately NOT in this set.
+            #
+            # self.phase_config does not exist on this class -- confirmed by
+            # grep, zero matches. Every other phase-flag read in this file
+            # (e.g. auto_move_guard_enabled just above) goes through
+            # self.risk_config.get("phase_config", {}); used the same
+            # pattern here rather than the doc's guessed attribute, which
+            # would have thrown inside this try and silently left the
+            # movers enabled -- the exact failure mode this file warns
+            # about elsewhere.
+            _ARITH_MOVERS = {
+                "soft_risk_cut", "intermediate_trail", "r_breakeven_lock",
+                "breakeven_atr", "breakeven_time",
+                "lsm_main_to_secondary_breakeven",
+                "lsm_natural_to_secondary_breakeven",
+                "lsm_reversal_breakeven", "lsm_direct_reversal_breakeven",
+                "pyramid_entry_breakeven",
+                "momentum_exhaustion_breakeven_fallback",
+            }
+            try:
+                _movers_on = bool(self.risk_config.get("phase_config", {}).get(
+                    "arithmetic_stop_movers_enabled", True))
+            except Exception:
+                _movers_on = True          # never suppress on our own error
+            if reason in _ARITH_MOVERS and not _movers_on:
+                logger.info(
+                    "[STOP-PAUSE] %s: %s suppressed -- would have moved SL to "
+                    "%.5g (current %.5g, entry %.5g)",
+                    self.asset, reason, candidate,
+                    self.current_stop_loss or 0, self.entry_price,
+                )
+                return False
+
             with self._sl_lock:
                 cur = self.current_stop_loss
                 if not self._is_tighter(candidate, cur):
@@ -4239,6 +4298,53 @@ class VeteranTradeManager:
 
         if entry_type is None or entry_type == "REJECT":
             return None
+
+        # ── STOP-2 SEG G: the tier decides which level the stop measures ──
+        # A retest proof's evidence IS the reference -- the stop belongs
+        # behind it (the entry_type branches below already do this via
+        # ref_2/nearby_4h_level). A runner proof's evidence is that price
+        # left the reference and did not return, so the reference is
+        # history rather than a live risk boundary. Measured on the 19 Aug
+        # BTC move: a runner stop behind the reference risks 5,200 points
+        # for 1.9R; behind the nearest level under entry it risks 1,100 for
+        # roughly 9R.
+        #
+        # Gated behind the entry_type check above by design, matching this
+        # batch's own risk note: REF-1 Segment H (entry_type reaching the
+        # live VTM) is unverified as of this writing, so this branch is
+        # inert until a live entry confirms it -- known and accepted, not
+        # an oversight.
+        #
+        # Uses self.nearby_4h_level (the VTM's own nearest-4H-level copy),
+        # not the broken reference (ref_2/setup_ref) -- the RANGE_BOUNDARY/
+        # MR_PULLBACK branches below call _nearest_structural_anchor the
+        # same way; None was checked against this method's real signature
+        # and rejected, since level_4h is compared against a 1D candidate,
+        # not a decorative placeholder.
+        _tier = (getattr(self, "brc_tier", None) or "").upper()
+        if _tier == "RUNNER":
+            _lvl = self._nearest_structural_anchor(
+                getattr(self, "nearby_4h_level", None), fallback_tf_label="4H",
+            )
+            if _lvl is not None and atr > 0:
+                _buf = float(self.risk_config.get(
+                    "structural_stop_allowance_atr", 0.3)) * atr
+                _stop = (_lvl - _buf) if side == "long" else (_lvl + _buf)
+                _ok = (_stop < self.entry_price) if side == "long" \
+                      else (_stop > self.entry_price)
+                if _ok:
+                    logger.info(
+                        "[STOP-TIER] %s RUNNER: stop from nearest level %.5g "
+                        "(not reference %.5g) -> %.5g",
+                        self.asset, _lvl,
+                        getattr(self, "ref_2", 0) or 0, _stop,
+                    )
+                    return _stop
+            logger.info(
+                "[STOP-TIER] %s RUNNER: no usable nearby level -- falling "
+                "through to entry-type routing.", self.asset,
+            )
+        # retest-class and unknown tiers fall through to the existing router
 
         if entry_type == "SPRING_ENTRY":
             # Stop just beyond the sweep level (the wick tip defines invalidation).
