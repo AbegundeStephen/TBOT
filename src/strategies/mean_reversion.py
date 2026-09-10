@@ -857,13 +857,55 @@ class MeanReversionStrategy(BaseStrategy):
                 # late is not a reversal — it is a chase.
                 _brc_age2 = int(getattr(composite_state, "brc_age", 0) or 0)
                 _brc_max_age2 = int(_pc2.get("brc_max_age_mr", 20))
-                if not (
+                _native_proof_ok = (
                     _brc_ok2
                     and _brc_kind2 == "MR_REV"
                     and _intended_dir != 0
                     and _brc_dir2 == _intended_dir
                     and _brc_age2 <= _brc_max_age2
-                ):
+                )
+                # LANE-1 SEG B: mirror of SEG A. MR trades reversals and only
+                # accepted MR_REV proofs. When a TF_CONT proof points the SAME
+                # way MR wants to trade, the signal died here.
+                #
+                # NOTE: this half has never been observed. Across 3-9 Sep, all
+                # nine distinct ownership suppressions were TF. The rule is
+                # symmetric because Desire ruled it symmetric, not because the
+                # MR case has been seen.
+                #
+                # Structural difference from TF's SEG A: TF already has a
+                # ready-to-ship (signal, confidence) pair at this point and
+                # can return immediately. MR does not -- confidence is computed
+                # further down this method, and the TRENDING veto + move_dir/
+                # trade_dir block below MUST still run even when the proof is
+                # satisfied (that's what the native "proof met" case does: it
+                # falls through, it does not return early). An early
+                # `return _intended_dir, confidence` here would skip the
+                # TRENDING veto entirely -- "counter-trend in a strong trend
+                # is fatal" per that veto's own comment -- so this is an elif
+                # that falls through exactly like the native-proof branch,
+                # not a return.
+                _cross_lane_ok = (
+                    _brc_ok2
+                    and _intended_dir != 0
+                    and _brc_dir2 == _intended_dir
+                    and _brc_age2 <= _brc_max_age2
+                )
+                if _native_proof_ok:
+                    logger.info(
+                        "[MR Mode2] %s: break-retest-close confirmed dir=%+d — proof met.",
+                        self.asset, _intended_dir,
+                    )
+                elif _cross_lane_ok:
+                    logger.info(
+                        "[CROSS-LANE] MR %s: acting on %s proof -- direction "
+                        "agrees (sig=%+d proof_dir=%+d age=%d). Was "
+                        "suppressed before LANE-1.",
+                        getattr(self, "asset", "?"), _brc_kind2,
+                        _intended_dir, _brc_dir2, _brc_age2,
+                    )
+                    self._cross_lane_proof = _brc_kind2   # LANE-1 SEG C
+                else:
                     logger.info(
                         "[MR Mode2] %s: no fresh REVERSAL proof dir=%+d "
                         "(brc_confirmed=%s brc_kind=%s brc_direction=%s "
@@ -888,10 +930,6 @@ class MeanReversionStrategy(BaseStrategy):
                         getattr(self, "asset", "?"), id(self),
                     )
                     return 0, 0.0
-                logger.info(
-                    "[MR Mode2] %s: break-retest-close confirmed dir=%+d — proof met.",
-                    self.asset, _intended_dir,
-                )
 
         # ── TRENDING veto: counter-trend in a strong trend is fatal ──────────
         if composite_state is not None:
@@ -1217,6 +1255,7 @@ class MeanReversionStrategy(BaseStrategy):
         # (mirrors L2 -- generate_signal is the dispatcher that runs every
         # cycle regardless of which mode routing selects below).
         self._lane_b_intent = None
+        self._cross_lane_proof = None   # LANE-1 SEG C: per-cycle
         if len(df) < self.get_warmup_period():
             return 0, 0.0
 

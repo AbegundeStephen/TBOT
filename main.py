@@ -5848,6 +5848,30 @@ class TradingBot:
             details["episode_id"] = _episode_id
             logger.info(f"[EPISODE] {asset_name}: {_episode_id} opened")
 
+            # LANE-1 SEG C: mark trades that only exist because of the
+            # cross-lane rule, so they can be pulled out of the record and
+            # scored separately -- given how thin the evidence for LANE-1's
+            # ruling is (Section 4 of that batch: 3 same-direction sightings
+            # post-REF-1, all one EURUSD level, one measured outcome, a
+            # loss), being able to isolate exactly these trades afterwards
+            # is the main protection against the ruling being wrong.
+            # Same object-access pattern as the Lane B block just below,
+            # which already reads _lane_b_intent off these same objects
+            # successfully -- confirmed live, not the aggregator's own
+            # internal instances.
+            try:
+                for _xl_obj in (
+                    self.strategies.get(asset_name, {}).get("trend_following"),
+                    self.strategies.get(asset_name, {}).get("mean_reversion"),
+                ):
+                    _xl = getattr(_xl_obj, "_cross_lane_proof", None) if _xl_obj else None
+                    if _xl:
+                        details["cross_lane_proof"] = _xl
+                        details["cross_lane"] = True
+                        break
+            except Exception as _xl_err:
+                logger.debug(f"[LANE-1] {asset_name}: cross-lane stamp failed: {_xl_err}")
+
             # ── LANES L4a: Lane B capture ────────────────────────────────────
             # Both lanes stash a suppressed intent when a completed proof exists
             # but belongs to the other lane. One shadow per PROOF, not per cycle
