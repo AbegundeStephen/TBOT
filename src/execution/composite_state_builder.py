@@ -937,10 +937,19 @@ class CompositeStateBuilder:
                                 # SECONDARY_RETRACEMENT / SECONDARY_REBOUND: no check.
                                 # None is the correct, intended reading here now.
 
-                                if _n2_up_max is not None and float(_n2_up_max) <= _n2_px:
-                                    _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} <= price")
-                                if _n2_dn_min is not None and float(_n2_dn_min) >= _n2_px:
-                                    _n2_bad.append(f"main_down_min {float(_n2_dn_min):.5g} >= price")
+                                # STOP-2 SEG D: main_up_max is the HIGH-WATER
+                                # MARK of the MAIN_UP leg. The moment price
+                                # makes a new high the anchor updates to that
+                                # price and the two are equal -- normal, not
+                                # broken. `<=` fired on equality and reported
+                                # a working mechanism as STALE/INVALID twice
+                                # (BTC 4 Sep, USOIL 8 Sep), both times
+                                # investigated as faults before the price data
+                                # showed the anchor was right.
+                                if _n2_up_max is not None and float(_n2_up_max) < _n2_px:
+                                    _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} < price")
+                                if _n2_dn_min is not None and float(_n2_dn_min) > _n2_px:
+                                    _n2_bad.append(f"main_down_min {float(_n2_dn_min):.5g} > price")
 
                                 if _n2_bad:
                                     logger.warning(

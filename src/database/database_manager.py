@@ -344,6 +344,34 @@ class TradingDatabaseManager:
                 else:
                     update_data["metadata"] = self._serialize_safely(metadata)
 
+            # STOP-2 SEG A: idempotency at the single convergence point.
+            #
+            # This is an UPDATE by id, so a second call is harmless to the
+            # data -- but it emits "Trade exit recorded" a second time, which
+            # reads as two exits and would double-count in any log-derived
+            # analysis. Confirmed twice: ID=275 (3 Sep) and ID=278 (8 Sep),
+            # each written by one path and then again by the sync cleanup
+            # 67 minutes later.
+            #
+            # STOP-1 Segment B guards the sync loop against ITSELF, which is
+            # a different thing and cannot catch this -- the two writes come
+            # from different callers. Guarding here covers every path,
+            # present and future.
+            try:
+                _cur = (self.supabase.table("trades")
+                        .select("status").eq("id", trade_id).execute())
+                if _cur.data and _cur.data[0].get("status") == "closed":
+                    logger.debug(
+                        "[DB] Trade %s already closed -- skipping duplicate "
+                        "exit write.", trade_id,
+                    )
+                    return True
+            except Exception as _idem_err:
+                # Never block a legitimate exit write on the guard's own
+                # failure. Falling through re-writes identical values, which
+                # is what happens today.
+                logger.debug("[DB] idempotency check failed: %s", _idem_err)
+
             result = (
                 self.supabase.table("trades")
                 .update(update_data)

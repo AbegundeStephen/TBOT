@@ -138,6 +138,9 @@ class ShadowPosition:
     # Extremes
     mfe_pct: float = 0.0    # Maximum Favourable Excursion
     mae_pct: float = 0.0    # Maximum Adverse Excursion
+    # STOP-2 SEG B: same extremes expressed in R, computed at close.
+    mfe_r: Optional[float] = None
+    mae_r: Optional[float] = None
 
     # Outcome
     closed: bool = False
@@ -317,6 +320,22 @@ class ShadowPosition:
         # 0.05% gross band = Desire-ratified scratch threshold.
         self.outcome_class = ("scratch" if abs(self.gross_pnl_pct) < 0.05
                               else ("win" if self.net_pnl_pct > 0 else "loss"))
+        # STOP-2 SEG B: express MFE/MAE in R as well as percent. Shadows
+        # record mfe_pct/mae_pct (fractions of entry_price, side-adjusted by
+        # _profit_pct so positive is always favorable); live episodes record
+        # mfe_r/gross_r. Only 12 of 598 closed records carried both R fields
+        # before this -- none of them stop_loss/take_profit exits, which are
+        # 570 of the population -- because the two record types spoke
+        # different units. mfe_pct is a FRACTION, not a price, so converting
+        # it back through entry_price before dividing by risk is required
+        # (mfe_r = mfe_pct * entry_price / risk), not a straight price diff.
+        try:
+            _risk = abs(float(self.entry_price) - float(self.initial_stop_loss))
+            if _risk > 0:
+                self.mfe_r = (float(self.mfe_pct) * float(self.entry_price)) / _risk
+                self.mae_r = (float(self.mae_pct) * float(self.entry_price)) / _risk
+        except Exception as _r_err:
+            logger.debug("[SHADOW] %s mfe_r/mae_r failed: %s", self.asset, _r_err)
         logger.debug(
             f"[SHADOW] {self.asset} {self.side} closed: "
             f"reason={reason}, gross={self.gross_pnl_pct:.3f}%, "
@@ -344,6 +363,8 @@ class ShadowPosition:
             "peak_profit_bar":  self.peak_profit_bar,
             "mfe_pct":          round(self.mfe_pct * 100, 4),
             "mae_pct":          round(self.mae_pct * 100, 4),
+            "mfe_r":            round(self.mfe_r, 4) if self.mfe_r is not None else None,
+            "mae_r":            round(self.mae_r, 4) if self.mae_r is not None else None,
             "gross_pnl_pct":    round(self.gross_pnl_pct, 4),
             "friction_pct":     round(self.friction_pct, 4),
             "net_pnl_pct":      round(self.net_pnl_pct, 4),

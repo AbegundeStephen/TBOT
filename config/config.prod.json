@@ -1479,6 +1479,7 @@
     "mr_mode3_climax_fade_enabled": true,
     "structural_stops_enabled": true,
     "structural_trailing_enabled": true,
+    "arithmetic_stop_movers_enabled": false,
     "market_watcher_structural_awareness_enabled": false,
     "vtm_structural_exit_awareness_enabled": false,
     "ml_livermore_features_enabled": false,
