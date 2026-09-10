@@ -439,6 +439,7 @@ class TrendFollowingStrategy(BaseStrategy):
         """Generate live signal without lookahead"""
         # LANES L2: clear last cycle's intent so a stale one is never reused.
         self._lane_b_intent = None
+        self._cross_lane_proof = None   # LANE-1 SEG C: per-cycle
         if len(df) < self.get_warmup_period():
             return 0, 0.0
 
@@ -649,13 +650,51 @@ class TrendFollowingStrategy(BaseStrategy):
                     and _brc_age <= _brc_max_age
                 ):
                     if not silent:
+                        # LANE-1: was "no fresh CONTINUATION proof", which is
+                        # wrong when brc_kind is TF_CONT and brc_age is 0 --
+                        # the real reason in that case is direction. Also adds
+                        # the asset name, which the old line omitted entirely,
+                        # making the nine historical suppressions impossible
+                        # to attribute without cross-referencing timestamps.
                         logger.info(
-                            "[TF] %s: signal=%+d suppressed — no fresh CONTINUATION "
-                            "proof (brc_confirmed=%s brc_kind=%s brc_direction=%s "
-                            "brc_age=%s max=%s).",
-                            getattr(self, "name", "TF"), signal, _brc_ok,
+                            "[%s] %s: signal=%+d suppressed — proof unusable "
+                            "(kind=%s dir=%+d age=%d max=%d): %s",
+                            getattr(self, "name", "TF"),
+                            getattr(self, "asset", "?"), signal,
                             _brc_kind, _brc_dir, _brc_age, _brc_max_age,
+                            "direction opposes signal" if _brc_dir != signal
+                            else "wrong kind" if not _brc_ok
+                            else "stale",
                         )
+                    # ── LANE-1 SEG A: act on the other lane's proof when the
+                    # directions agree ──────────────────────────────────────
+                    # TF trades continuation and only accepted TF_CONT proofs.
+                    # When an MR_REV proof points the SAME way TF wants to
+                    # trade, the signal died here -- confirmed in the log:
+                    #   [TF] signal=+1 suppressed -- no fresh CONTINUATION
+                    #   proof (brc_confirmed=True brc_kind=MR_REV
+                    #   brc_direction=1 brc_age=0 max=20)
+                    # Proof exists, direction agrees, TF stands down.
+                    #
+                    # Desire's ruling, 10 Sep: direction agreement is enough.
+                    # A reversal proof pointing up and a continuation signal
+                    # pointing up are two readings of the same price action
+                    # that reach the same conclusion.
+                    #
+                    # The opposite-direction case is UNCHANGED and still
+                    # blocks -- that is the majority of what this branch
+                    # catches and it is correct.
+                    if _brc_ok and _brc_dir == signal and _brc_age <= _brc_max_age:
+                        logger.info(
+                            "[CROSS-LANE] TF %s: acting on %s proof -- "
+                            "direction agrees (sig=%+d proof_dir=%+d age=%d). "
+                            "Was suppressed before LANE-1.",
+                            getattr(self, "asset", "?"), _brc_kind,
+                            signal, _brc_dir, _brc_age,
+                        )
+                        self._cross_lane_proof = _brc_kind   # LANE-1 SEG C
+                        return signal, confidence
+
                     # ── LANES L2: record the intent so main.py can open a Lane B
                     # shadow. The signal dies here, inside the strategy, before
                     # the council and before any existing shadow site -- so this
