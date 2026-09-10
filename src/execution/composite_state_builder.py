@@ -89,6 +89,12 @@ class CompositeStateBuilder:
         # fire. BRC writes here when ref_state goes DEAD; the death-check
         # pops (consumes) it the following cycle. Keyed (asset, setup_kind).
         self._ref_dead_pending = {}
+        # REF-2 SEG A: which R2 each frozen H belongs to. H was frozen once
+        # and cleared only on DEAD -- a reference that changes without dying
+        # (new R2, same leg still HEALTHY) left H stranded against a level
+        # that no longer exists. Confirmed live: USOIL held H=90.951 from
+        # 8 Sep while R2 moved 90.706 -> 94.076 over two days.
+        self._ref_h_anchor = {}
         # main.py invokes _build_composite_state twice per ~5min trading cycle
         # per asset (_update_asset_signal's recording pass, then trade_asset's
         # execution pass) against the same closed candle. Tracks the last
@@ -2282,11 +2288,36 @@ class CompositeStateBuilder:
                     # lower high during the pullback does NOT become a new
                     # trigger. Either price clears the original high or the
                     # setup dies at R1 (Segment D/F).
+                    #
+                    # REF-2 SEG A: re-arm H when the reference moves. H was
+                    # frozen once and cleared only on DEAD (below). A
+                    # reference that CHANGES without dying leaves H stranded:
+                    # USOIL held H=90.951 from 8 Sep while R2 moved 90.706 ->
+                    # 94.076, so the trigger compared price against a
+                    # two-day-old high and passed trivially every cycle.
+                    #
+                    # H belongs to the leg its reference defines. New
+                    # reference, new leg, new H. This does NOT re-anchor H
+                    # within a leg -- Desire's ruling stands: "No new last
+                    # high, we lock in the levels and track." It only
+                    # re-arms when the level H was measured against is no
+                    # longer the level in play.
+                    _h_anchor = self._ref_h_anchor.get(self.asset_type)
+                    if getattr(state, "ref_h", None) is not None \
+                            and _h_anchor is not None and _brc_ref != _h_anchor:
+                        logger.info(
+                            "[REF-REARM] %s: reference moved %.5g -> %.5g -- "
+                            "releasing H=%.5g",
+                            self.asset_type, _h_anchor, _brc_ref, state.ref_h,
+                        )
+                        state.ref_h = None
+
                     if _closed_through and getattr(state, "ref_h", None) is None:
                         state.ref_h = float(
                             state.last_swing_high_4h if _brc_dir == 1
                             else state.last_swing_low_4h
                         )
+                        self._ref_h_anchor[self.asset_type] = _brc_ref   # REF-2 SEG A
                         logger.info(
                             "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g",
                             self.asset_type, _brc_dir, _brc_ref,
@@ -2326,6 +2357,7 @@ class CompositeStateBuilder:
                     state.ref_state = _new_ref_state
                     if _new_ref_state == "DEAD":
                         state.ref_h = None      # re-arm for the next setup
+                        self._ref_h_anchor.pop(self.asset_type, None)   # REF-2 SEG A
                         # REF-1 SEG F: cross-cycle handoff to the death-check
                         # loop -- see _ref_dead_pending's __init__ comment.
                         self._ref_dead_pending[(self.asset_type, _brc_kind)] = True
@@ -2535,8 +2567,57 @@ class CompositeStateBuilder:
                                 "H=%.5g — proof complete.",
                                 self.asset_type, _brc_dir, _c1, state.ref_h,
                             )
+                        # REF-2 SEG C: record what a 4H close would have said.
+                        # The trigger fires on the 1H close (Desire's design,
+                        # for speed). Whether a 4H close would have agreed is
+                        # an open question with no data behind it -- this
+                        # line is the data. Logged unconditionally (not just
+                        # when _ref_trigger fires) so the comparison sample
+                        # isn't limited to already-passing cycles.
+                        #
+                        # CAVEAT: the 4H bar is still forming. This answers
+                        # "would a 4H trigger have fired as fast", not "would
+                        # it have fired at all" -- the 4H candle may close
+                        # beyond H later in its life.
+                        try:
+                            _c4 = float(df_4h["close"].iloc[-1])
+                            _c4_clear = (_c4 > state.ref_h) if _brc_dir == 1 \
+                                        else (_c4 < state.ref_h)
+                            logger.info(
+                                "[REF-TRIGGER-CMP] %s dir=%+d H=%.5g | 1H %.5g "
+                                "CLEAR | 4H %.5g %s",
+                                self.asset_type, _brc_dir, state.ref_h, _c1,
+                                _c4, "CLEAR" if _c4_clear else "NOT-CLEAR",
+                            )
+                        except Exception as _cmp_err:
+                            logger.debug("[REF-TRIGGER-CMP] %s: %s",
+                                         self.asset_type, _cmp_err)
 
-                    if _retested and _closed_through and _ref_trigger:
+                    # ── REF-2 SEG B: the trigger IS the proof, not a third lock ──
+                    # _ref_trigger was added by REF-1 as a third AND alongside
+                    # the two legacy tests. It could only make proofs harder,
+                    # never enable one -- confirmed live: [REF-TRIGGER] "proof
+                    # complete" and [NO-PROOF] fired 16ms apart on the same
+                    # cycle, same asset.
+                    #
+                    # Desire's design is one chain, not two systems:
+                    #   4H close beyond R2      -> the break
+                    #   held in the R2 zone     -> ref_state == HEALTHY
+                    #   1H close beyond H       -> proof complete
+                    # ref_state already measures the hold on 4H closes
+                    # (REF-1 SEG D), and _ref_trigger already requires
+                    # HEALTHY before it can be true, so _ref_trigger alone
+                    # expresses both the retest-hold and the close-through.
+                    #
+                    # FALLBACK: when references are absent, _ref_trigger
+                    # defaults True above and the legacy tests still decide --
+                    # this must not be able to stop all trading on an asset
+                    # whose ladder cannot produce a reference pair.
+                    _refs_live = (getattr(state, "ref_h", None) is not None
+                                  and getattr(state, "ref_state", None) is not None)
+                    _proof_ok = _ref_trigger if _refs_live else (_retested and _closed_through)
+
+                    if _proof_ok:
                         # ── Build 2: age the proof in BARS ────────────────────
                         # Same proof at the same reference across several bars is
                         # ONE proof getting older, not several proofs. A different
