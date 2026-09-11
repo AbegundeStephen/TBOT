@@ -2312,18 +2312,71 @@ class CompositeStateBuilder:
                         )
                         state.ref_h = None
 
+                    # ── REF-3 SEG C: H is the highest high SINCE THE BREAK ──
+                    # The 4H pivot scan (later in this method) requires four
+                    # lower bars to the right. In a vertical rally no bar ever
+                    # qualifies, so the scan keeps returning the last pivot
+                    # from BEFORE the move. Confirmed on USOIL: scan returns
+                    # 90.951 while price is at 97.6 having printed 100.98 --
+                    # 6 ATR of free pass, and USOIL produced 743 of 743
+                    # confirmed verdicts through a trigger that was passing
+                    # trivially.
+                    #
+                    # Desire's rule is "the last significant high on the
+                    # left" -- price must reclaim it to prove resumption. In
+                    # a thrust that is the running extreme, not a confirmed
+                    # pivot, because no pivot CAN confirm until the move
+                    # pauses. Using the running extreme means the trigger
+                    # correctly refuses during the thrust and arms once price
+                    # pulls back and recovers.
+                    #
+                    # Two scope corrections from the original draft, both
+                    # confirmed by reading rather than assumed:
+                    #   1. state.bars_since_break is written at :2451 --
+                    #      AFTER this freeze site -- and state is a fresh
+                    #      CompositeState() every call, so reading it here
+                    #      would always see 0 and this fix would silently
+                    #      never activate. Uses the LOCAL _bars_since_break
+                    #      instead, already in scope two lines above.
+                    #   2. _4h_highs/_4h_lows are extracted in the pivot scan
+                    #      much later in this method (:3357) -- also after
+                    #      this site, and nothing here persists across the
+                    #      call to hand them back. Recomputed fresh from
+                    #      df_4h directly (same source, already confirmed in
+                    #      scope for the REF-2 SEG D close4 read just below),
+                    #      rather than depending on the scan's variables.
+                    #   3. _bars_since_break counts 1H bars; the 4H array
+                    #      needs a 4H bar count -- divided by 4, floored at 1.
+                    _h_since_break = None
+                    try:
+                        _bsb_4h = max(1, int(_bars_since_break) // 4)
+                        if df_4h is not None and len(df_4h) > _bsb_4h:
+                            _slice_h = df_4h["high"].values[-(_bsb_4h + 1):]
+                            _slice_l = df_4h["low"].values[-(_bsb_4h + 1):]
+                            _h_since_break = (
+                                float(max(_slice_h)) if _brc_dir == 1
+                                else float(min(_slice_l))
+                            )
+                    except Exception as _hsb_err:
+                        logger.debug("[REF-H] %s: %s", self.asset_type, _hsb_err)
+
                     if _closed_through and getattr(state, "ref_h", None) is None:
+                        _h_pivot = (state.last_swing_high_4h if _brc_dir == 1
+                                    else state.last_swing_low_4h)
                         state.ref_h = float(
-                            state.last_swing_high_4h if _brc_dir == 1
-                            else state.last_swing_low_4h
+                            _h_since_break if _h_since_break is not None
+                            else _h_pivot
                         )
                         self._ref_h_anchor[self.asset_type] = _brc_ref   # REF-2 SEG A
                         logger.info(
-                            "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g",
+                            "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g "
+                            "(src=%s pivot=%s)",
                             self.asset_type, _brc_dir, _brc_ref,
                             getattr(state, "setup_ref_tests", 0),
                             ("%.5g" % state.ref_1) if state.ref_1 else "none",
                             state.ref_h,
+                            "since_break" if _h_since_break is not None else "pivot",
+                            ("%.5g" % _h_pivot) if _h_pivot else "none",
                         )
 
                     # REF-1 SEG D: the state machine, evaluated on the 4H
@@ -2580,14 +2633,33 @@ class CompositeStateBuilder:
                         # it have fired at all" -- the 4H candle may close
                         # beyond H later in its life.
                         try:
+                            # REF-3 SEG A: compute the 1H verdict rather than
+                            # hardcoding it. The original baked "CLEAR" into
+                            # the 1H side of the format string on the
+                            # assumption this line only ran after the trigger
+                            # fired -- it does not (logged unconditionally per
+                            # REF-2 SEG C), so GOLD logged "1H 4324.2 CLEAR"
+                            # against H=4490.8 on a long, which is impossible.
+                            # That made the CLEAR-both/1H-only split unusable
+                            # -- the 1H column was a constant.
+                            #
+                            # dist in ATR added: it's what separates a real
+                            # clearance from a free pass (measured 10 Sep:
+                            # BTC ~0.5 ATR real, USTEC ~2 ATR real, USOIL ~6
+                            # ATR -- a trigger passing for free).
                             _c4 = float(df_4h["close"].iloc[-1])
+                            _c1_clear = (_c1 > state.ref_h) if _brc_dir == 1 \
+                                        else (_c1 < state.ref_h)
                             _c4_clear = (_c4 > state.ref_h) if _brc_dir == 1 \
                                         else (_c4 < state.ref_h)
+                            _dist_atr = abs(_c1 - state.ref_h) / _atr if _atr else 0.0
                             logger.info(
-                                "[REF-TRIGGER-CMP] %s dir=%+d H=%.5g | 1H %.5g "
-                                "CLEAR | 4H %.5g %s",
-                                self.asset_type, _brc_dir, state.ref_h, _c1,
+                                "[REF-TRIGGER-CMP] %s dir=%+d H=%.5g | 1H %.5g %s "
+                                "| 4H %.5g %s | dist=%.2fATR",
+                                self.asset_type, _brc_dir, state.ref_h,
+                                _c1, "CLEAR" if _c1_clear else "NOT-CLEAR",
                                 _c4, "CLEAR" if _c4_clear else "NOT-CLEAR",
+                                _dist_atr,
                             )
                         except Exception as _cmp_err:
                             logger.debug("[REF-TRIGGER-CMP] %s: %s",
@@ -2791,7 +2863,14 @@ class CompositeStateBuilder:
                 state.lifecycle_phase = "EXHAUSTION"
             else:
                 state.lifecycle_phase = "ESTABLISHED"
-            logger.debug(
+            logger.info(         # REF-3 SEG F: was logger.debug. ~200 records
+                                 # show a state whose mapping says FADING or
+                                 # EXHAUSTION paired with a stored phase of
+                                 # ESTABLISHED. Every assignment and guard has
+                                 # been read and none explains it -- this
+                                 # prints the state and the resulting phase
+                                 # together, ending the guessing in one
+                                 # cycle. Demote back to DEBUG once answered.
                 "[LIFECYCLE] %s Livermore=%s age=%d → %s",
                 asset,
                 _lsm_state,
