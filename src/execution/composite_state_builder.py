@@ -2363,10 +2363,20 @@ class CompositeStateBuilder:
                     if _closed_through and getattr(state, "ref_h", None) is None:
                         _h_pivot = (state.last_swing_high_4h if _brc_dir == 1
                                     else state.last_swing_low_4h)
+                        # REF-3 SEG C (fix): take the MORE EXTREME of the two,
+                        # not always since-break. Confirmed live 11 Sep:
+                        #   USOIL  since_break=99.809  pivot=90.951  -> 99.809 correct
+                        #   GOLD   since_break=4361.1  pivot=4435    -> 4361.1 wrong
+                        # On GOLD the since-break window was short (recent
+                        # break) so the running extreme had not reached as far
+                        # as the completed pivot -- leaving H BELOW R2 on a
+                        # long, which any price clearing R2 also clears. The
+                        # free pass this segment removed on USOIL reappeared
+                        # on GOLD by the opposite route.
+                        _h_cands = [x for x in (_h_since_break, _h_pivot) if x]
                         state.ref_h = float(
-                            _h_since_break if _h_since_break is not None
-                            else _h_pivot
-                        )
+                            max(_h_cands) if _brc_dir == 1 else min(_h_cands)
+                        ) if _h_cands else None
                         self._ref_h_anchor[self.asset_type] = _brc_ref   # REF-2 SEG A
                         logger.info(
                             "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g "
