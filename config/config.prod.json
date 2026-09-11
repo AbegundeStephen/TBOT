@@ -63,6 +63,7 @@
   },
   "assets": {
     "BTC": {
+      "use_ema_structure": false,
       "enabled": true,
       "mode": "live",
       "allow_shorts": true,
@@ -149,6 +150,7 @@
       }
     },
     "GOLD": {
+      "use_ema_structure": false,
       "enabled": true,
       "allow_shorts": true,
       "symbol": "XAUUSDm",
@@ -234,6 +236,7 @@
       }
     },
     "USTEC": {
+      "use_ema_structure": false,
       "enabled": true,
       "allow_shorts": true,
       "symbol": "USTECm",
@@ -401,6 +404,7 @@
       }
     },
     "EURUSD": {
+      "use_ema_structure": false,
       "enabled": true,
       "allow_shorts": true,
       "symbol": "EURUSDm",
@@ -485,6 +489,7 @@
       }
     },
     "USOIL": {
+      "use_ema_structure": false,
       "enabled": true,
       "allow_shorts": true,
       "symbol": "USOILm",
@@ -571,6 +576,7 @@
       }
     },
     "GBPAUD": {
+      "use_ema_structure": false,
       "enabled": true,
       "allow_shorts": true,
       "symbol": "GBPAUDm",
@@ -1452,7 +1458,7 @@
     "setup_queue_cap": 20,
     "runner_confirmation_latency_bars": 2,
     "r_breakeven_enabled": true,
-    "r_breakeven_trigger": 0.75,
+    "r_breakeven_trigger": 1.0,
     "r_breakeven_lock": 0.2,
     "trail_mult_floor": 0.0,
     "trail_start_progress_r": 0.25,

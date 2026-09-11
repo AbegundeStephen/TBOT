@@ -888,6 +888,20 @@ class InstitutionalCouncilAggregator:
             }
             _cost_gate_blocked = _cost_R > _cost_cap
             try:
+                # REF-3 SEG E: why do cost_gate and volatility_gate never
+                # carry an id when council_verdict sometimes does?
+                # (74 of 1547 vs 0 of 852, confirmed 10 Sep). Logging what's
+                # actually in governor_data at the write site rather than
+                # inferring across files -- that approach produced three
+                # wrong diagnoses of this same problem before the fourth was
+                # right. DEBUG: high volume. Promote to INFO for one cycle,
+                # capture, demote.
+                logger.debug(
+                    "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
+                    _asset_u, "cost_gate",
+                    (governor_data or {}).get("episode_id"),
+                    sorted((governor_data or {}).keys())[:8],
+                )
                 from src.utils.gate_ledger import write_gate_decision
                 write_gate_decision(
                     (governor_data or {}).get("episode_id"),
@@ -3350,6 +3364,14 @@ class InstitutionalCouncilAggregator:
                 _vol_gate_passed = self._check_volatility_gate_adaptive(df, atr_fast, atr_slow)
                 # DATA-4 ITEM 1C: record this gate's decision either way.
                 try:
+                    # REF-3 SEG E: see the matching trace at the cost_gate
+                    # site -- same open question, same instrumentation.
+                    logger.debug(
+                        "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
+                        self.asset_type, "volatility_gate",
+                        (governor_data or {}).get("episode_id"),
+                        sorted((governor_data or {}).keys())[:8],
+                    )
                     from src.utils.gate_ledger import write_gate_decision
                     write_gate_decision(
                         (governor_data or {}).get("episode_id"), self.asset_type,
@@ -3815,6 +3837,18 @@ class InstitutionalCouncilAggregator:
             # unanswerable by query, which made T1's before/after an eyeball
             # comparison instead of a measurement.
             try:
+                # REF-3 SEG E: see the matching trace at the cost_gate site
+                # -- same open question, same instrumentation. council_verdict
+                # is the one that sometimes IS keyed (74 of 1547), so this
+                # trace matters here too: comparing its gd_keys against the
+                # other two sites' is how the "why do these two never see it"
+                # question actually gets answered.
+                logger.debug(
+                    "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
+                    self.asset_type, "council_verdict",
+                    (governor_data or {}).get("episode_id"),
+                    sorted((governor_data or {}).keys())[:8],
+                )
                 from src.utils.gate_ledger import write_gate_decision
                 write_gate_decision(
                     (governor_data or {}).get("episode_id"), self.asset_type,
