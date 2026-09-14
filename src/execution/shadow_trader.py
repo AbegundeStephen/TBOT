@@ -775,7 +775,7 @@ class ShadowTradingEngine:
             retest_type=_t4_retest,
             stop_source=_t4_stop_source,
             entry_atr=float(atr) if atr else 0.0,   # BATCH-610 ITEM 4
-            episode_id=episode_id or "",            # DATA-1 ITEM 1B
+            episode_id=episode_id or ("shadow-" + __import__("uuid").uuid4().hex[:12]),   # CU-1 C7: control opens mint their own id
             lane=lane,                              # LANES L1
             entry_price=entry_price,
             current_price=entry_price,
