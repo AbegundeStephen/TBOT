@@ -437,56 +437,6 @@ class SystemValidator:
             ch = self._get_or_create(name)
             ch.liveness = round(liveness, 1)
 
-        # HARD_VETO_LAYER liveness: track whether it fires at a reasonable rate
-        if signal_details:
-            _reason = signal_details.get("reasoning", "")
-            if name not in self._liveness_buffers:
-                pass  # handled above
-            _veto_name = "HARD_VETO_LAYER"
-            if _veto_name not in self._liveness_buffers:
-                self._liveness_buffers[_veto_name] = deque(maxlen=100)
-            # Blocks A-D in signal_aggregator.py logged "HARD_VETO" and are
-            # now retired. main.py's consolidated Livermore block uses different
-            # reasoning tags. Recognise both so this metric doesn't show "dead."
-            # B4/B5: livermore_counter_trend_block and livermore_secondary_
-            # chase_block were removed from main.py (counter-trend now always
-            # graduates instead of hard-vetoing; secondary chase is no longer
-            # blocked) — dropped here too so this metric isn't diluted by
-            # watching for tags that can no longer fire.
-            _reasoning_str = str(signal_details.get("reasoning", ""))
-            _veto_fired = any(
-                tag in _reasoning_str
-                for tag in (
-                    "HARD_VETO",
-                    "livermore_rebound_sl_sweep_block",
-                    "livermore_retracement_sl_sweep_block",
-                )
-            )
-            self._liveness_buffers[_veto_name].append(1 if _veto_fired else 0)
-            buf = self._liveness_buffers[_veto_name]
-            if len(buf) >= 20:
-                fire_rate = sum(buf) / len(buf)
-                # Expected 5–30% block rate; outside = calibration concern but not dead
-                # STOP-1 SEG H: a passive bot may legitimately see zero hard
-                # vetoes for a long time -- 0 in 63,322 cycles read as FAILING
-                # under the old 20-observation minimum. Same RARE_BOOLEAN
-                # reasoning as IS_SILENT_ZONE/BB_KC_SQUEEZE: give it a real
-                # window (5000 cycles, matching the other two) before calling
-                # "never fired" suspicious rather than "still calibrating."
-                if fire_rate == 0.0:
-                    _live = 70.0 if self._cycle_count < 5000 else 20.0
-                elif fire_rate > 0.70:
-                    _live = 40.0   # Firing too much — calibration issue
-                else:
-                    _live = 88.0   # Healthy
-                ch = self._get_or_create(_veto_name)
-                if ch.notes and "vetoes fired" in ch.notes:
-                    # preserve count annotation
-                    pass
-                ch.liveness = _live
-                total_vetoes = sum(self._liveness_buffers[_veto_name])
-                ch.notes = f"{total_vetoes} vetoes fired"
-
     # ─────────────────────────────────────────────────────────────────────────
     # Internal: Calibration
     # ─────────────────────────────────────────────────────────────────────────

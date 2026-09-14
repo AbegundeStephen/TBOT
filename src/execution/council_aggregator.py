@@ -478,6 +478,7 @@ class InstitutionalCouncilAggregator:
             )
             return True, preset_trade_type
 
+    # CU-1 C9: gate ③ retired 14 Sep — telemetry only, always passes.
     def _check_volatility_gate_adaptive(
         self, df: pd.DataFrame, atr_fast: float, atr_slow: float
     ) -> bool:
@@ -509,18 +510,6 @@ class InstitutionalCouncilAggregator:
                     f"atr_f={atr_fast:.5f} atr_s={atr_slow:.5f}"
                 )
 
-                # Check last 20 bars for extreme compression
-                if np.max(atr_ratio_series[-20:]) < 0.65:
-                    logger.info(
-                        "[VOLATILITY] Coiled Spring Detected - Breakout readiness high"
-                    )
-                    return True
-
-            if atr_fast < (0.5 * atr_slow):
-                logger.info(
-                    f"[VOLATILITY] ❌ BLOCKED - Dead Market (ATR Fast: {atr_fast:.4f} < 0.5 * ATR Slow: {atr_slow:.4f})"
-                )
-                return False
             return True
         except Exception as e:
             logger.error(f"[VOLATILITY] Error: {e}")
@@ -896,7 +885,8 @@ class InstitutionalCouncilAggregator:
                 # wrong diagnoses of this same problem before the fourth was
                 # right. DEBUG: high volume. Promote to INFO for one cycle,
                 # capture, demote.
-                logger.debug(
+                # CU-1 C5: info for one day, then back to debug
+                logger.info(
                     "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
                     _asset_u, "cost_gate",
                     (governor_data or {}).get("episode_id"),
@@ -3360,13 +3350,14 @@ class InstitutionalCouncilAggregator:
                         f"required_score +0.4, not blocked outright"
                     )
 
-                # 3. DEAD VOLATILITY GATE (ABSOLUTE VETO)
+                # 3. DEAD VOLATILITY — retired (CU-1 C9), telemetry only
                 _vol_gate_passed = self._check_volatility_gate_adaptive(df, atr_fast, atr_slow)
                 # DATA-4 ITEM 1C: record this gate's decision either way.
                 try:
                     # REF-3 SEG E: see the matching trace at the cost_gate
                     # site -- same open question, same instrumentation.
-                    logger.debug(
+                    # CU-1 C5: info for one day, then back to debug
+                    logger.info(
                         "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
                         self.asset_type, "volatility_gate",
                         (governor_data or {}).get("episode_id"),
@@ -3843,7 +3834,8 @@ class InstitutionalCouncilAggregator:
                 # trace matters here too: comparing its gd_keys against the
                 # other two sites' is how the "why do these two never see it"
                 # question actually gets answered.
-                logger.debug(
+                # CU-1 C5: info for one day, then back to debug
+                logger.info(
                     "[GATE-ID-TRACE] %s %s: eid=%s gd_keys=%s",
                     self.asset_type, "council_verdict",
                     (governor_data or {}).get("episode_id"),

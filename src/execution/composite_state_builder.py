@@ -1098,6 +1098,8 @@ class CompositeStateBuilder:
                         break
                 state.bb_kc_squeeze_active = _sq_dur >= _bkc_min_bars
                 state.bb_kc_squeeze_duration = int(_sq_dur)
+                if _sq_dur > 0 or state.bb_kc_squeeze_active:
+                    logger.info("[SQUEEZE] %s dur=%d min=%d active=%s", self.asset_type, int(_sq_dur), int(_bkc_min_bars), state.bb_kc_squeeze_active)
 
                 # BBW percentile: rank current bandwidth vs 6-month rolling window
                 # (~1095 1H bars; capped to available history)
@@ -1621,236 +1623,115 @@ class CompositeStateBuilder:
                         # SHIPS OFF. Logs the counterfactual so the multiple
                         # can be set from this system's own data instead of
                         # from a 1990s daily-index study.
-                        _p1_cfg = (getattr(state, "phase_config", {}) or {})
-                        _p1_on = bool(
-                            _p1_cfg.get("break_magnitude_filter_enabled", False)
+                        # P4-DEDUP: same thesis already queued? Uses the
+                        # ladder's OWN tolerance, so "same level" means the
+                        # same thing everywhere in the system.
+                        _p4_tol = (
+                            min(0.3 * float(_atr or 0.0),
+                                0.004 * float(_f1_px or 0.0))
+                            if (_atr and _f1_px) else 0.0
                         )
-                        _p1_mult = float(
-                            _p1_cfg.get("break_magnitude_atr_mult", 0.5) or 0.5
-                        )
-                        _p1_scale = {
-                            "SWING_4H": 2.0,
-                            "ZONE_LADDER": 2.0,
-                            "ANCHOR_1H": 1.0,
-                            # BUILD U: 1H-native level measured with the 1H
-                            # ATR, so no unit conversion applies. The 2.0 on
-                            # the 4H tiers converts a 1H ruler into a 4H one;
-                            # it is not a strictness setting. Strictness lives
-                            # in break_magnitude_atr_mult, which stays at 0.5.
-                            #
-                            # 0.5 x 1.0 x ATR = 0.5 ATR. Against 20 measured
-                            # broken-level distances (min 0.307, p25 0.732,
-                            # median 1.081) that refuses roughly the weakest
-                            # 11% -- a filter that discriminates, rather than
-                            # one that refuses 96% regardless of quality.
-                            "BROKEN_SWING_1H": 1.0,
-                        }.get(_f1_tier, 2.0)
-                        _p1_band = _p1_mult * _p1_scale * float(_atr or 0.0)
-                        _p1_dist = None
-                        _p1_weak = False
-                        try:
-                            # REF-1 fix (found live, 9 Sep): ZONE_LADDER is
-                            # exempt. This filter's 2.0x scale for ZONE_LADDER
-                            # was calibrated when that tier meant "the edge of
-                            # the current 4H zone" (zone_4h_current_lower/
-                            # _upper) -- several ATR from price. BATCH REF-1
-                            # Segment A redefined ZONE_LADDER to mean "the
-                            # nearest ladder level with >=2 tests"
-                            # (_pick_ladder_ref), deliberately close to price
-                            # by design (measured median 0.22 ATR). Against a
-                            # ~1.0 ATR band, EVERY ZONE_LADDER setup for EVERY
-                            # asset was refused as a "weak break" the moment
-                            # this shipped -- confirmed live: BTC dist=62.07
-                            # vs band=397.12, GOLD 2.62 vs 16.22, USTEC 24.25
-                            # vs 77.631, EURUSD 0.00017 vs 0.00075 -- all
-                            # roughly 0.15-0.3 ATR of real separation, all
-                            # refused. A level chosen for being close AND
-                            # already tested twice doesn't need a separate
-                            # distance-from-price test to prove it's real;
-                            # that's what tests>=2 already establishes. No
-                            # replacement multiplier substituted -- inventing
-                            # one without measuring this tier's actual
-                            # distance distribution (the way BROKEN_SWING_1H's
-                            # 1.0x was derived from 20 measured cases) would
-                            # just be a different guess.
-                            if _f1_tier == "ZONE_LADDER":
-                                _p1_weak = False
-                            elif _f1_px is not None and _p1_band > 0:
-                                _p1_dist = abs(float(_f1_px) - float(_f1_ref))
-                                _p1_weak = _p1_dist < _p1_band
-                        except Exception:
-                            _p1_weak = False
+                        _dup = None
+                        for _s in _q:
+                            if (_s.get("dir") == _candidate["dir"]
+                                    and _s.get("ref") is not None
+                                    and _p4_tol > 0
+                                    and abs(float(_s["ref"]) - float(_f1_ref))
+                                        <= _p4_tol):
+                                _dup = _s
+                                break
 
-                        # ── MEASURE M1: is this a NEW level or a re-poke? ──────
-                        # Cross-referencing 48 refusals against [SETUP-BORN] on
-                        # 1-Sept showed three behaviours wearing one label:
-                        #   DELAYED  -- USTEC 29178 refused 14:02/15:00, BORN 16:03
-                        #   RE-POKE  -- BTC 78499 BORN 00:00, then refused 6x after
-                        #   PREVENTED -- the residual, the only genuine cost
-                        # "REFUSED" read as prevention and was misread twice.
-                        # Name what actually happened.
-                        # LANES/MEASURE: the spec assumed a flat
-                        # self._setup_queue[self.asset_type] accessor; the real
-                        # structure is the per-lane `_q` list already in scope
-                        # here (this whole block runs inside _process_lane, and
-                        # the [SETUP-DUPLICATE] check just below already walks
-                        # this exact `_q` the same way) -- reused directly
-                        # rather than guessing a second accessor.
-                        _p1_existing = False
-                        if _p1_weak:
-                            try:
-                                for _s in _q:
-                                    if (
-                                        _s.get("kind") == _candidate["kind"]
-                                        and int(_s.get("dir", 0)) == int(_candidate["dir"])
-                                        and _s.get("ref") is not None
-                                        and abs(float(_s["ref"]) - float(_f1_ref))
-                                            <= (float(_atr or 0.0) * 0.10)
-                                    ):
-                                        _p1_existing = True
-                                        break
-                            except Exception:
-                                _p1_existing = False
-                        _p1_class = "RE-POKE (setup already live)" if _p1_existing \
-                            else "NO SETUP YET"
-
-                        if _p1_weak:
+                        if _dup is not None:
                             logger.info(
-                                "[P1-MAGNITUDE] %s: %s dir=%+d ref=%.5g "
-                                "px=%.5g dist=%.5g band=%.5g (%.2f x ATR "
-                                "x %.1f tier=%s) — WEAK BREAK%s class=%s",
+                                "[SETUP-DUPLICATE] %s: %s dir=%+d ref=%.5g — "
+                                "matches live setup (age=%s ref=%.5g "
+                                "delta=%.5g < tol %.5g). Refused.",
                                 self.asset_type, _candidate["kind"],
-                                int(_candidate["dir"]), _f1_ref, _f1_px,
-                                _p1_dist if _p1_dist is not None else -1.0,
-                                _p1_band, _p1_mult, _p1_scale, _f1_tier,
-                                " — REFUSED" if _p1_on
-                                else " — would refuse (filter OFF)",
-                                _p1_class,
+                                int(_candidate["dir"]), _f1_ref,
+                                _dup.get("age"), float(_dup["ref"]),
+                                abs(float(_dup["ref"]) - float(_f1_ref)),
+                                _p4_tol,
                             )
-                            # MEASURE M2: same numbers, queryable.
-                            try:
-                                from src.utils.p1_ledger import write_refusal
-                                write_refusal(
-                                    self.asset_type, _candidate["kind"],
-                                    _candidate["dir"], _f1_ref, _f1_px,
-                                    _p1_dist, _p1_band, _f1_tier,
-                                    _p1_mult, _p1_scale, _p1_class, _atr,
-                                )
-                            except Exception:
-                                pass
-
-                        if _p1_weak and _p1_on:
-                            pass          # refused: no setup is created
                         else:
-                            # P4-DEDUP: same thesis already queued? Uses the
-                            # ladder's OWN tolerance, so "same level" means the
-                            # same thing everywhere in the system.
-                            _p4_tol = (
-                                min(0.3 * float(_atr or 0.0),
-                                    0.004 * float(_f1_px or 0.0))
-                                if (_atr and _f1_px) else 0.0
+                            # REF-1 SEG B: the second reference. R2 (ref,
+                            # above) is the level just broken — losing it
+                            # ends the current leg. R1 is the one behind
+                            # it — losing it kills the move. Frozen
+                            # together, never re-anchored: "we lock in the
+                            # levels and track." Nudged by an epsilon past
+                            # R2 so the ladder filter (strictly beyond the
+                            # price it's given) finds the NEXT level out,
+                            # not R2 itself.
+                            _r1_px = (
+                                (float(_f1_ref) - 1e-9)
+                                if int(_candidate["dir"]) == 1
+                                else (float(_f1_ref) + 1e-9)
                             )
-                            _dup = None
-                            for _s in _q:
-                                if (_s.get("dir") == _candidate["dir"]
-                                        and _s.get("ref") is not None
-                                        and _p4_tol > 0
-                                        and abs(float(_s["ref"]) - float(_f1_ref))
-                                            <= _p4_tol):
-                                    _dup = _s
-                                    break
+                            _r1_ref, _r1_tests = self._pick_ladder_ref(
+                                _asset, int(_candidate["dir"]), _r1_px, _atr,
+                            )
+                            _r1_tag = "LADDER"
+                            if _r1_ref is None:
+                                _sw = (getattr(state, "last_swing_low_4h", None) if int(_candidate["dir"]) == 1
+                                       else getattr(state, "last_swing_high_4h", None))
+                                _ok_side = (_sw is not None and float(_sw) > 0 and (
+                                    (int(_candidate["dir"]) == 1 and float(_sw) < float(_f1_ref)) or
+                                    (int(_candidate["dir"]) == -1 and float(_sw) > float(_f1_ref))))
+                                if _ok_side:
+                                    _r1_ref, _r1_tests, _r1_tag = float(_sw), 0, "R1_SWING"
+                                    logger.info("[R1-SWING] %s: %s dir=%+d no tested line behind H=%.5g; R1 -> 4H swing %.5g",
+                                                self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref), float(_sw))
+                                else:
+                                    logger.info("[NO-R1-REFUSED] %s: %s dir=%+d H=%.5g — no tested line, no usable 4H swing. Refused.",
+                                                self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref))
 
-                            if _dup is not None:
+                            if _r1_ref is not None:
+                                self._ref_dead_pending.pop((_asset, _candidate["kind"]), None)   # PPL 8g: a new setup starts with no inherited kill
+                                _new_setup = dict(_candidate)
+                                _new_setup.update({
+                                    "age": 0,
+                                    "born_state": _lsm_now,
+                                    "born_compression": _comp,
+                                    "last_compression": _comp,
+                                    "energy": "HOLDING",
+                                    "ref": _f1_ref,
+                                    "ref_tier": _f1_tier,
+                                    "ref_role": self._ref_role_at(
+                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                    ),
+                                    "ref_tests": self._ref_tests_at(
+                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                    ),
+                                    "ref_1": _r1_ref,
+                                    "ref_1_tests": _r1_tests,
+                                    "r1_tag": _r1_tag,
+                                    "born_state_4h": getattr(state, "livermore_state_4h", None),
+                                })
+
+                                # P4-EVICT: make room if full.
+                                if len(_q) >= _P4_CAP:
+                                    _victim = self._p4_pick_eviction(_q)
+                                    if _victim is not None:
+                                        _q.remove(_victim)
+                                        logger.warning(
+                                            "[SETUP-EVICTED] %s: queue full (%d) — "
+                                            "dropped %s dir=%+d age=%s ref=%.5g "
+                                            "to admit ref=%.5g",
+                                            self.asset_type, _P4_CAP,
+                                            _victim.get("kind"),
+                                            int(_victim.get("dir", 0)),
+                                            _victim.get("age"),
+                                            float(_victim.get("ref") or 0.0),
+                                            _f1_ref,
+                                        )
+                                _q.append(_new_setup)
                                 logger.info(
-                                    "[SETUP-DUPLICATE] %s: %s dir=%+d ref=%.5g — "
-                                    "matches live setup (age=%s ref=%.5g "
-                                    "delta=%.5g < tol %.5g). Refused.",
-                                    self.asset_type, _candidate["kind"],
-                                    int(_candidate["dir"]), _f1_ref,
-                                    _dup.get("age"), float(_dup["ref"]),
-                                    abs(float(_dup["ref"]) - float(_f1_ref)),
-                                    _p4_tol,
+                                    "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
+                                    self.asset_type, _new_setup["kind"],
+                                    int(_new_setup["dir"]), _f1_ref, _f1_tier,
+                                    _new_setup.get("ref_role"),
+                                    _new_setup.get("ref_tests", 0),
                                 )
-                            else:
-                                # REF-1 SEG B: the second reference. R2 (ref,
-                                # above) is the level just broken — losing it
-                                # ends the current leg. R1 is the one behind
-                                # it — losing it kills the move. Frozen
-                                # together, never re-anchored: "we lock in the
-                                # levels and track." Nudged by an epsilon past
-                                # R2 so the ladder filter (strictly beyond the
-                                # price it's given) finds the NEXT level out,
-                                # not R2 itself.
-                                _r1_px = (
-                                    (float(_f1_ref) - 1e-9)
-                                    if int(_candidate["dir"]) == 1
-                                    else (float(_f1_ref) + 1e-9)
-                                )
-                                _r1_ref, _r1_tests = self._pick_ladder_ref(
-                                    _asset, int(_candidate["dir"]), _r1_px, _atr,
-                                )
-                                _r1_tag = "LADDER"
-                                if _r1_ref is None:
-                                    _sw = (getattr(state, "last_swing_low_4h", None) if int(_candidate["dir"]) == 1
-                                           else getattr(state, "last_swing_high_4h", None))
-                                    _ok_side = (_sw is not None and float(_sw) > 0 and (
-                                        (int(_candidate["dir"]) == 1 and float(_sw) < float(_f1_ref)) or
-                                        (int(_candidate["dir"]) == -1 and float(_sw) > float(_f1_ref))))
-                                    if _ok_side:
-                                        _r1_ref, _r1_tests, _r1_tag = float(_sw), 0, "R1_SWING"
-                                        logger.info("[R1-SWING] %s: %s dir=%+d no tested line behind H=%.5g; R1 -> 4H swing %.5g",
-                                                    self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref), float(_sw))
-                                    else:
-                                        logger.info("[NO-R1-REFUSED] %s: %s dir=%+d H=%.5g — no tested line, no usable 4H swing. Refused.",
-                                                    self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref))
-
-                                if _r1_ref is not None:
-                                    self._ref_dead_pending.pop((_asset, _candidate["kind"]), None)   # PPL 8g: a new setup starts with no inherited kill
-                                    _new_setup = dict(_candidate)
-                                    _new_setup.update({
-                                        "age": 0,
-                                        "born_state": _lsm_now,
-                                        "born_compression": _comp,
-                                        "last_compression": _comp,
-                                        "energy": "HOLDING",
-                                        "ref": _f1_ref,
-                                        "ref_tier": _f1_tier,
-                                        "ref_role": self._ref_role_at(
-                                            _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                        ),
-                                        "ref_tests": self._ref_tests_at(
-                                            _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                        ),
-                                        "ref_1": _r1_ref,
-                                        "ref_1_tests": _r1_tests,
-                                        "r1_tag": _r1_tag,
-                                        "born_state_4h": getattr(state, "livermore_state_4h", None),
-                                    })
-
-                                    # P4-EVICT: make room if full.
-                                    if len(_q) >= _P4_CAP:
-                                        _victim = self._p4_pick_eviction(_q)
-                                        if _victim is not None:
-                                            _q.remove(_victim)
-                                            logger.warning(
-                                                "[SETUP-EVICTED] %s: queue full (%d) — "
-                                                "dropped %s dir=%+d age=%s ref=%.5g "
-                                                "to admit ref=%.5g",
-                                                self.asset_type, _P4_CAP,
-                                                _victim.get("kind"),
-                                                int(_victim.get("dir", 0)),
-                                                _victim.get("age"),
-                                                float(_victim.get("ref") or 0.0),
-                                                _f1_ref,
-                                            )
-                                    _q.append(_new_setup)
-                                    logger.info(
-                                        "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
-                                        self.asset_type, _new_setup["kind"],
-                                        int(_new_setup["dir"]), _f1_ref, _f1_tier,
-                                        _new_setup.get("ref_role"),
-                                        _new_setup.get("ref_tests", 0),
-                                    )
 
                 # ---- STEP 3: arbitration — who holds the slot? -----------
                 # Desire's rule: most tests at its own reference wins. The
@@ -2200,6 +2081,9 @@ class CompositeStateBuilder:
                          so that regime_age_hours reflects elapsed *bar* time, not
                          wall-clock time.  Defaults to datetime.now() for live use.
         """
+        logger.info("[LIFECYCLE-ENTER] %s regime=%s lsm4=%s age4=%s",
+                    getattr(state, "asset_type", getattr(self, "asset_type", "?")), regime_name,
+                    getattr(state, "livermore_state_4h", None), getattr(state, "livermore_state_age_4h", None))
         from datetime import datetime, timezone
 
         asset = self.asset_type
