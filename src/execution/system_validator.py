@@ -106,6 +106,13 @@ class SystemValidator:
     log_interval_h    Hours between full 6-hour log summaries (default 6).
     """
 
+    # CU-1 C8 follow-up: component names whose tracking code has been
+    # retired. _load_state() restores every name found in the persisted
+    # JSON regardless of whether anything still updates it, so deleting
+    # the update code alone leaves a stale entry that reloads and
+    # re-persists itself forever. Skip these on load so they age out.
+    _RETIRED_COMPONENTS = {"HARD_VETO_LAYER"}
+
     def __init__(
         self,
         state_path: str = "data/system_validator_state.json",
@@ -749,6 +756,8 @@ class SystemValidator:
             self._calibration_counts = data.get("calibration_counts", {})
 
             for name, snap in data.get("health_summary", {}).items():
+                if name in self._RETIRED_COMPONENTS:
+                    continue
                 ch = self._get_or_create(name)
                 ch.liveness    = snap.get("liveness")
                 ch.calibration = snap.get("calibration")
