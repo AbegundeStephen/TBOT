@@ -2955,7 +2955,10 @@ class CompositeStateBuilder:
             _cached = getattr(self, "_gear_cache", None)
             if _cached is None or _cached[0] != _m:
                 import json
-                with open(self._GEAR_PATH, "r") as _f:
+                # utf-8-sig: tolerates a BOM if the file was hand-saved by
+                # PowerShell/Notepad (Out-File defaults to BOM'd UTF-8) --
+                # plain utf-8 files parse identically either way.
+                with open(self._GEAR_PATH, "r", encoding="utf-8-sig") as _f:
                     _g = json.load(_f)
                 c1 = str(_g.get("count1_tf", c1)).upper()
                 c3 = str(_g.get("count3_tf", c3)).upper()
