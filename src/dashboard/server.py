@@ -326,7 +326,7 @@ def ppl_gear():
             json.dump({"count1_tf": _c1, "count3_tf": _c3}, _f)
         return jsonify({"ok": True, "count1_tf": _c1, "count3_tf": _c3})
     try:
-        with open(_p) as _f:
+        with open(_p, encoding="utf-8-sig") as _f:
             return jsonify(json.load(_f))
     except FileNotFoundError:
         return jsonify({"count1_tf": None, "count3_tf": None, "note": "no gear file; config values apply"})
