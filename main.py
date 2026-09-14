@@ -632,6 +632,20 @@ class TradingBot:
                 if self.data_manager.initialize_mt5():
                     logger.info(f"[OK] MT5 connection established for: {', '.join(assets_by_exchange['mt5'])}")
                     mt5_initialized = True
+                    # PPL S11d: server-clock sanity check. 4H boundaries are
+                    # UTC-anchored; a broker server clock offset from UTC
+                    # silently shifts every 4H close this batch measures against.
+                    try:
+                        import MetaTrader5 as _mt5, datetime as _dt
+                        _t = _mt5.symbol_info_tick("XAUUSDm")
+                        _tick = _dt.datetime.fromtimestamp(_t.time, _dt.timezone.utc).replace(tzinfo=None)
+                        _now = _dt.datetime.utcnow()
+                        _gap = (_now - _tick).total_seconds()
+                        (logger.warning if abs(_gap) > 900 else logger.info)(
+                            "[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (%s)", _tick, _now, _gap,
+                            "server=UTC" if abs(_gap) <= 900 else "SERVER OFFSET — 4H boundaries may be wrong")
+                    except Exception as _ce:
+                        logger.warning("[CLOCK] could not compare MT5 tick to UTC: %s", _ce)
                 else:
                     logger.error("[FAIL] Failed to initialize MT5")
                     # Disable all MT5 assets if connection fails
@@ -3317,17 +3331,20 @@ class TradingBot:
                 # getattr on the shell would silently return nothing.
                 _old_cs = getattr(_old_perf_for_lsm, "_cs_builder", None)
                 if _old_cs is not None:
-                    for _f in (
-                        "_active_setup", "_active_setup_mr",
-                        "_brc_memory", "_brc_memory_mr",
-                        "_brc_break_ts", "_brc_break_ts_mr",
-                        "_retest_memory", "_structure_levels", "_zone_levels",
-                        "_prev_compression", "_traj_last_processed_ts",
-                        "_livermore_last_1h_ts", "_brc_log_ts",
-                        "_squeeze_was_active", "_spread_history",
-                    ):
+                    _keys = getattr(_old_cs, "_STATE_KEYS", None) or (
+                        "_active_setup", "_active_setup_mr", "_brc_memory", "_brc_memory_mr",
+                        "_brc_break_ts", "_brc_break_ts_mr", "_retest_memory", "_structure_levels",
+                        "_zone_levels", "_prev_compression", "_traj_last_processed_ts",
+                        "_livermore_last_1h_ts", "_brc_log_ts", "_squeeze_was_active", "_spread_history",
+                    )
+                    _carried, _empty = 0, []
+                    for _f in _keys:
                         if hasattr(_old_cs, _f):
                             _old_builder_state[_f] = getattr(_old_cs, _f)
+                            _carried += 1
+                            if not getattr(_old_cs, _f):
+                                _empty.append(_f)
+                    logger.info("[RELOAD-STATE] carried=%d keys, empty=%s", _carried, _empty or "none")
                     logger.info(
                         "[C3] %s: captured %d structural state fields before "
                         "preset reinit", asset_name, len(_old_builder_state),

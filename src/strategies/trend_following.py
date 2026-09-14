@@ -642,12 +642,10 @@ class TrendFollowingStrategy(BaseStrategy):
                     if isinstance(composite_state, dict)
                     else getattr(composite_state, "brc_age", 0)
                 )
-                _brc_max_age = int(_pc.get("brc_max_age_tf", 20))
                 if not (
                     _brc_ok
                     and _brc_kind == "TF_CONT"
                     and _brc_dir == signal
-                    and _brc_age <= _brc_max_age
                 ):
                     if not silent:
                         # LANE-1: was "no fresh CONTINUATION proof", which is
@@ -658,10 +656,10 @@ class TrendFollowingStrategy(BaseStrategy):
                         # to attribute without cross-referencing timestamps.
                         logger.info(
                             "[%s] %s: signal=%+d suppressed — proof unusable "
-                            "(kind=%s dir=%+d age=%d max=%d): %s",
+                            "(kind=%s dir=%+d age=%d max=none): %s",
                             getattr(self, "name", "TF"),
                             getattr(self, "asset", "?"), signal,
-                            _brc_kind, _brc_dir, _brc_age, _brc_max_age,
+                            _brc_kind, _brc_dir, _brc_age,
                             "direction opposes signal" if _brc_dir != signal
                             else "wrong kind" if not _brc_ok
                             else "stale",
@@ -684,7 +682,7 @@ class TrendFollowingStrategy(BaseStrategy):
                     # The opposite-direction case is UNCHANGED and still
                     # blocks -- that is the majority of what this branch
                     # catches and it is correct.
-                    if _brc_ok and _brc_dir == signal and _brc_age <= _brc_max_age:
+                    if _brc_ok and _brc_dir == signal:
                         logger.info(
                             "[CROSS-LANE] TF %s: acting on %s proof -- "
                             "direction agrees (sig=%+d proof_dir=%+d age=%d). "

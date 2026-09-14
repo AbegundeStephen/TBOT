@@ -311,6 +311,27 @@ def get_history(asset):
         return jsonify([])
 
 
+@app.route("/api/ppl/gear", methods=["GET", "POST"])
+def ppl_gear():
+    """PPL S2 provision: read/write the hot gear. UI toggle comes in a later batch."""
+    _p = "data/ppl_gear.json"
+    if request.method == "POST":
+        _b = request.get_json(force=True, silent=True) or {}
+        _c1 = str(_b.get("count1_tf", "")).upper()
+        _c3 = str(_b.get("count3_tf", "")).upper()
+        if _c1 not in ("1H", "4H") or _c3 not in ("1H", "4H"):
+            return jsonify({"ok": False, "error": "count1_tf and count3_tf must be '1H' or '4H'"}), 400
+        os.makedirs(os.path.dirname(_p), exist_ok=True)
+        with open(_p, "w") as _f:
+            json.dump({"count1_tf": _c1, "count3_tf": _c3}, _f)
+        return jsonify({"ok": True, "count1_tf": _c1, "count3_tf": _c3})
+    try:
+        with open(_p) as _f:
+            return jsonify(json.load(_f))
+    except FileNotFoundError:
+        return jsonify({"count1_tf": None, "count3_tf": None, "note": "no gear file; config values apply"})
+
+
 @app.route("/api/stats")
 def get_stats():
     """Get current portfolio statistics"""

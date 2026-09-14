@@ -123,6 +123,23 @@ class CompositeStateBuilder:
         # REF-1 SEG D: last-logged ref_state per asset, so [REF-STATE] logs
         # transitions only rather than firing every cycle the proof is alive.
         self._ref_state_last = {}
+        # ── PPL v1 stores, keyed (asset, kind) so a churned-and-reborn setup at
+        # the same H keeps its counts.
+        self._ppl = {}
+        self._atr4_cache = {}
+        self._gear_cache = None
+        # Single source of truth for what survives a hot-reload (P4).
+        self._STATE_KEYS = (
+            "_active_setup", "_active_setup_mr",
+            "_brc_memory", "_brc_memory_mr",
+            "_brc_break_ts", "_brc_break_ts_mr",
+            "_retest_memory", "_structure_levels", "_zone_levels",
+            "_prev_compression", "_traj_last_processed_ts",
+            "_livermore_last_1h_ts", "_brc_log_ts",
+            "_squeeze_was_active", "_spread_history",
+            "_ref_h_anchor", "_ref_state_last", "_ref_dead_pending", "_retest_failed_pending",
+            "_ppl", "_atr4_cache", "_gear_cache",
+        )
         logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
         # setup's energy trend (building / holding / fading).
@@ -1483,152 +1500,33 @@ class CompositeStateBuilder:
                     # A setup dies when the tape invalidates it. Order: master
                     # backstop first (state flip), then setup-specific evidence.
                     _death_reason = None
-                    _born_state = _s.get("born_state")
+                    _born_state = _s.get("born_state_4h")
+                    _lsm4_now = getattr(state, "livermore_state_4h", None)
                     _dir = int(_s.get("dir", 0))
-                    # (a) MASTER BACKSTOP — Livermore 1H state transitioned
-                    #     away from the context the setup was born into.
-                    if _born_state is not None and _lsm_now != _born_state:
+                    # PPL S8a: 4H Livermore state vs the 4H state at birth. 1H never kills.
+                    if _born_state is not None and _lsm4_now is not None and _lsm4_now != _born_state:
                         _born_up = _born_state in _UP
-                        _now_up = _lsm_now in _UP
-                        _now_down = _lsm_now in _DOWN
+                        _now_up = _lsm4_now in _UP
+                        _now_down = _lsm4_now in _DOWN
                         if (_born_up and _now_down) or ((not _born_up) and _now_up):
                             _death_reason = "LSM_STATE_FLIP"
-                    # (b) F1 — the setup's OWN reference failed to hold.
-                    #
-                    #     Was: a 3-bar poke against ANY local high, global to
-                    #     the asset. 201 of 331 deaths, all at age 1-3. A
-                    #     setup born on 4H structure was dying to three bars
-                    #     of noise — and the pullback it died for is the
-                    #     retest it was waiting for.
-                    #
-                    #     Now: only a candle that CLOSES through this setup's
-                    #     own frozen level, by more than tolerance, against
-                    #     the setup's direction, kills it.
-                    #
-                    #     The rule is symmetric — equal rigor both ways:
-                    #       dir=+1 dies on a close below ref - tol
-                    #       dir=-1 dies on a close above ref + tol
-                    #
-                    #     Only candles that closed AFTER birth are examined.
-                    #     Reading the whole 28-bar window would re-introduce
-                    #     the pre-break contamination already fixed once.
-                    #     Age 0 is skipped: the candle that births a setup
-                    #     must not also be the candle that kills it.
-                    if _death_reason is None:
-                        _f1_ref = _s.get("ref")
-                        _f1_look = min(int(_s.get("age", 0) or 0), 28)
-                        if _f1_ref is not None and _f1_look >= 1 and df is not None:
-                            try:
-                                _f1_tol = 0.15 * float(_atr or 0.0)
-                                # FIX (post-doc): age increments in STEP 1
-                                # before this runs, so at age=k exactly k new
-                                # candles have closed since birth -- the last
-                                # k rows of df, iloc[-k:]. The doc's original
-                                # iloc[-(k+1):-1] instead spans [birth,
-                                # birth+k-1]: it re-includes the birth candle
-                                # and drops the current one, the opposite of
-                                # "only candles that closed after birth" and
-                                # "the birth candle must not kill its own
-                                # setup" -- confirmed against a real GOLD
-                                # backtest: 92.5% of FAILED_BREAKOUT deaths
-                                # still landed at age_at_death=1 with the
-                                # original window, flat against the doc's own
-                                # "should rise well above 1-3" expectation.
-                                _f1_closes = df["close"].iloc[-_f1_look:].values
-                                if _dir == 1:
-                                    _f1_broke = bool(
-                                        (_f1_closes < (float(_f1_ref) - _f1_tol)).any()
-                                    )
-                                else:
-                                    _f1_broke = bool(
-                                        (_f1_closes > (float(_f1_ref) + _f1_tol)).any()
-                                    )
-                                if _f1_broke:
-                                    _death_reason = "FAILED_BREAKOUT"
-                                    if _f1_look == 1:
-                                        logger.debug(
-                                            "[F1-DIAG] %s: %s dir=%+d tier=%s "
-                                            "ref=%.5g tol=%.5g band=[%.5g,%.5g] "
-                                            "closes=%s",
-                                            self.asset_type, _s.get("kind"),
-                                            _dir, _s.get("ref_tier"),
-                                            float(_f1_ref), _f1_tol,
-                                            float(_f1_ref) - _f1_tol,
-                                            float(_f1_ref) + _f1_tol,
-                                            list(_f1_closes),
-                                        )
-                            except Exception as _f1_err:
-                                logger.debug(
-                                    "[F1] %s: anchored death check error: %s",
-                                    self.asset_type, _f1_err,
-                                )
-
-                    # (b2) F1 — STRUCTURE FAILED TO HOLD. The level this setup
-                    #      was born against has changed role since birth. A
-                    #      support that became resistance is no longer the
-                    #      level the thesis was built on, so there is nothing
-                    #      left to be right about.
-                    if _death_reason is None:
-                        _f1_born_role = _s.get("ref_role")
-                        if _f1_born_role is not None:
-                            try:
-                                _f1_px = float(df["close"].iloc[-1])
-                            except Exception:
-                                _f1_px = None
-                            _f1_now_role = self._ref_role_at(
-                                _asset, _s.get("ref"), _atr, _f1_px,
-                                _s.get("ref_tier"),
-                            )
-                            if (
-                                _f1_now_role is not None
-                                and _f1_now_role != _f1_born_role
-                            ):
-                                _death_reason = "REF_ROLE_FLIPPED"
-                    # (c) E3: the retest itself broke the level instead of
-                    #     holding it. A real breakout earns its retest; one
-                    #     that closes back through was never a breakout.
-                    #
-                    #     NOT read from state.retest_failed: this method
-                    #     builds a brand-new CompositeState() every call
-                    #     (line ~265), and the BRC block that would set that
-                    #     field runs LATER in this same method (~line 1282)
-                    #     than this trajectory layer (~line 1047) — BRC
-                    #     itself depends on trajectory's setup_active/kind/dir
-                    #     output, so the order can't be reversed. Reading
-                    #     state.retest_failed here would always see the
-                    #     unset default and this death condition would be
-                    #     permanently dead code. Consumed instead from a
-                    #     cross-cycle store BRC writes to when it detects a
-                    #     failed retest — popped so it fires once, one cycle
-                    #     after BRC detects it (the same one-cycle lag
-                    #     LSM_STATE_FLIP-style checks don't have, but
-                    #     FAILED_BREAKOUT etc. don't need to, since they read
-                    #     fields set earlier in the same call).
-                    #
-                    #     P4 NOTE: this flag is keyed (_asset, kind), not per
-                    #     setup id. All members of one lane share a kind, so
-                    #     if BRC flags a failed retest while more than one
-                    #     setup is queued, the pop only fires once — whichever
-                    #     member is checked first this iteration gets credited
-                    #     with RETEST_FAILED, the rest do not see it this
-                    #     cycle. Inherited from the pre-queue design; the doc
-                    #     did not ask for per-member attribution here.
-                    if _death_reason is None and self._retest_failed_pending.pop(
-                        (_asset, _s.get("kind")), False
-                    ):
-                        _death_reason = "RETEST_FAILED"
+                    # PPL S8b/c/d: legacy F1 anchored-close death, F1 role-flip
+                    # death, and E3 retest-failed death all deleted. PPL's own
+                    # count/kill logic (S9) replaces them -- the only price
+                    # kill under PPL is a 4H close beyond R1 (REF_INVALIDATED).
                     # (d) SETUP-SPECIFIC — a structure break against the
                     #     setup (long setup sees bearish BOS, or vice versa).
+                    #     PPL S8e: reads the 4H BOS/CHoCH fields (S7), not 1H.
                     if _death_reason is None:
                         if _dir == 1:
-                            if getattr(state, "bos_bearish", False):
+                            if getattr(state, "bos_bearish_4h", False):
                                 _death_reason = "OPPOSING_BOS"
-                            elif getattr(state, "choch_bearish", False):
+                            elif getattr(state, "choch_bearish_4h", False):
                                 _death_reason = "OPPOSING_CHOCH"
                         elif _dir == -1:
-                            if getattr(state, "bos_bullish", False):
+                            if getattr(state, "bos_bullish_4h", False):
                                 _death_reason = "OPPOSING_BOS"
-                            elif getattr(state, "choch_bullish", False):
+                            elif getattr(state, "choch_bullish_4h", False):
                                 _death_reason = "OPPOSING_CHOCH"
                     # (e) REF-1 SEG F: EXPIRED_PROOF_WINDOW retired.
                     # A setup now dies when price CLOSES beyond R1
@@ -1651,6 +1549,7 @@ class CompositeStateBuilder:
                     if _death_reason is not None:
                         state.setup_died = True
                         state.setup_death_reason = _death_reason
+                        self._ref_dead_pending.pop((_asset, _s.get("kind")), None)   # PPL 8g: a dead setup's DEAD flag must not outlive it
                         logger.info(
                             "[MEASURE-8.4-DEATH] %s: kind=%s dir=%+d age_at_death=%s reason=%s",
                             self.asset_type, _s.get("kind"), _s.get("dir"),
@@ -1890,50 +1789,68 @@ class CompositeStateBuilder:
                                 _r1_ref, _r1_tests = self._pick_ladder_ref(
                                     _asset, int(_candidate["dir"]), _r1_px, _atr,
                                 )
+                                _r1_tag = "LADDER"
+                                if _r1_ref is None:
+                                    _sw = (getattr(state, "last_swing_low_4h", None) if int(_candidate["dir"]) == 1
+                                           else getattr(state, "last_swing_high_4h", None))
+                                    _ok_side = (_sw is not None and float(_sw) > 0 and (
+                                        (int(_candidate["dir"]) == 1 and float(_sw) < float(_f1_ref)) or
+                                        (int(_candidate["dir"]) == -1 and float(_sw) > float(_f1_ref))))
+                                    if _ok_side:
+                                        _r1_ref, _r1_tests, _r1_tag = float(_sw), 0, "R1_SWING"
+                                        logger.info("[R1-SWING] %s: %s dir=%+d no tested line behind H=%.5g; R1 -> 4H swing %.5g",
+                                                    self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref), float(_sw))
+                                    else:
+                                        logger.info("[NO-R1-REFUSED] %s: %s dir=%+d H=%.5g — no tested line, no usable 4H swing. Refused.",
+                                                    self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref))
 
-                                _new_setup = dict(_candidate)
-                                _new_setup.update({
-                                    "age": 0,
-                                    "born_state": _lsm_now,
-                                    "born_compression": _comp,
-                                    "last_compression": _comp,
-                                    "energy": "HOLDING",
-                                    "ref": _f1_ref,
-                                    "ref_tier": _f1_tier,
-                                    "ref_role": self._ref_role_at(
-                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                    ),
-                                    "ref_tests": self._ref_tests_at(
-                                        _asset, _f1_ref, _atr, _f1_px, _f1_tier
-                                    ),
-                                    "ref_1": _r1_ref,
-                                    "ref_1_tests": _r1_tests,
-                                })
+                                if _r1_ref is not None:
+                                    self._ref_dead_pending.pop((_asset, _candidate["kind"]), None)   # PPL 8g: a new setup starts with no inherited kill
+                                    _new_setup = dict(_candidate)
+                                    _new_setup.update({
+                                        "age": 0,
+                                        "born_state": _lsm_now,
+                                        "born_compression": _comp,
+                                        "last_compression": _comp,
+                                        "energy": "HOLDING",
+                                        "ref": _f1_ref,
+                                        "ref_tier": _f1_tier,
+                                        "ref_role": self._ref_role_at(
+                                            _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                        ),
+                                        "ref_tests": self._ref_tests_at(
+                                            _asset, _f1_ref, _atr, _f1_px, _f1_tier
+                                        ),
+                                        "ref_1": _r1_ref,
+                                        "ref_1_tests": _r1_tests,
+                                        "r1_tag": _r1_tag,
+                                        "born_state_4h": getattr(state, "livermore_state_4h", None),
+                                    })
 
-                                # P4-EVICT: make room if full.
-                                if len(_q) >= _P4_CAP:
-                                    _victim = self._p4_pick_eviction(_q)
-                                    if _victim is not None:
-                                        _q.remove(_victim)
-                                        logger.warning(
-                                            "[SETUP-EVICTED] %s: queue full (%d) — "
-                                            "dropped %s dir=%+d age=%s ref=%.5g "
-                                            "to admit ref=%.5g",
-                                            self.asset_type, _P4_CAP,
-                                            _victim.get("kind"),
-                                            int(_victim.get("dir", 0)),
-                                            _victim.get("age"),
-                                            float(_victim.get("ref") or 0.0),
-                                            _f1_ref,
-                                        )
-                                _q.append(_new_setup)
-                                logger.info(
-                                    "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
-                                    self.asset_type, _new_setup["kind"],
-                                    int(_new_setup["dir"]), _f1_ref, _f1_tier,
-                                    _new_setup.get("ref_role"),
-                                    _new_setup.get("ref_tests", 0),
-                                )
+                                    # P4-EVICT: make room if full.
+                                    if len(_q) >= _P4_CAP:
+                                        _victim = self._p4_pick_eviction(_q)
+                                        if _victim is not None:
+                                            _q.remove(_victim)
+                                            logger.warning(
+                                                "[SETUP-EVICTED] %s: queue full (%d) — "
+                                                "dropped %s dir=%+d age=%s ref=%.5g "
+                                                "to admit ref=%.5g",
+                                                self.asset_type, _P4_CAP,
+                                                _victim.get("kind"),
+                                                int(_victim.get("dir", 0)),
+                                                _victim.get("age"),
+                                                float(_victim.get("ref") or 0.0),
+                                                _f1_ref,
+                                            )
+                                    _q.append(_new_setup)
+                                    logger.info(
+                                        "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
+                                        self.asset_type, _new_setup["kind"],
+                                        int(_new_setup["dir"]), _f1_ref, _f1_tier,
+                                        _new_setup.get("ref_role"),
+                                        _new_setup.get("ref_tests", 0),
+                                    )
 
                 # ---- STEP 3: arbitration — who holds the slot? -----------
                 # Desire's rule: most tests at its own reference wins. The
@@ -1995,6 +1912,9 @@ class CompositeStateBuilder:
                 state.setup_ref_tests = int(_pub.get("ref_tests", 0) or 0)  # N4
                 state.ref_1 = _pub.get("ref_1")                       # REF-1 SEG B
                 state.ref_1_tests = int(_pub.get("ref_1_tests", 0) or 0)  # REF-1 SEG B
+                state.brc_r1 = state.ref_1                            # PPL S6c
+                state.brc_r1_tag = _pub.get("r1_tag")                 # PPL S6c
+                state.brc_ref_tier = getattr(state, "setup_ref_tier", None)  # PPL S6c
 
             self._prev_compression[_asset] = _comp
         except Exception as _traj_err:
@@ -2113,591 +2033,53 @@ class CompositeStateBuilder:
                 if _brc_ref is not None and float(_brc_ref) > 0:
                     _brc_ref = float(_brc_ref)
                     _brc_close = float(df["close"].iloc[-1])
+                    # bar timestamp (live path: datetime index; backtest: RangeIndex + column)
+                    _bar_ts = df["timestamp"].iloc[-1] if "timestamp" in df.columns else df.index[-1]
 
-                    # df.index[-1] is NOT reliably the bar timestamp across
-                    # callers: the live path (data_manager.clean_data) sets a
-                    # datetime index, but backtest.py builds df straight from
-                    # backtrader buffers with a plain RangeIndex and the
-                    # timestamp as its own column instead (same footgun as
-                    # the earlier trajectory-tracker double-invocation fix in
-                    # this same file). Prefer that column when present.
-                    # Computed here, above the window slicing and the 8.2/8.7
-                    # measurement blocks, because Part C's break memory below
-                    # needs it immediately.
+                    # ── PPL v1 (replaces Part C retest window, REF-FREEZE H, P2 runner, REF-TRIGGER) ──
+                    _pcfg = (getattr(state, "phase_config", {}) or {})
+                    _gear = self._ppl_gear(_pcfg)
+                    state.brc_gear = "%s/%s" % _gear
+                    _atr4 = self._atr4_now(df_4h, self.asset_type)
+                    _r1_now = getattr(state, "ref_1", None)
+                    _ppl_out = None
+                    _proof_ok = False
+
+                    # 4H reference state (REF-1 SEG D) — kept: it is the R1 kill's source
                     try:
-                        _bar_ts = (
-                            df["timestamp"].iloc[-1] if "timestamp" in df.columns
-                            else df.index[-1]
-                        )
-                    except Exception:
-                        _bar_ts = None
-
-                    # How far is the reference from price? A level several
-                    # percent away is not a live retest candidate — it is a
-                    # leftover. This is the signature that exposed the stale
-                    # anchor (USOIL ref=87.811 vs close=83.10, 5.4%). Log only
-                    # — no gate. If this still shows large gaps after Fix 2,
-                    # something else is producing stale references.
-                    try:
-                        _ref_dist_pct = abs(_brc_close - _brc_ref) / _brc_ref * 100.0
-                        if _ref_dist_pct > 2.0:
-                            _k = (self.asset_type, "REFDIST")
-                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
-                                self._brc_log_ts[_k] = _bar_ts
-                                logger.info(
-                                    "[REF-DISTANCE] %s: kind=%s dir=%+d ref=%.5g "
-                                    "close=%.5g dist=%.2f%% — reference far from price.",
-                                    self.asset_type, _brc_kind, _brc_dir,
-                                    _brc_ref, _brc_close, _ref_dist_pct,
-                                )
-                    except Exception:
-                        pass
-
-                    # ── Part C: break-anchored retest ordering ──────────────
-                    # Keyed on the reference LEVEL, not the setup object. The
-                    # setup churns (median life 1 bar); the level it broke does
-                    # not. A new reference means a new break — start the clock.
-                    # The same reference means the same break still standing,
-                    # however many times the tracker reset in between.
-                    _bt = self._brc_break_ts.get(self.asset_type)
-                    if _bt is None or _bt.get("ref") != _brc_ref:
-                        # LATENCY FIX: seed "true_age" from how far back the
-                        # break candle actually is, not from 0. _bars_since_break
-                        # stays 0-seeded because the retest pre/post split
-                        # (lines ~2011, ~2105) depends on it counting only bars
-                        # observed SINCE confirmation — inflating it would let a
-                        # pre-break touch masquerade as a post-break retest,
-                        # exactly the bug the ordering fix removed. The RUNNER
-                        # age gate reads true_age instead; nothing else does.
-                        #
-                        # true_seed = bars between the break candle and now.
-                        #
-                        # FOLLOWUP: the original approach re-derived the break
-                        # candle by scanning backward through the window for
-                        # the most recent bar whose high cleared _brc_ref.
-                        # Measured live in backtest: that search excludes the
-                        # current bar (iloc[...:-1]) -- but the current bar is
-                        # almost always the one that actually triggers the
-                        # break (_hh/_ll go true because THIS bar's high/low
-                        # just crossed the reference). And _brc_ref is a
-                        # CONFIRMED PRIOR SWING PIVOT price, not a nearby
-                        # level -- in a genuine deep pullback (the only
-                        # context this code runs in), price has usually been
-                        # below that old peak for a while, so the scan rarely
-                        # finds a match nearby and instead lands on an
-                        # incidental old high near where that pivot originally
-                        # formed. Measured: gaps up to 27 bars (the search
-                        # window's own edge), firing on ~18% of GOLD's 1H
-                        # candles, with no correlation to the small live
-                        # latency this fix was built to close.
-                        #
-                        # Simpler and matches what was actually measured live:
-                        # a fixed correction, not a re-derived price search.
-                        _true_seed = int(
-                            (getattr(self, "phase_config", {}) or {}).get(
-                                "runner_confirmation_latency_bars", 2
-                            ) or 0
-                        )
-                        self._brc_break_ts[self.asset_type] = {
-                            "ref": _brc_ref, "last_ts": _bar_ts,
-                            "bars": 0, "true_age": _true_seed,
-                        }
-                    elif _bar_ts is not None and _bar_ts != _bt.get("last_ts"):
-                        # A new candle closed — both clocks tick.
-                        _bt["bars"] = int(_bt.get("bars", 0)) + 1
-                        _bt["true_age"] = int(_bt.get("true_age", 0)) + 1
-                        _bt["last_ts"] = _bar_ts
-                    _bars_since_break = int(
-                        self._brc_break_ts[self.asset_type].get("bars", 0)
-                    )
-                    # RUNNER-only: true age from the actual break candle.
-                    _runner_age = int(
-                        self._brc_break_ts[self.asset_type].get("true_age", 0)
-                    )
-                    # LATENCY FIX: only logs when the two clocks actually
-                    # diverge, so this shows the real confirmation-lag gap
-                    # directly instead of spamming every cycle with gap=0.
-                    if _runner_age != _bars_since_break:
-                        logger.info(
-                            "[LATENCY-GAP] %s: bars_since_break=%d runner_age=%d gap=%d",
-                            self.asset_type, _bars_since_break, _runner_age,
-                            _runner_age - _bars_since_break,
-                        )
-
-                    # REF-1 SEG F: was 28. The retest VERDICT is now the R2
-                    # level test (Segment D's ref_state), not a window; this
-                    # only bounds the touch scan.
-                    _WIN = 12
-                    _brc_win_high = df["high"].iloc[-(_WIN + 1):-1].values
-                    _brc_win_low  = df["low"].iloc[-(_WIN + 1):-1].values
-
-                    # Window position i maps to (WIN - i) bars ago: i=0 is the
-                    # oldest bar in the window, i=WIN-1 is one bar back. A touch
-                    # is POST-BREAK only when it is more recent than the break
-                    # itself — strictly, so the break candle's own wick never
-                    # counts as its own retest.
-                    # E3: a retest is the level HOLDING, judged on the CLOSE.
-                    # The previous version tested the low only, so a wick
-                    # rejection and a full breakdown were the same event.
-                    #
-                    # Tolerance is ATR-scaled, never a fixed number: 50 points
-                    # is 0.17% on USTEC, 0.08% on BTC, 1.5% on GOLD, 60% on
-                    # USOIL and 4300% on EURUSD. _atr is the shared ATR(14)
-                    # computed at the top of this method.
-                    _tol = 0.15 * float(_atr or 0.0)
-                    _win_close = df["close"].iloc[-(_WIN + 1):-1].values
-
-                    _retest_failed = False
-                    if _brc_dir == 1:
-                        # Touched the level, and closed back above it (or
-                        # within tolerance below).
-                        _retested = any(
-                            (_lo <= _brc_ref)
-                            and (_cl > _brc_ref - _tol)
-                            and ((_WIN - i) < _bars_since_break)
-                            for i, (_lo, _cl) in enumerate(
-                                zip(_brc_win_low, _win_close)
-                            )
-                        )
-                        # E3 kill: a post-break candle CLOSED through the level
-                        # by more than tolerance. Not a retest — a break the
-                        # other way. The thesis is dead.
-                        _retest_failed = any(
-                            (_cl < _brc_ref - _tol)
-                            and ((_WIN - i) < _bars_since_break)
-                            for i, _cl in enumerate(_win_close)
-                        )
-                        _closed_through = _brc_close > _brc_ref
-                    else:
-                        _retested = any(
-                            (_hi >= _brc_ref)
-                            and (_cl < _brc_ref + _tol)
-                            and ((_WIN - i) < _bars_since_break)
-                            for i, (_hi, _cl) in enumerate(
-                                zip(_brc_win_high, _win_close)
-                            )
-                        )
-                        _retest_failed = any(
-                            (_cl > _brc_ref + _tol)
-                            and ((_WIN - i) < _bars_since_break)
-                            for i, _cl in enumerate(_win_close)
-                        )
-                        _closed_through = _brc_close < _brc_ref
-
-                    # REF-1 SEG C: freeze H at the break and never move it. A
-                    # lower high during the pullback does NOT become a new
-                    # trigger. Either price clears the original high or the
-                    # setup dies at R1 (Segment D/F).
-                    #
-                    # REF-2 SEG A: re-arm H when the reference moves. H was
-                    # frozen once and cleared only on DEAD (below). A
-                    # reference that CHANGES without dying leaves H stranded:
-                    # USOIL held H=90.951 from 8 Sep while R2 moved 90.706 ->
-                    # 94.076, so the trigger compared price against a
-                    # two-day-old high and passed trivially every cycle.
-                    #
-                    # H belongs to the leg its reference defines. New
-                    # reference, new leg, new H. This does NOT re-anchor H
-                    # within a leg -- Desire's ruling stands: "No new last
-                    # high, we lock in the levels and track." It only
-                    # re-arms when the level H was measured against is no
-                    # longer the level in play.
-                    _h_anchor = self._ref_h_anchor.get(self.asset_type)
-                    if getattr(state, "ref_h", None) is not None \
-                            and _h_anchor is not None and _brc_ref != _h_anchor:
-                        logger.info(
-                            "[REF-REARM] %s: reference moved %.5g -> %.5g -- "
-                            "releasing H=%.5g",
-                            self.asset_type, _h_anchor, _brc_ref, state.ref_h,
-                        )
-                        state.ref_h = None
-
-                    # ── REF-3 SEG C: H is the highest high SINCE THE BREAK ──
-                    # The 4H pivot scan (later in this method) requires four
-                    # lower bars to the right. In a vertical rally no bar ever
-                    # qualifies, so the scan keeps returning the last pivot
-                    # from BEFORE the move. Confirmed on USOIL: scan returns
-                    # 90.951 while price is at 97.6 having printed 100.98 --
-                    # 6 ATR of free pass, and USOIL produced 743 of 743
-                    # confirmed verdicts through a trigger that was passing
-                    # trivially.
-                    #
-                    # Desire's rule is "the last significant high on the
-                    # left" -- price must reclaim it to prove resumption. In
-                    # a thrust that is the running extreme, not a confirmed
-                    # pivot, because no pivot CAN confirm until the move
-                    # pauses. Using the running extreme means the trigger
-                    # correctly refuses during the thrust and arms once price
-                    # pulls back and recovers.
-                    #
-                    # Two scope corrections from the original draft, both
-                    # confirmed by reading rather than assumed:
-                    #   1. state.bars_since_break is written at :2451 --
-                    #      AFTER this freeze site -- and state is a fresh
-                    #      CompositeState() every call, so reading it here
-                    #      would always see 0 and this fix would silently
-                    #      never activate. Uses the LOCAL _bars_since_break
-                    #      instead, already in scope two lines above.
-                    #   2. _4h_highs/_4h_lows are extracted in the pivot scan
-                    #      much later in this method (:3357) -- also after
-                    #      this site, and nothing here persists across the
-                    #      call to hand them back. Recomputed fresh from
-                    #      df_4h directly (same source, already confirmed in
-                    #      scope for the REF-2 SEG D close4 read just below),
-                    #      rather than depending on the scan's variables.
-                    #   3. _bars_since_break counts 1H bars; the 4H array
-                    #      needs a 4H bar count -- divided by 4, floored at 1.
-                    _h_since_break = None
-                    try:
-                        _bsb_4h = max(1, int(_bars_since_break) // 4)
-                        if df_4h is not None and len(df_4h) > _bsb_4h:
-                            _slice_h = df_4h["high"].values[-(_bsb_4h + 1):]
-                            _slice_l = df_4h["low"].values[-(_bsb_4h + 1):]
-                            _h_since_break = (
-                                float(max(_slice_h)) if _brc_dir == 1
-                                else float(min(_slice_l))
-                            )
-                    except Exception as _hsb_err:
-                        logger.debug("[REF-H] %s: %s", self.asset_type, _hsb_err)
-
-                    if _closed_through and getattr(state, "ref_h", None) is None:
-                        _h_pivot = (state.last_swing_high_4h if _brc_dir == 1
-                                    else state.last_swing_low_4h)
-                        # REF-3 SEG C (fix): take the MORE EXTREME of the two,
-                        # not always since-break. Confirmed live 11 Sep:
-                        #   USOIL  since_break=99.809  pivot=90.951  -> 99.809 correct
-                        #   GOLD   since_break=4361.1  pivot=4435    -> 4361.1 wrong
-                        # On GOLD the since-break window was short (recent
-                        # break) so the running extreme had not reached as far
-                        # as the completed pivot -- leaving H BELOW R2 on a
-                        # long, which any price clearing R2 also clears. The
-                        # free pass this segment removed on USOIL reappeared
-                        # on GOLD by the opposite route.
-                        _h_cands = [x for x in (_h_since_break, _h_pivot) if x]
-                        state.ref_h = float(
-                            max(_h_cands) if _brc_dir == 1 else min(_h_cands)
-                        ) if _h_cands else None
-                        self._ref_h_anchor[self.asset_type] = _brc_ref   # REF-2 SEG A
-                        logger.info(
-                            "[REF-FREEZE] %s dir=%+d R2=%.5g (%dt) R1=%s H=%.5g "
-                            "(src=%s pivot=%s)",
-                            self.asset_type, _brc_dir, _brc_ref,
-                            getattr(state, "setup_ref_tests", 0),
-                            ("%.5g" % state.ref_1) if state.ref_1 else "none",
-                            state.ref_h,
-                            "since_break" if _h_since_break is not None else "pivot",
-                            ("%.5g" % _h_pivot) if _h_pivot else "none",
-                        )
-
-                    # REF-1 SEG D: the state machine, evaluated on the 4H
-                    # close. Doc referenced _close4 from the Livermore 4H
-                    # update (:736), but that local is only assigned inside
-                    # its own "new 4H candle" branch and is not reliably in
-                    # scope here (most cycles re-process an already-seen 4H
-                    # bar) -- recomputed fresh from df_4h instead, same
-                    # source, no new data dependency.
-                    try:
-                        _close4_now = (
-                            float(df_4h["close"].iloc[-1])
-                            if df_4h is not None and len(df_4h) > 0 else None
-                        )
+                        _close4_now = float(df_4h["close"].iloc[-1]) if df_4h is not None and len(df_4h) > 0 else None
                     except Exception:
                         _close4_now = None
-                    _new_ref_state = self._ref_state(
-                        _close4_now, state.ref_1, _brc_ref, _brc_dir
-                    )
+                    _new_ref_state = self._ref_state(_close4_now, _r1_now, _brc_ref, _brc_dir)
                     if _new_ref_state != self._ref_state_last.get(self.asset_type):
-                        logger.info(
-                            "[REF-STATE] %s dir=%+d %s → %s | close4=%s R2=%.5g R1=%s",
-                            self.asset_type, _brc_dir,
-                            self._ref_state_last.get(self.asset_type) or "NONE",
-                            _new_ref_state,
-                            ("%.5g" % _close4_now) if _close4_now is not None else "none",
-                            _brc_ref,
-                            ("%.5g" % state.ref_1) if state.ref_1 else "none",
-                        )
+                        logger.info("[REF-STATE] %s dir=%+d %s → %s | close4=%s H=%.5g R1=%s",
+                                    self.asset_type, _brc_dir, self._ref_state_last.get(self.asset_type) or "NONE",
+                                    _new_ref_state, ("%.5g" % _close4_now) if _close4_now is not None else "none",
+                                    _brc_ref, ("%.5g" % _r1_now) if _r1_now else "none")
                         self._ref_state_last[self.asset_type] = _new_ref_state
                     state.ref_state = _new_ref_state
                     if _new_ref_state == "DEAD":
-                        state.ref_h = None      # re-arm for the next setup
-                        self._ref_h_anchor.pop(self.asset_type, None)   # REF-2 SEG A
-                        # REF-1 SEG F: cross-cycle handoff to the death-check
-                        # loop -- see _ref_dead_pending's __init__ comment.
                         self._ref_dead_pending[(self.asset_type, _brc_kind)] = True
+                        self._ppl.pop((self.asset_type, _brc_kind), None)
 
-                    if _retest_failed:
-                        state.retest_failed = True
-                        # E3/E2: hand off to the trajectory block, which runs
-                        # before this block within the same call and so can't
-                        # read state.retest_failed same-cycle (see the E3
-                        # comment in the trajectory death-check). Keyed by
-                        # kind so it targets whichever lane owns this proof.
-                        self._retest_failed_pending[(self.asset_type, _brc_kind)] = True
-
-                    # Measurement 8.2: how many bars actually elapse between
-                    # the first retest and the eventual close-through, unbound
-                    # by the 8-candle window the live gate uses — buckets the
-                    # 1,136-style "retested, no close-through" candles into
-                    # never-closes / closed-late / closed-in-window-but-missed.
-                    try:
-                        _rt_key = (self.asset_type, _brc_kind, _brc_dir, round(_brc_ref, 2))
-                        _rt_mem = self._retest_memory.get(self.asset_type, {})
-                        if _retested and not _closed_through:
-                            if _rt_key not in _rt_mem:
-                                _rt_first_ts = (
-                                    df["timestamp"].iloc[-1] if "timestamp" in df.columns
-                                    else df.index[-1]
-                                )
-                                _rt_mem[_rt_key] = _rt_first_ts
-                                self._retest_memory[self.asset_type] = _rt_mem
-                        elif _closed_through and _rt_key in _rt_mem:
-                            _rt_first_ts = _rt_mem.pop(_rt_key)
-                            _rt_close_ts = (
-                                df["timestamp"].iloc[-1] if "timestamp" in df.columns
-                                else df.index[-1]
-                            )
-                            try:
-                                _bar_gap = int(
-                                    (pd.Timestamp(_rt_close_ts) - pd.Timestamp(_rt_first_ts))
-                                    / pd.Timedelta(hours=1)
-                                )
-                            except Exception:
-                                _bar_gap = None
-                            logger.info(
-                                "[MEASURE-8.2-RETEST-TO-CLOSE] %s: kind=%s dir=%+d "
-                                "ref=%.5g bar_gap=%s (bucket=%s)",
-                                self.asset_type, _brc_kind, _brc_dir, _brc_ref, _bar_gap,
-                                ("WITHIN_WINDOW" if _bar_gap is not None and _bar_gap <= 8
-                                 else "LATE_CLOSE" if _bar_gap is not None else "UNKNOWN"),
-                            )
-                            self._retest_memory[self.asset_type] = _rt_mem
-                    except Exception as _m82_err:
-                        logger.warning("[MEASURE-8.2] error (non-blocking): %s", _m82_err)
-
-                    # MEASURE-8.7 — now a regression check on the ordering fix
-                    # above rather than a survey. Counts every touch of the
-                    # reference in the window and splits pre-break from
-                    # post-break. Before this build ~90% of touches were
-                    # pre-break and all of them counted; now only post-break
-                    # touches can satisfy _retested. pre_break should stay high
-                    # (the market really does touch these levels beforehand)
-                    # while retested=True should now only ever appear alongside
-                    # post_break > 0. If it does not, the filter is not working.
-                    _touch_src = _brc_win_low if _brc_dir == 1 else _brc_win_high
-                    _touch_idxs = [
-                        i for i, v in enumerate(_touch_src)
-                        if (v <= _brc_ref if _brc_dir == 1 else v >= _brc_ref)
-                    ]
-                    if True:  # TEMP diagnostic — log every evaluation
-                        _pre_break  = [i for i in _touch_idxs if (_WIN - i) >= _bars_since_break]
-                        _post_break = [i for i in _touch_idxs if (_WIN - i) <  _bars_since_break]
-                        _k = (self.asset_type, "ORDERING")
-                        if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
-                            self._brc_log_ts[_k] = _bar_ts
-                            logger.info(
-                                "[MEASURE-8.7-ORDERING] %s: kind=%s dir=%+d "
-                                "bars_since_break=%d touches=%d pre_break=%d "
-                                "post_break=%d retested=%s",
-                                self.asset_type, _brc_kind, _brc_dir,
-                                _bars_since_break, len(_touch_idxs),
-                                len(_pre_break), len(_post_break), _retested,
-                            )
-                    # DATA-1 ITEM 3B: retested/post_break existed only as log
-                    # text above. Set unconditionally (every evaluation, not
-                    # gated behind brc_confirmed) since these are computed
-                    # every cycle regardless of whether a proof confirms.
-                    # Doc's snippet used int(_post_break) -- _post_break is a
-                    # list here (same one the log line above counts with
-                    # len()), so using len() to match its real type.
-                    state.retested = bool(_retested)
-                    state.post_break_touches = len(_post_break)
-                    state.bars_since_break = int(_bars_since_break)
-
-                    # REF-1 SEG G1: the pullback low — the level whose loss
-                    # means the retest failed. Already computable here: the
-                    # window lows and the post-break split are both in scope.
-                    try:
-                        _pb = [v for i, v in enumerate(
-                                   _brc_win_low if _brc_dir == 1 else _brc_win_high)
-                               if (_WIN - i) < _bars_since_break]
-                        if _pb:
-                            state.ref_pullback_low = (
-                                float(min(_pb)) if _brc_dir == 1 else float(max(_pb))
-                            )
-                    except Exception:
-                        pass
-
-                    # E4: the RUNNER — a pullback that never reaches the level.
-                    # Only evaluated when the normal retest did not qualify.
-                    # LATENCY FIX: RUNNER eligibility uses _runner_age (counts
-                    # from the actual break candle), not _bars_since_break
-                    # (counts from confirmation, ~2 bars later). The pre-break
-                    # FILTER inside this block below still uses _bars_since_break
-                    # on purpose — that boundary must match the retest split, or
-                    # pre-break bars leak into the runner scan.
-                    if not _retested and not _retest_failed and _runner_age >= 3:
-                        _wl = list(_brc_win_low); _wh = list(_brc_win_high)
-                        _wc = list(_win_close)
-                        _n = len(_wc)
-                        for _i in range(1, _n - 1):
-                            if (_WIN - _i) >= _bars_since_break:
-                                continue                      # pre-break
-                            # ── P2: RUNNER ACCEPTANCE ────────────────────────
-                            # WAS: _recover required a later close above
-                            # _pre_high — the highest high since the break,
-                            # INCLUDING the break candle. That makes the bar to
-                            # clear rise one-for-one with the size of the break:
-                            # a 0.5-ATR poke needs +0.5 ATR, a 5-ATR thrust
-                            # needs +5 ATR. Explosive moves consolidate after a
-                            # thrust and rarely do that, so the tier built to
-                            # catch the strongest moves was rejecting them and
-                            # admitting the feeble ones.
-                            #
-                            # NOW: a fixed acceptance band, independent of
-                            # thrust size. Price must have CLOSED clearly beyond
-                            # the reference and never come back through it.
-                            #
-                            # "Never came back" is already guaranteed by the
-                            # `not _retest_failed` gate above, and the minimum
-                            # duration by `_bars_since_break >= 3` (3 HOURS —
-                            # this window runs on the H1 frame). So no candle
-                            # count is added here; only the margin is new.
-                            #
-                            # Bulkowski (n=10,348): breakouts perform better
-                            # WITHOUT a retest (97% up / 91% down), and a clean
-                            # retest that holds above the break price averages
-                            # 41.3% vs 26.7% for one that trades back through.
-                            # What makes a retest good is the refusal to return
-                            # — a move that never returns is the extreme case of
-                            # that, not a missing beat.
-                            _p2_mult = float(
-                                (getattr(state, "phase_config", {}) or {}).get(
-                                    "runner_accept_atr_mult", 0.5
-                                ) or 0.5
-                            )
-                            _p2_band = _p2_mult * float(_atr or 0.0)
-
-                            if _brc_dir == 1:
-                                _pull_ok = _wl[_i] > _brc_ref          # dip held above
-                                _accept = any(
-                                    _c > (_brc_ref + _p2_band)
-                                    for _c in _wc[_i:]
-                                ) if _p2_band > 0 else False
-                            else:
-                                _pull_ok = _wh[_i] < _brc_ref
-                                _accept = any(
-                                    _c < (_brc_ref - _p2_band)
-                                    for _c in _wc[_i:]
-                                ) if _p2_band > 0 else False
-
-                            if _pull_ok and _accept:
-                                _retested = True
-                                _brc_tier_used = "RUNNER"
-                                logger.info(
-                                    "[P2-RUNNER] %s: %s dir=%+d ref=%.5g "
-                                    "band=%.5g (%.2f x ATR) — accepted "
-                                    "(held beyond level, never returned)",
-                                    self.asset_type, _brc_kind, _brc_dir,
-                                    _brc_ref, _p2_band, _p2_mult,
-                                )
-                                break
-
-                    # ── REF-1 SEG E: the single 1H test in the sequence ──────
-                    # Everything else runs on 4H closes. This runs on the 1H
-                    # close because waiting for a 4H close to confirm the
-                    # resumption gives away up to four hours of the move.
-                    #
-                    # Price must reclaim the ENTIRE breakout structure (H),
-                    # not merely nose back above R2 — so a pullback that
-                    # stalls and rolls over never triggers.
-                    #
-                    # DEFAULT TRUE when references are absent. If the ladder
-                    # has nothing usable for an asset, that asset behaves
-                    # exactly as it does today rather than going silent. This
-                    # batch must not be able to stop all trading.
-                    _ref_trigger = True
-                    if getattr(state, "ref_h", None) is not None \
-                            and getattr(state, "ref_state", None) is not None:
-                        _c1 = float(df["close"].iloc[-1])       # the 1H close
-                        _ref_trigger = (
-                            state.ref_state == "HEALTHY"
-                            and ((_c1 > state.ref_h) if _brc_dir == 1
-                                 else (_c1 < state.ref_h))
+                    if _atr4 is None:
+                        logger.error("[PPL] %s: no 4H ATR — counts REFUSED this cycle", self.asset_type)
+                    elif _r1_now is None:
+                        logger.error("[PPL] %s: no R1 on a live setup — counts REFUSED (should have been refused at birth)", self.asset_type)
+                    else:
+                        _ppl_out = self._ppl_step(
+                            self.asset_type, _brc_kind, _brc_dir, _brc_ref, float(_r1_now), _brc_tier_used,
+                            df, df_4h, _atr4, self._ppl_spread(self.asset_type, _brc_close), _pcfg, _gear,
                         )
-                        if _ref_trigger:
-                            logger.info(
-                                "[REF-TRIGGER] %s dir=%+d 1H close %.5g cleared "
-                                "H=%.5g — proof complete.",
-                                self.asset_type, _brc_dir, _c1, state.ref_h,
-                            )
-                        # REF-2 SEG C: record what a 4H close would have said.
-                        # The trigger fires on the 1H close (Desire's design,
-                        # for speed). Whether a 4H close would have agreed is
-                        # an open question with no data behind it -- this
-                        # line is the data. Logged unconditionally (not just
-                        # when _ref_trigger fires) so the comparison sample
-                        # isn't limited to already-passing cycles.
-                        #
-                        # CAVEAT: the 4H bar is still forming. This answers
-                        # "would a 4H trigger have fired as fast", not "would
-                        # it have fired at all" -- the 4H candle may close
-                        # beyond H later in its life.
-                        try:
-                            # REF-3 SEG A: compute the 1H verdict rather than
-                            # hardcoding it. The original baked "CLEAR" into
-                            # the 1H side of the format string on the
-                            # assumption this line only ran after the trigger
-                            # fired -- it does not (logged unconditionally per
-                            # REF-2 SEG C), so GOLD logged "1H 4324.2 CLEAR"
-                            # against H=4490.8 on a long, which is impossible.
-                            # That made the CLEAR-both/1H-only split unusable
-                            # -- the 1H column was a constant.
-                            #
-                            # dist in ATR added: it's what separates a real
-                            # clearance from a free pass (measured 10 Sep:
-                            # BTC ~0.5 ATR real, USTEC ~2 ATR real, USOIL ~6
-                            # ATR -- a trigger passing for free).
-                            _c4 = float(df_4h["close"].iloc[-1])
-                            _c1_clear = (_c1 > state.ref_h) if _brc_dir == 1 \
-                                        else (_c1 < state.ref_h)
-                            _c4_clear = (_c4 > state.ref_h) if _brc_dir == 1 \
-                                        else (_c4 < state.ref_h)
-                            _dist_atr = abs(_c1 - state.ref_h) / _atr if _atr else 0.0
-                            logger.info(
-                                "[REF-TRIGGER-CMP] %s dir=%+d H=%.5g | 1H %.5g %s "
-                                "| 4H %.5g %s | dist=%.2fATR",
-                                self.asset_type, _brc_dir, state.ref_h,
-                                _c1, "CLEAR" if _c1_clear else "NOT-CLEAR",
-                                _c4, "CLEAR" if _c4_clear else "NOT-CLEAR",
-                                _dist_atr,
-                            )
-                        except Exception as _cmp_err:
-                            logger.debug("[REF-TRIGGER-CMP] %s: %s",
-                                         self.asset_type, _cmp_err)
-
-                    # ── REF-2 SEG B: the trigger IS the proof, not a third lock ──
-                    # _ref_trigger was added by REF-1 as a third AND alongside
-                    # the two legacy tests. It could only make proofs harder,
-                    # never enable one -- confirmed live: [REF-TRIGGER] "proof
-                    # complete" and [NO-PROOF] fired 16ms apart on the same
-                    # cycle, same asset.
-                    #
-                    # Desire's design is one chain, not two systems:
-                    #   4H close beyond R2      -> the break
-                    #   held in the R2 zone     -> ref_state == HEALTHY
-                    #   1H close beyond H       -> proof complete
-                    # ref_state already measures the hold on 4H closes
-                    # (REF-1 SEG D), and _ref_trigger already requires
-                    # HEALTHY before it can be true, so _ref_trigger alone
-                    # expresses both the retest-hold and the close-through.
-                    #
-                    # FALLBACK: when references are absent, _ref_trigger
-                    # defaults True above and the legacy tests still decide --
-                    # this must not be able to stop all trading on an asset
-                    # whose ladder cannot produce a reference pair.
-                    _refs_live = (getattr(state, "ref_h", None) is not None
-                                  and getattr(state, "ref_state", None) is not None)
-                    _proof_ok = _ref_trigger if _refs_live else (_retested and _closed_through)
+                        state.brc_count = int(_ppl_out.get("count", 0))
+                        state.brc_h2 = _ppl_out.get("h2")
+                        state.ref_h = _ppl_out.get("h2")          # VTM/shadow read ref_h; H2 is its successor
+                        state.brc_test_of_proof = bool(_ppl_out.get("test_of_proof"))
+                        if _ppl_out.get("expired"):
+                            self._ppl_expire_setup(self.asset_type, _brc_kind)
+                        if _ppl_out.get("tier"):
+                            _brc_tier_used = _ppl_out.get("tier")   # RETEST | RUNNER
+                        _proof_ok = bool(_ppl_out.get("proof"))
 
                     if _proof_ok:
                         # ── Build 2: age the proof in BARS ────────────────────
@@ -2731,15 +2113,19 @@ class CompositeStateBuilder:
                         state.brc_direction = _brc_dir
                         state.brc_kind = _brc_kind
                         state.brc_tier = _brc_tier_used
+                        if _ppl_out:
+                            state.brc_proof_dist_atr = _ppl_out.get("proof_dist_atr")
+                            state.brc_retest_depth = _ppl_out.get("retest_depth")
                         state.brc_age = _age
                         state.brc_first_confirmed_ts = _first_ts
 
                         logger.info(
                             "[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g "
-                            "age=%d bar(s) (strict close-through, 28-bar "
-                            "break-anchored retest)",
+                            "age=%d bar(s) h2=%s tier=%s dist=%s depth=%s gear=%s",
                             self.asset_type, _brc_kind, _brc_dir, _brc_ref,
                             _brc_close, _age,
+                            state.brc_h2, state.brc_tier, state.brc_proof_dist_atr,
+                            state.brc_retest_depth, state.brc_gear,
                         )
                         # Item 6: every one of the CONFIRMED lines above is a
                         # per-candle count — the same proof re-confirms on
@@ -2772,26 +2158,12 @@ class CompositeStateBuilder:
                                     self.asset_type, _brc_kind, _brc_dir, _brc_ref, _age,
                                 )
                     else:
-                        # Item 5: retested but the strict close-through failed
-                        # — how close did it get? A close 0.01% short of the
-                        # reference and a close 2% short are the same "no" in
-                        # the CONFIRMED/not-CONFIRMED count, but very different
-                        # near-misses.
-                        if _retested and not _closed_through:
-                            _gap = (
-                                (_brc_ref - _brc_close) if _brc_dir == 1
-                                else (_brc_close - _brc_ref)
-                            )
-                            _gap_pct = (_gap / _brc_ref * 100.0) if _brc_ref else 0.0
-                            _k = (self.asset_type, "NEARMISS")
-                            if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
-                                self._brc_log_ts[_k] = _bar_ts
-                                logger.info(
-                                    "[PROOF-NEAR-MISS] %s: %s dir=%+d retested but no "
-                                    "close-through — close=%.5g ref=%.5g gap=%.5g (%.3f%%).",
-                                    self.asset_type, _brc_kind, _brc_dir,
-                                    _brc_close, _brc_ref, _gap, _gap_pct,
-                                )
+                        # PPL S9: the old "retested but no close-through"
+                        # near-miss diagnostic used _retested/_closed_through,
+                        # both deleted by S9b -- PPL's [COUNT-1-CHECK] and
+                        # [COUNT-3-CHECK] already log the equivalent distance
+                        # info per cycle, so this block is just the forget.
+                        #
                         # Proof condition no longer holds — forget it. If it
                         # re-forms later that is a NEW proof starting at age 0.
                         self._brc_memory.pop(self.asset_type, None)
@@ -3507,6 +2879,31 @@ class CompositeStateBuilder:
                             })
                         break
 
+            # ── PPL S7: 4H BOS/CHoCH, same logic as the 1H detector on 4H closes + pivots,
+            # gated by the 4H Livermore state. _UP is a local of _build_composite_state
+            # (not in scope in this method) -- copied here rather than assumed.
+            try:
+                _UP = {"MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT"}
+                _c4 = float(df_4h["close"].iloc[-1])
+                _hh4 = (state.last_swing_high_4h is not None and _c4 > float(state.last_swing_high_4h))
+                _ll4 = (state.last_swing_low_4h is not None and _c4 < float(state.last_swing_low_4h))
+                _st4 = getattr(state, "livermore_state_4h", None)
+                _up4 = (_st4 in _UP) if _st4 is not None else None
+                _rev4 = _st4 in ("NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT", "NATURAL_RALLY", "SECONDARY_RALLY")
+                if _up4 is True and _hh4:   state.bos_bullish_4h = True
+                elif _up4 is False and _ll4: state.bos_bearish_4h = True
+                if _up4 is False and _hh4 and _rev4:  state.choch_bullish_4h = True
+                elif _up4 is True and _ll4 and _rev4: state.choch_bearish_4h = True
+                if any((state.bos_bullish_4h, state.bos_bearish_4h, state.choch_bullish_4h, state.choch_bearish_4h)):
+                    _k7 = (self.asset_type, "STRUCT4H")
+                    if self._brc_log_ts.get(_k7) != df_4h.index[-1]:
+                        self._brc_log_ts[_k7] = df_4h.index[-1]
+                        logger.info("[STRUCT-4H] %s: close4=%.5g sh4=%s sl4=%s state4=%s -> bos_bull=%s bos_bear=%s choch_bull=%s choch_bear=%s",
+                                    self.asset_type, _c4, state.last_swing_high_4h, state.last_swing_low_4h, _st4,
+                                    state.bos_bullish_4h, state.bos_bearish_4h, state.choch_bullish_4h, state.choch_bearish_4h)
+            except Exception as _e7:
+                logger.debug("[STRUCT-4H] %s: skipped: %s", self.asset_type, _e7)
+
             # Collect all candidate levels within 3.0 ATR.
             # Sort by quality: most-tested first, then nearest.
             # A level tested 3 times at a price is more significant
@@ -3656,6 +3053,220 @@ class CompositeStateBuilder:
         except Exception as e:
             logger.debug("[REF-STATE] %s: %s", self.asset_type, e)
             return None
+
+    _GEAR_PATH = "data/ppl_gear.json"
+
+    def _ppl_gear(self, pcfg):
+        """
+        PPL S2: the three-position gear, read HOT. Sidecar file wins; config
+        keys are the fallback. Any change clears in-flight PPL records so
+        no setup carries counts made under a different frame.
+        Returns (count1_tf, count3_tf), each "1H" or "4H".
+        """
+        import os
+        c1 = str(pcfg.get("ppl_count1_tf", "1H")).upper()
+        c3 = str(pcfg.get("ppl_count3_tf", "1H")).upper()
+        try:
+            _m = os.path.getmtime(self._GEAR_PATH)
+            _cached = getattr(self, "_gear_cache", None)
+            if _cached is None or _cached[0] != _m:
+                import json
+                with open(self._GEAR_PATH, "r") as _f:
+                    _g = json.load(_f)
+                c1 = str(_g.get("count1_tf", c1)).upper()
+                c3 = str(_g.get("count3_tf", c3)).upper()
+                if c1 not in ("1H", "4H") or c3 not in ("1H", "4H"):
+                    logger.error("[GEAR] invalid gear %s/%s in %s — falling back to config %s/%s",
+                                 c1, c3, self._GEAR_PATH,
+                                 pcfg.get("ppl_count1_tf", "1H"), pcfg.get("ppl_count3_tf", "1H"))
+                    c1 = str(pcfg.get("ppl_count1_tf", "1H")).upper()
+                    c3 = str(pcfg.get("ppl_count3_tf", "1H")).upper()
+                _prev = _cached[1:] if _cached else None
+                self._gear_cache = (_m, c1, c3)
+                if _prev is not None and _prev != (c1, c3):
+                    self._ppl.clear()
+                    logger.warning("[GEAR-CHANGE] %s -> %s/%s — all in-flight PPL counts cleared; setups re-count from 0",
+                                   "%s/%s" % _prev, c1, c3)
+                else:
+                    logger.info("[GEAR] count1=%s count3=%s (source=%s)", c1, c3, self._GEAR_PATH)
+            else:
+                c1, c3 = _cached[1], _cached[2]
+        except FileNotFoundError:
+            pass
+        except Exception as _e:
+            logger.error("[GEAR] read error %s — using config %s/%s", _e, c1, c3)
+        return c1, c3
+
+    def _atr4_now(self, df_4h, asset):
+        """PPL S5: 4H ATR(14) on closed 4H bars, recomputed per cycle, cached per bar.
+        Returns None (never 0) if it cannot be computed, and logs at ERROR."""
+        try:
+            if df_4h is None or len(df_4h) < 16:
+                logger.error("[ATR4] %s: cannot compute — df_4h has %s bars (<16). Counts REFUSED this cycle.",
+                             asset, 0 if df_4h is None else len(df_4h))
+                return None
+            _ts = df_4h.index[-1]
+            _c = self._atr4_cache.get(asset)
+            if _c is not None and _c[0] == _ts:
+                return _c[1]
+            _h = df_4h["high"].astype(float).values
+            _l = df_4h["low"].astype(float).values
+            _cl = df_4h["close"].astype(float).values
+            _tr = np.maximum(_h[1:] - _l[1:], np.maximum(np.abs(_h[1:] - _cl[:-1]), np.abs(_l[1:] - _cl[:-1])))
+            _atr = float(np.mean(_tr[-14:]))
+            if not np.isfinite(_atr) or _atr <= 0:
+                logger.error("[ATR4] %s: 4H ATR came back %s. Counts REFUSED this cycle.", asset, _atr)
+                return None
+            logger.info("[ATR4] %s: atr4=%.5g on 4H bar %s", asset, _atr, _ts)
+            self._atr4_cache[asset] = (_ts, _atr)
+            return _atr
+        except Exception as _e:
+            logger.error("[ATR4] %s: exception: %s. Counts REFUSED this cycle.", asset, _e)
+            return None
+
+    def _ppl_step(self, asset, kind, direction, h, r1, h_tier, df_1h, df_4h, atr4, spread, pcfg, gear):
+        """
+        PPL v1 proof engine (Desire, 13-14 Sep 2026).
+          gear = (count1_tf, count3_tf), each "1H"|"4H"
+          count 1 = close on count1_tf beyond H (ladder tiers: any; untested tiers: by band, 4H ATR)
+          H2      = highest close on count3_tf since the break; ratchets in trade direction only
+          count 2 = first 1H close lower than H2 (long) that is NOT beyond R1, or a runner streak
+          test-of-proof = 1H close beyond R1 -> wait for the 4H; never a retest, never a kill
+          count 3 = close on count3_tf beyond PRIOR H2 by max(tol*atr4, floor*spread), only after count 2
+          kill    = 4H close beyond R1 (mirrored here; the real kill is _ref_state -> REF_INVALIDATED)
+          expiry  = count 0 for more than N closes on count1_tf -> expire (not a death)
+        """
+        key = (asset, kind)
+        d = 1 if direction == 1 else -1
+        c1tf, c3tf = gear
+        out = dict(count=0, h2=None, tier=None, proof=False, proof_dist_atr=None,
+                   retest_depth=None, test_of_proof=False, expired=False, dead=False, gear="%s/%s" % gear)
+        try:
+            if df_4h is None or len(df_4h) < 2 or df_1h is None or len(df_1h) < 2:
+                return out
+            ts4, c4 = df_4h.index[-1], float(df_4h["close"].iloc[-1])
+            ts1, c1 = df_1h.index[-1], float(df_1h["close"].iloc[-1])
+            tsA, cA = (ts4, c4) if c1tf == "4H" else (ts1, c1)     # count-1 frame
+            tsB, cB = (ts4, c4) if c3tf == "4H" else (ts1, c1)     # count-3 / H2 frame
+
+            rec = self._ppl.get(key)
+            if rec is None or rec.get("h") != h:
+                rec = dict(h=h, r1=r1, h_tier=h_tier, count=0, h2=None, h2_prior=None,
+                           first_retest_ts=None, tier=None, streak=0, last_c1=None,
+                           last_ts1=None, last_ts4=None, last_tsA=None, last_tsB=None,
+                           count0_bars=0, break_ts=None, retest_depth=None)
+                self._ppl[key] = rec
+
+            new4, new1 = rec["last_ts4"] != ts4, rec["last_ts1"] != ts1
+            newA, newB = rec["last_tsA"] != tsA, rec["last_tsB"] != tsB
+
+            # kill mirror — ALWAYS the 4H close, whatever the gear
+            if new4 and ((d == 1 and c4 < r1) or (d == -1 and c4 > r1)):
+                out["dead"] = True
+                logger.info("[KILL-R1] %s %s dir=%+d close4=%.5g R1=%.5g -> dead", asset, kind, d, c4, r1)
+                self._ppl.pop(key, None)
+                return out
+
+            # count 0 -> 1
+            if rec["count"] == 0 and newA:
+                rec["count0_bars"] += 1
+                band = 0.0 if h_tier == "ZONE_LADDER" else float(pcfg.get("ppl_break_band_atr4_untested", 0.10)) * float(atr4)
+                broke = (cA > h + band) if d == 1 else (cA < h - band)
+                dist = ((cA - h) if d == 1 else (h - cA)) / float(atr4)
+                logger.info("[COUNT-1-CHECK] %s %s dir=%+d tf=%s close=%.5g H=%.5g band=%.5g dist=%.2fATR4 tier=%s -> %s",
+                            asset, kind, d, c1tf, cA, h, band, dist, h_tier, "BREAK" if broke else "no")
+                if broke:
+                    rec.update(count=1, h2=cB, h2_prior=cB, break_ts=tsA, streak=0, last_c1=None)
+                    logger.info("[COUNT-1] %s %s dir=%+d tf=%s BREAK close=%.5g H=%.5g H2=%.5g", asset, kind, d, c1tf, cA, h, cB)
+                elif rec["count0_bars"] >= int(pcfg.get("ppl_count0_expiry_bars", 4)):
+                    out["expired"] = True
+                    logger.info("[COUNT-0-EXPIRED] %s %s dir=%+d H=%.5g after %d %s closes without a break",
+                                asset, kind, d, h, rec["count0_bars"], c1tf)
+                    self._ppl.pop(key, None)
+                    return out
+
+            # H2 ratchet on the count-3 frame, after the break candle
+            if rec["count"] >= 1 and newB and tsB > rec["break_ts"]:
+                rec["h2_prior"] = rec["h2"]
+                if (d == 1 and cB > rec["h2"]) or (d == -1 and cB < rec["h2"]):
+                    logger.info("[H2-RATCHET] %s %s dir=%+d tf=%s H2 %.5g -> %.5g", asset, kind, d, c3tf, rec["h2"], cB)
+                    rec["h2"] = cB
+
+            # count 1 -> 2 (always 1H)
+            if rec["count"] == 1 and new1 and ts1 > rec["break_ts"]:
+                beyond_r1 = (c1 < r1) if d == 1 else (c1 > r1)
+                lower = (c1 < rec["h2"]) if d == 1 else (c1 > rec["h2"])
+                if beyond_r1:
+                    out["test_of_proof"] = True
+                    rec["streak"] = 0
+                    logger.info("[TEST-OF-PROOF] %s %s dir=%+d close1=%.5g beyond R1=%.5g — waiting on the 4H", asset, kind, d, c1, r1)
+                elif lower:
+                    span = abs(rec["h2"] - r1)
+                    rec.update(count=2, tier="RETEST", first_retest_ts=ts1,
+                               retest_depth=(abs(rec["h2"] - c1) / span) if span > 0 else None)
+                    logger.info("[COUNT-2] %s %s dir=%+d RETEST close1=%.5g H2=%.5g R1=%.5g depth=%s",
+                                asset, kind, d, c1, rec["h2"], r1,
+                                ("%.2f" % rec["retest_depth"]) if rec["retest_depth"] is not None else "n/a")
+                else:
+                    prev = rec["last_c1"]
+                    if prev is not None and ((d == 1 and c1 > prev) or (d == -1 and c1 < prev)):
+                        rec["streak"] += 1
+                    else:
+                        rec["streak"] = 1 if prev is None else 0
+                    if rec["streak"] >= int(pcfg.get("ppl_runner_streak_n", 4)):
+                        rec.update(count=2, tier="RUNNER", first_retest_ts=ts1, retest_depth=0.0)
+                        logger.info("[COUNT-2] %s %s dir=%+d RUNNER streak=%d close1=%.5g H2=%.5g",
+                                    asset, kind, d, rec["streak"], c1, rec["h2"])
+
+            # count 2 -> 3 on the count-3 frame, against PRIOR H2 (Option A)
+            if rec["count"] == 2 and newB and tsB > rec["first_retest_ts"]:
+                tol = max(float(pcfg.get("ppl_proof_tolerance_atr4", 0.15)) * float(atr4),
+                          float(pcfg.get("ppl_proof_spread_floor_mult", 2.0)) * float(spread or 0.0))
+                h2p = rec["h2_prior"] if rec["h2_prior"] is not None else rec["h2"]
+                cleared = (cB >= h2p + tol) if d == 1 else (cB <= h2p - tol)
+                dist = ((cB - h2p) if d == 1 else (h2p - cB)) / float(atr4)
+                logger.info("[COUNT-3-CHECK] %s %s dir=%+d tf=%s close=%.5g H2=%.5g tol=%.5g dist=%.2fATR4 -> %s",
+                            asset, kind, d, c3tf, cB, h2p, tol, dist, "PROOF" if cleared else "no")
+                if cleared:
+                    rec["count"] = 3
+                    out.update(proof=True, proof_dist_atr=dist)
+                    logger.info("[COUNT-3] %s %s dir=%+d tf=%s PROOF close=%.5g H2=%.5g dist=%.2fATR4 tier=%s gear=%s/%s",
+                                asset, kind, d, c3tf, cB, h2p, dist, rec["tier"], c1tf, c3tf)
+
+            rec.update(last_ts4=ts4, last_ts1=ts1, last_tsA=tsA, last_tsB=tsB)
+            if new1:
+                rec["last_c1"] = c1
+            out.update(count=rec["count"], h2=rec["h2"], tier=rec["tier"], retest_depth=rec["retest_depth"])
+            if rec["count"] == 3:
+                out["proof"] = True
+            return out
+        except Exception as _e:
+            logger.error("[PPL] %s %s: engine error — counts REFUSED this cycle: %s", asset, kind, _e)
+            return out
+
+    def _ppl_expire_setup(self, asset, kind):
+        """PPL: remove a count-0 setup from its lane queue without a death reason."""
+        _store = self._active_setup if kind == "TF_CONT" else self._active_setup_mr
+        _q = _store.get(asset)
+        if isinstance(_q, list):
+            _store[asset] = [s for s in _q if s.get("kind") != kind]
+        elif isinstance(_q, dict) and _q.get("kind") == kind:
+            _store[asset] = []
+
+    def _ppl_spread(self, asset, price):
+        """PPL: spread in PRICE units — observed median when n>=5, else the friction map."""
+        try:
+            _hist = self._spread_history.get(asset) or []
+            if len(_hist) >= 5:
+                import statistics
+                return float(statistics.median(_hist))
+        except Exception:
+            pass
+        try:
+            from src.execution.shadow_trader import FRICTION_PENALTIES
+            return float(FRICTION_PENALTIES.get(asset.upper(), 0.0) or 0.0) * float(price)
+        except Exception:
+            return 0.0
 
     # ── Zone Ladder ──────────────────────────────────────────────────────
 
@@ -3898,11 +3509,6 @@ class CompositeStateBuilder:
         if kind == "MR_REV":
             _candidates = [
                 (
-                    getattr(state, "livermore_anchor_natural_low_1h", None) if direction == 1
-                    else getattr(state, "livermore_anchor_natural_high_1h", None),
-                    "ANCHOR_1H",
-                ),
-                (
                     _ladder_floor,
                     "ZONE_LADDER",
                 ),
@@ -3910,6 +3516,11 @@ class CompositeStateBuilder:
                     getattr(state, "last_swing_low_4h", None) if direction == 1
                     else getattr(state, "last_swing_high_4h", None),
                     "SWING_4H",
+                ),
+                (
+                    getattr(state, "livermore_anchor_natural_low_1h", None) if direction == 1
+                    else getattr(state, "livermore_anchor_natural_high_1h", None),
+                    "ANCHOR_1H",
                 ),
             ]
         elif kind == "TF_CONT":
@@ -4005,6 +3616,8 @@ class CompositeStateBuilder:
                 _u_legacy_tier, _u_legacy_ref,
                 ("%.5g" % float(_u_broken)) if _u_broken is not None else "none",
             )
+            logger.info("[REF-TIER] %s: %s dir=%+d tier=%s ref=%.5g",
+                        self.asset_type, kind, direction, _u_legacy_tier, float(_u_legacy_ref))
             return _u_legacy_ref, _u_legacy_tier
 
         if _usable(_u_broken, "BROKEN_SWING_1H"):
@@ -4013,6 +3626,8 @@ class CompositeStateBuilder:
                 "— no usable 4H tier",
                 self.asset_type, kind, direction, float(_u_broken),
             )
+            logger.info("[REF-TIER] %s: %s dir=%+d tier=%s ref=%.5g",
+                        self.asset_type, kind, direction, "BROKEN_SWING_1H", float(_u_broken))
             return float(_u_broken), "BROKEN_SWING_1H"
 
         logger.info(
