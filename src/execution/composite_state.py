@@ -117,6 +117,20 @@ class CompositeState:
     ref_h: Optional[float] = None            # REF-1 SEG C
     ref_state: Optional[str] = None          # HEALTHY | DANGER | DEAD
     ref_pullback_low: Optional[float] = None # REF-1 SEG G
+    # ── PPL v1 ──
+    brc_ref_tier: Optional[str] = None
+    brc_h2: Optional[float] = None
+    brc_r1: Optional[float] = None
+    brc_r1_tag: Optional[str] = None          # "LADDER" | "R1_SWING"
+    brc_count: int = 0                        # 0 born, 1 broke, 2 retested/runner, 3 proven
+    brc_gear: Optional[str] = None            # "1H/1H" | "4H/1H" | "4H/4H"
+    brc_proof_dist_atr: Optional[float] = None
+    brc_retest_depth: Optional[float] = None
+    brc_test_of_proof: bool = False
+    bos_bullish_4h: bool = False
+    bos_bearish_4h: bool = False
+    choch_bullish_4h: bool = False
+    choch_bearish_4h: bool = False
     nearby_4h_level_3: Optional[float] = None   # Third nearest 4H structural level
     nearby_4h_level_type: Optional[str] = None  # "swing_high" / "swing_low" — current role, re-evaluated every cycle by role reversal
     # A4: level_defended was only ever computed against the single primary

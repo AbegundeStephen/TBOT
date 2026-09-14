@@ -3441,7 +3441,6 @@ class PerformanceWeightedAggregator:
                             _brc_dir_i = int(_ind_get("brc_direction", 0) or 0)
                             _brc_kind_i = _ind_get("brc_kind", None)
                             _brc_age_i = int(_ind_get("brc_age", 0) or 0)
-                            _brc_max_age_i = int(_ind_pc.get("brc_max_age_solo", 20))
 
                             # Build 2: a solo fire must carry the proof kind that
                             # matches the engine firing it.
@@ -3468,15 +3467,14 @@ class PerformanceWeightedAggregator:
                                 _brc_ok_i
                                 and _brc_kind_i == _required_kind
                                 and _brc_dir_i == best_signal
-                                and _brc_age_i <= _brc_max_age_i
                             ):
                                 logger.info(
                                     "[INDEPENDENT] %s: %s solo fire suppressed — no "
                                     "fresh %s proof (brc_confirmed=%s brc_kind=%s "
-                                    "brc_direction=%s brc_age=%s max=%s vs signal=%+d).",
+                                    "brc_direction=%s brc_age=%s max=none vs signal=%+d).",
                                     self.asset_type, best_name, _required_kind,
                                     _brc_ok_i, _brc_kind_i, _brc_dir_i,
-                                    _brc_age_i, _brc_max_age_i, best_signal,
+                                    _brc_age_i, best_signal,
                                 )
                                 candidates = []
                         # ─────────────────────────────────────────────────────

@@ -563,6 +563,9 @@ class VeteranTradeManager:
         # as every sibling field above; composite_state.py already declares
         # this field, it just wasn't extracted into VTM until now.
         self.brc_tier                   = _cs.get("brc_tier")
+        self.brc_ref_tier               = _cs.get("brc_ref_tier")   # PPL S9c
+        self.brc_h2                     = _cs.get("brc_h2")         # PPL S9c
+        self.brc_gear                   = _cs.get("brc_gear")       # PPL S9c
         # STOP-2 SEG F: the references the proof was built on. REF-1 froze
         # R2 (the level broken), R1 (the origin) and H (the trigger) on the
         # composite state, but nothing copied them here, so trade management
@@ -1251,7 +1254,8 @@ class VeteranTradeManager:
                         _attempt_structural = True
                         logger.info(
                             f"[TIER-STOP] {self.asset}: tier={_tier} -> structural "
-                            f"(allowance {_allow} ATR, _compute_structural_stop's own per-entry_type buffer applies)"
+                            f"(allowance {_allow} ATR, _compute_structural_stop's own per-entry_type buffer applies) "
+                            f"anchor=H(ref_2={getattr(self, 'ref_2', None)})"
                         )
                     else:
                         _attempt_structural = False
@@ -4268,6 +4272,14 @@ class VeteranTradeManager:
             logger.warning(f"[STOP-ANCHOR] {self.asset}: anchor selection failed ({_e}) — using 4H")
             return level_4h
 
+    def _ppl_grade_mult(self) -> float:
+        _tbl = (self.risk_config.get("phase_config", {}) or {}).get("ppl_stop_grade_allowance_mult", {}) or {}
+        _g = (getattr(self, "entry_retest_type", None) or "NONE").upper()
+        try:
+            return float(_tbl.get(_g, _tbl.get("NONE", 1.0)))
+        except Exception:
+            return 1.0
+
     def _compute_structural_stop(self, atr: float) -> "Optional[float]":
         """
         Phase 4 — Structural Stop Router.
@@ -4321,6 +4333,20 @@ class VeteranTradeManager:
         # same way; None was checked against this method's real signature
         # and rejected, since level_4h is compared against a 1D candidate,
         # not a decorative placeholder.
+        _tier_ppl = (getattr(self, "brc_tier", None) or "").upper()
+        _h_ref = getattr(self, "ref_2", None)
+        if _tier_ppl == "RETEST" and _h_ref and atr > 0:
+            _base = float(self.risk_config.get("structural_stop_allowance_atr", 0.3))
+            _mult = self._ppl_grade_mult()
+            _buf = _base * _mult * atr
+            _stop = (float(_h_ref) - _buf) if side == "long" else (float(_h_ref) + _buf)
+            _ok = (_stop < entry) if side == "long" else (_stop > entry)
+            logger.info("[STOP-H] %s tier=RETEST grade=%s H=%.5g base=%.2f x%.2f -> buf=%.5g stop=%.5g (%s)",
+                        self.asset, getattr(self, "entry_retest_type", None), float(_h_ref), _base, _mult, _buf, _stop,
+                        "OK" if _ok else "wrong side -> fallback")
+            if _ok:
+                return _stop
+
         _tier = (getattr(self, "brc_tier", None) or "").upper()
         if _tier == "RUNNER":
             _lvl = self._nearest_structural_anchor(
