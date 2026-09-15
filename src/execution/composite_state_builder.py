@@ -357,9 +357,11 @@ class CompositeStateBuilder:
         """Build a fresh CompositeState from closed-candle data."""
         from src.execution.composite_state import CompositeState
         import talib as ta
+        import time as _time
         from datetime import datetime
 
         state = CompositeState()
+        state.built_at_ts = _time.time()   # DIARY-1 D3
         # Fix 1: propagate phase_config gate flags into CompositeState
         state.phase_config = getattr(self, "phase_config", {})
 

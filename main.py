@@ -587,6 +587,17 @@ class TradingBot:
                 self.system_validator.record_trade_outcome
             )
 
+        # DIARY-1 D5: heartbeat monitor -- every component's promise, checked
+        # every 5 minutes on the same timer as the [VALIDATOR] watchdog.
+        try:
+            from src.execution.heartbeat import HeartbeatMonitor
+            self.heartbeat_monitor = HeartbeatMonitor(
+                config=self.config, telegram_bot=getattr(self, "telegram_bot", None),
+            )
+        except Exception as _hb_init_err:
+            logger.warning(f"[HEARTBEAT] init failed: {_hb_init_err}")
+            self.heartbeat_monitor = None
+
         self.error_handler = GlobalErrorHandler(
             telegram_bot=self.telegram_bot,
             db_manager=self.db_manager,
@@ -2933,6 +2944,12 @@ class TradingBot:
         asset_cfg: dict,
         lane: str = "A",              # LANES L1: default keeps all 12 existing sites on Lane A
         bypass_guards: bool = False,  # LANES L1: Lane C only
+        side_override: str = None,        # DIARY-1 D4: paired lane opens both sides regardless of `signal`
+        trail_mult_override: float = None,  # DIARY-1 D4: per-variant management setting
+        be_r_override: float = None,        # DIARY-1 D4: per-variant management setting
+        pair_id: str = "",                  # DIARY-1 D4
+        variant: str = "",                  # DIARY-1 D4
+        episode_id_override: str = None,    # DIARY-1 D4: distinct id per side/variant within a pair
     ):
         """
         Open a shadow (virtual) position for any signal that was blocked
@@ -2940,7 +2957,7 @@ class TradingBot:
         no-ops when shadow_trader is absent or signal is 0.
         """
         try:
-            if not self.shadow_trader or signal == 0 or current_price <= 0:
+            if not self.shadow_trader or (signal == 0 and side_override is None) or current_price <= 0:
                 # REF-1 SEG K4: 6 [LANE-B] captures logged, 0 shadow records
                 # on disk. This method's own except (below) is warning-level
                 # and has never fired -- it returns cleanly, most likely
@@ -2952,7 +2969,7 @@ class TradingBot:
                         asset_name, lane, bool(self.shadow_trader), signal, current_price,
                     )
                 return
-            _side = "long" if signal > 0 else "short"
+            _side = side_override if side_override else ("long" if signal > 0 else "short")
             # VTM-style regime-adaptive ATR (same logic used in the main shadow block)
             _atr = None
             try:
@@ -2985,8 +3002,10 @@ class TradingBot:
             _risk_cfg = asset_cfg.get("risk", {})
             _atr_mult = float(_risk_cfg.get("atr_multiplier", 1.8))
             _tp_mults = _risk_cfg.get("partial_targets", [2.5, 4.0, 6.0])
-            _trail_mult = float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
-            _be_r       = float(_risk_cfg.get("r_breakeven_trigger", 0.75))          # S7c
+            _trail_mult = trail_mult_override if trail_mult_override is not None \
+                else float(_risk_cfg.get("runner_trail_atr_multiplier", 0.8))   # S7c
+            _be_r       = be_r_override if be_r_override is not None \
+                else float(_risk_cfg.get("r_breakeven_trigger", 0.75))          # S7c
             _src = details.get("aggregator_mode", "PERF").upper()
             # J2.1: Pass CompositeState snapshot at entry.
             # Part 1.5 (Brain Rebuild): _aggregator was never unwrapped from
@@ -3064,9 +3083,11 @@ class TradingBot:
                 composite_state=_comp_state_dict,
                 trail_mult=_trail_mult,   # S7c
                 be_r=_be_r,               # S7c
-                episode_id=self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5
+                episode_id=episode_id_override or self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5 / DIARY-1 D4
                 lane=lane,                       # LANES L1
                 bypass_guards=bypass_guards,     # LANES L1
+                pair_id=pair_id,                 # DIARY-1 D4
+                variant=variant,                 # DIARY-1 D4
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -4327,15 +4348,34 @@ class TradingBot:
                     "price": _price,
                     "aggregator_mode": "CONTROL",
                 }
+
+                # DIARY-1 D4: paired control lane (Desire, 15 Sep). Random
+                # triggers open BOTH sides, each under every configured
+                # management variant, sharing one pair_id -- antithetic
+                # sampling, four management episodes per market path. The
+                # biased arm stays single-sided (its point IS the Livermore
+                # direction) but still gets the variants.
+                _paired = bool(_cfg.get("lane_c_paired_enabled", False))
+                _variants = _cfg.get("lane_c_variants") or [{"name": "std", "trail_mult": 0.8, "be_r": 1.0}]
+                _pair_id = f"{asset_name}-{int(_now_ts)}-{_rnd.randrange(1_000_000):06d}"
+                _sides = [1, -1] if (_paired and _lane_tag == "C-RANDOM") else [_signal]
+
+                for _side in _sides:
+                    for _v in _variants:
+                        self._shadow_open_blocked(
+                            asset_name, _side, _details, df, _price,
+                            f"lane_c_{_lane_tag.lower()}", asset_cfg,
+                            lane=_lane_tag, bypass_guards=True,
+                            side_override=("long" if _side > 0 else "short"),
+                            trail_mult_override=float(_v.get("trail_mult", 0.8)),
+                            be_r_override=float(_v.get("be_r", 1.0)),
+                            pair_id=_pair_id, variant=_v.get("name", ""),
+                            episode_id_override=f"shadow-{_pair_id}-{'L' if _side > 0 else 'S'}-{_v.get('name', '')}",
+                        )
                 logger.info(
-                    f"[LANE-C] {asset_name}: {_lane_tag} "
-                    f"{'LONG' if _signal > 0 else 'SHORT'} @ {_price:.5f} "
+                    f"[LANE-C] {asset_name}: {_lane_tag} pair={_pair_id} sides={len(_sides)} "
+                    f"variants={len(_variants)} @ {_price:.5f} "
                     f"({self._lane_c_counts.get(asset_name, 0) + 1}/{_per_asset_per_day} today)"
-                )
-                self._shadow_open_blocked(
-                    asset_name, _signal, _details, df, _price,
-                    f"lane_c_{_lane_tag.lower()}", asset_cfg,
-                    lane=_lane_tag, bypass_guards=True,
                 )
                 self._lane_c_counts[asset_name] = self._lane_c_counts.get(asset_name, 0) + 1
             except Exception as _lc_asset_err:
@@ -6947,6 +6987,11 @@ class TradingBot:
                 # ── DATA-1 ITEM 3A: store what W1 only logged. A log line
                 # cannot be joined or aggregated; every proof question in the
                 # queue needs these as fields.
+                # DIARY-1 D3: how stale the composite_state snapshot was at
+                # entry. built_at_ts is set once, in composite_state_builder.py,
+                # when the state object is created for this cycle.
+                _built_at = _cs_get("built_at_ts")
+                _state_age_s = (time.time() - float(_built_at)) if _built_at else None
                 details["entry_measure"] = {
                     "proof_ref": _pr_ref,
                     "proof_age_bars": _pr_age,
@@ -6958,6 +7003,7 @@ class TradingBot:
                     "proof_reused": bool(_pr_used is not None),
                     "brc_kind": details.get("brc_kind", ""),
                     "brc_confirmed": bool(details.get("brc_confirmed", False)),
+                    "state_age_s": _state_age_s,
                 }
             except Exception as _me:
                 logger.warning(f"[ENTRY-MEASURE] {asset_name}: could not record ({_me})")
@@ -8368,6 +8414,15 @@ class TradingBot:
 
         except Exception as _wdog_err:
             logger.debug("[VALIDATOR] watchdog_tick error: %s", _wdog_err)
+
+        # DIARY-1 D5: heartbeat runs on the same 5-min scheduler timer as
+        # the [VALIDATOR] watchdog above -- self-paced internally, so this
+        # call is cheap even if the scheduler fires more often.
+        if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor is not None:
+            try:
+                self.heartbeat_monitor.tick()
+            except Exception as _hb_err:
+                logger.debug("[HEARTBEAT] tick error: %s", _hb_err)
 
     # ── Fix 7: Connection watchdog ────────────────────────────────────────────
 

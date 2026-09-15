@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -141,6 +142,8 @@ class ShadowPosition:
     # STOP-2 SEG B: same extremes expressed in R, computed at close.
     mfe_r: Optional[float] = None
     mae_r: Optional[float] = None
+    sl_path: list = field(default_factory=list)   # DIARY-1 D2: [(ts_iso, old_sl, new_sl, reason)]
+    state_age_s: Optional[float] = None           # DIARY-1 D3
 
     # Outcome
     closed: bool = False
@@ -175,6 +178,8 @@ class ShadowPosition:
     be_r: float = 0.75
     breakeven_applied: bool = False
 
+    pair_id: str = ""                # DIARY-1 D4: joins the paired-lane-C family
+    variant: str = ""                # DIARY-1 D4: management-variant name within the pair
     lane: str = "A"                 # LANES L1: which shadow lane produced this
     resumed: bool = False               # MEASURE-2 S1: survived at least one restart
     resume_count: int = 0               # MEASURE-2 S1: how many
@@ -222,6 +227,8 @@ class ShadowPosition:
                 _prof = (current_price - self.entry_price) if self.side == "long" \
                         else (self.entry_price - current_price)
                 if _prof >= self.be_r * _risk:
+                    self.sl_path.append((datetime.utcnow().isoformat(), float(self.stop_loss), float(self.entry_price), "breakeven"))
+                    self.sl_path = self.sl_path[-200:]
                     self.stop_loss = self.entry_price      # side-aware by construction
                     self.breakeven_applied = True
 
@@ -236,11 +243,15 @@ class ShadowPosition:
                 self.highest_price = max(self.highest_price, current_price)
                 _trail_sl = self.highest_price - self.trailing_distance
                 if _trail_sl > self.stop_loss:
+                    self.sl_path.append((datetime.utcnow().isoformat(), float(self.stop_loss), float(_trail_sl), "trail"))
+                    self.sl_path = self.sl_path[-200:]
                     self.stop_loss = _trail_sl
             else:
                 self.lowest_price = min(self.lowest_price, current_price)
                 _trail_sl = self.lowest_price + self.trailing_distance
                 if _trail_sl < self.stop_loss:
+                    self.sl_path.append((datetime.utcnow().isoformat(), float(self.stop_loss), float(_trail_sl), "trail"))
+                    self.sl_path = self.sl_path[-200:]
                     self.stop_loss = _trail_sl
 
         # Check stop loss hit
@@ -365,6 +376,10 @@ class ShadowPosition:
             "mae_pct":          round(self.mae_pct * 100, 4),
             "mfe_r":            round(self.mfe_r, 4) if self.mfe_r is not None else None,
             "mae_r":            round(self.mae_r, 4) if self.mae_r is not None else None,
+            "sl_path":          self.sl_path,   # DIARY-1 D2
+            "state_age_s":      self.state_age_s,   # DIARY-1 D3
+            "pair_id":          self.pair_id,        # DIARY-1 D4
+            "variant":          self.variant,        # DIARY-1 D4
             "gross_pnl_pct":    round(self.gross_pnl_pct, 4),
             "friction_pct":     round(self.friction_pct, 4),
             "net_pnl_pct":      round(self.net_pnl_pct, 4),
@@ -515,6 +530,8 @@ class ShadowTradingEngine:
         episode_id: str = "",           # DATA-1 ITEM 1B
         lane: str = "A",                # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
         bypass_guards: bool = False,    # LANES L1: Lane C only -- see L1b
+        pair_id: str = "",              # DIARY-1 D4: joins the paired-lane-C family
+        variant: str = "",              # DIARY-1 D4: management-variant name within the pair
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -777,6 +794,8 @@ class ShadowTradingEngine:
             entry_atr=float(atr) if atr else 0.0,   # BATCH-610 ITEM 4
             episode_id=episode_id or ("shadow-" + __import__("uuid").uuid4().hex[:12]),   # CU-1 C7: control opens mint their own id
             lane=lane,                              # LANES L1
+            pair_id=pair_id,                        # DIARY-1 D4
+            variant=variant,                        # DIARY-1 D4
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),
@@ -809,6 +828,13 @@ class ShadowTradingEngine:
             },
             # J2.1: CompositeState snapshot
             composite_state=composite_state or {},
+            # DIARY-1 D3: how stale the snapshot was at the moment this
+            # position opened -- built_at_ts is set once, in
+            # composite_state_builder.py, when the state object is created.
+            state_age_s=(
+                (time.time() - float(composite_state.get("built_at_ts", time.time())))
+                if composite_state else None
+            ),
             # J2.2: Standardized trailing stop (same for every shadow trade)
             trailing_active=False,
             trailing_distance=_trailing_distance,

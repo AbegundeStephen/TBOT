@@ -17,6 +17,10 @@ from typing import Optional, Dict, List
 class CompositeState:
     """Updated on every closed candle. Passed between all analysis layers."""
 
+    # DIARY-1 D3: wall-clock time this snapshot was built, so a consumer can
+    # tell how stale the picture was (hot-reload/cache) by the time it acted.
+    built_at_ts: Optional[float] = None
+
     # ══════════════════════════════════════
     # LAYER 1: MACRO STATE
     # ══════════════════════════════════════

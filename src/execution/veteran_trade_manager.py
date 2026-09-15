@@ -750,6 +750,7 @@ class VeteranTradeManager:
         # State
         self.initial_stop_loss = None
         self.current_stop_loss = None
+        self.sl_path = []   # DIARY-1 D2: [(ts_iso, old_sl, new_sl, reason)]
         self.take_profit_levels = []
         self.remaining_position = 1.0
         self.partials_hit = []
@@ -3766,6 +3767,8 @@ class VeteranTradeManager:
             # semantics with zero recording — a full revert of this batch's
             # SL behavior via one config edit, no redeploy.
             if not self.risk_config.get("phase_config", {}).get("auto_move_guard_enabled", True):
+                self.sl_path.append((datetime.utcnow().isoformat(), self.current_stop_loss, float(candidate), reason))
+                self.sl_path = self.sl_path[-200:]
                 self.current_stop_loss = candidate
                 return True
             if getattr(self, "_auto_sl_paused", False):
@@ -3831,6 +3834,8 @@ class VeteranTradeManager:
                         f"{cur if cur is None else f'{cur:.5f}'} for {self.asset} {self.side} — suppressed (tighten-only)"
                     )
                     return False
+                self.sl_path.append((datetime.utcnow().isoformat(), cur, float(candidate), reason))
+                self.sl_path = self.sl_path[-200:]
                 self.current_stop_loss = candidate
             self._queue_pending_move("SL", cur, candidate, reason)
             return True
@@ -4061,6 +4066,8 @@ class VeteranTradeManager:
         # market_watcher/check_exit pair.
         with self._sl_lock:
             old_sl = self.current_stop_loss
+            self.sl_path.append((datetime.utcnow().isoformat(), old_sl, float(new_sl), "manual_set_sl"))  # DIARY-1 D2
+            self.sl_path = self.sl_path[-200:]
             self.current_stop_loss = new_sl
         self._record_auto_move("SL", old_sl, new_sl, "manual_set_sl", source="MANUAL")
         logger.info(
