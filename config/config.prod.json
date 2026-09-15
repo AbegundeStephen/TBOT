@@ -1541,6 +1541,7 @@
     "ppl_proof_tolerance_atr4": 0.15,
     "ppl_proof_spread_floor_mult": 2.0,
     "ppl_break_band_atr4_untested": 0.1,
+    "builder_state_max_age_s": 21600,
     "ppl_stop_grade_allowance_mult": {
       "CLEAN": 1.0,
       "WICK": 1.33,

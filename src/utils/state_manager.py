@@ -2,10 +2,11 @@ import json
 import os
 import logging
 from pathlib import Path
+from src.utils.instance_paths import suffixed_path as _suffixed_path
 
 logger = logging.getLogger("STATE_MANAGER")
 
-STATE_FILE = "data/system_state.json"
+STATE_FILE = _suffixed_path("data/system_state.json")  # B11
 
 def save_system_state(data: dict):
     """

@@ -11,6 +11,7 @@ replaced. No behaviour change intended.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -128,6 +129,7 @@ class CompositeStateBuilder:
         self._ppl = {}
         self._atr4_cache = {}
         self._gear_cache = None
+        self._struct4h = {}
         # Single source of truth for what survives a hot-reload (P4).
         self._STATE_KEYS = (
             "_active_setup", "_active_setup_mr",
@@ -138,7 +140,7 @@ class CompositeStateBuilder:
             "_livermore_last_1h_ts", "_brc_log_ts",
             "_squeeze_was_active", "_spread_history",
             "_ref_h_anchor", "_ref_state_last", "_ref_dead_pending", "_retest_failed_pending",
-            "_ppl", "_atr4_cache", "_gear_cache",
+            "_ppl", "_atr4_cache", "_gear_cache", "_struct4h",
         )
         logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
@@ -230,6 +232,60 @@ class CompositeStateBuilder:
             logger.error(
                 "[Livermore] Init failed — state machine disabled: %s", _lsm_err
             )
+
+        # B7: restore setups/memory from before the last restart, if fresh
+        # enough. Must be the last line of __init__ -- reads _STATE_KEYS,
+        # set earlier in this method.
+        _max_age_s = 6 * 3600
+        try:
+            _max_age_s = int((self._config.get("phase_config", {}) or {}).get("builder_state_max_age_s", _max_age_s))
+        except Exception:
+            pass
+        self.restore_stores(max_age_s=_max_age_s)
+
+    # B11: doc's file list for path-suffixing named main.py/state_manager.py/
+    # portfolio_manager.py, but _PERSIST_DIR (added this same batch, B7) lives
+    # here -- suffixed for the same reason: instance B's setups must not
+    # collide with the live instance's on disk.
+    from src.utils.instance_paths import suffixed_path as _suffixed_path_b7
+    _PERSIST_DIR = _suffixed_path_b7("data/builder_state")
+
+    def persist_stores(self):
+        """B7: write every _STATE_KEYS store to disk so a restart does not wipe setups."""
+        try:
+            import os, pickle, time
+            os.makedirs(self._PERSIST_DIR, exist_ok=True)
+            _payload = {k: getattr(self, k, None) for k in self._STATE_KEYS}
+            _payload["__saved_at"] = time.time()
+            _tmp = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl.tmp")
+            _dst = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl")
+            with open(_tmp, "wb") as _f:
+                pickle.dump(_payload, _f)
+            os.replace(_tmp, _dst)
+        except Exception as _e:
+            logger.warning("[PERSIST] %s: store save failed: %s", self.asset_type, _e)
+
+    def restore_stores(self, max_age_s=6 * 3600):
+        """B7: load stores saved by persist_stores if they are fresh enough."""
+        try:
+            import os, pickle, time
+            _src = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl")
+            if not os.path.exists(_src):
+                logger.info("[PERSIST] %s: no saved stores — starting empty", self.asset_type)
+                return
+            with open(_src, "rb") as _f:
+                _payload = pickle.load(_f)
+            _age = time.time() - float(_payload.get("__saved_at", 0))
+            if _age > max_age_s:
+                logger.warning("[PERSIST] %s: saved stores are %.0f min old (> %.0f) — ignored", self.asset_type, _age / 60, max_age_s / 60)
+                return
+            _n = 0
+            for k in self._STATE_KEYS:
+                if k in _payload and _payload[k] is not None:
+                    setattr(self, k, _payload[k]); _n += 1
+            logger.info("[PERSIST] %s: restored %d stores (%.0f min old)", self.asset_type, _n, _age / 60)
+        except Exception as _e:
+            logger.warning("[PERSIST] %s: store restore failed: %s", self.asset_type, _e)
 
     # ── PHASE 1: Livermore warm-start ────────────────────────────────────────
 
@@ -1425,6 +1481,10 @@ class CompositeStateBuilder:
                 _candle_ts is not None
                 and self._traj_last_processed_ts.get(_asset) == _candle_ts
             )
+            # B4: a pending 4H kill must not wait for the next 1H candle.
+            if _already_processed and any(k[0] == _asset for k in self._ref_dead_pending.keys()):
+                _already_processed = False
+                logger.info("[TRAJ-REOPEN] %s: pending R1 kill — death loop re-run this cycle", _asset)
 
             # E2: birth candidates computed once, shared between lanes. The
             # TF lane may only be born from _bos_candidate; the MR lane may
@@ -1667,23 +1727,29 @@ class CompositeStateBuilder:
                                 if int(_candidate["dir"]) == 1
                                 else (float(_f1_ref) + 1e-9)
                             )
-                            _r1_ref, _r1_tests = self._pick_ladder_ref(
-                                _asset, int(_candidate["dir"]), _r1_px, _atr,
+                            _atr4_birth = self._atr4_now(df_4h, _asset) if df_4h is not None else None
+                            _r1_ref, _r1_tests, _r1_tag = self._pick_origin_ref(
+                                _asset, int(_candidate["dir"]), float(_f1_ref), state, _atr4_birth,
                             )
-                            _r1_tag = "LADDER"
                             if _r1_ref is None:
-                                _sw = (getattr(state, "last_swing_low_4h", None) if int(_candidate["dir"]) == 1
-                                       else getattr(state, "last_swing_high_4h", None))
-                                _ok_side = (_sw is not None and float(_sw) > 0 and (
-                                    (int(_candidate["dir"]) == 1 and float(_sw) < float(_f1_ref)) or
-                                    (int(_candidate["dir"]) == -1 and float(_sw) > float(_f1_ref))))
-                                if _ok_side:
-                                    _r1_ref, _r1_tests, _r1_tag = float(_sw), 0, "R1_SWING"
-                                    logger.info("[R1-SWING] %s: %s dir=%+d no tested line behind H=%.5g; R1 -> 4H swing %.5g",
-                                                self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref), float(_sw))
-                                else:
-                                    logger.info("[NO-R1-REFUSED] %s: %s dir=%+d H=%.5g — no tested line, no usable 4H swing. Refused.",
-                                                self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref))
+                                logger.info("[NO-R1-REFUSED] %s: %s dir=%+d H=%.5g — no 4H swing on the correct side. Refused.",
+                                            self.asset_type, _candidate["kind"], int(_candidate["dir"]), float(_f1_ref))
+                            else:
+                                _gap_atr = (abs(float(_f1_ref) - float(_r1_ref)) / float(_atr4_birth)) if _atr4_birth else -1.0
+                                logger.info("[R1-ORIGIN] %s: %s dir=%+d H=%.5g R1=%.5g tag=%s tests=%d gap=%.2fATR4",
+                                            self.asset_type, _candidate["kind"], int(_candidate["dir"]),
+                                            float(_f1_ref), float(_r1_ref), _r1_tag, int(_r1_tests), _gap_atr)
+                                try:
+                                    _c4_birth = float(df_4h["close"].iloc[-1]) if df_4h is not None and len(df_4h) else None
+                                except Exception:
+                                    _c4_birth = None
+                                if _c4_birth is not None and (
+                                    (int(_candidate["dir"]) == 1 and _c4_birth < float(_r1_ref)) or
+                                    (int(_candidate["dir"]) == -1 and _c4_birth > float(_r1_ref))
+                                ):
+                                    logger.info("[DOA-REFUSED] %s: %s dir=%+d — last 4H close %.5g already beyond R1 %.5g. Not born.",
+                                                self.asset_type, _candidate["kind"], int(_candidate["dir"]), _c4_birth, float(_r1_ref))
+                                    _r1_ref = None
 
                             if _r1_ref is not None:
                                 self._ref_dead_pending.pop((_asset, _candidate["kind"]), None)   # PPL 8g: a new setup starts with no inherited kill
@@ -2475,7 +2541,25 @@ class CompositeStateBuilder:
                     "SECONDARY_RETRACEMENT",
                     "SECONDARY_REBOUND",
                 )
-                _j1_may_reverse = _lsm_state in _J1_REVERSAL_STATES
+                _j1_lsm = _lsm_state in _J1_REVERSAL_STATES
+                # B5 fix: state.livermore_state_4h is not set until the
+                # Phase 1 Livermore block later in _build_composite_state
+                # (:776) -- always None here, on every cycle, in this same
+                # fresh state object (same trap as PPL S7's _st4 a few lines
+                # below in _update_structure_memory, left alone per B2's
+                # "don't touch the S7 detector" rule). Reading the 4H
+                # Livermore machine directly instead of the not-yet-set
+                # state field gives the same value _build_composite_state
+                # would assign later this cycle, just sourced correctly.
+                _lsm4 = (self._livermore_4h.snapshot().state
+                         if getattr(self, "_livermore_4h", None) is not None else None)
+                _j1_lsm4 = _lsm4 in _J1_REVERSAL_STATES
+                _s4 = self._struct4h.get(self.asset_type)
+                _4h_up = bool(_s4 and (_s4[1] or _s4[3]))
+                _4h_down = bool(_s4 and (_s4[2] or _s4[4]))
+                _j1_up_ok = _j1_lsm or _j1_lsm4 or _4h_up
+                _j1_down_ok = _j1_lsm or _j1_lsm4 or _4h_down
+                _j1_may_reverse = _j1_lsm  # kept for any later reader; the two lines below use the split gates
 
                 # ── BUILD U: capture the level that actually broke ─────
                 # Set on BOTH branches -- value when the break is true,
@@ -2559,12 +2643,18 @@ class CompositeStateBuilder:
 
                 # CHoCH — the parent trend's own structure breaking, AND the
                 # state machine agreeing the counter-move is abnormal.
-                if (not _parent_up) and _hh and _j1_may_reverse:
+                if (not _parent_up) and _hh and _j1_up_ok:
                     state.choch_detected = True
                     state.choch_bullish = True
-                elif _parent_up and _ll and _j1_may_reverse:
+                    if not _j1_lsm:
+                        logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
+                                    self.asset_type, _lsm_state, _lsm4, _s4)
+                elif _parent_up and _ll and _j1_down_ok:
                     state.choch_detected = True
                     state.choch_bearish = True
+                    if not _j1_lsm:
+                        logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
+                                    self.asset_type, _lsm_state, _lsm4, _s4)
 
                 # Tiebreak: an expanding range (higher high AND lower low) can
                 # satisfy both. The bot is passive by default and continuation
@@ -2778,6 +2868,8 @@ class CompositeStateBuilder:
                 elif _up4 is False and _ll4: state.bos_bearish_4h = True
                 if _up4 is False and _hh4 and _rev4:  state.choch_bullish_4h = True
                 elif _up4 is True and _ll4 and _rev4: state.choch_bearish_4h = True
+                self._struct4h[self.asset_type] = (df_4h.index[-1], bool(state.bos_bullish_4h), bool(state.bos_bearish_4h),
+                                                   bool(state.choch_bullish_4h), bool(state.choch_bearish_4h))
                 if any((state.bos_bullish_4h, state.bos_bearish_4h, state.choch_bullish_4h, state.choch_bearish_4h)):
                     _k7 = (self.asset_type, "STRUCT4H")
                     if self._brc_log_ts.get(_k7) != df_4h.index[-1]:
@@ -2910,6 +3002,40 @@ class CompositeStateBuilder:
             logger.debug("[REF-LADDER] %s: %s", asset, e)
             return (None, 0)
 
+    def _pick_origin_ref(self, asset, direction, h_price, state, atr4, min_tests=2):
+        """
+        B1 (Desire, 15 Sep): R1 is the ORIGIN — the last 4H swing the move
+        launched from — not the nearest ladder rung. Steps:
+          1. take the last 4H swing on the correct side of H
+             (last_swing_low_4h for a long, last_swing_high_4h for a short)
+          2. if a tested ladder line (>= min_tests, 4H tf) sits at or beyond
+             that swing (below it for a long), snap to the NEAREST such line
+          3. else use the raw swing, tagged R1_SWING
+        Returns (price, tests, tag) or (None, 0, None).
+        """
+        try:
+            _sw = (getattr(state, "last_swing_low_4h", None) if direction == 1
+                   else getattr(state, "last_swing_high_4h", None))
+            if _sw is None or float(_sw) <= 0:
+                return (None, 0, None)
+            _sw = float(_sw)
+            _ok_side = (_sw < float(h_price)) if direction == 1 else (_sw > float(h_price))
+            if not _ok_side:
+                return (None, 0, None)
+            store = self._zone_levels.get(asset, []) or []
+            _cands = [l for l in store
+                      if l.get("tf") == "4H" and l.get("price") is not None
+                      and int(l.get("tests", 0) or 0) >= min_tests
+                      and ((float(l["price"]) <= _sw) if direction == 1 else (float(l["price"]) >= _sw))]
+            if _cands:
+                _cands.sort(key=lambda l: abs(_sw - float(l["price"])))
+                _best = _cands[0]
+                return (float(_best["price"]), int(_best.get("tests", 0) or 0), "LADDER")
+            return (_sw, 0, "R1_SWING")
+        except Exception as e:
+            logger.debug("[REF-ORIGIN] %s: %s", asset, e)
+            return (None, 0, None)
+
     def _ref_state(self, close4, r1, r2, direction):
         """
         REF-1 rev 3 SEG D: the level test that replaces the bar timer.
@@ -2938,7 +3064,7 @@ class CompositeStateBuilder:
             logger.debug("[REF-STATE] %s: %s", self.asset_type, e)
             return None
 
-    _GEAR_PATH = "data/ppl_gear.json"
+    _GEAR_PATH = os.environ.get("TBOT_GEAR_PATH", "data/ppl_gear.json")  # B11
 
     def _ppl_gear(self, pcfg):
         """
@@ -3050,7 +3176,10 @@ class CompositeStateBuilder:
             # kill mirror — ALWAYS the 4H close, whatever the gear
             if new4 and ((d == 1 and c4 < r1) or (d == -1 and c4 > r1)):
                 out["dead"] = True
-                logger.info("[KILL-R1] %s %s dir=%+d close4=%.5g R1=%.5g -> dead", asset, kind, d, c4, r1)
+                _kk = (asset, kind, "KILL")
+                if self._brc_log_ts.get(_kk) != ts4:
+                    self._brc_log_ts[_kk] = ts4
+                    logger.info("[KILL-R1] %s %s dir=%+d close4=%.5g R1=%.5g -> dead", asset, kind, d, c4, r1)
                 self._ppl.pop(key, None)
                 return out
 

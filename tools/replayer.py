@@ -369,15 +369,132 @@ def report():
           "has not been run. See --calibrate.")
 
 
+# ── B8: replayer reads PPL's fields ────────────────────────────────────────
+# Design deviation from the batch doc, stated: the doc asked for a join of
+# each closed trade to its [BRC] CONFIRMED / [ENTRY-MEASURE] LOG LINES by
+# asset + entry time. Checked the actual data first (logs/episodes/*.jsonl):
+# every record already IS one full closed trade -- entry_time, close_time,
+# close_reason, net_pnl_r, mfe_pct, mae_pct -- with the ENTIRE CompositeState
+# embedded under "composite_state", including PPL's brc_tier/brc_gear/
+# brc_retest_depth/brc_proof_dist_atr fields verbatim. That is strictly the
+# same information the two log lines carry, already structured and already
+# joined -- a text-log join by asset+timestamp would be strictly more
+# fragile (rotation, formatting drift, near-miss timestamps) for no gain.
+# Read the field directly instead.
+#
+# The doc's "count closed-trade rows, never the per-cycle [EPISODE] ids
+# (382/day)" warning is real but the cause is different from what it
+# implies: episode rows already are individual closed trades, not per-cycle
+# snapshots -- the inflation comes from non-market closures like
+# "abandoned_restart_gap" (a restart bookkeeping closure, no real exit),
+# which get filtered out below rather than counted as trade outcomes.
+
+_ADMIN_CLOSE_REASONS = {"abandoned_restart_gap", "abandoned", "manual_flat", ""}
+
+_DEPTH_BUCKET_EDGES = (0.25, 0.5)
+_DEPTH_BUCKET_LABELS = ("<0.25", "0.25-0.5", ">0.5")
+
+
+def _bucket(value, edges=_DEPTH_BUCKET_EDGES, labels=_DEPTH_BUCKET_LABELS):
+    if value is None:
+        return None
+    for edge, label in zip(edges, labels):
+        if value < edge:
+            return label
+    return labels[-1]
+
+
+def load_closed_trades():
+    """B8: real closed-trade rows (not per-cycle snapshots, not admin closes)."""
+    rows = []
+    skipped_admin = 0
+    for f in sorted(glob.glob("logs/episodes/*.jsonl")):
+        for line in open(f, encoding="utf-8"):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if not e.get("close_time") or not e.get("entry_time"):
+                continue
+            if e.get("net_pnl_r") is None:
+                continue
+            if (e.get("close_reason") or "") in _ADMIN_CLOSE_REASONS:
+                skipped_admin += 1
+                continue
+            rows.append(e)
+    n_assets = len(set(r.get("asset") for r in rows))
+    print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "
+          f"({skipped_admin} admin closures excluded)")
+    return rows
+
+
+# B8 field extractors, keyed by --by name. Each reads composite_state
+# directly -- see the design note above for why, not the log-line join.
+_BY_FIELDS = {
+    "tier": lambda e: (e.get("composite_state") or {}).get("brc_tier"),
+    "gear": lambda e: (e.get("composite_state") or {}).get("brc_gear"),
+    "retest_depth": lambda e: _bucket((e.get("composite_state") or {}).get("brc_retest_depth")),
+    "proof_dist_atr": lambda e: _bucket((e.get("composite_state") or {}).get("brc_proof_dist_atr")),
+}
+
+
+def replay_by(by, min_trades=30, min_trailing=10, min_assets=3):
+    """B8: group closed trades by a PPL field, report R/win-rate/mfe/mae.
+
+    Threshold rule (Desire, ruled): report only when >= 30 closed trades,
+    >= 10 trailing exits, >= 3 assets -- counted over the WHOLE eligible
+    sample (all rows with a non-null value for `by`), before grouping.
+    """
+    key_fn = _BY_FIELDS[by]
+    rows = load_closed_trades()
+    eligible = [r for r in rows if key_fn(r) is not None]
+
+    n_total = len(eligible)
+    n_trailing = sum(1 for r in eligible if "trailing" in (r.get("close_reason") or ""))
+    n_assets = len(set(r.get("asset") for r in eligible))
+
+    print(f"\nreplayer --by {by}: {n_total} eligible trades, "
+          f"{n_trailing} trailing exits, {n_assets} assets")
+
+    if n_total < min_trades or n_trailing < min_trailing or n_assets < min_assets:
+        print(f"below threshold (n={n_total}) -- need >= {min_trades} trades, "
+              f">= {min_trailing} trailing exits, >= {min_assets} assets")
+        return
+
+    groups = defaultdict(list)
+    for r in eligible:
+        groups[key_fn(r)].append(r)
+
+    print(f"\n{'group':<16} {'n':>5} {'avg_r':>8} {'win%':>7} {'avg_mfe%':>10} {'avg_mae%':>10}")
+    for k in sorted(groups, key=lambda x: str(x)):
+        grp = groups[k]
+        rs = [g["net_pnl_r"] for g in grp if g.get("net_pnl_r") is not None]
+        mfe = [g["mfe_pct"] for g in grp if g.get("mfe_pct") is not None]
+        mae = [g["mae_pct"] for g in grp if g.get("mae_pct") is not None]
+        wins = sum(1 for x in rs if x > 0)
+        avg_r = sum(rs) / len(rs) if rs else float("nan")
+        win_pct = 100 * wins / len(rs) if rs else float("nan")
+        avg_mfe = sum(mfe) / len(mfe) if mfe else float("nan")
+        avg_mae = sum(mae) / len(mae) if mae else float("nan")
+        print(f"{str(k):<16} {len(grp):>5} {avg_r:>+8.3f} {win_pct:>6.0f}% "
+              f"{avg_mfe:>+10.3f} {avg_mae:>+10.3f}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--by", choices=sorted(_BY_FIELDS.keys()),
+                     help="B8: group closed trades by a PPL field (tier/gear/retest_depth/proof_dist_atr)")
     ap.add_argument("--result-json", default="logs/backtests/20260822_164803/result.json")
     a = ap.parse_args()
     if a.calibrate:
         calibrate(a.result_json)
     elif a.report:
         report()
+    elif a.by:
+        replay_by(a.by)
     else:
         ap.print_help()

@@ -851,7 +851,8 @@ class PortfolioManager:
         self.session_start_time = None
         self.session_start_equity = None
         self.session_start_capital = None
-        self.state_file = Path("data/portfolio_state.pkl")
+        from src.utils.instance_paths import suffixed_path as _p_inst
+        self.state_file = Path(_p_inst("data/portfolio_state.pkl"))  # B11
 
         # Tracks whether the last close per asset was manual (Telegram command / force-close)
         # vs. natural (VTM, SL, TP).  Used by check_min_time_between_trades() to decide

@@ -1007,6 +1007,12 @@ class ShadowTradingEngine:
         # feed the trail-multiplier learner (Desire's ruling, 27 Aug -- both
         # sources feed it, tagged separately, live weighted). _rec already
         # carries episode_id via to_dict() (Item 1B).
+        # B12a: _rec's keys per to_dict() -- "r_multiple"/"mfe_r" doc-suggested
+        # names don't exist; net_pnl_r/mfe_r are the real fields.
+        logger.info("[SHADOW] Closed %s %s @ %.5f reason=%s r=%.2f mfe_r=%.2f",
+                    _rec.get("side"), _rec.get("asset"), float(_rec.get("close_price") or 0),
+                    _rec.get("close_reason"), float(_rec.get("net_pnl_r") or 0),
+                    float(_rec.get("mfe_r") or 0))
         write_episode({**_rec, "source": "shadow"})
         # Keep results bounded
         if len(self.closed_results) > self._max_closed:
