@@ -118,9 +118,10 @@ from src.data.btc_flow_harvester import BTCFlowHarvester  # BTC Flow batch, 17-A
 
 def setup_logging(config):
     """Setup logging with proper encoding and rotation"""
+    from src.utils.instance_paths import suffixed_path as _p_inst
     log_config = config.get("logging", {})
     log_level = getattr(logging, log_config.get("level", "INFO"))
-    log_file = log_config.get("file", "logs/trading_bot.log")
+    log_file = _p_inst(log_config.get("file", "logs/trading_bot.log"))  # B11
 
     Path(log_file).parent.mkdir(exist_ok=True)
 
@@ -446,7 +447,8 @@ class TradingBot:
         # already funded a trade -- same failure the cooldown clock had
         # before STEP 4.6 was added.
         self.used_proofs: dict = {}
-        self._used_proofs_path = Path("logs/used_proofs.json")
+        from src.utils.instance_paths import suffixed_path as _p_inst
+        self._used_proofs_path = Path(_p_inst("logs/used_proofs.json"))  # B11
         self.last_market_status_log = {}  # Per-asset logging dictionary
         # Startup warmup: block all new trade executions until the first complete
         # trading cycle has finished. This prevents the startup race condition where
@@ -2222,6 +2224,21 @@ class TradingBot:
                     mtf_regime["composite_state"] = _cs
                 except Exception as _cs_err:
                     logger.debug("[HYBRID/council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+            # B6: _update_trend_lifecycle is only ever called from the legacy
+            # SignalAggregator.get_aggregated_signal path -- the council
+            # (aggregator.get_aggregated_signal below) overrides that method
+            # and never calls it, so lifecycle_phase has been defaulting to
+            # "HEALTHY" for every council trade. Call it here, on the same
+            # _cs object the council reads via governor_data["composite_state"]
+            # a few lines down, before that read happens.
+            try:
+                _lc_builder = getattr(_perf_agg, "_cs_builder", None)
+                if _cs is not None and _lc_builder is not None and hasattr(_lc_builder, "_update_trend_lifecycle"):
+                    _lc_bar_dt = df.index[-1] if df is not None and len(df) else None
+                    _lc_builder._update_trend_lifecycle(_cs, str(mtf_regime.get("regime", "NEUTRAL")), current_dt=_lc_bar_dt)
+            except Exception as _lc_e:
+                logger.warning("[LIFECYCLE] %s: council-path call failed: %s", asset_name, _lc_e)
 
             # Hold council signals until Livermore is warm — same rule
             # performance mode already enforces internally.
@@ -4445,6 +4462,20 @@ class TradingBot:
                     except Exception as _sk:
                         logger.error(f"[VTM LOOP] System metrics save failed: {_sk}")
 
+                    # B7: same 30s-ish cadence as the system-metrics save above --
+                    # persist every asset's builder stores (setups, BRC/PPL
+                    # memory, zone ladders) so a restart does not wipe them.
+                    for _b7_asset, _b7_agg in (self.aggregators or {}).items():
+                        try:
+                            _b7_builder = getattr(_b7_agg, "_cs_builder", None)
+                            if _b7_builder is None and isinstance(_b7_agg, dict):
+                                _b7_cand = _b7_agg.get("performance") or _b7_agg.get("livermore")
+                                _b7_builder = getattr(_b7_cand, "_cs_builder", None)
+                            if _b7_builder is not None and hasattr(_b7_builder, "persist_stores"):
+                                _b7_builder.persist_stores()
+                        except Exception as _b7_e:
+                            logger.warning(f"[PERSIST] {_b7_asset}: persist_stores failed: {_b7_e}")
+
                 # Check if there are any positions to manage to avoid unnecessary work
                 if self.portfolio_manager and self.portfolio_manager.get_open_positions_count() > 0:
                     self._check_VTM_positions()
@@ -5751,6 +5782,18 @@ class TradingBot:
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
                         logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+                # B6: same lifecycle-classifier wiring as site 1 of 3 (~:2221)
+                # -- this council dispatch (dict-aggregator "council" mode)
+                # reads governor_data["composite_state"] too and would
+                # otherwise default lifecycle_phase to "HEALTHY" forever.
+                try:
+                    _lc_builder = getattr(_lsm_comp, "_cs_builder", None)
+                    if _cs is not None and _lc_builder is not None and hasattr(_lc_builder, "_update_trend_lifecycle"):
+                        _lc_bar_dt = df.index[-1] if df is not None and len(df) else None
+                        _lc_builder._update_trend_lifecycle(_cs, str(mtf_regime.get("regime", "NEUTRAL")), current_dt=_lc_bar_dt)
+                except Exception as _lc_e:
+                    logger.warning("[LIFECYCLE] %s: council-path call failed: %s", asset_name, _lc_e)
 
                 # Hold council signals until Livermore is warm — same rule
                 # performance mode already enforces internally.
@@ -7809,6 +7852,18 @@ class TradingBot:
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
                         logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
+
+                # B6: same lifecycle-classifier wiring as sites 1/2 of 3
+                # -- this ranking/caching pass reads governor_data via the
+                # same council call and would otherwise default
+                # lifecycle_phase to "HEALTHY" forever.
+                try:
+                    _lc_builder = getattr(_lsm_comp, "_cs_builder", None)
+                    if _cs is not None and _lc_builder is not None and hasattr(_lc_builder, "_update_trend_lifecycle"):
+                        _lc_bar_dt = df.index[-1] if df is not None and len(df) else None
+                        _lc_builder._update_trend_lifecycle(_cs, str(mtf_regime.get("regime", "NEUTRAL")), current_dt=_lc_bar_dt)
+                except Exception as _lc_e:
+                    logger.warning("[LIFECYCLE] %s: council-path call failed: %s", asset_name, _lc_e)
 
                 # Hold council signals until Livermore is warm — same rule
                 # performance mode already enforces internally.

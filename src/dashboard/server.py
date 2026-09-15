@@ -1117,6 +1117,11 @@ _ASSET_FIELDS = [
     ("risk.runner_trail_atr_multiplier",    "Runner Trail ATR Multiplier",   "float", {"min": 0.5, "max": 5.0, "step": 0.1}),
     ("risk.time_stop_trend",                "Time Stop — Trend (bars)",      "int",   {"min": 12, "max": 240, "step": 4}),
     ("risk.time_stop_reversion",            "Time Stop — Reversion (bars)",  "int",   {"min": 4,  "max": 72,  "step": 2}),
+    # B10: the two keys the batch doc wanted exposed. use_ema_structure and
+    # atr_multiplier above already resolve correctly (assets.{asset}.{sub_path},
+    # see the write/read helpers below) -- these two use the same convention.
+    ("risk.structural_stop_allowance_atr",  "Structural Stop Allowance (ATR)","float", {"min": 0.1, "max": 1.0, "step": 0.05}),
+    ("risk.min_sl_pct",                     "Min SL %",                      "pct",   {"min": 0.0, "max": 0.02, "step": 0.0005}),
 ]
 
 def _cfg_get(cfg, dot_path):
