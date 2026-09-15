@@ -4066,6 +4066,11 @@ class PortfolioManager:
             ),
             "rr_at_entry": getattr(_exit_vtm, "rr_at_entry", None) if _exit_vtm else None,
             "min_sl_bound": getattr(_exit_vtm, "min_sl_bound", None) if _exit_vtm else None,
+            "sl_path": getattr(_exit_vtm, "sl_path", []),   # DIARY-1 D2
+            "state_age_s": (
+                (getattr(_exit_vtm, "signal_details", {}) or {}).get("entry_measure", {}).get("state_age_s")
+                if _exit_vtm else None
+            ),   # DIARY-1 D3
         })
 
         logger.info(

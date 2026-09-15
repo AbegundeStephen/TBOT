@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def write_episode(record: dict) -> None:
     """Append one closed episode to today's daily ledger file."""
     try:
+        record.setdefault("schema_version", 2)   # DIARY-1: v1 = pre-15 Sep rows; v2 = management path + state_age + pair fields
         _dir = Path("logs/episodes")
         _dir.mkdir(parents=True, exist_ok=True)
         _path = _dir / f"episodes_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
