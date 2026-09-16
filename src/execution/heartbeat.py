@@ -103,14 +103,28 @@ class HeartbeatMonitor:
         return [msg for ts, msg in snap if ts >= cutoff]
 
     def _count_tag(self, snap, tag, window_min, asset=None):
+        """HOTFIX: found live -- most registry tags are literal log prefixes
+        like "[KILL-R1]", and [ / ] are regex character-class delimiters.
+        re.compile("[KILL-R1]") does NOT raise (so the old re.error fallback
+        never triggered); it silently compiles to a character class matching
+        any ONE of {K,I,L,R,1,-} -- which matches nearly every log line,
+        wildly inflating every count. Only treat a tag as a real regex when
+        it visibly asks for one (contains ".*" -- every actual regex tag in
+        the registry, e.g. "Fetching .* H4", uses this); everything else is
+        a literal substring match, no compilation at all.
+        """
         lines = self._lines_in_window(snap, window_min)
-        try:
-            pattern = re.compile(tag)
-        except re.error:
-            pattern = re.compile(re.escape(tag))
+        if ".*" in tag:
+            try:
+                pattern = re.compile(tag)
+            except re.error:
+                pattern = re.compile(re.escape(tag))
+            match = pattern.search
+        else:
+            match = lambda msg: tag in msg
         n = 0
         for msg in lines:
-            if pattern.search(msg) and (asset is None or asset in msg):
+            if match(msg) and (asset is None or asset in msg):
                 n += 1
         return n
 
@@ -172,7 +186,7 @@ class HeartbeatMonitor:
                 continue
         return rows[-limit:]
 
-    def _check_non_null(self, p):
+    def _check_non_null(self, p, snap):
         if "config_path" in p:
             path = p["config_path"]
             parts = path.split(".")
@@ -205,6 +219,34 @@ class HeartbeatMonitor:
             missing = sum(1 for r in rows if r.get(field) is None or r.get(field) == "")
             ok = missing == 0
             return ok, (f"ledger field {field}: missing on {missing}/{len(rows)} recent rows" if not ok else "")
+        if "tag" in p and "extract" in p:
+            # HOTFIX: reload.keys (tag+extract+min_value) and brc.confirmed_fields
+            # (tag+extract list) were falling through to the unconditional
+            # `return True, ""` below -- silently passing forever, never
+            # actually checking anything.
+            win = p.get("window_min", 1440)
+            lines = self._lines_in_window(snap, win)
+            tag = p["tag"]
+            extracts = p["extract"] if isinstance(p["extract"], list) else [p["extract"]]
+            match_line = None
+            for msg in reversed(lines):
+                if tag in msg:
+                    match_line = msg
+                    break
+            if match_line is None:
+                return True, ""   # tag hasn't appeared in-window yet -- not a failure
+            if "min_value" in p:
+                ex = extracts[0]
+                if ex not in match_line:
+                    return False, f"{tag}: '{ex}' not found in matching line"
+                try:
+                    val = int(match_line.split(ex, 1)[1].split()[0].strip(","))
+                except Exception:
+                    return False, f"{tag}: could not parse value after '{ex}'"
+                ok = val >= p["min_value"]
+                return ok, (f"{tag} {ex}: {val} < min_value {p['min_value']}" if not ok else "")
+            missing = [ex for ex in extracts if ex not in match_line]
+            return (not missing), (f"{tag}: missing field(s) {missing}" if missing else "")
         return True, ""
 
     def _check_set_ledger(self, p):
@@ -231,7 +273,7 @@ class HeartbeatMonitor:
                     return self._check_set_ledger(p)
                 return self._check_set(p, snap)
             if ptype == "non_null":
-                return self._check_non_null(p)
+                return self._check_non_null(p, snap)
         except Exception as e:
             return None, f"checker error: {e}"
         return True, ""
