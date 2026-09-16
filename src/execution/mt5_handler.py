@@ -374,22 +374,31 @@ class MT5ExecutionHandler:
                     )
                 return live_price
 
-            # Downgrade to DEBUG when the market is expected to be closed —
-            # stale ticks outside trading hours are normal, not actionable.
-            # USTEC uses equity hours; crypto is 24/7 (always warn); everything
-            # else (FX, Gold, Oil) uses forex session hours.
+            # HF-2 M2: downgrade to DEBUG when the market is expected to be
+            # closed -- stale ticks outside trading hours are normal, not
+            # actionable. Uses the same MarketHours.get_market_status() +
+            # is_rollover_dead_zone() combination, and the same
+            # stocks-vs-forex mapping, main.py's check_market_hours() uses
+            # for _mkt_log_type -- confirmed live that this site's own
+            # mapping had drifted from main.py's (USTEC was still routed to
+            # is_us_stock_market_open() here, months after USTEC moved to
+            # forex-style near-continuous hours everywhere else).
             _sym_key = symbol.lower().rstrip("m")
             if "btc" in _sym_key or "eth" in _sym_key:
                 _mkt_open = True          # crypto never sleeps; stale tick is always unexpected
-            elif _sym_key in ("ustec", "us100", "nas100", "spx"):
-                _mkt_open = MarketHours.is_us_stock_market_open()
             else:
-                _mkt_open = MarketHours.is_forex_market_open()
+                _mkt_type = "stocks" if _sym_key in ("us100", "nas100", "spx") else "forex"
+                _status, _ = MarketHours.get_market_status(_mkt_type)
+                _mkt_open = (_status != "CLOSED") and not MarketHours.is_rollover_dead_zone()
 
             _log_tick = logger.warning if _mkt_open else logger.debug
             _tick_ctx = "" if _mkt_open else " (market closed — expected)"
+            # The companion last_error line follows the same rule -- MT5's
+            # own "no error" resting state is code 1 ("Success"), not 0, so
+            # this used to log a fake warning on every single stale tick
+            # regardless of market hours.
             if mt5.last_error()[0] != 0:
-                logger.warning(f"[MT5] {symbol}: last_error={mt5.last_error()}")
+                _log_tick(f"[MT5] {symbol}: last_error={mt5.last_error()}")
             _sym_info = mt5.symbol_info(symbol)
             if _sym_info is not None and not _sym_info.visible:
                 logger.warning(f"[MT5] {symbol}: not visible in Market Watch — re-selecting")

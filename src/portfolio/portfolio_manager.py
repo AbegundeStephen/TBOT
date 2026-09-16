@@ -900,7 +900,7 @@ class PortfolioManager:
             return cfg.get("mt5_symbol") or cfg.get("symbol", asset_name)
         return cfg.get("binance_symbol") or cfg.get("symbol", asset_name)
 
-    def _save_system_metrics(self):
+    def _save_system_metrics(self, market_status=None):
         """
         STOP-1 SEG C: persist system-wide metrics independently of whether any
         position is open.
@@ -914,6 +914,10 @@ class PortfolioManager:
         /reset_equity re-baseline) was lost on the next restart.
 
         Cheap, atomic, and safe to call every cycle.
+
+        HF-2 M1: market_status is TradingBot's, not this class's -- passed in
+        by the caller (main.py) each tick, since save_system_state() replaces
+        the whole file and this is the only writer.
         """
         try:
             system_metrics = {
@@ -922,6 +926,7 @@ class PortfolioManager:
                 "realized_pnl_today": self.realized_pnl_today,
                 "mode": self.mode,
                 "timestamp": datetime.now().isoformat(),
+                "market_status": market_status or {},
             }
             save_system_state(system_metrics)
         except Exception as e:

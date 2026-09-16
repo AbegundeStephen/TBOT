@@ -450,6 +450,23 @@ class TradingBot:
         from src.utils.instance_paths import suffixed_path as _p_inst
         self._used_proofs_path = Path(_p_inst("logs/used_proofs.json"))  # B11
         self.last_market_status_log = {}  # Per-asset logging dictionary
+        # HF-2 M1: one status per asset, read by MT5/VTM/heartbeat/persistence
+        # instead of each re-deriving it. Restored below so the first cycle
+        # after a restart doesn't log a spurious OPEN->CLOSED/CLOSED->OPEN
+        # transition against an empty dict.
+        self.market_status = {}   # asset -> (status, message, seconds_until_open)
+        self._vtm_pause_logged = {}   # HF-2 M3: asset -> bool, "already logged paused"
+        try:
+            from src.utils.state_manager import load_system_state as _load_sys_state
+            _saved_state = _load_sys_state()
+            if _saved_state and _saved_state.get("market_status"):
+                self.market_status = {
+                    k: tuple(v) for k, v in _saved_state["market_status"].items()
+                }
+                logger.info("[MARKET] restored status for %d asset(s) from prior session",
+                            len(self.market_status))
+        except Exception as _ms_restore_err:
+            logger.debug(f"[MARKET] status restore skipped: {_ms_restore_err}")
         # Startup warmup: block all new trade executions until the first complete
         # trading cycle has finished. This prevents the startup race condition where
         # rapid successive cycles fire before the cooldown clock is seeded from DB,
@@ -592,7 +609,7 @@ class TradingBot:
         try:
             from src.execution.heartbeat import HeartbeatMonitor
             self.heartbeat_monitor = HeartbeatMonitor(
-                config=self.config, telegram_bot=getattr(self, "telegram_bot", None),
+                config=self.config, telegram_bot=getattr(self, "telegram_bot", None), bot=self,
             )
         except Exception as _hb_init_err:
             logger.warning(f"[HEARTBEAT] init failed: {_hb_init_err}")
@@ -4498,7 +4515,7 @@ class TradingBot:
                 if self.portfolio_manager and _now_k1 - _last_metrics_save >= state_save_interval:
                     _last_metrics_save = _now_k1
                     try:
-                        self.portfolio_manager._save_system_metrics()
+                        self.portfolio_manager._save_system_metrics(market_status=self.market_status)
                     except Exception as _sk:
                         logger.error(f"[VTM LOOP] System metrics save failed: {_sk}")
 
@@ -4598,9 +4615,33 @@ class TradingBot:
             # Iterate over a copy of the dictionary's items
             for position_id, position in list(self.portfolio_manager.positions.items()):
                 asset_name = position.asset
-                
+
                 if not self.config["assets"].get(asset_name, {}).get("enabled", False):
                     continue
+
+                # HF-2 M3: pause management on a closed market. Broker-side
+                # SL/TP are untouched -- this only skips the bot's own
+                # trail/breakeven/structural adjustments for this position
+                # this pass. Per-position `continue`, not a literal sleep --
+                # this loop iterates every open position across every asset
+                # in one pass, and blocking it would stall management of
+                # every OTHER still-open-market position too. The outer
+                # loop's own ~update_interval-second cadence already gives
+                # the "paused" effect: this check re-runs every pass until
+                # the status flips back to OPEN.
+                _mkt = self.market_status.get(asset_name, ("OPEN",))
+                if _mkt[0] == "CLOSED":
+                    if not self._vtm_pause_logged.get(asset_name):
+                        self._vtm_pause_logged[asset_name] = True
+                        _until = _mkt[2] if len(_mkt) > 2 else 300
+                        logger.info(
+                            f"[VTM] {asset_name}: market closed — management paused "
+                            f"until {'%.0fh' % (_until / 3600) if _until else '+5min'}"
+                        )
+                    continue
+                elif self._vtm_pause_logged.get(asset_name):
+                    self._vtm_pause_logged[asset_name] = False
+                    logger.info(f"[VTM] {asset_name}: market open — management resumed")
 
                 # Skip positions with no real quantity (closed/ghost entries)
                 if not getattr(position, "quantity", None) or position.quantity <= 0:
@@ -5379,24 +5420,31 @@ class TradingBot:
 
         # 2. Check Weekend Block for Institutional Assets (Gold, USOIL, Forex, Indices)
         is_open = MarketHours.should_trade(asset_name)
+        # HF-2 M1: the type-selection this branch already did is what every
+        # OTHER consumer (MT5 tick warnings, VTM management pause, heartbeat)
+        # needs too -- computed once here regardless of open/closed so both
+        # branches below can store the same shape into self.market_status.
+        _mkt_log_type = (
+            "stocks" if asset_name_upper in ("US100", "NAS100", "SPX")
+            else "forex"
+        )
         if not is_open:
-            # Use the correct market type so the log message matches the asset.
-            # USTEC now trades USOIL's near-continuous forex-style schedule
-            # (should_trade() routes it to is_forex_market_open()), so it gets
-            # the "forex" wording here too — labeling it "stocks" would print
-            # a message describing the old NYSE-hours gate it no longer uses.
-            _mkt_log_type = (
-                "stocks" if asset_name_upper in ("US100", "NAS100", "SPX")
-                else "forex"
-            )
             status, message = MarketHours.get_market_status(_mkt_log_type)
-            current_hour = datetime.now().hour
-
-            # Use per-asset logging
-            if self.last_market_status_log.get(asset_name) != current_hour:
-                logger.info(f"[MARKET] {asset_name}: {message}")
-                self.last_market_status_log[asset_name] = current_hour
+            _until_open = MarketHours.time_until_market_open(_mkt_log_type)
+            _prev = self.market_status.get(asset_name)
+            self.market_status[asset_name] = (status, message, _until_open)
+            if _prev is None or _prev[0] != status:
+                logger.info(f"[MARKET] {asset_name}: {status} — {message}")
             return False
+
+        # HF-2 M1: record/announce the OPEN transition too -- rollover dead
+        # zone and the session filter below are finer-grained entry
+        # restrictions on an otherwise-open market, not "the market is
+        # closed" in the sense every other market_status consumer means.
+        _prev_open = self.market_status.get(asset_name)
+        self.market_status[asset_name] = ("OPEN", "Market open", 0)
+        if _prev_open is not None and _prev_open[0] != "OPEN":
+            logger.info(f"[MARKET] {asset_name}: OPEN")
 
         # 3. Rollover Dead Zone Protection (21:30 - 23:30 UTC)
         # Reason: Spreads explode and liquidity vanishes during this period.
@@ -8554,7 +8602,11 @@ class TradingBot:
             import json as _json
             from datetime import timedelta as _td
             _day = (datetime.now() - _td(days=1)).strftime("%Y-%m-%d")
-            _ep_path = Path(f"logs/episodes/episodes_{_day}.jsonl")
+            # Suffix the DIRECTORY, matching write_episode()'s own
+            # convention exactly -- suffixing the filename instead would
+            # point this reader at a path the writer never creates.
+            from src.utils.instance_paths import suffixed_path as _p_inst_ep
+            _ep_path = Path(_p_inst_ep("logs/episodes")) / f"episodes_{_day}.jsonl"
             if not _ep_path.exists():
                 logger.info(f"[EP-VALID] {_day}: no episodes closed")
                 return
@@ -9400,11 +9452,21 @@ def main():
     _pid_path.write_text(str(_os.getpid()))
     logger.info(f"[MAIN] PID {_os.getpid()} written to {_pid_path}")
 
+    # HF-2 I2: there is no --dry-run CLI flag anywhere in this file (no
+    # argparse exists at all) -- the only real safety mechanism is
+    # config["trading"]["mode"] == "paper". Both the config path here and
+    # TradingBot(...) below were hardcoded literals, so a second instance
+    # had no way to run on its own config (and therefore its own mode)
+    # without this -- it would have loaded the SAME config.json as the
+    # live instance, including trading.mode="live", and could have sent
+    # real duplicate orders. Same env-var pattern as TBOT_GEAR_PATH/
+    # TBOT_INSTANCE.
+    _config_path = os.environ.get("TBOT_CONFIG_PATH", "config/config.json")
     try:
-        with open("config/config.json", encoding="utf-8") as f:
+        with open(_config_path, encoding="utf-8") as f:
             config = json.load(f)
     except FileNotFoundError:
-        print("[FAIL] config/config.json not found!")
+        print(f"[FAIL] {_config_path} not found!")
         sys.exit(1)
 
     # Check required models exist
@@ -9450,7 +9512,7 @@ def main():
 
     # Create and run the trading bot
     try:
-        bot = TradingBot("config/config.json")
+        bot = TradingBot(_config_path)
         bot.start()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (KeyboardInterrupt)")

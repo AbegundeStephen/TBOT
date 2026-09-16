@@ -233,15 +233,13 @@ class CompositeStateBuilder:
                 "[Livermore] Init failed — state machine disabled: %s", _lsm_err
             )
 
-        # B7: restore setups/memory from before the last restart, if fresh
-        # enough. Must be the last line of __init__ -- reads _STATE_KEYS,
-        # set earlier in this method.
-        _max_age_s = 6 * 3600
-        try:
-            _max_age_s = int((self._config.get("phase_config", {}) or {}).get("builder_state_max_age_s", _max_age_s))
-        except Exception:
-            pass
-        self.restore_stores(max_age_s=_max_age_s)
+        # B7 / HF-2 M5: stage setups/memory from before the last restart.
+        # Must be the last line of __init__ -- reads _STATE_KEYS, set
+        # earlier in this method. The actual fresh-enough decision (bars
+        # passed, not wall-clock age) happens on the first real
+        # _build_composite_state call -- see _apply_pending_restore().
+        self._pending_restore = None
+        self.restore_stores()
 
     # B11: doc's file list for path-suffixing named main.py/state_manager.py/
     # portfolio_manager.py, but _PERSIST_DIR (added this same batch, B7) lives
@@ -257,6 +255,7 @@ class CompositeStateBuilder:
             os.makedirs(self._PERSIST_DIR, exist_ok=True)
             _payload = {k: getattr(self, k, None) for k in self._STATE_KEYS}
             _payload["__saved_at"] = time.time()
+            _payload["__last_bar_ts"] = getattr(self, "_last_bar_ts", None)   # HF-2 M5
             _tmp = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl.tmp")
             _dst = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl")
             with open(_tmp, "wb") as _f:
@@ -265,27 +264,57 @@ class CompositeStateBuilder:
         except Exception as _e:
             logger.warning("[PERSIST] %s: store save failed: %s", self.asset_type, _e)
 
-    def restore_stores(self, max_age_s=6 * 3600):
-        """B7: load stores saved by persist_stores if they are fresh enough."""
+    def restore_stores(self):
+        """
+        HF-2 M5: stage saved stores for restoration. The actual "is this
+        fresh enough" decision now counts closed 1H bars between the save
+        and now, not wall-clock hours (a weekend is 0 bars but 60+ hours,
+        and the old wall-clock check would have refused a perfectly good
+        Friday-close save on Monday morning). That count needs live df
+        data, which does not exist yet at __init__ time (when this runs) --
+        _apply_pending_restore() finishes the job on the builder's first
+        real _build_composite_state call instead.
+        """
         try:
-            import os, pickle, time
+            import os, pickle
             _src = os.path.join(self._PERSIST_DIR, f"{self.asset_type}.pkl")
             if not os.path.exists(_src):
                 logger.info("[PERSIST] %s: no saved stores — starting empty", self.asset_type)
+                self._pending_restore = None
                 return
             with open(_src, "rb") as _f:
-                _payload = pickle.load(_f)
-            _age = time.time() - float(_payload.get("__saved_at", 0))
-            if _age > max_age_s:
-                logger.warning("[PERSIST] %s: saved stores are %.0f min old (> %.0f) — ignored", self.asset_type, _age / 60, max_age_s / 60)
+                self._pending_restore = pickle.load(_f)
+            logger.info("[PERSIST] %s: staged saved stores, pending bar-count confirmation on first cycle",
+                        self.asset_type)
+        except Exception as _e:
+            logger.warning("[PERSIST] %s: store restore failed: %s", self.asset_type, _e)
+            self._pending_restore = None
+
+    def _apply_pending_restore(self, df):
+        """HF-2 M5: called once, from the first real _build_composite_state
+        call, once live df data exists to count bars against."""
+        _payload = self._pending_restore
+        self._pending_restore = None
+        try:
+            import time
+            _saved_last_bar_ts = _payload.get("__last_bar_ts")
+            _idx = df["timestamp"] if "timestamp" in df.columns else df.index
+            _bars_passed = int((_idx > _saved_last_bar_ts).sum()) if _saved_last_bar_ts is not None else None
+            _max_bars = int((getattr(self, "phase_config", {}) or {}).get("builder_state_max_bars", 6))
+            _saved_at = _payload.get("__saved_at", 0)
+            _age_h = (time.time() - float(_saved_at)) / 3600 if _saved_at else 0.0
+            if _bars_passed is None or _bars_passed > _max_bars:
+                logger.warning("[PERSIST] %s: saved stores refused (bars passed=%s > %s)",
+                               self.asset_type, _bars_passed, _max_bars)
                 return
             _n = 0
             for k in self._STATE_KEYS:
                 if k in _payload and _payload[k] is not None:
                     setattr(self, k, _payload[k]); _n += 1
-            logger.info("[PERSIST] %s: restored %d stores (%.0f min old)", self.asset_type, _n, _age / 60)
+            logger.info("[PERSIST] %s: restored %d stores (bars passed=%d, saved %.0fh ago)",
+                        self.asset_type, _n, _bars_passed, _age_h)
         except Exception as _e:
-            logger.warning("[PERSIST] %s: store restore failed: %s", self.asset_type, _e)
+            logger.warning("[PERSIST] %s: pending restore apply failed: %s", self.asset_type, _e)
 
     # ── PHASE 1: Livermore warm-start ────────────────────────────────────────
 
@@ -367,6 +396,15 @@ class CompositeStateBuilder:
 
         if df is None or len(df) < 20:
             return state
+
+        # HF-2 M5: the last closed 1H bar this builder has actually seen,
+        # tracked unconditionally (not just inside the BRC block) so every
+        # persisted store -- not only BRC-specific ones -- can be aged in
+        # bars rather than wall-clock time. Same backtest-vs-live index
+        # handling as the BRC block's own _bar_ts derivation.
+        self._last_bar_ts = df["timestamp"].iloc[-1] if "timestamp" in df.columns else df.index[-1]
+        if getattr(self, "_pending_restore", None) is not None:
+            self._apply_pending_restore(df)
 
         # ── D.3: Session Context ──────────────────────────────────────────
         # Use bar timestamp when available (critical in backtest where wall-clock
@@ -2649,14 +2687,20 @@ class CompositeStateBuilder:
                     state.choch_detected = True
                     state.choch_bullish = True
                     if not _j1_lsm:
-                        logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
-                                    self.asset_type, _lsm_state, _lsm4, _s4)
+                        _kj = (self.asset_type, "J1-4H")   # HF-2 E2: once per candle
+                        if self._brc_log_ts.get(_kj) != df.index[-1]:
+                            self._brc_log_ts[_kj] = df.index[-1]
+                            logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
+                                        self.asset_type, _lsm_state, _lsm4, _s4)
                 elif _parent_up and _ll and _j1_down_ok:
                     state.choch_detected = True
                     state.choch_bearish = True
                     if not _j1_lsm:
-                        logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
-                                    self.asset_type, _lsm_state, _lsm4, _s4)
+                        _kj = (self.asset_type, "J1-4H")   # HF-2 E2: once per candle
+                        if self._brc_log_ts.get(_kj) != df.index[-1]:
+                            self._brc_log_ts[_kj] = df.index[-1]
+                            logger.info("[J1-4H] %s: CHoCH admitted on 4H agreement (lsm1h=%s lsm4h=%s struct4h=%s)",
+                                        self.asset_type, _lsm_state, _lsm4, _s4)
 
                 # Tiebreak: an expanding range (higher high AND lower low) can
                 # satisfy both. The bot is passive by default and continuation
@@ -3247,6 +3291,7 @@ class CompositeStateBuilder:
                             asset, kind, d, c3tf, cB, h2p, tol, dist, "PROOF" if cleared else "no")
                 if cleared:
                     rec["count"] = 3
+                    rec["proof_dist_atr"] = dist   # HF-2 E1: persist past the proving cycle
                     out.update(proof=True, proof_dist_atr=dist)
                     logger.info("[COUNT-3] %s %s dir=%+d tf=%s PROOF close=%.5g H2=%.5g dist=%.2fATR4 tier=%s gear=%s/%s",
                                 asset, kind, d, c3tf, cB, h2p, dist, rec["tier"], c1tf, c3tf)
@@ -3254,7 +3299,8 @@ class CompositeStateBuilder:
             rec.update(last_ts4=ts4, last_ts1=ts1, last_tsA=tsA, last_tsB=tsB)
             if new1:
                 rec["last_c1"] = c1
-            out.update(count=rec["count"], h2=rec["h2"], tier=rec["tier"], retest_depth=rec["retest_depth"])
+            out.update(count=rec["count"], h2=rec["h2"], tier=rec["tier"], retest_depth=rec["retest_depth"],
+                       proof_dist_atr=rec.get("proof_dist_atr"))   # HF-2 E1
             if rec["count"] == 3:
                 out["proof"] = True
             return out
