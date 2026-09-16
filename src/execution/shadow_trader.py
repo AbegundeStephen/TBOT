@@ -473,7 +473,13 @@ class ShadowTradingEngine:
         # accumulated the 200+ closed trades the calibration logic needs. We now
         # append every closed trade to an append-only daily JSONL and reload the
         # recent history on startup so the scorecard survives restarts.
-        self._archive_dir = archive_dir
+        # HF-2 I3: the known gap in B11's path-suffixing -- every caller's
+        # archive_dir (the bot's own "logs/shadow" default and
+        # scalp_alert_engine's "logs/shadow_scalp") is suffixed here, so
+        # instance B's shadow trades never land in the live instance's
+        # archive regardless of which caller constructed this engine.
+        from src.utils.instance_paths import suffixed_path as _p_inst
+        self._archive_dir = _p_inst(archive_dir)
         try:
             import os as _os
             _os.makedirs(self._archive_dir, exist_ok=True)

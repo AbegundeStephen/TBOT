@@ -19,6 +19,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from src.utils.instance_paths import suffixed_path as _suffixed_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +28,10 @@ def write_episode(record: dict) -> None:
     """Append one closed episode to today's daily ledger file."""
     try:
         record.setdefault("schema_version", 2)   # DIARY-1: v1 = pre-15 Sep rows; v2 = management path + state_age + pair fields
-        _dir = Path("logs/episodes")
+        # HF-2 I3: logs/episodes/ was the known gap in B11's path-suffixing --
+        # instance B's episodes would otherwise land in the SAME daily ledger
+        # file the live instance reads, corrupting both instances' diaries.
+        _dir = Path(_suffixed_path("logs/episodes"))
         _dir.mkdir(parents=True, exist_ok=True)
         _path = _dir / f"episodes_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
         with open(_path, "a", encoding="utf-8") as f:

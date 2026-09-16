@@ -8,6 +8,7 @@ Provides notifications and remote control capabilities
 import logging
 import asyncio
 import io
+import os
 import sys
 import html
 from datetime import datetime, timedelta
@@ -39,6 +40,15 @@ from telegram.constants import ParseMode
 from telegram.error import NetworkError, TimedOut, RetryAfter, TelegramError
 
 logger = logging.getLogger(__name__)
+
+# HF-2 H5: distinct from None so send_notification can tell "caller didn't
+# specify a parse_mode" (use the MARKDOWN default) apart from "caller
+# explicitly wants no entity parsing" (parse_mode=None) -- both used to
+# collapse to the same falsy value, so passing None to disable Markdown
+# silently did nothing; a message with an odd number of literal
+# underscores (e.g. a promise id like "kill.once_per_bar") left an
+# unclosed italics span and Telegram rejected the whole message.
+_PARSE_MODE_UNSET = object()
 
 
 # ... [KEEP EXISTING SignalMonitoringIntegration and admin_only classes UNCHANGED] ...
@@ -3419,11 +3429,20 @@ class TradingTelegramBot:
             except:
                 pass
 
-    async def send_notification(self, message: str, disable_preview: bool = True, parse_mode: str = None):
+    async def send_notification(self, message: str, disable_preview: bool = True, parse_mode=_PARSE_MODE_UNSET):
         """
         Send notification with proper error handling and retry logic.
-        parse_mode: "HTML" | "Markdown" | None (defaults to ParseMode.MARKDOWN)
+        parse_mode: "HTML" | "Markdown" | None (None = no entity parsing,
+        sent as plain text) | omitted (defaults to ParseMode.MARKDOWN).
+
+        HF-2 I4: a second, side-by-side instance (TBOT_INSTANCE=B) reading
+        the same bot_token/admin_ids as the live instance would otherwise
+        double every alert into the same chat with no way to tell which
+        instance sent it. Prefixed here, once, rather than at every one of
+        the many call sites across the codebase.
         """
+        if os.environ.get("TBOT_INSTANCE") and not message.startswith(f"[{os.environ['TBOT_INSTANCE']}] "):
+            message = f"[{os.environ['TBOT_INSTANCE']}] {message}"
         if not self._is_ready or not self.application:
             logger.debug("[TELEGRAM] Not ready, queuing message")
             self._message_queue.append(message)
@@ -3433,7 +3452,7 @@ class TradingTelegramBot:
             logger.warning("[TELEGRAM] Bot not running")
             return
 
-        effective_parse_mode = parse_mode if parse_mode else ParseMode.MARKDOWN
+        effective_parse_mode = ParseMode.MARKDOWN if parse_mode is _PARSE_MODE_UNSET else parse_mode
         success_count = 0
 
         for admin_id in self.admin_ids:

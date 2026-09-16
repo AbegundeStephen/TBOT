@@ -44,15 +44,23 @@ class _TailHandler(logging.Handler):
     promises was actually failing. Fixed by never iterating the live
     buffer: emit() appends under a lock, and snapshot() copies it out under
     the same lock once per tick, before any promise is evaluated.
+
+    HF-2 H1: never count yourself -- a HEARTBEAT FAIL/OK/RECOVERED line is
+    itself a log record; without this, one promise's line can satisfy (or
+    inflate the count toward) another cadence check purely because the
+    checker logged about it.
     """
 
     def __init__(self, maxlen=50000):
         super().__init__()
         self.buffer = deque(maxlen=maxlen)
         self._lock = threading.Lock()
+        self.started_at = time.time()   # HF-2 H4: warm-up window anchor
 
     def emit(self, record):
         try:
+            if record.name == "HEARTBEAT" or "[HEARTBEAT]" in record.getMessage():
+                return
             with self._lock:
                 self.buffer.append((record.created, record.getMessage()))
         except Exception:
@@ -63,21 +71,51 @@ class _TailHandler(logging.Handler):
             return list(self.buffer)
 
 
+# HF-2 H3: root logger, exactly once, process-wide -- a second
+# HeartbeatMonitor construction (e.g. across whatever hot-reload path
+# recreates parts of TradingBot) must reuse the same handler rather than
+# attaching a second one, which would double-count every line.
+_shared_handler = None
+_shared_handler_lock = threading.Lock()
+
+
+def _get_tail_handler():
+    global _shared_handler
+    with _shared_handler_lock:
+        if _shared_handler is None:
+            _shared_handler = _TailHandler()
+            # Remove any stray attachment to a named (non-root) logger from
+            # an older version of this code -- only root sees every record.
+            for name, obj in list(logging.Logger.manager.loggerDict.items()):
+                if isinstance(obj, logging.Logger):
+                    for h in list(obj.handlers):
+                        if isinstance(h, _TailHandler):
+                            obj.removeHandler(h)
+            root = logging.getLogger()
+            for h in list(root.handlers):
+                if isinstance(h, _TailHandler) and h is not _shared_handler:
+                    root.removeHandler(h)
+            root.addHandler(_shared_handler)
+        return _shared_handler
+
+
 class HeartbeatMonitor:
     """One instance lives on the bot for its whole runtime. Call `tick()`
     from the same periodic timer that runs the [VALIDATOR] report -- it
     self-paces to every 5 minutes internally, so calling it more often
     (e.g. every trading cycle) is harmless."""
 
-    def __init__(self, config=None, registry_path=_REGISTRY_PATH, telegram_bot=None):
+    def __init__(self, config=None, registry_path=_REGISTRY_PATH, telegram_bot=None, bot=None):
         self.config = config or {}
         self.registry_path = registry_path
         self.telegram_bot = telegram_bot
+        self.bot = bot   # HF-2 H6: source of bot.market_status for "market_open"
         self.assets = list(self.config.get("assets", {}).keys())
-        self.handler = _TailHandler()
-        logging.getLogger().addHandler(self.handler)
+        self.handler = _get_tail_handler()
         self._promises = self._load_registry()
         self._state = {}   # promise_id -> {"failing": bool, "last_error_ts": float}
+        self._warmup_logged = set()     # HF-2 H4: promise ids already logged once
+        self._market_skip_logged = set()  # HF-2 H6: (promise_id, asset) already logged once
         self._last_check_ts = 0.0
         self._last_ok_summary_ts = 0.0
         logger.info("[HEARTBEAT] loaded %d enabled promises from %s",
@@ -102,41 +140,95 @@ class HeartbeatMonitor:
         cutoff = time.time() - window_min * 60
         return [msg for ts, msg in snap if ts >= cutoff]
 
-    def _count_tag(self, snap, tag, window_min, asset=None):
-        """HOTFIX: found live -- most registry tags are literal log prefixes
-        like "[KILL-R1]", and [ / ] are regex character-class delimiters.
+    @staticmethod
+    def _tag_matcher(tag):
+        """
+        HOTFIX (hotfix 2): most registry tags are literal log prefixes like
+        "[KILL-R1]", and [ / ] are regex character-class delimiters.
         re.compile("[KILL-R1]") does NOT raise (so the old re.error fallback
         never triggered); it silently compiles to a character class matching
         any ONE of {K,I,L,R,1,-} -- which matches nearly every log line,
         wildly inflating every count. Only treat a tag as a real regex when
         it visibly asks for one (contains ".*" -- every actual regex tag in
-        the registry, e.g. "Fetching .* H4", uses this); everything else is
-        a literal substring match, no compilation at all.
+        the registry, e.g. "Fetching .* H4", uses this).
+
+        HF-2 H2: never a bare substring search either, for a bracketed
+        literal tag -- "[KILL-R1]" must anchor the bracketed token itself
+        (start of message; every log call in this codebase is
+        logger.info("[TAG] ...", ...), so the tag is always the first
+        thing in record.getMessage()), not match "[KILL-R1]" appearing
+        incidentally inside some unrelated line's text. A free-text tag
+        with no brackets (e.g. "Traceback", "No fresh tick data") still
+        searches anywhere in the line -- it was never meant to be anchored.
         """
-        lines = self._lines_in_window(snap, window_min)
         if ".*" in tag:
+            # HF-2 follow-up: several regex tags mix a literal bracket WITH
+            # the ".*" wildcard ("[EPISODE] .* closed and written",
+            # "[PERSIST] .* restored", "[VTM] .* management paused") --
+            # compiling the tag raw hits the exact same character-class bug
+            # as a pure-literal bracket tag (confirmed: re.compile("[VTM] .*
+            # management paused") matches any line with a bare "T" ... far
+            # too permissive). Escape the whole tag, then restore only the
+            # ".*" sequences to real wildcards.
             try:
-                pattern = re.compile(tag)
+                pattern = re.compile(re.escape(tag).replace(re.escape(".*"), ".*"))
             except re.error:
                 pattern = re.compile(re.escape(tag))
-            match = pattern.search
-        else:
-            match = lambda msg: tag in msg
+            return pattern.search
+        if tag.startswith("[") and tag.endswith("]"):
+            return lambda msg: msg.startswith(tag)
+        return lambda msg: tag in msg
+
+    def _count_tag(self, snap, tag, window_min, asset=None):
+        lines = self._lines_in_window(snap, window_min)
+        match = self._tag_matcher(tag)
         n = 0
         for msg in lines:
             if match(msg) and (asset is None or asset in msg):
                 n += 1
         return n
 
+    def _is_market_closed(self, asset):
+        """HF-2 H6: reads the status Group M writes to bot.market_status.
+        Unknown/absent status is treated as OPEN -- never silently skip a
+        check just because the field hasn't been wired somewhere yet."""
+        status_map = getattr(self.bot, "market_status", None) if self.bot else None
+        if not status_map:
+            return False
+        entry = status_map.get(asset)
+        return bool(entry and entry[0] == "CLOSED")
+
     def _check_cadence(self, p, snap):
+        pid = p["id"]
         tag = p["tag"]
         window_min = p.get("window_min", 60)
         _min, _max = p.get("min"), p.get("max")
+
+        # HF-2 H4: warm-up -- a promise whose window is longer than the
+        # process (or the tail handler) has been alive can only ever read
+        # as a false absence. Skip silently after the first log.
+        uptime_s = time.time() - self.handler.started_at
+        if window_min * 60 > uptime_s:
+            if pid not in self._warmup_logged:
+                self._warmup_logged.add(pid)
+                logger.info("[HEARTBEAT] WARMUP skip %s (uptime %.0fmin < window %dmin)",
+                            pid, uptime_s / 60, window_min)
+            return True, ""
+
+        _market_gated = p.get("when") == "market_open"
+
         if p.get("per_asset"):
             bad = []
             for a in self.assets:
                 if not self.config.get("assets", {}).get(a, {}).get("enabled", False):
                     continue
+                if _market_gated and self._is_market_closed(a):
+                    if (pid, a) not in self._market_skip_logged:
+                        self._market_skip_logged.add((pid, a))
+                        logger.info("[HEARTBEAT] SKIP %s (%s closed)", pid, a)
+                    continue
+                else:
+                    self._market_skip_logged.discard((pid, a))
                 n = self._count_tag(snap, tag, window_min, asset=a)
                 if _min is not None and n < _min:
                     bad.append(f"{a}={n}<{_min}")
@@ -157,9 +249,10 @@ class HeartbeatMonitor:
         forbidden = p.get("forbidden")
         window_min = p.get("window_min", 1440)
         lines = self._lines_in_window(snap, window_min)
+        match = self._tag_matcher(tag)
         bad = []
         for msg in lines:
-            if tag not in msg or extract not in msg:
+            if not match(msg) or extract not in msg:
                 continue
             val = msg.split(extract, 1)[1].split()[0].strip(",")
             if allowed is not None and val not in [str(a) for a in allowed]:
@@ -173,8 +266,12 @@ class HeartbeatMonitor:
     # ── direct-state evaluation (non_null, ledger-backed set) ───────────
 
     def _recent_episode_rows(self, limit=50):
+        # HF-2 I3: not in the batch's own file list, but this runs live
+        # inside each instance's process -- unsuffixed, instance B's
+        # heartbeat would read instance A's episode ledger.
+        from src.utils.instance_paths import suffixed_path as _p_inst_ep
         rows = []
-        for f in sorted(glob.glob("logs/episodes/*.jsonl"))[-2:]:
+        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/*.jsonl"))[-2:]:
             try:
                 for line in open(f, encoding="utf-8", errors="ignore"):
                     if line.strip():
@@ -228,9 +325,10 @@ class HeartbeatMonitor:
             lines = self._lines_in_window(snap, win)
             tag = p["tag"]
             extracts = p["extract"] if isinstance(p["extract"], list) else [p["extract"]]
+            tag_match = self._tag_matcher(tag)
             match_line = None
             for msg in reversed(lines):
-                if tag in msg:
+                if tag_match(msg):
                     match_line = msg
                     break
             if match_line is None:
@@ -282,8 +380,14 @@ class HeartbeatMonitor:
         try:
             if self.telegram_bot and getattr(self.telegram_bot, "_current_loop", None):
                 import asyncio
+                # HF-2 H5: explicit plain text. send_notification's own
+                # parse_mode default is Markdown, and promise ids like
+                # "kill.once_per_bar" carry underscores -- an odd count
+                # left an unclosed italics span and Telegram silently
+                # rejected the whole message.
                 asyncio.run_coroutine_threadsafe(
-                    self.telegram_bot.send_notification(message), self.telegram_bot._current_loop,
+                    self.telegram_bot.send_notification(message, parse_mode=None),
+                    self.telegram_bot._current_loop,
                 )
         except Exception as e:
             logger.debug("[HEARTBEAT] telegram notify failed: %s", e)
