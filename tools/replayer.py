@@ -12,8 +12,9 @@ Run:  python tools/replayer.py --calibrate
       python tools/replayer.py --report
 """
 
-import argparse, json, glob
+import argparse, json, glob, random, statistics
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 
@@ -404,10 +405,144 @@ def _bucket(value, edges=_DEPTH_BUCKET_EDGES, labels=_DEPTH_BUCKET_LABELS):
     return labels[-1]
 
 
-def load_closed_trades():
-    """B8: real closed-trade rows (not per-cycle snapshots, not admin closes)."""
+# ── REPLAYER-2 R1: PPL-only selection ───────────────────────────────────────
+# Hard-coded cutoff per the batch doc -- the moment PPL went live. Rows are
+# "PPL" if close_time (or entry_time, for still-open-at-write rows) falls
+# after it; --all includes earlier rows too.
+_PPL_CUTOFF = pd.Timestamp("2026-09-14T16:21:00+02:00")
+
+
+def _is_ppl_row(e):
+    ts = e.get("close_time") or e.get("entry_time")
+    if not ts:
+        return False
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        return t > _PPL_CUTOFF
+    except Exception:
+        return False
+
+
+# ── REPLAYER-2 R2: derived fields ───────────────────────────────────────────
+def _proof_dist_h_atr(e):
+    """|entry - H| / ATR4, H = composite_state.setup_ref, ATR4 = entry_atr
+    (composite_state carries no separate brc-level ATR field to fall back to
+    -- entry_atr is the only ATR4 value these rows actually store)."""
+    cs = e.get("composite_state") or {}
+    h, atr, entry = cs.get("setup_ref"), e.get("entry_atr"), e.get("entry_price")
+    if h is None or not atr or entry is None:
+        return None
+    try:
+        return abs(float(entry) - float(h)) / float(atr)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _sl_path_fields(e):
+    """n_moves / trail_travel_atr / first_move_bar / be_reached / last_move_reason
+    from sl_path ([ts_iso, old, new, reason] tuples -- shared shape between
+    live VTM and shadow positions, just different reason vocabularies)."""
+    path = e.get("sl_path") or []
+    out = {"n_moves": len(path), "trail_travel_atr": None, "first_move_bar": None,
+           "be_reached": False, "last_move_reason": None}
+    if not path:
+        return out
+    atr = e.get("entry_atr") or 0
+    travel = 0.0
+    for mv in path:
+        try:
+            _, old, new, reason = mv
+        except (ValueError, TypeError):
+            continue
+        try:
+            travel += abs(float(new) - float(old))
+        except (TypeError, ValueError):
+            pass
+        if reason and "breakeven" in str(reason).lower():
+            out["be_reached"] = True
+    out["trail_travel_atr"] = (travel / atr) if atr else None
+    try:
+        out["last_move_reason"] = path[-1][3]
+    except (IndexError, TypeError):
+        pass
+    try:
+        et = pd.Timestamp(e.get("entry_time"))
+        ft = pd.Timestamp(path[0][0])
+        # 1H bars -- the timeframe the whole management stack runs on.
+        out["first_move_bar"] = max(0, int((ft - et).total_seconds() // 3600))
+    except Exception:
+        pass
+    return out
+
+
+def _exit_via(e):
+    """Reclassify the exit by comparing close_price to the last sl_path stop
+    / initial stop / target, within one spread -- close_reason strings alone
+    don't distinguish a trail-stop-out from an initial-stop-out, which is why
+    trailing exits read as zero today."""
+    close_price = e.get("close_price")
+    if close_price is None:
+        return None
+    try:
+        close_price = float(close_price)
+    except (TypeError, ValueError):
+        return None
+    from src.execution.shadow_trader import FRICTION_PENALTIES, _DEFAULT_FRICTION
+    asset = (e.get("asset") or "").upper()
+    spread = FRICTION_PENALTIES.get(asset, _DEFAULT_FRICTION) * close_price
+
+    take_profit = e.get("take_profit")
+    if take_profit:
+        try:
+            if abs(close_price - float(take_profit)) <= spread:
+                return "target"
+        except (TypeError, ValueError):
+            pass
+
+    path = e.get("sl_path") or []
+    if path:
+        try:
+            last_stop, last_reason = float(path[-1][2]), str(path[-1][3] or "").lower()
+            if abs(close_price - last_stop) <= spread and "trail" in last_reason:
+                return "trail"
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    initial_stop = e.get("initial_stop_loss")
+    if initial_stop:
+        try:
+            if abs(close_price - float(initial_stop)) <= spread:
+                return "stop"
+        except (TypeError, ValueError):
+            pass
+    return "other"
+
+
+def _derive(e):
+    """Attach every R2 derived field once, at load time. schema_version < 2
+    rows (pre-DIARY-1 -- no sl_path/state_age captured) get the sl_path-only
+    fields left None rather than dropping the row outright -- non-sl_path
+    questions (win rate by tier, etc.) are still answerable from them."""
+    e = dict(e)
+    e["proof_dist_h_atr"] = _proof_dist_h_atr(e)
+    if (e.get("schema_version") or 1) >= 2:
+        e.update(_sl_path_fields(e))
+        e["exit_via"] = _exit_via(e)
+    else:
+        e.update({"n_moves": None, "trail_travel_atr": None, "first_move_bar": None,
+                   "be_reached": None, "last_move_reason": None, "exit_via": None})
+    return e
+
+
+def load_closed_trades(include_all=False):
+    """B8/R1: real closed-trade rows (not per-cycle snapshots, not admin
+    closes). PPL-only by default (R1); --all includes pre-PPL rows too.
+    Always drops stale-state opens (state_age_s > 900) -- those never
+    reflect what the live gate actually saw at decision time."""
     rows = []
-    skipped_admin = 0
+    skipped_admin = skipped_stale = skipped_pre_ppl = 0
     for f in sorted(glob.glob("logs/episodes/*.jsonl")):
         for line in open(f, encoding="utf-8"):
             if not line.strip():
@@ -423,63 +558,251 @@ def load_closed_trades():
             if (e.get("close_reason") or "") in _ADMIN_CLOSE_REASONS:
                 skipped_admin += 1
                 continue
-            rows.append(e)
+            _age = e.get("state_age_s")
+            if _age is not None and _age > 900:
+                skipped_stale += 1
+                continue
+            if not include_all and not _is_ppl_row(e):
+                skipped_pre_ppl += 1
+                continue
+            rows.append(_derive(e))
     n_assets = len(set(r.get("asset") for r in rows))
+    _tail = " -- use --all to include" if skipped_pre_ppl and not include_all else ""
     print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "
-          f"({skipped_admin} admin closures excluded)")
+          f"({skipped_admin} admin closures, {skipped_stale} stale-state, "
+          f"{skipped_pre_ppl} pre-PPL excluded{_tail})")
     return rows
 
 
-# B8 field extractors, keyed by --by name. Each reads composite_state
-# directly -- see the design note above for why, not the log-line join.
+def _dedupe_pairs(rows):
+    """R1 pair rule: rows sharing a pair_id count as ONE sample for direction
+    questions (--by side). Keeps the earliest row per pair_id; rows with no
+    pair_id (the overwhelming majority -- pairing is Lane-C-only) pass
+    through untouched."""
+    seen, out = set(), []
+    for r in sorted(rows, key=lambda r: r.get("entry_time") or ""):
+        pid = r.get("pair_id")
+        if pid:
+            if pid in seen:
+                continue
+            seen.add(pid)
+        out.append(r)
+    return out
+
+
+# R3 field extractors, keyed by --by name -- the exact vocabulary from the
+# batch doc (supersedes B8's narrower retest_depth/proof_dist_atr names).
 _BY_FIELDS = {
-    "tier": lambda e: (e.get("composite_state") or {}).get("brc_tier"),
-    "gear": lambda e: (e.get("composite_state") or {}).get("brc_gear"),
-    "retest_depth": lambda e: _bucket((e.get("composite_state") or {}).get("brc_retest_depth")),
-    "proof_dist_atr": lambda e: _bucket((e.get("composite_state") or {}).get("brc_proof_dist_atr")),
+    "tier":         lambda e: (e.get("composite_state") or {}).get("brc_tier"),
+    "gear":         lambda e: (e.get("composite_state") or {}).get("brc_gear"),
+    "variant":      lambda e: e.get("variant") or None,
+    "depth":        lambda e: _bucket((e.get("composite_state") or {}).get("brc_retest_depth")),
+    "proof_dist_h": lambda e: _bucket(e.get("proof_dist_h_atr"), edges=(1.0, 2.0),
+                                       labels=("<1", "1-2", ">2")),
+    "exit_via":     lambda e: e.get("exit_via"),
+    "gate_id":      lambda e: e.get("gate_id") if e.get("gate_id") not in (None, "unknown") else None,
+    "gate_stage":   lambda e: e.get("gate_stage") if e.get("gate_stage") not in (None, "unknown") else None,
+    "asset":        lambda e: e.get("asset"),
+    "lane":         lambda e: e.get("lane"),
+    "side":         lambda e: e.get("side"),
 }
 
 
-def replay_by(by, min_trades=30, min_trailing=10, min_assets=3):
-    """B8: group closed trades by a PPL field, report R/win-rate/mfe/mae.
+def replay_by(by, min_trades=30, min_trailing=10, min_assets=3, include_all=False):
+    """R3: group PPL closed trades by any of the doc's fields.
 
-    Threshold rule (Desire, ruled): report only when >= 30 closed trades,
-    >= 10 trailing exits, >= 3 assets -- counted over the WHOLE eligible
-    sample (all rows with a non-null value for `by`), before grouping.
+    Deviation from B8, stated: R3 says a below-threshold table still prints,
+    headed "BELOW THRESHOLD -- indicative only", rather than B8's hard
+    refusal to print anything. Trailing-exit count now uses the R2 exit_via
+    reclassification, not a close_reason substring match (the fix for
+    "0 trailing exits ever").
     """
+    if by not in _BY_FIELDS:
+        print(f"unknown --by {by!r} -- choose from {sorted(_BY_FIELDS)}")
+        return
     key_fn = _BY_FIELDS[by]
-    rows = load_closed_trades()
+    rows = load_closed_trades(include_all=include_all)
+    if by == "side":
+        rows = _dedupe_pairs(rows)  # R1: direction questions count a pair once
     eligible = [r for r in rows if key_fn(r) is not None]
 
     n_total = len(eligible)
-    n_trailing = sum(1 for r in eligible if "trailing" in (r.get("close_reason") or ""))
+    n_trailing = sum(1 for r in eligible if r.get("exit_via") == "trail")
     n_assets = len(set(r.get("asset") for r in eligible))
+    below = n_total < min_trades or n_trailing < min_trailing or n_assets < min_assets
 
     print(f"\nreplayer --by {by}: {n_total} eligible trades, "
-          f"{n_trailing} trailing exits, {n_assets} assets")
-
-    if n_total < min_trades or n_trailing < min_trailing or n_assets < min_assets:
-        print(f"below threshold (n={n_total}) -- need >= {min_trades} trades, "
-              f">= {min_trailing} trailing exits, >= {min_assets} assets")
+          f"{n_trailing} trailing exits (exit_via), {n_assets} assets  "
+          f"[threshold: >={min_trades} trades / >={min_trailing} trailing / >={min_assets} assets]")
+    if not eligible:
+        print("no eligible rows -- nothing to group.")
         return
+    if below:
+        print("BELOW THRESHOLD -- indicative only")
 
     groups = defaultdict(list)
     for r in eligible:
         groups[key_fn(r)].append(r)
 
-    print(f"\n{'group':<16} {'n':>5} {'avg_r':>8} {'win%':>7} {'avg_mfe%':>10} {'avg_mae%':>10}")
+    print(f"\n{'group':<16} {'n':>5} {'win%':>7} {'mean_R':>8} {'med_mfe_r':>10} "
+          f"{'med_mae_r':>10} {'trail_atr':>10} {'worst10%':>9}")
     for k in sorted(groups, key=lambda x: str(x)):
         grp = groups[k]
         rs = [g["net_pnl_r"] for g in grp if g.get("net_pnl_r") is not None]
-        mfe = [g["mfe_pct"] for g in grp if g.get("mfe_pct") is not None]
-        mae = [g["mae_pct"] for g in grp if g.get("mae_pct") is not None]
+        mfe_r = [g["mfe_r"] for g in grp if g.get("mfe_r") is not None]
+        mae_r = [g["mae_r"] for g in grp if g.get("mae_r") is not None]
+        travel = [g["trail_travel_atr"] for g in grp if g.get("trail_travel_atr") is not None]
         wins = sum(1 for x in rs if x > 0)
-        avg_r = sum(rs) / len(rs) if rs else float("nan")
         win_pct = 100 * wins / len(rs) if rs else float("nan")
-        avg_mfe = sum(mfe) / len(mfe) if mfe else float("nan")
-        avg_mae = sum(mae) / len(mae) if mae else float("nan")
-        print(f"{str(k):<16} {len(grp):>5} {avg_r:>+8.3f} {win_pct:>6.0f}% "
-              f"{avg_mfe:>+10.3f} {avg_mae:>+10.3f}")
+        mean_r = sum(rs) / len(rs) if rs else float("nan")
+        med_mfe = statistics.median(mfe_r) if mfe_r else float("nan")
+        med_mae = statistics.median(mae_r) if mae_r else float("nan")
+        mean_travel = sum(travel) / len(travel) if travel else float("nan")
+        rs_sorted = sorted(rs)
+        worst_n = max(1, len(rs_sorted) // 10) if rs_sorted else 0
+        worst10 = sum(rs_sorted[:worst_n]) / worst_n if worst_n else float("nan")
+        print(f"{str(k):<16} {len(grp):>5} {win_pct:>6.0f}% {mean_r:>+8.3f} "
+              f"{med_mfe:>+10.3f} {med_mae:>+10.3f} {mean_travel:>10.3f} {worst10:>+9.3f}")
+
+
+# ── REPLAYER-2 R4: arms -- the input to RL-1 ────────────────────────────────
+_ARM_VALUES = {
+    "trail_mult":  [0.6, 0.8, 1.0, 1.3],
+    "be_r":        [0.75, 1.0, 1.25],
+    "grade_table": ["current", "wick_1.25x", "flat"],
+}
+_RUNNER_TRAIL_DEFAULT = 0.8   # current runner_atr_mult_flat -- the fixed trail
+                              # multiplier used while re-running be_r/grade_table
+
+
+def _bootstrap_ci(values, n_resamples=1000, ci=0.90):
+    """Bootstrap CI on the mean. Returns (mean, lo, hi); (mean, mean, mean)
+    for n<2 -- a CI on one point is meaningless, not an error."""
+    if not values:
+        return None, None, None
+    mean = sum(values) / len(values)
+    n = len(values)
+    if n < 2:
+        return mean, mean, mean
+    lo_pct, hi_pct = (1 - ci) / 2, 1 - (1 - ci) / 2
+    means = sorted(
+        sum(values[random.randrange(n)] for _ in range(n)) / n
+        for _ in range(n_resamples)
+    )
+    lo = means[int(lo_pct * n_resamples)]
+    hi = means[min(int(hi_pct * n_resamples), n_resamples - 1)]
+    return mean, lo, hi
+
+
+def _replay_with_be(entry, stop, side, atr, path, be_trigger_r, mult=_RUNNER_TRAIL_DEFAULT):
+    """replay()'s exact exit stack with BE_TRIGGER_R swapped for the be_r
+    arm's candidate value -- replay() itself hardcodes the module constant,
+    so trying a different trigger means re-running the stack, not calling it."""
+    risk = abs(entry - stop)
+    if risk <= 0 or path is None or path.empty:
+        return None
+    cur, armed, peak = stop, False, entry
+    for _, bar in path.iterrows():
+        hi, lo = float(bar["high"]), float(bar["low"])
+        if (side == "long" and lo <= cur) or (side == "short" and hi >= cur):
+            return (cur - entry) / risk * (1 if side == "long" else -1)
+        peak = max(peak, hi) if side == "long" else min(peak, lo)
+        prog = abs(peak - entry) / risk
+        if not armed and prog >= be_trigger_r:
+            armed = True
+            cur = entry + BE_LOCK_R * risk * (1 if side == "long" else -1)
+        if armed:
+            t = peak - mult * atr if side == "long" else peak + mult * atr
+            cur = max(cur, t) if side == "long" else min(cur, t)
+    close = float(path.iloc[-1]["close"])
+    return (close - entry) / risk * (1 if side == "long" else -1)
+
+
+def _replay_row_arm(e, knob, value):
+    """Re-run one closed row's exit stack under one arm value, walking the
+    real 15m path. Returns R, or None if the row/path can't support a replay."""
+    asset, side = e.get("asset"), e.get("side")
+    entry, stop, atr = e.get("entry_price"), e.get("initial_stop_loss") or e.get("stop_loss"), e.get("entry_atr")
+    if not (asset and side and entry and stop and atr):
+        return None
+    path = load_path(asset, e.get("entry_time"), e.get("close_time"))
+    if path is None or path.empty:
+        return None
+
+    if knob == "trail_mult":
+        return replay(entry, stop, side, atr, path, value)
+    if knob == "be_r":
+        return _replay_with_be(entry, stop, side, atr, path, value)
+    if knob == "grade_table":
+        # grade_table's real geometry lives inside CompositeStateBuilder's
+        # zone-ladder state (full price history, not reconstructable from a
+        # closed episode row -- the same gap calibrate() documents for
+        # REVERSION stops). Approximated by widening/flattening the ATR stop
+        # distance instead, which this script CAN replay faithfully; stated
+        # here rather than silently guessed.
+        if value == "current":
+            eff_stop = stop
+        elif value == "wick_1.25x":
+            risk = abs(entry - stop)
+            eff_stop = entry - risk * 1.25 if side == "long" else entry + risk * 1.25
+        else:  # "flat"
+            mult = ASSET_ATR_MULT.get(asset, 1.8)
+            eff_stop = entry - atr * mult if side == "long" else entry + atr * mult
+        return replay(entry, eff_stop, side, atr, path, _RUNNER_TRAIL_DEFAULT)
+    return None
+
+
+def run_arms(knob, include_all=False):
+    """R4: re-run every closed row's exit stack under each arm value, report
+    n / mean R / bootstrap 90% CI / worst-10% per asset x arm, and write the
+    table to logs/replayer_arms_<knob>_<date>.json alongside stdout."""
+    if knob not in _ARM_VALUES:
+        print(f"unknown knob {knob!r} -- choose from {list(_ARM_VALUES)}")
+        return
+    print("Replay path = 1H bars; results are directional, not precise "
+          "(1H sims inflate expectancy, per calibrate()'s own finding). "
+          "15m path pending.\n")
+    rows = load_closed_trades(include_all=include_all)
+    by_asset_arm = defaultdict(lambda: defaultdict(list))
+    for e in rows:
+        for value in _ARM_VALUES[knob]:
+            r = _replay_row_arm(e, knob, value)
+            if r is not None:
+                by_asset_arm[e.get("asset")][value].append(r)
+
+    out = {
+        "knob": knob,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "header": "Replay path = 1H bars; results are directional, not precise "
+                  "(1H sims inflate). 15m path pending.",
+        "assets": {},
+    }
+    print(f"{'asset':<8} {'arm':>12} {'n':>5} {'mean_R':>8} {'CI90_lo':>8} "
+          f"{'CI90_hi':>8} {'worst10%':>9}")
+    for asset in sorted(by_asset_arm):
+        out["assets"][asset] = {}
+        for value in _ARM_VALUES[knob]:
+            vals = by_asset_arm[asset].get(value, [])
+            n = len(vals)
+            mean, lo, hi = _bootstrap_ci(vals)
+            vals_sorted = sorted(vals)
+            worst_n = max(1, n // 10) if n else 0
+            worst10 = sum(vals_sorted[:worst_n]) / worst_n if worst_n else None
+            out["assets"][asset][str(value)] = {
+                "n": n, "mean_r": mean, "ci90_lo": lo, "ci90_hi": hi, "worst10pct": worst10,
+            }
+            if n:
+                print(f"{asset:<8} {str(value):>12} {n:>5} {mean:>+8.3f} "
+                      f"{lo:>+8.3f} {hi:>+8.3f} {worst10:>+9.3f}")
+            else:
+                print(f"{asset:<8} {str(value):>12} {n:>5} {'--':>8} {'--':>8} {'--':>8} {'--':>9}")
+
+    date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
+    out_path = f"logs/replayer_arms_{knob}_{date_tag}.json"
+    Path("logs").mkdir(exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, default=str)
+    print(f"\nwrote {out_path}")
 
 
 if __name__ == "__main__":
@@ -487,14 +810,21 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--by", choices=sorted(_BY_FIELDS.keys()),
-                     help="B8: group closed trades by a PPL field (tier/gear/retest_depth/proof_dist_atr)")
+                     help="R3: group PPL closed trades by tier/gear/variant/depth/"
+                          "proof_dist_h/exit_via/gate_id/gate_stage/asset/lane/side")
+    ap.add_argument("--arms", choices=sorted(_ARM_VALUES.keys()),
+                     help="R4: per-asset arm table (trail_mult/be_r/grade_table) with bootstrap 90%% CI")
+    ap.add_argument("--all", action="store_true",
+                     help="R1: include pre-PPL rows too (default: PPL-only, cutoff 2026-09-14T16:21+02:00)")
     ap.add_argument("--result-json", default="logs/backtests/20260822_164803/result.json")
     a = ap.parse_args()
     if a.calibrate:
         calibrate(a.result_json)
     elif a.report:
         report()
+    elif a.arms:
+        run_arms(a.arms, include_all=a.all)
     elif a.by:
-        replay_by(a.by)
+        replay_by(a.by, include_all=a.all)
     else:
         ap.print_help()

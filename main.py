@@ -165,6 +165,21 @@ def setup_logging(config):
 logger = logging.getLogger(__name__)
 
 
+def _load_gates_registry():
+    """B3 GATE-1 G1: config/gates.json's gate_id -> stage lookup, loaded
+    once at import time (a static registry, not something that changes
+    mid-run)."""
+    try:
+        with open("config/gates.json", encoding="utf-8") as _f:
+            return json.load(_f).get("gates", {})
+    except Exception as _e:
+        logger.warning(f"[GATE-1] could not load config/gates.json: {_e}")
+        return {}
+
+
+_GATES_REGISTRY = _load_gates_registry()
+
+
 class TradingBot:
     """Main trading bot with  stability and error recovery"""
 
@@ -456,6 +471,7 @@ class TradingBot:
         # transition against an empty dict.
         self.market_status = {}   # asset -> (status, message, seconds_until_open)
         self._vtm_pause_logged = {}   # HF-2 M3: asset -> bool, "already logged paused"
+        self._blocked_seen = {}   # B3 GATE-1 G3: (asset, side, proof_ref, gate_id) -> last_seen_ts
         try:
             from src.utils.state_manager import load_system_state as _load_sys_state
             _saved_state = _load_sys_state()
@@ -465,6 +481,12 @@ class TradingBot:
                 }
                 logger.info("[MARKET] restored status for %d asset(s) from prior session",
                             len(self.market_status))
+            if _saved_state and _saved_state.get("blocked_seen"):
+                self._blocked_seen = {
+                    tuple(k): v for k, v in _saved_state["blocked_seen"]
+                }
+                logger.info("[GATE-1] restored %d blocked-signal key(s) from prior session",
+                            len(self._blocked_seen))
         except Exception as _ms_restore_err:
             logger.debug(f"[MARKET] status restore skipped: {_ms_restore_err}")
         # Startup warmup: block all new trade executions until the first complete
@@ -2746,6 +2768,7 @@ class TradingBot:
                         asset_name, int(_intended), merged_details, df, _cp,
                         "ai_validation",
                         self.config.get("assets", {}).get(asset_name, {}),
+                        gate_id="ai_reject", gate_stage="post_council",
                     )
         except Exception as _aie:
             logger.debug(f"[SHADOW] AI-reject shadow open failed: {_aie}")
@@ -2821,21 +2844,12 @@ class TradingBot:
             for asset in self.selected_presets:
                 self.dynamic_selector.current_presets[asset] = preset
 
-        # HF-2A A4: the block above only updates selected_presets/
-        # current_presets bookkeeping -- it never calls _reinitialize_aggregator,
-        # so the strategies stay built on whatever preset they were
-        # constructed with until the hourly _update_dynamic_presets() next
-        # runs, ~5 minutes in. Run that same call once here, right after
-        # aggregators are built and before the first trading cycle, so
-        # first-cycle council verdicts use the selector's real preset.
-        try:
-            self._preset_startup_call = True
-            self._update_dynamic_presets()
-            logger.info("[AUTO PRESET] startup selection complete")
-        except Exception as _preset_startup_err:
-            logger.warning(f"[AUTO PRESET] startup selection failed: {_preset_startup_err}")
-        finally:
-            self._preset_startup_call = False
+        # B3 A4b: the real _update_dynamic_presets() call now runs in start(),
+        # after run_mtf_regime_analysis() -- moved out of here because
+        # load_models() (this method) runs BEFORE run_mtf_regime_analysis()
+        # populates _current_regime_data, so calling it here always hit the
+        # "no regime yet" fallback for every asset (HF-2A A4's bug, found
+        # 16 Sep). See start() for the real call site.
 
         # ✨  Try to initialize AI (non-fatal)
         ai_success = False
@@ -2983,6 +2997,8 @@ class TradingBot:
         pair_id: str = "",                  # DIARY-1 D4
         variant: str = "",                  # DIARY-1 D4
         episode_id_override: str = None,    # DIARY-1 D4: distinct id per side/variant within a pair
+        gate_id: str = "unknown",           # B3 GATE-1 G2: stable name, from config/gates.json
+        gate_stage: str = "unknown",        # B3 GATE-1 G2: pre_direction | post_council | post_approval | control
     ):
         """
         Open a shadow (virtual) position for any signal that was blocked
@@ -3002,6 +3018,27 @@ class TradingBot:
                         asset_name, lane, bool(self.shadow_trader), signal, current_price,
                     )
                 return
+
+            # B3 GATE-1 G3: blocks repeat every cycle while they persist
+            # (measured: 509 NY-open LOG lines were far fewer distinct
+            # signals). Collapse repeats of the same (asset, side, proof,
+            # gate) within 4h to one row instead of one every ~5min.
+            _side_for_key = side_override if side_override else ("long" if signal > 0 else "short")
+            _proof_ref_for_key = details.get("setup_ref") or details.get("proof_ref")
+            try:
+                _proof_ref_for_key = round(float(_proof_ref_for_key), 5) if _proof_ref_for_key else None
+            except (TypeError, ValueError):
+                _proof_ref_for_key = None
+            _block_key = (asset_name, _side_for_key, _proof_ref_for_key, gate_id)
+            if not hasattr(self, "_blocked_seen"):
+                self._blocked_seen = {}
+            _now_gk = time.time()
+            _last_seen = self._blocked_seen.get(_block_key)
+            if _last_seen is not None and (_now_gk - _last_seen) < 4 * 3600:
+                logger.debug(f"[GATE-1] repeat block {asset_name} {gate_id} (suppressed)")
+                return
+            self._blocked_seen[_block_key] = _now_gk
+
             _side = side_override if side_override else ("long" if signal > 0 else "short")
             # VTM-style regime-adaptive ATR (same logic used in the main shadow block)
             _atr = None
@@ -3121,6 +3158,8 @@ class TradingBot:
                 bypass_guards=bypass_guards,     # LANES L1
                 pair_id=pair_id,                 # DIARY-1 D4
                 variant=variant,                 # DIARY-1 D4
+                gate_id=gate_id,                 # B3 GATE-1 G2
+                gate_stage=gate_stage,            # B3 GATE-1 G2
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -3223,6 +3262,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, _div["signal_to_shadow"], details, df, current_price,
                     _div["gate_label"], asset_cfg,
+                    gate_id="tier3_divergence", gate_stage="post_council",
                 )
         except Exception as e:
             logger.debug(f"[TIER3 DIVERGENCE] check failed for {asset_name}: {e}")
@@ -4415,6 +4455,7 @@ class TradingBot:
                             be_r_override=float(_v.get("be_r", 1.0)),
                             pair_id=_pair_id, variant=_v.get("name", ""),
                             episode_id_override=f"shadow-{_pair_id}-{'L' if _side > 0 else 'S'}-{_v.get('name', '')}",
+                            gate_id="lane_c", gate_stage="control",
                         )
                 logger.info(
                     f"[LANE-C] {asset_name}: {_lane_tag} pair={_pair_id} sides={len(_sides)} "
@@ -4542,7 +4583,17 @@ class TradingBot:
                 if self.portfolio_manager and _now_k1 - _last_metrics_save >= state_save_interval:
                     _last_metrics_save = _now_k1
                     try:
-                        self.portfolio_manager._save_system_metrics(market_status=self.market_status)
+                        # B3 GATE-1 G3: prune anything older than 24h before
+                        # persisting -- the dedup window is only 4h, no need
+                        # to carry ancient keys across every restart forever.
+                        _bs_cutoff = _now_k1 - 24 * 3600
+                        _bs_serialized = [
+                            [list(k), v] for k, v in getattr(self, "_blocked_seen", {}).items()
+                            if v >= _bs_cutoff
+                        ]
+                        self.portfolio_manager._save_system_metrics(
+                            market_status=self.market_status, blocked_seen=_bs_serialized,
+                        )
                     except Exception as _sk:
                         logger.error(f"[VTM LOOP] System metrics save failed: {_sk}")
 
@@ -6112,6 +6163,7 @@ class TradingBot:
                         asset_name, _intent["signal"], _lane_b_details, df,
                         current_price, f"lane_b_{_intent['reason']}", asset_cfg,
                         lane=_lane_tag,
+                        gate_id="lane_b", gate_stage="control",
                     )
             except Exception as _lb_err:
                 logger.warning(f"[LANE-B] {asset_name}: capture failed: {_lb_err}")
@@ -6616,6 +6668,7 @@ class TradingBot:
                         self._shadow_open_blocked(
                             asset_name, signal, details, df, current_price,
                             "mtf_counter_trend", asset_cfg,
+                            gate_id="macro_conflict", gate_stage="post_council",
                         )
                         if not _ct_advisory:
                             self._notify_blocked(
@@ -6663,6 +6716,7 @@ class TradingBot:
                     self._shadow_open_blocked(
                         asset_name, signal, details, df, current_price,
                         "mtf_max_positions", asset_cfg,
+                        gate_id="trading_limits", gate_stage="post_approval",
                     )
                     return  # ← Block the trade
 
@@ -6845,12 +6899,65 @@ class TradingBot:
 
                     self._notify_blocked(
                         asset=asset_name,
-                        signal=original_sig or 1, # fallback if original_sig is missing
+                        signal=original_sig,   # B3 GATE-1 G4: no invented fallback -- see below
                         block_source=block_source,
                         block_reason=block_reason,
                         details=details,
                         price=details.get("price"),
                     )
+
+                    # B3 GATE-1 G2/G4: this generic aggregator-block path never
+                    # called _shadow_open_blocked at all -- measured 16 Sep,
+                    # this is exactly why Cost Gate refused ~179 times in three
+                    # weeks with the diary holding 1 row (and R:R Gate 75->0).
+                    _gid_map = {
+                        "Cost Gate": "cost_gate",
+                        "R:R Gate": "rr_gate",
+                        "Candle Momentum Reversal": "candle_momentum",
+                        "Opposite Trend Veto": "opposite_trend",
+                        "AI Validation": "ai_reject",
+                    }
+                    _gate_id_generic = _gid_map.get(block_source)
+                    if _gate_id_generic is None:
+                        _rr = (raw_reason or "").lower()
+                        if "low_regime_confidence" in _rr or "low regime confidence" in (block_reason or "").lower():
+                            _gate_id_generic = "regime_confidence"
+                        elif "blocked_by_trap_filter" in _rr:
+                            _gate_id_generic = "trap_filter"
+                        elif "blocked_by_governor" in _rr:
+                            _gate_id_generic = "governor"
+                        elif "ny_open_block" in _rr:
+                            _gate_id_generic = "ny_open"
+                        elif "stale price" in (block_source or "").lower():
+                            _gate_id_generic = "stale_price"
+                        else:
+                            _gate_id_generic = "aggregator_other"
+                    _gate_stage_generic = _GATES_REGISTRY.get(_gate_id_generic, {}).get("stage", "unknown")
+
+                    if _gate_stage_generic == "pre_direction" and original_sig == 0:
+                        # G4: no invented side for a pre-direction gate with no
+                        # intended direction -- record, don't shadow.
+                        logger.info(f"[GATE-1] {asset_name} {_gate_id_generic}: no direction — recorded, not shadowed")
+                        if getattr(self, "funnel_logger", None) is not None:
+                            try:
+                                self.funnel_logger.record(
+                                    asset_name, 0,
+                                    {"reasoning": _gate_id_generic, "gate_stage": _gate_stage_generic,
+                                     "episode_id": details.get("episode_id")},
+                                )
+                            except Exception:
+                                pass
+                    elif original_sig != 0:
+                        self._shadow_open_blocked(
+                            asset_name, original_sig, details, df, current_price,
+                            block_reason, asset_cfg,
+                            gate_id=_gate_id_generic, gate_stage=_gate_stage_generic,
+                        )
+                    else:
+                        logger.debug(
+                            f"[GATE-1] {asset_name} {_gate_id_generic}: no original_signal — "
+                            f"not shadowed (post_council/post_approval block with no direction to open)"
+                        )
                 else:
                     logger.info(f"[HOLD] {asset_name}: No action taken")
                 return
@@ -6884,6 +6991,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "trading_limits", asset_cfg,
+                    gate_id="trading_limits", gate_stage="post_approval",
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
@@ -6937,6 +7045,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "cooldown_block", asset_cfg,
+                    gate_id="cooldown", gate_stage="post_approval",
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
@@ -6994,6 +7103,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "proof_reused", asset_cfg,
+                    gate_id="proof_reused", gate_stage="post_approval",
                 )
                 self._notify_blocked(
                     asset=asset_name,
@@ -7146,6 +7256,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "natural_cycle_gate", asset_cfg,
+                    gate_id="natural_cycle", gate_stage="post_council",
                 )
                 if getattr(self, "funnel_logger", None) is not None:
                     try:
@@ -7175,6 +7286,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "system_health_veto", asset_cfg,
+                    gate_id="system_health", gate_stage="post_approval",
                 )
                 return
 
@@ -7193,6 +7305,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "circuit_breaker", asset_cfg,
+                    gate_id="circuit_breaker", gate_stage="post_approval",
                 )
                 return
 
@@ -7234,6 +7347,7 @@ class TradingBot:
                 self._shadow_open_blocked(
                     asset_name, signal, details, df, current_price,
                     "quality_gate", asset_cfg,
+                    gate_id="quality_gate", gate_stage="post_approval",
                 )
                 return
 
@@ -9005,6 +9119,24 @@ class TradingBot:
             if self.mtf_integration:
                 logger.info("[MTF] Running initial regime analysis...")
                 self.run_mtf_regime_analysis()
+
+            # B3 A4b: run the preset selector once here, right after
+            # run_mtf_regime_analysis() has populated _current_regime_data
+            # for every enabled asset -- HF-2A A4 ran this in load_models(),
+            # BEFORE regime data existed, so every asset hit the "no regime
+            # yet" fallback and stayed on whatever preset the block above
+            # set. Guarded so a second start() call (shouldn't happen, but
+            # cheap insurance) can't double-run it.
+            if not getattr(self, "_startup_preset_done", False):
+                self._startup_preset_done = True
+                try:
+                    self._preset_startup_call = True
+                    self._update_dynamic_presets()
+                    logger.info("[AUTO PRESET] startup selection complete")
+                except Exception as _preset_startup_err:
+                    logger.warning(f"[AUTO PRESET] startup selection failed: {_preset_startup_err}")
+                finally:
+                    self._preset_startup_call = False
 
             # Initialize and start the autotrainer
             self.initialize_autotrainer()

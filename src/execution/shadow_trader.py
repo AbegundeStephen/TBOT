@@ -180,6 +180,8 @@ class ShadowPosition:
 
     pair_id: str = ""                # DIARY-1 D4: joins the paired-lane-C family
     variant: str = ""                # DIARY-1 D4: management-variant name within the pair
+    gate_id: str = "unknown"         # B3 GATE-1 G2: stable name, from config/gates.json
+    gate_stage: str = "unknown"      # B3 GATE-1 G2
     lane: str = "A"                 # LANES L1: which shadow lane produced this
     resumed: bool = False               # MEASURE-2 S1: survived at least one restart
     resume_count: int = 0               # MEASURE-2 S1: how many
@@ -380,6 +382,8 @@ class ShadowPosition:
             "state_age_s":      self.state_age_s,   # DIARY-1 D3
             "pair_id":          self.pair_id,        # DIARY-1 D4
             "variant":          self.variant,        # DIARY-1 D4
+            "gate_id":          self.gate_id,        # B3 GATE-1 G2
+            "gate_stage":       self.gate_stage,     # B3 GATE-1 G2
             "gross_pnl_pct":    round(self.gross_pnl_pct, 4),
             "friction_pct":     round(self.friction_pct, 4),
             "net_pnl_pct":      round(self.net_pnl_pct, 4),
@@ -491,6 +495,22 @@ class ShadowTradingEngine:
             f"(max_open={max_positions}, max_closed={max_closed}, "
             f"cooldown={cooldown_minutes}min, archive={self._archive_dir})"
         )
+        self._funnel = None   # B3 GATE-1 G5: lazy -- most callers never refuse
+
+    def _refuse(self, asset: str, side, gate_id: str, guard: str, **extra) -> None:
+        """B3 GATE-1 G5: every guard that declines to open a shadow says so
+        out loud -- silence is no longer an option. Best-effort: a funnel
+        write failure must never be why a refusal itself goes unlogged."""
+        logger.info("[SHADOW] Refused %s %s gate=%s guard=%s", asset, side, gate_id, guard)
+        try:
+            if self._funnel is None:
+                from src.analytics.funnel_logger import FunnelLogger
+                self._funnel = FunnelLogger()
+            _rec = {"reasoning": gate_id, "refused_by": guard, "side": side}
+            _rec.update(extra)
+            self._funnel.record(asset, 0, _rec)
+        except Exception as _fe:
+            logger.debug(f"[SHADOW] funnel record failed for refusal ({guard}): {_fe}")
 
     def update_friction_penalty(self, asset: str, observed_slippage_pct: float) -> None:
         """Item 4: let real fill slippage correct the static FRICTION_PENALTIES
@@ -538,6 +558,8 @@ class ShadowTradingEngine:
         bypass_guards: bool = False,    # LANES L1: Lane C only -- see L1b
         pair_id: str = "",              # DIARY-1 D4: joins the paired-lane-C family
         variant: str = "",              # DIARY-1 D4: management-variant name within the pair
+        gate_id: str = "unknown",       # B3 GATE-1 G2: stable name, from config/gates.json
+        gate_stage: str = "unknown",    # B3 GATE-1 G2
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -555,10 +577,11 @@ class ShadowTradingEngine:
         tp_multiples     : TP ATR multiples [tp1, tp2, tp3] — first entry used for TP1
         """
         if len(self.open_positions) >= self._max_positions:
-            logger.debug("[SHADOW] Max positions reached, skipping")
+            self._refuse(asset, side, gate_id, "max_positions")
             return None
 
         if entry_price <= 0:
+            self._refuse(asset, side, gate_id, "invalid_entry_price")
             return None
 
         asset_key = asset.upper()
@@ -574,6 +597,7 @@ class ShadowTradingEngine:
                 logger.debug(
                     f"[SHADOW] Dedup: {asset_key} {side.upper()} already open, skipping"
                 )
+                self._refuse(asset, side, gate_id, "duplicate_open")
                 return None
 
         # S5.2 — Cooldown: skip if a shadow closed for this asset within cooldown window
@@ -587,6 +611,7 @@ class ShadowTradingEngine:
                     f"[SHADOW] Cooldown: {asset_key} last closed {_elapsed:.0f}min ago "
                     f"(need {self._cooldown_minutes}min), skipping"
                 )
+                self._refuse(asset, side, gate_id, "cooldown")
                 return None
 
         # Compute SL/TP using VTM's formula:
@@ -708,6 +733,7 @@ class ShadowTradingEngine:
         else:
             # S7h: refuse an unmeasurable shadow rather than open a degenerate one.
             logger.warning("[SHADOW] open refused for %s: atr unavailable — no risk anchor", asset)
+            self._refuse(asset, side, gate_id, "no_atr")
             return None
 
         # J2.2 + J2.3: Compute standardized trailing and TP1 params at entry time
@@ -802,6 +828,8 @@ class ShadowTradingEngine:
             lane=lane,                              # LANES L1
             pair_id=pair_id,                        # DIARY-1 D4
             variant=variant,                        # DIARY-1 D4
+            gate_id=gate_id,                        # B3 GATE-1 G2
+            gate_stage=gate_stage,                  # B3 GATE-1 G2
             entry_price=entry_price,
             current_price=entry_price,
             entry_time=datetime.now(timezone.utc),

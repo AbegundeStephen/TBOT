@@ -900,7 +900,7 @@ class PortfolioManager:
             return cfg.get("mt5_symbol") or cfg.get("symbol", asset_name)
         return cfg.get("binance_symbol") or cfg.get("symbol", asset_name)
 
-    def _save_system_metrics(self, market_status=None):
+    def _save_system_metrics(self, market_status=None, blocked_seen=None):
         """
         STOP-1 SEG C: persist system-wide metrics independently of whether any
         position is open.
@@ -918,6 +918,7 @@ class PortfolioManager:
         HF-2 M1: market_status is TradingBot's, not this class's -- passed in
         by the caller (main.py) each tick, since save_system_state() replaces
         the whole file and this is the only writer.
+        B3 GATE-1 G3: blocked_seen is TradingBot's too, same reasoning.
         """
         try:
             system_metrics = {
@@ -927,6 +928,7 @@ class PortfolioManager:
                 "mode": self.mode,
                 "timestamp": datetime.now().isoformat(),
                 "market_status": market_status or {},
+                "blocked_seen": blocked_seen or [],
             }
             save_system_state(system_metrics)
         except Exception as e:
