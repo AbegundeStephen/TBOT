@@ -2821,6 +2821,22 @@ class TradingBot:
             for asset in self.selected_presets:
                 self.dynamic_selector.current_presets[asset] = preset
 
+        # HF-2A A4: the block above only updates selected_presets/
+        # current_presets bookkeeping -- it never calls _reinitialize_aggregator,
+        # so the strategies stay built on whatever preset they were
+        # constructed with until the hourly _update_dynamic_presets() next
+        # runs, ~5 minutes in. Run that same call once here, right after
+        # aggregators are built and before the first trading cycle, so
+        # first-cycle council verdicts use the selector's real preset.
+        try:
+            self._preset_startup_call = True
+            self._update_dynamic_presets()
+            logger.info("[AUTO PRESET] startup selection complete")
+        except Exception as _preset_startup_err:
+            logger.warning(f"[AUTO PRESET] startup selection failed: {_preset_startup_err}")
+        finally:
+            self._preset_startup_call = False
+
         # ✨  Try to initialize AI (non-fatal)
         ai_success = False
         try:
@@ -3675,6 +3691,13 @@ class TradingBot:
                     and asset_name in self._current_regime_data
                 ):
                     regime_data = self._current_regime_data[asset_name]
+                elif getattr(self, "_preset_startup_call", False):
+                    # HF-2A A4: called once at startup, before _current_regime_data
+                    # exists for any asset -- get_preset_for_asset() still does its
+                    # own independent 4H fetch and produces a real regime-based
+                    # preset, this is just visibility that the DNA-gating extra
+                    # signal wasn't available for this specific call.
+                    logger.info(f"[AUTO PRESET] {asset_name}: no regime yet — default kept")
 
                 new_preset = self.dynamic_selector.get_preset_for_asset(asset_name, regime_data=regime_data)
 
@@ -4128,8 +4151,6 @@ class TradingBot:
             # ✅ NEW: Log hybrid statistics periodically
             # ✅ NEW: Log hybrid statistics periodically
             if hasattr(self, "hybrid_selector"):
-                stats = self.hybrid_selector.get_statistics()
-
                 # ✅ FIX: Read from _hybrid_active_modes, which is stamped by
                 # get_aggregated_signal_hybrid_dynamic() with the mode that was
                 # *actually* used each cycle. The old approach called
@@ -4137,15 +4158,11 @@ class TradingBot:
                 # through to _default_analysis() → 'performance' because there
                 # is no market data — producing a misleading log even when
                 # council ran every cycle.
-                active_modes = getattr(self, "_hybrid_active_modes", {})
-
-                logger.info(f"\n[HYBRID STATS]")
-                logger.info(f"  Total Switches:      {stats['total_switches']}")
-                logger.info(f"  Council Signals:     {stats['council_signals']}")
-                logger.info(f"  Performance Signals: {stats['performance_signals']}")
-                logger.info(
-                    f"  Current Modes:       {active_modes}"
-                )  # <-- Now uses active_modes
+                # HF-2A A5: [HYBRID STATS] retired -- legacy_engine_enabled is
+                # false (FIX-1 F1c) and all six assets run the council; this
+                # block advertised "Performance Signals: 0 | Current Modes: {}"
+                # every cycle for a mode that no longer exists. hybrid_selector
+                # itself is untouched -- this is a log tidy, not a removal.
 
                 # ── LANES L4b: Lane C control group ──────────────────────────
                 # Random entries, managed by the SAME exit stack as everything
