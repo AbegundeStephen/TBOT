@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import deque
 
@@ -31,17 +32,35 @@ _OK_SUMMARY_S = 3600             # once an hour
 
 class _TailHandler(logging.Handler):
     """Appends every formatted log record to a bounded deque -- the
-    heartbeat's own view of the log, independent of file rotation/rereads."""
+    heartbeat's own view of the log, independent of file rotation/rereads.
+
+    HOTFIX (found within minutes of DIARY-1 going live): every check used to
+    iterate self.buffer directly while other threads were still calling
+    emit() on it -- a live deque mutated during iteration raises
+    "RuntimeError: deque mutated during iteration", which the per-promise
+    except in _evaluate() was catching and reporting as a FAIL for whatever
+    promise happened to be running at that instant. Random promise names,
+    same underlying error, every few minutes -- nothing about those
+    promises was actually failing. Fixed by never iterating the live
+    buffer: emit() appends under a lock, and snapshot() copies it out under
+    the same lock once per tick, before any promise is evaluated.
+    """
 
     def __init__(self, maxlen=50000):
         super().__init__()
         self.buffer = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
 
     def emit(self, record):
         try:
-            self.buffer.append((record.created, record.getMessage()))
+            with self._lock:
+                self.buffer.append((record.created, record.getMessage()))
         except Exception:
             pass
+
+    def snapshot(self):
+        with self._lock:
+            return list(self.buffer)
 
 
 class HeartbeatMonitor:
@@ -74,13 +93,17 @@ class HeartbeatMonitor:
             return []
 
     # ── log-line evaluation (cadence, set) ──────────────────────────────
+    # All of these take `snap` -- one immutable list captured by tick() via
+    # self.handler.snapshot() before any promise is evaluated. Never touch
+    # self.handler.buffer directly here (see _TailHandler's HOTFIX note).
 
-    def _lines_in_window(self, window_min):
+    @staticmethod
+    def _lines_in_window(snap, window_min):
         cutoff = time.time() - window_min * 60
-        return [msg for ts, msg in self.handler.buffer if ts >= cutoff]
+        return [msg for ts, msg in snap if ts >= cutoff]
 
-    def _count_tag(self, tag, window_min, asset=None):
-        lines = self._lines_in_window(window_min)
+    def _count_tag(self, snap, tag, window_min, asset=None):
+        lines = self._lines_in_window(snap, window_min)
         try:
             pattern = re.compile(tag)
         except re.error:
@@ -91,7 +114,7 @@ class HeartbeatMonitor:
                 n += 1
         return n
 
-    def _check_cadence(self, p):
+    def _check_cadence(self, p, snap):
         tag = p["tag"]
         window_min = p.get("window_min", 60)
         _min, _max = p.get("min"), p.get("max")
@@ -100,26 +123,26 @@ class HeartbeatMonitor:
             for a in self.assets:
                 if not self.config.get("assets", {}).get(a, {}).get("enabled", False):
                     continue
-                n = self._count_tag(tag, window_min, asset=a)
+                n = self._count_tag(snap, tag, window_min, asset=a)
                 if _min is not None and n < _min:
                     bad.append(f"{a}={n}<{_min}")
                 if _max is not None and n > _max:
                     bad.append(f"{a}={n}>{_max}")
             return (not bad), (f"{tag}: " + ", ".join(bad) if bad else "")
-        n = self._count_tag(tag, window_min)
+        n = self._count_tag(snap, tag, window_min)
         if _min is not None and n < _min:
             return False, f"{tag}: {n} < min {_min} in {window_min}min"
         if _max is not None and n > _max:
             return False, f"{tag}: {n} > max {_max} in {window_min}min"
         return True, ""
 
-    def _check_set(self, p):
+    def _check_set(self, p, snap):
         tag = p["tag"]
         extract = p.get("extract")
         allowed = p.get("allowed")
         forbidden = p.get("forbidden")
         window_min = p.get("window_min", 1440)
-        lines = self._lines_in_window(window_min)
+        lines = self._lines_in_window(snap, window_min)
         bad = []
         for msg in lines:
             if tag not in msg or extract not in msg:
@@ -195,19 +218,22 @@ class HeartbeatMonitor:
             return False, f"ledger field {field}: unexpected value(s) {sorted(set(map(str, bad)))}"
         return True, ""
 
-    def _evaluate(self, p):
+    def _evaluate(self, p, snap):
+        """Returns (passed, detail) where passed is True/False for a real
+        promise result, or None if the checker itself errored -- a checker
+        crash is NOT a promise failure (HOTFIX, see _TailHandler)."""
         try:
             ptype = p.get("type")
             if ptype == "cadence":
-                return self._check_cadence(p)
+                return self._check_cadence(p, snap)
             if ptype == "set":
                 if "ledger_field" in p:
                     return self._check_set_ledger(p)
-                return self._check_set(p)
+                return self._check_set(p, snap)
             if ptype == "non_null":
                 return self._check_non_null(p)
         except Exception as e:
-            return False, f"checker error: {e}"
+            return None, f"checker error: {e}"
         return True, ""
 
     def _notify(self, message):
@@ -228,11 +254,21 @@ class HeartbeatMonitor:
             return
         self._last_check_ts = now
 
+        # HOTFIX: one snapshot for the whole tick, taken under the handler's
+        # lock -- every promise evaluates against this same immutable list,
+        # never against the live buffer other threads keep appending to.
+        snap = self.handler.snapshot()
+
         ok_count = 0
         for p in self._promises:
             pid = p["id"]
-            passed, detail = self._evaluate(p)
+            passed, detail = self._evaluate(p, snap)
             st = self._state.setdefault(pid, {"failing": False, "last_error_ts": 0.0})
+            if passed is None:
+                # Checker itself errored -- not a promise failure. Loud once,
+                # never a FAIL log, never a Telegram, never counted either way.
+                logger.error("[HEARTBEAT] CHECKER ERROR %s: %s", pid, detail)
+                continue
             if passed:
                 if st["failing"]:
                     logger.info("[HEARTBEAT] RECOVERED %s", pid)
