@@ -283,6 +283,52 @@ class HeartbeatMonitor:
                 continue
         return rows[-limit:]
 
+    def _episode_rows_in_window(self, window_min):
+        """B3 GATE-1 G6: unlike _recent_episode_rows (fixed row count, used
+        for schema/id spot-checks), gate coverage needs an actual TIME
+        window -- reads enough daily files to cover it, filtered by each
+        row's close_time (falling back to entry_time)."""
+        from src.utils.instance_paths import suffixed_path as _p_inst_ep
+        import datetime as _dt
+        days_back = max(1, int(window_min / 1440) + 2)
+        cutoff = time.time() - window_min * 60
+        rows = []
+        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/*.jsonl"))[-days_back:]:
+            try:
+                for line in open(f, encoding="utf-8", errors="ignore"):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    _ts_raw = row.get("close_time") or row.get("entry_time")
+                    if not _ts_raw:
+                        continue
+                    try:
+                        _ts = _dt.datetime.fromisoformat(str(_ts_raw).replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        continue
+                    if _ts >= cutoff:
+                        rows.append(row)
+            except Exception:
+                continue
+        return rows
+
+    def _check_ledger_seen(self, p):
+        """B3 GATE-1 G6: counts episode rows with `ledger_field` == `equals`
+        within window_min. One promise per gate, generated from
+        config/gates.json."""
+        field = p["ledger_field"]
+        target = p["equals"]
+        window_min = p.get("window_min", 10080)
+        rows = self._episode_rows_in_window(window_min)
+        n = sum(1 for r in rows if r.get(field) == target)
+        _min = p.get("min", 1)
+        if n < _min:
+            return False, f"{field}=={target}: {n} < min {_min} in {window_min}min"
+        return True, ""
+
     def _check_non_null(self, p, snap):
         if "config_path" in p:
             path = p["config_path"]
@@ -370,6 +416,21 @@ class HeartbeatMonitor:
             return False, f"ledger field {field}: unexpected value(s) {sorted(set(map(str, bad)))}"
         return True, ""
 
+    def _check_file_fresh(self, p):
+        """B3 REPLAYER-2 R5 / RL-1: file(s) touched within window_min. `file`
+        may be a glob pattern (e.g. logs/replayer_arms_*.json); passes if the
+        newest match's mtime is inside the window. No matches at all is not
+        a failure -- these promises are 'enabled once threshold first met',
+        so an offline tool that hasn't run yet must not page anyone."""
+        pattern = p["file"]
+        win_s = p.get("window_min", 10080) * 60
+        matches = glob.glob(pattern)
+        if not matches:
+            return True, ""
+        newest = max(os.path.getmtime(m) for m in matches)
+        ok = (time.time() - newest) <= win_s
+        return ok, ("" if ok else f"{pattern}: newest match is stale (> {p.get('window_min')} min)")
+
     def _evaluate(self, p, snap):
         """Returns (passed, detail) where passed is True/False for a real
         promise result, or None if the checker itself errored -- a checker
@@ -384,6 +445,10 @@ class HeartbeatMonitor:
                 return self._check_set(p, snap)
             if ptype == "non_null":
                 return self._check_non_null(p, snap)
+            if ptype == "ledger_seen":
+                return self._check_ledger_seen(p)
+            if ptype == "file_fresh":
+                return self._check_file_fresh(p)
         except Exception as e:
             return None, f"checker error: {e}"
         return True, ""
