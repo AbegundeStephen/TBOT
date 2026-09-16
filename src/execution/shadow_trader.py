@@ -855,7 +855,8 @@ class ShadowTradingEngine:
         self.open_positions.append(pos)
         logger.info(
             f"[SHADOW] Opened {side.upper()} {asset} @ {entry_price:.5f} "
-            f"(src={strategy_source}, gate={gate_blocked_by})"
+            f"(src={strategy_source}, gate={gate_blocked_by}) "
+            f"variant={variant or '-'} pair={(pair_id or '-')[-6:]}"
         )
         return pos
 

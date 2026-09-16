@@ -348,12 +348,24 @@ class HeartbeatMonitor:
         return True, ""
 
     def _check_set_ledger(self, p):
+        # HF-2A A2: missing_as lets a promise treat a MISSING field as if it
+        # held a given value -- episode.schema's real need: pre-DIARY-1 rows
+        # have no schema_version at all, and "None is not in [1, 2]" would
+        # fail forever on those old rows even though they are legitimately
+        # schema 1 (schema_version didn't exist yet).
         field = p["ledger_field"]
         allowed = p.get("allowed") or []
+        missing_as = p.get("missing_as")
         rows = self._recent_episode_rows(limit=50)
         if not rows:
             return True, ""
-        bad = [r.get(field) for r in rows if r.get(field) not in allowed]
+        bad = []
+        for r in rows:
+            v = r.get(field)
+            if v is None and missing_as is not None:
+                v = missing_as
+            if v not in allowed:
+                bad.append(v)
         if bad:
             return False, f"ledger field {field}: unexpected value(s) {sorted(set(map(str, bad)))}"
         return True, ""

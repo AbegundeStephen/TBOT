@@ -4324,6 +4324,16 @@ class TradingBot:
                 if self._lane_c_counts.get(asset_name, 0) >= _per_asset_per_day:
                     continue
 
+                # HF-2A A1: the random lane must only trade open markets.
+                # DIARY-1's state_age_s caught a lane-C position opened on a
+                # 5.5-hour-old cached composite state -- the signal loop had
+                # already skipped this asset as closed, but this cycle kept
+                # rolling its die and opening on stale state/last-known price.
+                _ms = getattr(self, "market_status", {}).get(asset_name, ("OPEN", "", 0))
+                if _ms[0] == "CLOSED":
+                    logger.debug(f"[LANE-C] {asset_name}: skipped — market closed ({_ms[1]})")
+                    continue
+
                 # Spread the quota across the session rather than firing it all
                 # in the first hour: one chance per cycle, sized so the expected
                 # count lands near the cap over a ~24h trading day.
