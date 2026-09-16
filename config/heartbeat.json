@@ -22,7 +22,7 @@
     { "id": "vol.telemetry",        "type": "cadence", "tag": "[VOL-TELEMETRY]",   "min": 1,  "window_min": 15,   "when": "council_convened", "enabled": false },
     { "id": "squeeze.visible",      "type": "cadence", "tag": "[SQUEEZE]",         "min": 1,  "window_min": 10080, "note": "one per week is enough to prove wiring" },
     { "id": "reload.keys",          "type": "non_null","tag": "[RELOAD-STATE]",    "extract": "carried=", "min_value": 22 },
-    { "id": "persist.saved",        "type": "cadence", "tag": "[PERSIST]",         "min": 1,  "window_min": 5,    "note": "B7" },
+    { "id": "persist.saved",        "type": "cadence", "tag": "[PERSIST] .* saved","min": 1,  "window_min": 10,   "note": "B7" },
     { "id": "persist.restored",     "type": "cadence", "tag": "[PERSIST] .* restored", "min": 1, "window_min": 43200, "when": "process_started_with_saved_stores", "enabled": false },
     { "id": "mt5.fresh_4h",         "type": "cadence", "tag": "Fetching .* H4",    "min": 1,  "window_min": 60,   "per_asset": true, "when": "market_open" },
     { "id": "mt5.tick_health",      "type": "cadence", "tag": "No fresh tick data","max": 60, "window_min": 60,   "per_asset": true, "note": "max — a symbol choking", "when": "market_open" },

@@ -261,6 +261,14 @@ class CompositeStateBuilder:
             with open(_tmp, "wb") as _f:
                 pickle.dump(_payload, _f)
             os.replace(_tmp, _dst)
+            # HF-2A A2: this saves every ~30s (main.py's timer) but used to
+            # log only on failure -- the persist.saved promise could never
+            # pass because there was no [PERSIST] success line to count.
+            # Loud once per 5 minutes per asset, not every 30s.
+            _now_pl = time.time()
+            if _now_pl - getattr(self, "_last_persist_log_ts", 0) >= 300:
+                self._last_persist_log_ts = _now_pl
+                logger.info("[PERSIST] %s: saved %d stores", self.asset_type, len(self._STATE_KEYS))
         except Exception as _e:
             logger.warning("[PERSIST] %s: store save failed: %s", self.asset_type, _e)
 
