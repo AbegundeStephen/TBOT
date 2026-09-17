@@ -5,6 +5,7 @@
     "calendar":           {"stage": "pre_direction"},
     "flash_veto":         {"stage": "pre_direction"},
     "stale_price":        {"stage": "pre_direction"},
+    "session_window":     {"stage": "pre_direction", "note": "B4 P6 G1: found live, not in the original registry -- check_market_hours's preferred-session filter ('[MARKET] ... Outside preferred session window'). No _shadow_open_blocked call exists at this site (same gap as watcher_suppress) -- registry-only for now, matching G1's own rule that the list must match the code even where the code has a known instrumentation gap."},
     "council_score":      {"stage": "post_council"},
     "cost_gate":          {"stage": "post_council"},
     "rr_gate":            {"stage": "post_council"},
@@ -29,6 +30,8 @@
     "system_health":      {"stage": "post_approval", "note": "B3: found live, not in the original registry -- Final Pre-Flight system-health veto"},
     "quality_gate":       {"stage": "post_approval", "note": "B3: found live, not in the original registry -- signal_quality below min_signal_quality"},
     "size_reduced":       {"stage": "post_approval"},
+    "geometry_refused":   {"stage": "post_approval", "note": "B4 P0c: the shared stop/target gauntlet's floor/clamp/R:R refusal, discovered AFTER the fill (this codebase commits to a fill before VTM ever runs) -- results in an immediate close, not a blocked signal."},
+    "not_worthwhile":     {"stage": "post_approval", "note": "B4 P0g-3: worthwhileness check specifically (no level pays min_reward_ccy, or risk exceeds the per-trade budget) -- a narrower case of geometry_refused, kept distinct per the doc's own instruction."},
     "lane_b":             {"stage": "control"},
     "lane_c":             {"stage": "control"}
   }

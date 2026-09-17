@@ -3705,8 +3705,16 @@ class TradingTelegramBot:
             import html as html_lib
             details = details or {}
 
-            direction = "BUY" if signal == 1 else "SELL"
-            dir_icon  = "🟢" if signal == 1 else "🔴"
+            # B4 P6 G4: was a plain binary ("BUY" whenever signal != 1
+            # otherwise "SELL"), so a genuine signal=0 (no direction at all
+            # -- the exact case G4 exists to stop inventing a side for)
+            # printed as a confident "SELL". Confirmed clean at every
+            # main.py call site (all pass the raw signal/original_sig, no
+            # "or 1" fallback remains) -- this formatter was the one
+            # remaining place a missing direction could still read as a
+            # real one.
+            direction = "BUY" if signal == 1 else "SELL" if signal == -1 else "NONE"
+            dir_icon  = "🟢" if signal == 1 else "🔴" if signal == -1 else "⚪"
 
             # Source → icon map
             source_icons = {

@@ -1430,6 +1430,9 @@
   },
   "phase_config": {
     "_note": "Controls which phases are active. Flip flags here instead of touching source code. current_phase is informational only.",
+    "runner_trail_enabled": false,
+    "min_reward_ccy": 5.0,
+    "max_target_atr": 2.5,
     "current_phase": "1",
     "autotrainer_enabled": false,
     "break_magnitude_filter_enabled": false,

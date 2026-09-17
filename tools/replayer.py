@@ -12,9 +12,9 @@ Run:  python tools/replayer.py --calibrate
       python tools/replayer.py --report
 """
 
-import argparse, json, glob, random, statistics
+import argparse, json, glob, random, re, statistics
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pandas as pd
 
@@ -390,7 +390,11 @@ def report():
 # "abandoned_restart_gap" (a restart bookkeeping closure, no real exit),
 # which get filtered out below rather than counted as trade outcomes.
 
-_ADMIN_CLOSE_REASONS = {"abandoned_restart_gap", "abandoned", "manual_flat", ""}
+# B4 P0c: geometry_refused is a rule-driven immediate close (the gauntlet
+# refused the trade's placement after the fill already happened), not a
+# real "held to a market outcome" trade -- excluded the same way the other
+# administrative closes are, so it can't skew R:R/exit-reason stats.
+_ADMIN_CLOSE_REASONS = {"abandoned_restart_gap", "abandoned", "manual_flat", "geometry_refused", ""}
 
 _DEPTH_BUCKET_EDGES = (0.25, 0.5)
 _DEPTH_BUCKET_LABELS = ("<0.25", "0.25-0.5", ">0.5")
@@ -537,12 +541,19 @@ def _derive(e):
 
 
 def load_closed_trades(include_all=False):
-    """B8/R1: real closed-trade rows (not per-cycle snapshots, not admin
-    closes). PPL-only by default (R1); --all includes pre-PPL rows too.
-    Always drops stale-state opens (state_age_s > 900) -- those never
-    reflect what the live gate actually saw at decision time."""
+    """B8/R1/P10/R6: real closed-trade rows (not per-cycle snapshots, not
+    admin closes). PPL-only by default (R1); --all includes pre-PPL rows
+    too. Always drops stale-state opens (state_age_s > 900) and stale-price
+    lane-C opens (price_age_s > 5400) -- neither reflects what the live
+    gate actually saw at decision time.
+
+    Lane-C rows with no price_age_s field at all are excluded outright --
+    that field didn't exist before P10 shipped, so its absence IS "dated
+    before P10 ships" (the doc's own exclusion rule), without needing a
+    hardcoded cutoff timestamp that could drift from the real deploy time.
+    """
     rows = []
-    skipped_admin = skipped_stale = skipped_pre_ppl = 0
+    skipped_admin = skipped_stale = skipped_pre_ppl = skipped_stale_price = skipped_pre_p10_lanec = 0
     for f in sorted(glob.glob("logs/episodes/*.jsonl")):
         for line in open(f, encoding="utf-8"):
             if not line.strip():
@@ -562,6 +573,15 @@ def load_closed_trades(include_all=False):
             if _age is not None and _age > 900:
                 skipped_stale += 1
                 continue
+            _lane = e.get("lane") or ""
+            if _lane.startswith("C"):
+                _price_age = e.get("price_age_s")
+                if _price_age is None:
+                    skipped_pre_p10_lanec += 1
+                    continue
+                if _price_age > 5400:
+                    skipped_stale_price += 1
+                    continue
             if not include_all and not _is_ppl_row(e):
                 skipped_pre_ppl += 1
                 continue
@@ -570,7 +590,8 @@ def load_closed_trades(include_all=False):
     _tail = " -- use --all to include" if skipped_pre_ppl and not include_all else ""
     print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "
           f"({skipped_admin} admin closures, {skipped_stale} stale-state, "
-          f"{skipped_pre_ppl} pre-PPL excluded{_tail})")
+          f"{skipped_stale_price} stale-price lane-C, {skipped_pre_p10_lanec} "
+          f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded{_tail})")
     return rows
 
 
@@ -606,6 +627,63 @@ _BY_FIELDS = {
     "lane":         lambda e: e.get("lane"),
     "side":         lambda e: e.get("side"),
 }
+
+
+# ── REPLAYER-2 R6: pair every gate block with the council's verdict ────────
+_SCORE_LINE_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+.*SCORE:\s+(\S+)\s+([\d.]+)\s*/\s*([\d.]+)"
+)
+_LOCAL_UTC_OFFSET = timedelta(hours=2)  # this project's stated log-time convention
+
+
+def _load_score_lines(log_glob="logs/trading_bot*.log"):
+    """R6: (ts_utc, asset, total_score, required_score) from every SCORE:
+    line in the bot's logs -- the council's own verdict, independent of
+    whatever gate blocked the signal afterward. Log timestamps are LOCAL
+    (UTC+2), converted here so they compare directly against episode rows'
+    UTC entry_time."""
+    rows = []
+    for f in sorted(glob.glob(log_glob)):
+        try:
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    m = _SCORE_LINE_RE.search(line)
+                    if not m:
+                        continue
+                    try:
+                        ts_local = pd.Timestamp(m.group(1))
+                        ts_utc = (ts_local - _LOCAL_UTC_OFFSET).tz_localize("UTC")
+                        rows.append((ts_utc, m.group(2).upper(), float(m.group(3)), float(m.group(4))))
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    return rows
+
+
+def _pair_with_score(row, score_lines, window_s=60):
+    """R6: nearest SCORE: line for this row's asset in the preceding
+    minute. Returns {"score", "required", "council_passed"} or None if no
+    SCORE line exists for this asset in that window (log rotated out,
+    log_glob didn't match, etc. -- absence is not itself a finding)."""
+    try:
+        entry_ts = pd.Timestamp(row.get("entry_time"))
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.tz_localize("UTC")
+    except Exception:
+        return None
+    asset = (row.get("asset") or "").upper()
+    best, best_delta = None, None
+    for ts, a, score, required in score_lines:
+        if a != asset:
+            continue
+        delta = (entry_ts - ts).total_seconds()
+        if 0 <= delta <= window_s and (best_delta is None or delta < best_delta):
+            best, best_delta = (score, required), delta
+    if best is None:
+        return None
+    score, required = best
+    return {"score": score, "required": required, "council_passed": score >= required}
 
 
 def replay_by(by, min_trades=30, min_trailing=10, min_assets=3, include_all=False):
@@ -663,6 +741,27 @@ def replay_by(by, min_trades=30, min_trailing=10, min_assets=3, include_all=Fals
         worst10 = sum(rs_sorted[:worst_n]) / worst_n if worst_n else float("nan")
         print(f"{str(k):<16} {len(grp):>5} {win_pct:>6.0f}% {mean_r:>+8.3f} "
               f"{med_mfe:>+10.3f} {med_mae:>+10.3f} {mean_travel:>10.3f} {worst10:>+9.3f}")
+
+    # R6: --by gate_id gets one more line -- for each gate, how many of its
+    # blocks happened on a signal the council had actually PASSED. This is
+    # the exact read that caused a wrong call on 16 Sep: a Cost Gate block
+    # on a signal scored 2.96/2.95 (already past its own bar).
+    if by == "gate_id":
+        score_lines = _load_score_lines()
+        if not score_lines:
+            print("\n(R6: no SCORE: lines found under logs/trading_bot*.log -- "
+                  "council-verdict pairing skipped)")
+        else:
+            print(f"\n{'gate_id':<16} {'n':>5} {'paired':>7} {'council_passed':>15}")
+            for k in sorted(groups, key=lambda x: str(x)):
+                grp = groups[k]
+                paired = [(_pair_with_score(g, score_lines)) for g in grp]
+                paired = [p for p in paired if p is not None]
+                n_passed = sum(1 for p in paired if p["council_passed"])
+                print(f"{str(k):<16} {len(grp):>5} {len(paired):>7} {n_passed:>15}")
+                if n_passed:
+                    print(f"  ^ {n_passed} block(s) on a signal the council had "
+                          f"already passed -- read the gate against the score, not around it")
 
 
 # ── REPLAYER-2 R4: arms -- the input to RL-1 ────────────────────────────────

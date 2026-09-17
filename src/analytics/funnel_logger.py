@@ -67,6 +67,30 @@ class FunnelLogger:
             return "blocked_ai_validation"
 
         reason = str(details.get("reasoning", "")).lower()
+
+        # B4 P6 G7: council_aggregator.py's main_reasoning appends
+        # "(Score: X/Y)" onto EVERY decision_type unconditionally (line
+        # ~3821) -- including ones blocked for a completely different
+        # reason (Governor Veto, trap filter, ...) that just happens to
+        # also report the score for visibility. The "score"/"rejected"
+        # substring keys below then swallowed all of those, PLUS every
+        # signal that actually CLEARED its threshold and was blocked for
+        # something else entirely -- measured: 115 rows with score >=
+        # required filed as blocked_low_score (e.g. "USOIL BUY (Confirmed)
+        # (Score: 3.41/3.3)"). Full "always from gate_id" would need
+        # gate_id threaded into every funnel.record() caller (a larger
+        # plumbing change than this fix); this closes the specific,
+        # measured false-positive by checking the number itself before
+        # trusting the word "score" at all.
+        import re as _re_funnel
+        _score_m = _re_funnel.search(r"score:\s*([\d.]+)\s*/\s*([\d.]+)", reason)
+        _score_actually_low = True  # unknown shape -- don't change existing behavior
+        if _score_m:
+            try:
+                _score_actually_low = float(_score_m.group(1)) < float(_score_m.group(2))
+            except ValueError:
+                pass
+
         # Map known veto reasons (set across both aggregators) to families.
         # Order matters — first match wins. "quality" precedes "score"/"rejected"
         # so "REJECTED (Quality: ...)" lands in low_quality, while
@@ -111,8 +135,15 @@ class FunnelLogger:
             "rejected": "blocked_low_score",
         }
         for key, fam in families.items():
-            if key in reason:
-                return fam
+            if key not in reason:
+                continue
+            if key in ("score", "rejected") and not _score_actually_low:
+                # A passing score ("Score: 3.41/3.3") got blocked for some
+                # OTHER reason entirely -- don't file it as low-score just
+                # because the number is present in the text. Fall through
+                # to the remaining keys / blocked_other instead.
+                continue
+            return fam
 
         if not self._raw_fired(details):
             return "no_raw_signal"

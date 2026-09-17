@@ -690,15 +690,40 @@ class DataManager:
                                df["timestamp"].dt.tz_localize("UTC").dt.floor("h")
                         _m = _key.map(_fv.set_index("_hr")["volume"])
                         _swapped = int(_m.notna().sum())
-                        # BATCH-A A4: MT5 tick_volume arrives as an integer dtype;
-                        # Binance volumes are floats. Assigning floats into an int
-                        # column raised a FutureWarning with a full array dump on
-                        # every overlay (~3,913 per weekend) and becomes a hard
-                        # error in a future pandas. Cast once, then assign.
-                        df["volume"] = df["volume"].astype("float64")
-                        df.loc[_m.notna(), "volume"] = _m[_m.notna()].values
-                    logger.info(f"[VOL-SOURCE] BTC: binance overlay on {_swapped}/{len(df)} bars"
-                                + ("" if _swapped else " — tick-volume fallback"))
+                        _total = len(df)
+                        # B4 P8: a window average that mixes real binance
+                        # volume for SOME bars with MT5 tick-count volume for
+                        # others compares a real number against a mostly-tick
+                        # baseline -- likely why BTC's VOLUME judge scored
+                        # 0.00-0.23/0.5 on every scorecard (measured coverage:
+                        # 1H ~99%, 4H trading ~90%, 4H regime 166/546=31%, D1
+                        # 27/200=14%). Consistent units per window: only
+                        # apply the overlay when the WHOLE window is covered;
+                        # otherwise leave every bar as tick volume.
+                        if _swapped == _total and _total > 0:
+                            # BATCH-A A4: MT5 tick_volume arrives as an integer
+                            # dtype; Binance volumes are floats. Assigning
+                            # floats into an int column raised a
+                            # FutureWarning with a full array dump on every
+                            # overlay (~3,913 per weekend) and becomes a hard
+                            # error in a future pandas. Cast once, then assign.
+                            df["volume"] = df["volume"].astype("float64")
+                            df.loc[_m.notna(), "volume"] = _m[_m.notna()].values
+                            logger.info(
+                                f"[VOL-SOURCE] BTC {timeframe}: binance overlay on {_swapped}/{_total} bars"
+                            )
+                        elif _swapped > 0:
+                            logger.info(
+                                f"[VOL-SOURCE] BTC {timeframe}: mixed coverage {_swapped}/{_total} "
+                                f"— using tick volume for consistency"
+                            )
+                        else:
+                            logger.info(
+                                f"[VOL-SOURCE] BTC {timeframe}: binance overlay on 0/{_total} bars "
+                                f"— tick-volume fallback"
+                            )
+                    else:
+                        logger.info(f"[VOL-SOURCE] BTC {timeframe}: no flow CSV — tick-volume fallback")
                 except Exception as _e:
                     logger.warning(f"[VOL-SOURCE] BTC overlay failed — tick fallback: {_e}")
 

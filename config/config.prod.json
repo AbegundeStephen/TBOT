@@ -1450,6 +1450,9 @@
   },
   "phase_config": {
     "_note": "Phase 1 calibration window. Flip individual flags to true only when data from this watch period justifies it.",
+    "runner_trail_enabled": false,
+    "min_reward_ccy": 5.0,
+    "max_target_atr": 2.5,
     "current_phase": "1",
     "autotrainer_enabled": false,
     "break_magnitude_filter_enabled": false,
