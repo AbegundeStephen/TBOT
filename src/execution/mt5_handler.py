@@ -2328,8 +2328,30 @@ class MT5ExecutionHandler:
                             # Push SL if moved
                             if (self.trading_config.get("place_vtm_sl_on_exchange", False)
                                 and _sl_after is not None and _sl_before != _sl_after):
-                                self._push_sl_to_exchange(position.mt5_ticket, _sym, _sl_after)
-                                
+                                _sl_pushed = self._push_sl_to_exchange(position.mt5_ticket, _sym, _sl_after)
+                                if not _sl_pushed:
+                                    # B4 P4: a push that isn't accepted must not leave the
+                                    # LOCAL VTM believing a stop the broker never applied --
+                                    # confirmed live (16 Sep): local moved 1.8861->1.8898,
+                                    # broker kept 1.8861, exit filled there, and the bot
+                                    # carried a false risk figure for 97 minutes. Read the
+                                    # broker's real stop back and adopt it -- reduced to
+                                    # verification-only now that the gauntlet (P0) decides
+                                    # the number correctly in the first place.
+                                    try:
+                                        _live_pos = mt5.positions_get(ticket=position.mt5_ticket)
+                                        if _live_pos and _live_pos[0].sl:
+                                            _broker_sl = float(_live_pos[0].sl)
+                                            if abs(_broker_sl - _sl_after) > 1e-9:
+                                                logger.warning(
+                                                    "[STOP-SYNC] %s: modify refused/unconfirmed -- "
+                                                    "keeping broker SL %.5f, discarding local %.5f",
+                                                    asset_name, _broker_sl, _sl_after,
+                                                )
+                                                position.trade_manager.current_stop_loss = _broker_sl
+                                    except Exception as _sync_err:
+                                        logger.debug(f"[STOP-SYNC] {asset_name}: readback failed: {_sync_err}")
+
                             # Push TP if moved
                             if (self.trading_config.get("place_vtm_tp_on_exchange", False)
                                 and _tp_after is not None and _tp_before != _tp_after):

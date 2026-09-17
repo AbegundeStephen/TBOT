@@ -198,6 +198,22 @@ class HeartbeatMonitor:
         entry = status_map.get(asset)
         return bool(entry and entry[0] == "CLOSED")
 
+    def _has_open_positions(self):
+        """B4 W3: vtm.sync_running's tag ([SYNC] MT5:) only ever logs from
+        _reconcile_exchange_positions, which main.py's VTM loop only calls
+        while at least one position is open -- while flat, that promise
+        would FAIL every window forever, which is not a fault. Unknown/no
+        bot reference defaults to True (never silently skip a check just
+        because this hasn't been wired -- matches _is_market_closed's own
+        fail-open convention)."""
+        pm = getattr(self.bot, "portfolio_manager", None) if self.bot else None
+        if pm is None or not hasattr(pm, "get_open_positions_count"):
+            return True
+        try:
+            return pm.get_open_positions_count() > 0
+        except Exception:
+            return True
+
     def _check_cadence(self, p, snap):
         pid = p["id"]
         tag = p["tag"]
@@ -235,6 +251,14 @@ class HeartbeatMonitor:
                 if _max is not None and n > _max:
                     bad.append(f"{a}={n}>{_max}")
             return (not bad), (f"{tag}: " + ", ".join(bad) if bad else "")
+
+        if p.get("when") == "positions_open" and not self._has_open_positions():
+            if pid not in self._market_skip_logged:
+                self._market_skip_logged.add(pid)
+                logger.info("[HEARTBEAT] SKIP %s (flat -- no open positions)", pid)
+            return True, ""
+        self._market_skip_logged.discard(pid)
+
         n = self._count_tag(snap, tag, window_min)
         if _min is not None and n < _min:
             return False, f"{tag}: {n} < min {_min} in {window_min}min"
@@ -328,6 +352,48 @@ class HeartbeatMonitor:
         if n < _min:
             return False, f"{field}=={target}: {n} < min {_min} in {window_min}min"
         return True, ""
+
+    def _check_log_vs_ledger(self, p, snap):
+        """B4 P6 G6: REPLACES the per-gate ledger_seen promises above --
+        those FAIL for every gate that legitimately never fired in the
+        window (measured: only 24-28 of 56 passed, nine FAILs each on gates
+        with zero real blocks). One rule instead: if the log recorded a
+        block by gate X in the window, the ledger must hold a row for X in
+        the same window. Zero log blocks for a gate means no check for that
+        gate -- not a failure.
+
+        Requires main.py's [HOLD] line to carry gate_id=<id> (added
+        alongside this checker, same commit) -- extract_gate here means
+        "read the gate_id= suffix", not re-deriving the human-label mapping
+        a second time."""
+        window_min = p.get("window_min", 1440)
+        tag = p.get("tag", "Signal BLOCKED by")
+        lines = self._lines_in_window(snap, window_min)
+        tag_match = self._tag_matcher(tag)
+        _log_counts = {}
+        for msg in lines:
+            if not tag_match(msg):
+                continue
+            m = re.search(r"gate_id=(\S+)", msg)
+            if m:
+                gid = m.group(1)
+                _log_counts[gid] = _log_counts.get(gid, 0) + 1
+        if not _log_counts:
+            return True, ""  # nothing blocked this window -- nothing to check
+
+        rows = self._episode_rows_in_window(window_min)
+        _ledger_counts = {}
+        for r in rows:
+            gid = r.get("gate_id")
+            if gid:
+                _ledger_counts[gid] = _ledger_counts.get(gid, 0) + 1
+
+        bad = [
+            f"{gid}: {n} log blocks, 0 ledger rows"
+            for gid, n in _log_counts.items()
+            if _ledger_counts.get(gid, 0) == 0
+        ]
+        return (not bad), "; ".join(bad)
 
     def _check_non_null(self, p, snap):
         if "config_path" in p:
@@ -447,6 +513,8 @@ class HeartbeatMonitor:
                 return self._check_non_null(p, snap)
             if ptype == "ledger_seen":
                 return self._check_ledger_seen(p)
+            if ptype == "log_vs_ledger":
+                return self._check_log_vs_ledger(p, snap)
             if ptype == "file_fresh":
                 return self._check_file_fresh(p)
         except Exception as e:

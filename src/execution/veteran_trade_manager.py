@@ -358,6 +358,7 @@ class VeteranTradeManager:
         telegram=None,  # Brain rebuild Part 0.3
         council_ref=None,  # Gate Tier 4.1 — reuses _check_lifecycle_phase in the alert layer
         episode_id: Optional[str] = None,  # DATA-3 ITEM 1C
+        portfolio_manager=None,  # B4 P0g-1: reach _get_quote_to_usd_rate for non-USD-quoted pairs
     ):
         self.entry_price = entry_price
         self.side = side.lower()
@@ -393,6 +394,7 @@ class VeteranTradeManager:
         self.entry_retest_type = entry_retest_type
         self.telegram = telegram  # Brain rebuild Part 0.3 — used by 3.5's alert layer
         self.council_ref = council_ref  # Gate Tier 4.1 — used by the alert layer's lifecycle-phase reuse
+        self.portfolio_manager = portfolio_manager  # B4 P0g-1
         self.atr_at_entry = self._calculate_atr()
 
         # Determine asset type for leverage ceiling
@@ -1044,6 +1046,202 @@ class VeteranTradeManager:
             logger.error(f"[VTM] Promotion check error: {e}")
             return False
 
+    # ── B4 PART A: ONE STOP PIPELINE ────────────────────────────────────────
+    def _quote_to_usd_rate(self) -> float:
+        """P0g-1: 1.0 (no conversion) when unreachable -- fails toward
+        today's existing behavior rather than inventing a rate. self.asset
+        (e.g. "GBPAUD") is passed directly rather than a broker symbol --
+        VTM has no symbol attribute, and _get_quote_to_usd_rate's own
+        normalisation (strip any 'M') is a no-op on every current asset key,
+        so this is safe for the live asset list without extra plumbing."""
+        if self.portfolio_manager and hasattr(self.portfolio_manager, "_get_quote_to_usd_rate"):
+            try:
+                return float(self.portfolio_manager._get_quote_to_usd_rate(self.asset))
+            except Exception:
+                return 1.0
+        return 1.0
+
+    def _next_structural_levels(self, atr: float) -> list:
+        """P0g-2: candidate levels beyond the current target, in the trade's
+        direction, nearest first. TREND reads the same zone-ladder the
+        structure-target engine already uses; REVERSION has no ladder, only
+        the single opposite-side zone line, so its walk is at most one step.
+        """
+        levels = []
+        try:
+            if self.trade_type == "REVERSION":
+                _lvl = self.zone_current_upper if self.side == "long" else self.zone_current_lower
+                if _lvl:
+                    levels = [float(_lvl)]
+            else:
+                _ladder = getattr(self, "zone_ladder_4h", []) or []
+                for _l in _ladder:
+                    try:
+                        _p = float(_l.get("price"))
+                    except Exception:
+                        continue
+                    if self.side == "long" and _p > self.entry_price:
+                        levels.append(_p)
+                    elif self.side == "short" and _p < self.entry_price:
+                        levels.append(_p)
+                levels = sorted(set(levels), reverse=(self.side == "short"))
+                if self.side == "long":
+                    levels = sorted(l for l in levels)
+                # nearest-to-entry first either way
+                levels = sorted(levels, key=lambda p: abs(p - self.entry_price))
+        except Exception as e:
+            logger.debug(f"[TP-WALK] {self.asset}: level lookup error: {e}")
+        return levels
+
+    def _check_worthwhileness(self, sl: float, tp: float, atr: float):
+        """P0g: the pipeline's job is to PUT THE TARGET somewhere that pays,
+        not to veto -- Desire's ruling. Walks the target out to progressively
+        farther real structural levels before ever refusing. Returns
+        (ok, final_tp, reason).
+        """
+        quote_to_usd = self._quote_to_usd_rate()
+        if quote_to_usd != 1.0:
+            logger.info(f"[FX-CONV] {self.asset}: quote rate={quote_to_usd:.4f} applied to worthwhileness check")
+
+        risk_dist = abs(self.entry_price - sl)
+        _pcfg = self.risk_config.get("phase_config", {})
+        min_reward_ccy = float(_pcfg.get("min_reward_ccy", 5.0))
+        max_target_atr = float(_pcfg.get("max_target_atr", 2.5))
+
+        def _reward_ccy(_tp):
+            return abs(_tp - self.entry_price) * float(self.position_size or 0) * quote_to_usd
+
+        reward = _reward_ccy(tp)
+        if reward < min_reward_ccy:
+            for i, level in enumerate(self._next_structural_levels(atr), start=1):
+                level_atr = (abs(level - self.entry_price) / atr) if atr else 0.0
+                if level_atr > max_target_atr:
+                    break
+                level_reward = _reward_ccy(level)
+                logger.info(
+                    "[TP-WALK] %s %s L%d %.5f = $%.2f (%.2fATR) -> %.5f = $%.2f (%.2fATR) %s",
+                    self.asset, self.side, i, tp, reward,
+                    (abs(tp - self.entry_price) / atr) if atr else 0.0,
+                    level, level_reward, level_atr,
+                    "ACCEPTED" if level_reward >= min_reward_ccy else "still short",
+                )
+                tp, reward = level, level_reward
+                if reward >= min_reward_ccy:
+                    break
+
+        if reward < min_reward_ccy:
+            return False, tp, (
+                f"not_worthwhile: best ${reward:.2f} at "
+                f"{(abs(tp - self.entry_price) / atr) if atr else 0.0:.2f}ATR "
+                f"< ${min_reward_ccy:.2f} min"
+            )
+
+        # Risk budget: local_free_margin is an approximation for equity (VTM
+        # has no direct equity reference) -- conservative direction, since
+        # free margin is <= equity whenever other positions are open.
+        risk_ccy = risk_dist * float(self.position_size or 0) * quote_to_usd
+        _risk_cap_pct = float(_pcfg.get("max_risk_pct_per_trade", 0.02))
+        if self.local_free_margin and self.local_free_margin > 0:
+            risk_cap_ccy = self.local_free_margin * _risk_cap_pct
+            if risk_ccy > risk_cap_ccy:
+                return False, tp, (
+                    f"not_worthwhile: risk ${risk_ccy:.2f} > budget "
+                    f"${risk_cap_ccy:.2f} ({_risk_cap_pct:.1%} of free margin)"
+                )
+
+        return True, tp, "ok"
+
+    def _finalise_stop_and_target(self, candidate_sl: float, candidate_tp: float, atr: float, source: str):
+        """
+        B4 P0a: the ONLY place a stop or target becomes final. REVERSION and
+        TREND each propose candidates from their own logic (unchanged --
+        REVERSION's zone pick, TREND's whole ladder/MA-shield/structural-
+        override machinery), then BOTH pass their SL and PRIMARY target
+        (TP1 -- the same level min_rr enforcement has always been checked
+        against in this file) through here.
+
+        Order: 3x spread floor -> min_sl_pct floor -> max_stop_dist clamp ->
+        worthwhileness (real money, FX-aware) -> R:R on FINAL numbers.
+
+        Deviation from the doc's literal step order, stated: "tier/H anchor"
+        is TREND's existing STEP 2.5 structural-stop-override
+        (_compute_structural_stop) -- it needs vtm_entry_type/tier context
+        that does not exist for REVERSION, so it stays where it already runs
+        (before this method is called), not duplicated here. Idempotent by
+        construction for TREND (its own floors already ran); this is where
+        REVERSION gets them for the first time.
+
+        Returns (sl, tp, ok: bool, reason: str). ok=False means DO NOT TRADE.
+        """
+        sl, tp = candidate_sl, candidate_tp
+        floor_bound = False
+        clamp_bound = False
+
+        # 3x spread floor
+        if self.current_ask > 0 and self.current_bid > 0:
+            spread = abs(self.current_ask - self.current_bid)
+            raw_dist = abs(self.entry_price - sl)
+            floored_dist = max(raw_dist, 3.0 * spread)
+            if floored_dist > raw_dist:
+                sl = self.entry_price - floored_dist if self.side == "long" else self.entry_price + floored_dist
+
+        # min_sl_pct floor
+        _min_sl_pct = self.risk_config.get("min_sl_pct", 0.0)
+        if _min_sl_pct > 0 and self.entry_price > 0:
+            _min_sl_dist = self.entry_price * _min_sl_pct
+            _raw_dist = abs(self.entry_price - sl)
+            if _raw_dist < _min_sl_dist:
+                sl = (self.entry_price - _min_sl_dist) if self.side == "long" else (self.entry_price + _min_sl_dist)
+                floor_bound = True
+
+        # max_stop_dist / min_stop_dist ATR clamp (P3: values unchanged, no-op)
+        if atr and atr > 0:
+            _min_mult = float(self.risk_config.get("min_stop_atr_mult", 0.8))
+            _max_mult = float(self.risk_config.get("max_stop_atr_mult", 5.0))
+            _dist = abs(self.entry_price - sl)
+            _clamped = max(atr * _min_mult, min(atr * _max_mult, _dist))
+            if abs(_clamped - _dist) > 1e-9:
+                clamp_bound = True
+                sl = (self.entry_price - _clamped) if self.side == "long" else (self.entry_price + _clamped)
+
+        self.min_sl_bound = floor_bound
+        risk_dist = abs(self.entry_price - sl)
+
+        def _log_final(_tp, _ok, _reason):
+            _rr = (abs(_tp - self.entry_price) / risk_dist) if risk_dist > 0 and _tp else 0.0
+            _atr_dist = (risk_dist / atr) if atr else 0.0
+            logger.info(
+                "[STOP-FINAL] %s %s src=%s sl=%.5f (%.5g, %.2fATR) tp=%s rr=%.2f "
+                "floor=%s spread=ok clamp=%s -> %s",
+                self.asset, self.side, source, sl, risk_dist, _atr_dist,
+                f"{_tp:.5f}" if _tp else "None", _rr,
+                "BOUND" if floor_bound else "ok",
+                "BOUND" if clamp_bound else "ok",
+                "OK" if _ok else f"REFUSED ({_reason})",
+            )
+
+        if risk_dist <= 0:
+            _log_final(tp, False, "zero or invalid risk distance")
+            return sl, tp, False, "zero or invalid risk distance"
+
+        # Worthwhileness (P0g) -- may walk tp outward
+        ok, tp, reason = self._check_worthwhileness(sl, tp, atr)
+        if not ok:
+            _log_final(tp, False, reason)
+            return sl, tp, False, reason
+
+        # R:R on FINAL numbers -- refuse, never stretch (P0b)
+        _min_rr = float(self.risk_config.get("min_rr", 1.5))
+        reward_dist = abs(tp - self.entry_price) if tp else 0.0
+        rr = (reward_dist / risk_dist) if risk_dist > 0 else 0.0
+        if rr < _min_rr:
+            _reason = f"rr {rr:.2f} < {_min_rr:.2f}"
+            _log_final(tp, False, _reason)
+            return sl, tp, False, _reason
+
+        _log_final(tp, True, "")
+        return sl, tp, True, "ok"
+
     def _calculate_initial_levels(self):
         try:
             atr = self._calculate_atr()
@@ -1123,29 +1321,18 @@ class VeteranTradeManager:
                         tp_target = self.entry_price - (2.0 * atr)
                         logger.warning("[VTM] REVERSION SHORT: TP was >= entry — clamped to entry - 2×ATR")
 
-                self._propose_stop(self.initial_stop_loss, "initial_stop")
+                # B4 P0a/P0b: the premature _propose_stop call and the R:R
+                # ATR-stretch that used to live here are both removed.
+                # REVERSION's candidate SL/TP now go through the SAME
+                # gauntlet TREND's do (see the shared call site right before
+                # "STEP 3 — Lot Sanitizer" below), which floors, clamps, and
+                # -- on a final R:R miss -- REFUSES rather than inventing an
+                # ATR-multiple target disconnected from the zone geometry
+                # that was the whole point of a REVERSION trade.
                 self.take_profit_levels = [tp_target]
                 self.partial_sizes = [1.0]
 
-                # Q3 check 2: if the zone-derived geometry doesn't clear the
-                # per-asset R:R floor, the zones are too tight for this trade —
-                # fall back to ATR geometry rather than take a sub-threshold R:R.
-                _min_rr = float(self.risk_config.get("min_rr", 1.5))
-                _risk = abs(self.entry_price - self.initial_stop_loss)
-                _reward = abs(tp_target - self.entry_price)
-                if _risk > 0 and (_reward / _risk) < _min_rr:
-                    _atr_tp = self.partial_targets[0] if self.partial_targets else 2.0
-                    if self.side == "long":
-                        tp_target = self.entry_price + (_atr_tp * atr)
-                    else:
-                        tp_target = self.entry_price - (_atr_tp * atr)
-                    self.take_profit_levels = [tp_target]
-                    logger.info(
-                        f"[VTM] REVERSION: zone R:R {_reward/_risk:.2f} < {_min_rr} — "
-                        f"TP fell back to ATR ({_atr_tp}×)"
-                    )
-
-                logger.info(f"[VTM] REVERSION MODE: SL={self.initial_stop_loss}, TP={tp_target}")
+                logger.info(f"[VTM] REVERSION MODE (candidate): SL={self.initial_stop_loss}, TP={tp_target}")
 
             else:
                 # ATR-based adaptive floors and caps.
@@ -1738,7 +1925,29 @@ class VeteranTradeManager:
                 raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
             
             self.position_size = final_size
-            self._propose_stop(self.initial_stop_loss, "initial_stop")
+
+            # B4 P0a/P0c: the ONE shared gauntlet, for both REVERSION and
+            # TREND alike. Placed here (not inside either branch above) so
+            # a single call site covers both -- everything above this point
+            # is candidate selection; nothing below is allowed to move the
+            # stop or target again except real management moves later in
+            # the trade's life.
+            _candidate_tp = self.take_profit_levels[0] if self.take_profit_levels else None
+            _final_sl, _final_tp, _geo_ok, _geo_reason = self._finalise_stop_and_target(
+                self.initial_stop_loss, _candidate_tp, atr, source=self.trade_type,
+            )
+            self.initial_stop_loss = _final_sl
+            if self.take_profit_levels:
+                self.take_profit_levels[0] = _final_tp
+            self.geometry_refused = not _geo_ok
+            self.geometry_refused_reason = _geo_reason if not _geo_ok else None
+
+            # P0f: this is the position's genuine first stop -- bypasses
+            # tighten-only. See _propose_stop's own docstring for why this
+            # matters even though current_stop_loss is usually still None
+            # here (VTM re-init and P0e's post-mutation re-finalisation are
+            # the cases where it is not).
+            self._propose_stop(self.initial_stop_loss, "initial_stop", initial=True)
 
             # STOP-1 SEG F1: one line covering the whole stop-placement chain.
             # Today it takes four separate log lines and a code read to work
@@ -2142,8 +2351,20 @@ class VeteranTradeManager:
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
                     if new_trail > self.current_stop_loss:
-                        logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
-                        self._propose_stop(new_trail, "trailing_stop")
+                        # B4 P0d: off by default -- Desire wants profit measured
+                        # with and without the ATR runner trail. This mechanism
+                        # is NOT in _ARITH_MOVERS (confirmed: "trailing_stop" has
+                        # been live all along despite arithmetic_stop_movers_
+                        # enabled=false), so a dedicated flag is needed here.
+                        if self.risk_config.get("phase_config", {}).get("runner_trail_enabled", False):
+                            logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
+                            self._propose_stop(new_trail, "trailing_stop")
+                        else:
+                            logger.info(
+                                "[STOP-PAUSE] %s: trailing_stop suppressed -- would have moved SL to "
+                                "%.5g (current %.5g, entry %.5g)",
+                                self.asset, new_trail, self.current_stop_loss or 0, self.entry_price,
+                            )
 
                 # ── STRUCTURAL SWING LOW TRAIL (Option 1 + Option B) ──────────
                 # Fires for BOTH REVERSION and TREND types when in profit.
@@ -2170,8 +2391,16 @@ class VeteranTradeManager:
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
                     if new_trail < self.current_stop_loss:
-                        logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
-                        self._propose_stop(new_trail, "trailing_stop")
+                        # B4 P0d: mirror of the long branch above.
+                        if self.risk_config.get("phase_config", {}).get("runner_trail_enabled", False):
+                            logger.info(f"[VTM] 🏃 Trailing SL updated to ${new_trail:,.2f} (from ${self.current_stop_loss:,.2f}).")
+                            self._propose_stop(new_trail, "trailing_stop")
+                        else:
+                            logger.info(
+                                "[STOP-PAUSE] %s: trailing_stop suppressed -- would have moved SL to "
+                                "%.5g (current %.5g, entry %.5g)",
+                                self.asset, new_trail, self.current_stop_loss or 0, self.entry_price,
+                            )
 
                 # ── STRUCTURAL SWING HIGH TRAIL (Option 1 + Option B, shorts) ─
                 _current_profit_short = self.entry_price - self.close[-1]
@@ -2818,8 +3047,14 @@ class VeteranTradeManager:
             if self.side == "long":
                 _soft_sl = self.entry_price - 0.75 * _initial_risk
                 if _soft_sl > self.current_stop_loss:
+                    # B4 P13: this line printed as though the stop had already
+                    # moved, ahead of _propose_stop -- which suppresses
+                    # "soft_risk_cut" outright when arithmetic_stop_movers_
+                    # enabled=false (42,051 [STOP-PAUSE] lines exist, so
+                    # suppression works correctly; this line just kept
+                    # claiming otherwise).
                     logger.info(
-                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} would move SL → {_soft_sl:,.5f} "
                         f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
                     )
                     self._propose_stop(_soft_sl, "soft_risk_cut")
@@ -2827,7 +3062,7 @@ class VeteranTradeManager:
                 _soft_sl = self.entry_price + 0.75 * _initial_risk
                 if _soft_sl < self.current_stop_loss:
                     logger.info(
-                        f"[VTM] 🔰 Soft risk-cut: {self.asset} SL → {_soft_sl:,.5f} "
+                        f"[VTM] 🔰 Soft risk-cut: {self.asset} would move SL → {_soft_sl:,.5f} "
                         f"(profit ${current_profit:.4g} > 0.75×ATR ${0.75*atr_value:.4g}, risk −25%)"
                     )
                     self._propose_stop(_soft_sl, "soft_risk_cut")
@@ -3439,6 +3674,41 @@ class VeteranTradeManager:
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
 
+                    # B4 P0e: re-run the shared gauntlet now that this trade
+                    # is TREND -- "keeps REVERSION's stop" (unevaluated
+                    # against current price/ATR, and against a target that
+                    # no longer exists post-cancel) was the bug. Uses
+                    # _next_structural_levels under the NEW trade_type, so
+                    # the walk now reads the TREND-style zone ladder rather
+                    # than REVERSION's single zone line.
+                    try:
+                        _mut_levels = self._next_structural_levels(atr_value)
+                        _mut_tp = _mut_levels[0] if _mut_levels else (
+                            current_price + (2.0 * atr_value) if self.side == "long"
+                            else current_price - (2.0 * atr_value)
+                        )
+                        _mut_sl, _mut_tp, _mut_ok, _mut_reason = self._finalise_stop_and_target(
+                            self.current_stop_loss, _mut_tp, atr_value, source="MUTATION",
+                        )
+                        if _mut_ok:
+                            # Tighten-only still applies here -- this is a
+                            # management move, not the initial stop.
+                            self._propose_stop(_mut_sl, "mutation_refinalize")
+                            self.take_profit_levels = [_mut_tp]
+                        else:
+                            # Refusal on an ALREADY-OPEN position means "keep
+                            # what you had", never "undo the mutation" -- the
+                            # position stays TREND/trailing-enabled with its
+                            # prior stop; only the re-finalized numbers are
+                            # skipped.
+                            logger.info(
+                                "[STOP-FINAL] %s: mutation re-finalize refused (%s) -- "
+                                "keeping prior stop, no new target set",
+                                self.asset, _mut_reason,
+                            )
+                    except Exception as _mut_err:
+                        logger.warning(f"[VTM] mutation re-finalize error (non-blocking): {_mut_err}")
+
         # --- STEP 5.5: Momentum Exhaustion Exit ---
         # Three simultaneous conditions must hold:
         #   1. RSI is in the exhaustion zone (> 75 long / < 25 short) — price stretched
@@ -3734,7 +4004,7 @@ class VeteranTradeManager:
             return True
         return candidate > current if self.side == "long" else candidate < current
 
-    def _propose_stop(self, candidate: Optional[float], reason: str) -> bool:
+    def _propose_stop(self, candidate: Optional[float], reason: str, initial: bool = False) -> bool:
         """
         ALL automated stop writes route here (Manual-Authority batch,
         ratified 17-Aug). Tighten-only: an automated move may protect more,
@@ -3743,6 +4013,17 @@ class VeteranTradeManager:
         move for the ledger (_queue_pending_move) and honors the per-position
         pause set by /reverse. Never raises; a rejected proposal is a log
         line, not an error.
+
+        B4 P0f: `initial=True` bypasses tighten-only entirely. Without it,
+        the FIRST value ever written becomes a ceiling no later correction
+        can pass -- confirmed live (17 Sep GBPAUD): REVERSION's own
+        construction-time stop got written once, then the gauntlet's
+        post-floor value (identical, in that case, but not always) was
+        rejected as "not tighter than itself". current_stop_loss is None at
+        construction, so the ordinary tighten-only path would usually let a
+        single "initial_stop" proposal through anyway -- this flag exists
+        for the cases where it isn't None: VTM re-init on an existing
+        position, and P0e's post-mutation re-finalisation.
 
         Why queue instead of recording immediately: this is called from deep
         inside check_exit()/update_with_current_price(), both of which hold
@@ -3828,7 +4109,7 @@ class VeteranTradeManager:
 
             with self._sl_lock:
                 cur = self.current_stop_loss
-                if not self._is_tighter(candidate, cur):
+                if not initial and not self._is_tighter(candidate, cur):
                     logger.info(
                         f"[VTM] ✗ {reason}: SL {candidate:.5f} not tighter than "
                         f"{cur if cur is None else f'{cur:.5f}'} for {self.asset} {self.side} — suppressed (tighten-only)"

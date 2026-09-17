@@ -144,6 +144,7 @@ class ShadowPosition:
     mae_r: Optional[float] = None
     sl_path: list = field(default_factory=list)   # DIARY-1 D2: [(ts_iso, old_sl, new_sl, reason)]
     state_age_s: Optional[float] = None           # DIARY-1 D3
+    price_age_s: Optional[float] = None           # B4 P10
 
     # Outcome
     closed: bool = False
@@ -380,6 +381,7 @@ class ShadowPosition:
             "mae_r":            round(self.mae_r, 4) if self.mae_r is not None else None,
             "sl_path":          self.sl_path,   # DIARY-1 D2
             "state_age_s":      self.state_age_s,   # DIARY-1 D3
+            "price_age_s":      self.price_age_s,   # B4 P10
             "pair_id":          self.pair_id,        # DIARY-1 D4
             "variant":          self.variant,        # DIARY-1 D4
             "gate_id":          self.gate_id,        # B3 GATE-1 G2
@@ -396,7 +398,20 @@ class ShadowPosition:
             "stop_source":      self.stop_source,
             "initial_stop_loss": self.initial_stop_loss,
             "friction_source":  self.friction_source,
-            "trailing_activated": self.trailing_active,
+            # B4 P12: renamed from "trailing_activated" -- it's read from
+            # self.trailing_active AT CLOSE, which is an OUTCOME (losers get
+            # stopped out before the trail ever has a chance to arm), not a
+            # treatment. Full count of 216 shadow rows: True->144 (108W/31S/
+            # 5L), False->72 (0W/1S/70L) -- perfect separation, because the
+            # field just reports whether the trade survived long enough to
+            # reach the trail, not whether trailing caused the outcome.
+            # trail_moved_stop is the real treatment: did any sl_path entry
+            # actually have reason "trail" (or contain "trail", covering
+            # live VTM's trailing_stop/structural_swing_trail spellings too).
+            "trail_was_active_at_close": self.trailing_active,
+            "trail_moved_stop": any(
+                "trail" in str(mv[3]).lower() for mv in (self.sl_path or []) if len(mv) > 3
+            ),
             "net_pnl_r":        self._net_r(),
             "gate_code":        self.gate_code,          # S7e
             "outcome_class":    self.outcome_class,       # S7b
@@ -560,6 +575,7 @@ class ShadowTradingEngine:
         variant: str = "",              # DIARY-1 D4: management-variant name within the pair
         gate_id: str = "unknown",       # B3 GATE-1 G2: stable name, from config/gates.json
         gate_stage: str = "unknown",    # B3 GATE-1 G2
+        price_age_s: float = None,      # B4 P10: age of the price this open used, seconds
     ) -> Optional[ShadowPosition]:
         """
         Open a new shadow position for a blocked signal.
@@ -869,6 +885,7 @@ class ShadowTradingEngine:
                 (time.time() - float(composite_state.get("built_at_ts", time.time())))
                 if composite_state else None
             ),
+            price_age_s=price_age_s,  # B4 P10
             # J2.2: Standardized trailing stop (same for every shadow trade)
             trailing_active=False,
             trailing_distance=_trailing_distance,

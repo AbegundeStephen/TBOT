@@ -180,6 +180,7 @@ class Position:
         telegram=None,  # Brain rebuild Part 0.3 fix: Position has no telegram_bot
         # of its own (unlike PortfolioManager) — must be passed in explicitly.
         council_ref=None,  # Gate Tier 4.1 — passed through to the VTM constructor below
+        portfolio_manager=None,  # B4 P0g-1: so the VTM can reach _get_quote_to_usd_rate
     ):
         self.asset = asset
         self.symbol = symbol
@@ -209,6 +210,7 @@ class Position:
         self.disable_partials = disable_partials
         self.telegram = telegram  # Brain rebuild Part 0.3 fix
         self.council_ref = council_ref  # Gate Tier 4.1
+        self.portfolio_manager = portfolio_manager  # B4 P0g-1
 
         self.stop_loss = None
         self.take_profit = None
@@ -327,6 +329,7 @@ class Position:
                     # which doesn't exist on Position (only on PortfolioManager) — crashed
                     # VTM init on every fresh position open, leaving it stop-loss-less.
                     council_ref=self.council_ref,  # Gate Tier 4.1
+                    portfolio_manager=self.portfolio_manager,  # B4 P0g-1
                     # DATA-3 ITEM 1C: read from self.episode_id (the Position's
                     # own attribute, set just above in __init__), not from
                     # signal_details -- keeps the VTM's copy consistent with
@@ -1167,6 +1170,7 @@ class PortfolioManager:
                                         # position.episode_id survives independently
                                         # (DATA-3 ITEM 1B), so read from there instead.
                                         episode_id=getattr(position, "episode_id", None),
+                                        portfolio_manager=self,  # B4 P0g-1
                                     )
                                     logger.info(
                                         f"[STATE] VTM for {position_id} successfully created."
@@ -2317,9 +2321,24 @@ class PortfolioManager:
             logger.error(f"[PORTFOLIO] SL distance is 0 for {asset}")
             return 0.0
 
+        # B4 P0g-1: stop_distance_pct is a dimensionless fraction of the
+        # QUOTE currency (sl_distance and entry_price are both in that
+        # currency) -- risk_per_trade is USD. Dividing USD by a bare
+        # fraction silently assumes the quote currency IS USD, which is
+        # only true for BTC/GOLD/USTEC/USOIL/EURUSD. For an AUD-quoted pair
+        # like GBPAUD this undersizes the position by roughly the AUD->USD
+        # rate (~0.66), i.e. by about a third -- confirmed via
+        # _get_quote_to_usd_rate, which already exists and was unused here.
+        quote_to_usd = self._get_quote_to_usd_rate(asset)
+        if quote_to_usd != 1.0:
+            logger.info(
+                f"[FX-CONV] {asset}: quote currency rate={quote_to_usd:.4f} "
+                f"applied to position sizing"
+            )
+
         # Position size = Risk Amount / Stop Distance %
         stop_distance_pct = sl_distance / entry_price
-        position_size_usd = risk_per_trade / stop_distance_pct
+        position_size_usd = risk_per_trade / (stop_distance_pct * quote_to_usd)
 
         # ✨ STEP 1.5: Confidence-Based Scaling
         # Reason: Increase size for high-conviction signals, decrease for uncertain ones.
@@ -2845,6 +2864,7 @@ class PortfolioManager:
             lot_precision=lot_precision,
             telegram=self.telegram_bot,  # Brain rebuild Part 0.3 fix
             council_ref=self._resolve_council_ref(asset),  # Gate Tier 4.1
+            portfolio_manager=self,  # B4 P0g-1
         )
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
@@ -2882,6 +2902,32 @@ class PortfolioManager:
             self.close_position(
                 position_id=position.position_id,
                 reason="no_structural_anchor_weak_signal",
+            )
+        # B4 P0c: same pattern, for the shared stop/target gauntlet's refusal
+        # (floor+clamp conflict, R:R miss, or unworkable placement -- see
+        # _finalise_stop_and_target). Stated deviation from the doc's literal
+        # "decide before the order, send with the order": this codebase
+        # commits to a fill BEFORE VTM (and therefore the gauntlet) ever
+        # runs -- add_position always receives an mt5_ticket already in hand
+        # (confirmed by reading the call graph up to _execute_mt5_order).
+        # Moving the decision earlier would mean pricing the gauntlet off an
+        # ESTIMATED pre-fill price and threading sl/tp into the order
+        # request itself, a restructuring of the order-execution call graph
+        # this batch does not attempt. This achieves the same protective
+        # outcome the doc actually cares about instead: no badly-geometried
+        # trade survives, and it is not this method's job to guess when
+        # "before" is unreachable that a same-outcome "immediately after" is
+        # wrong not to take.
+        elif position.trade_manager and getattr(
+            position.trade_manager, "geometry_refused", False
+        ):
+            _reason = getattr(position.trade_manager, "geometry_refused_reason", "unknown")
+            logger.warning(
+                f"[VTM] {asset}: geometry refused at open ({_reason}) — closing immediately."
+            )
+            self.close_position(
+                position_id=position.position_id,
+                reason="geometry_refused",
             )
 
         # 6. Database Logging
@@ -2993,24 +3039,43 @@ class PortfolioManager:
         current_count = self.get_asset_position_count(asset, side)
 
         # Standardized Log (ENTRY)
-        log_trade_event(
-            "ENTRY",
-            {
-                "symbol": symbol,
-                "asset": asset,
-                "side": side,
-                "price": entry_price,
-                "quantity": quantity,
-                "trade_type": (
-                    signal_details.get("trade_type", "TREND")
-                    if signal_details
-                    else "TREND"
-                ),
-                "position_id": position.position_id,
-                "record_source": "portfolio",
-                "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
-            },
+        # B4 P5: full-history grep shows every real entry logging exactly
+        # this ENTRY line once alongside mt5_handler.py's own ENTRY line
+        # (internal id + MT5 ticket, same second) -- that pair is normal and
+        # must not be suppressed. The one anomaly found (16 Sep, GBPAUD) was
+        # a SECOND call for the same position_id 31s later with a different
+        # trade_type, meaning add_position() ran twice for one logical
+        # position. KNOWN UNKNOWN: what causes that second call is not
+        # established -- P0c may make it moot -- so this only suppresses the
+        # resulting duplicate log line, it does not touch add_position()'s
+        # own logic or prevent whatever caused the second call.
+        _entry_type = (
+            signal_details.get("trade_type", "TREND") if signal_details else "TREND"
         )
+        if not hasattr(self, "_entry_events_seen"):
+            self._entry_events_seen = {}
+        _prev_type = self._entry_events_seen.get(position.position_id)
+        if _prev_type is not None and _prev_type != _entry_type:
+            logger.warning(
+                "[TRADE-EVENT] second ENTRY for %s: %s after %s — suppressed",
+                position.position_id, _entry_type, _prev_type,
+            )
+        else:
+            self._entry_events_seen[position.position_id] = _entry_type
+            log_trade_event(
+                "ENTRY",
+                {
+                    "symbol": symbol,
+                    "asset": asset,
+                    "side": side,
+                    "price": entry_price,
+                    "quantity": quantity,
+                    "trade_type": _entry_type,
+                    "position_id": position.position_id,
+                    "record_source": "portfolio",
+                    "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
+                },
+            )
 
         logger.info(
             f"✓ Position #{current_count} opened: {asset} {side.upper()} "

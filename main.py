@@ -6,6 +6,7 @@ Enhanced error handling, network resilience, and Telegram thread management
 
 
 import subprocess
+import atexit
 import json
 import logging
 import sys
@@ -1157,9 +1158,22 @@ class TradingBot:
                 self.ai_monitor = AIValidatorMonitor(self.ai_validator)
                 self.ai_tuner = AIValidatorTuner(self.ai_validator)
 
-                schedule.every(1).hours.do(self.ai_monitor.log_periodic_report)
-
-                logger.info("[AI] ✓ Monitoring enabled")
+                # B4 P9 (Desire ruled: leave the validator off, just stop the
+                # noise): with use_ai_validation=false the validator object
+                # exists but is never asked to validate, so the hourly
+                # report always printed Total Checks: 0 and a block of
+                # zeros. Gate the schedule on the same flag that gates the
+                # validator itself -- this does not touch the entry path or
+                # any gate, only whether a report about an idle component
+                # gets printed.
+                if self.params.use_ai_validation:
+                    schedule.every(1).hours.do(self.ai_monitor.log_periodic_report)
+                    logger.info("[AI] ✓ Monitoring enabled")
+                else:
+                    logger.info(
+                        "[AI] Validator DISABLED (use_ai_validation=false) — "
+                        "hourly report suppressed"
+                    )
 
             except Exception as e:
                 logger.warning(f"[AI] Monitoring warning: {e}")
@@ -2999,6 +3013,7 @@ class TradingBot:
         episode_id_override: str = None,    # DIARY-1 D4: distinct id per side/variant within a pair
         gate_id: str = "unknown",           # B3 GATE-1 G2: stable name, from config/gates.json
         gate_stage: str = "unknown",        # B3 GATE-1 G2: pre_direction | post_council | post_approval | control
+        price_age_s: float = None,          # B4 P10: age of the price this open used, seconds
     ):
         """
         Open a shadow (virtual) position for any signal that was blocked
@@ -3160,6 +3175,7 @@ class TradingBot:
                 variant=variant,                 # DIARY-1 D4
                 gate_id=gate_id,                 # B3 GATE-1 G2
                 gate_stage=gate_stage,            # B3 GATE-1 G2
+                price_age_s=price_age_s,          # B4 P10
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
         except Exception as _e:
@@ -4316,6 +4332,16 @@ class TradingBot:
                 )
                 time.sleep(300)
 
+        finally:
+            # B4 W4: second independent caller of the shared persist path
+            # (PersistLoop thread is the third) -- runs whether the cycle
+            # above succeeded or raised, so a run_trading_cycle failure is
+            # never also the reason system metrics/builder stores go stale.
+            try:
+                self._persist_periodic_state()
+            except Exception as _persist_err:
+                logger.error(f"[PERSIST] periodic persist from cycle tail failed: {_persist_err}")
+
     def _episode_id_for(self, asset_name, details):
         """FRAME-1 SEG 5: return this evaluation's episode id, minting one if
         the caller's `details` predates the trade-pass mint (DATA-3 ITEM 4).
@@ -4404,6 +4430,30 @@ class TradingBot:
                 if _price <= 0:
                     continue
 
+                # B4 P10: "market open" and "data fresh" are different things
+                # and only the first was tested above -- confirmed live (17
+                # Sep): three GOLD opens at 05:43/06:38/08:44, all at the same
+                # 4272.443 price, with no [Fetched ... bars] line for GOLD
+                # anywhere in between (real price by 09:00 was 4310.8, 38.4pt
+                # / ~1.3ATR away). Deviation from the doc's literal anchor:
+                # this cache's timestamp lives on df.index (a DatetimeIndex),
+                # not a "timestamp" column -- confirmed by how the cache
+                # itself is populated (main.py's df.index[-1] freshness check
+                # right before caching).
+                try:
+                    _last_bar_ts = df.index[-1]
+                    if _last_bar_ts.tzinfo is None:
+                        _last_bar_ts = _last_bar_ts.tz_localize("UTC")
+                    _price_age_s = (datetime.now(timezone.utc) - _last_bar_ts).total_seconds()
+                except Exception:
+                    _price_age_s = None
+                if _price_age_s is None or _price_age_s > 5400:
+                    logger.info(
+                        "[LANE-C] %s: skipped — price is %.0f min old",
+                        asset_name, (_price_age_s / 60) if _price_age_s is not None else -1,
+                    )
+                    continue
+
                 if _rnd.random() < _biased_pct:
                     _lane_tag = "C-BIASED"
                     _agg = self.aggregators.get(asset_name)
@@ -4456,6 +4506,7 @@ class TradingBot:
                             pair_id=_pair_id, variant=_v.get("name", ""),
                             episode_id_override=f"shadow-{_pair_id}-{'L' if _side > 0 else 'S'}-{_v.get('name', '')}",
                             gate_id="lane_c", gate_stage="control",
+                            price_age_s=_price_age_s,  # B4 P10
                         )
                 logger.info(
                     f"[LANE-C] {asset_name}: {_lane_tag} pair={_pair_id} sides={len(_sides)} "
@@ -4560,56 +4611,35 @@ class TradingBot:
 
         _last_reconcile = 0.0
         _last_state_save = 0.0
-        _last_metrics_save = 0.0  # REF-1 SEG K1: separate timer -- see below
+        _last_watchdog_log = 0.0  # B4 W3
 
         while self.is_running:
             try:
-                # REF-1 SEG K1: system metrics are ACCOUNT state, not position
-                # state, and must persist even while flat. This was gated
-                # inside the "positions to manage" branch below, so
-                # peak_equity (drives the drawdown shield) and loss_streak
-                # (drives the circuit breaker) never got saved while flat --
-                # system_state.json sat unchanged across a restart, and a
-                # /reset_equity issued while flat did not survive one.
-                #
-                # Separate timer from _last_state_save on purpose:
-                # save_portfolio_state() below already calls
-                # _save_system_metrics() itself (STOP-1 SEG C), so sharing one
-                # timer would have this branch reset the clock every loop tick
-                # whenever positions ARE open, starving save_portfolio_state()
-                # of its own interval and silently disabling the VTM/position
-                # crash-recovery persistence this loop exists for.
-                _now_k1 = time.time()
-                if self.portfolio_manager and _now_k1 - _last_metrics_save >= state_save_interval:
-                    _last_metrics_save = _now_k1
-                    try:
-                        # B3 GATE-1 G3: prune anything older than 24h before
-                        # persisting -- the dedup window is only 4h, no need
-                        # to carry ancient keys across every restart forever.
-                        _bs_cutoff = _now_k1 - 24 * 3600
-                        _bs_serialized = [
-                            [list(k), v] for k, v in getattr(self, "_blocked_seen", {}).items()
-                            if v >= _bs_cutoff
-                        ]
-                        self.portfolio_manager._save_system_metrics(
-                            market_status=self.market_status, blocked_seen=_bs_serialized,
-                        )
-                    except Exception as _sk:
-                        logger.error(f"[VTM LOOP] System metrics save failed: {_sk}")
+                # B4 W3: know within two minutes, not twenty hours. DEBUG on
+                # every iteration is cheap; the INFO line is throttled to
+                # once/60s so it's a heartbeat, not log spam.
+                logger.debug("[VTM-LOOP] tick")
+                _now_w3 = time.time()
+                if _now_w3 - _last_watchdog_log >= 60:
+                    _last_watchdog_log = _now_w3
+                    _n_pos_w3 = (
+                        self.portfolio_manager.get_open_positions_count()
+                        if self.portfolio_manager else 0
+                    )
+                    # _last_reconcile is 0.0 until the first reconcile this
+                    # session (only runs while positions are open) -- -1
+                    # means "not yet", not a real 1.7-billion-second age.
+                    _sync_age_w3 = (_now_w3 - _last_reconcile) if _last_reconcile else -1.0
+                    logger.info("[VTM-LOOP] alive — %d position(s), last_sync %.0fs ago",
+                                _n_pos_w3, _sync_age_w3)
 
-                    # B7: same 30s-ish cadence as the system-metrics save above --
-                    # persist every asset's builder stores (setups, BRC/PPL
-                    # memory, zone ladders) so a restart does not wipe them.
-                    for _b7_asset, _b7_agg in (self.aggregators or {}).items():
-                        try:
-                            _b7_builder = getattr(_b7_agg, "_cs_builder", None)
-                            if _b7_builder is None and isinstance(_b7_agg, dict):
-                                _b7_cand = _b7_agg.get("performance") or _b7_agg.get("livermore")
-                                _b7_builder = getattr(_b7_cand, "_cs_builder", None)
-                            if _b7_builder is not None and hasattr(_b7_builder, "persist_stores"):
-                                _b7_builder.persist_stores()
-                        except Exception as _b7_e:
-                            logger.warning(f"[PERSIST] {_b7_asset}: persist_stores failed: {_b7_e}")
+                # B4 W4: system metrics + builder-store persistence moved to
+                # _persist_periodic_state() -- a dead/hung VTM thread (see W1)
+                # must not be the only thing keeping this alive. This call is
+                # one of three (run_trading_cycle's tail, the independent
+                # PersistLoop thread); the shared guard inside it means only
+                # one of the three actually does the write each interval.
+                self._persist_periodic_state()
 
                 # Check if there are any positions to manage to avoid unnecessary work
                 if self.portfolio_manager and self.portfolio_manager.get_open_positions_count() > 0:
@@ -4635,12 +4665,125 @@ class TradingBot:
                 # Sleep until the next update
                 time.sleep(update_interval)
 
-            except Exception as e:
-                logger.error(f"[VTM LOOP] Error in VTM management loop: {e}", exc_info=True)
-                # Sleep longer on error to prevent spamming logs
-                time.sleep(60)
-        
+            except Exception as _loop_err:
+                # B4 W2: an exception in one cycle must never end the loop.
+                # A try/except already wrapped this body before B4 -- the gap
+                # was the 60s post-error sleep (a loop that looked dead for a
+                # full minute on every caught error) and the generic tag.
+                # Genuinely dying to a RAISED exception was never the risk
+                # W1 found anyway (zero tracebacks logged across the 20h
+                # outage) -- this tightens recovery regardless.
+                logger.error("[VTM-LOOP] ERROR — continuing: %s", _loop_err, exc_info=True)
+                time.sleep(1)
+                continue
+
         logger.info("[VTM LOOP] VTM management loop has stopped.")
+
+    def _persist_periodic_state(self):
+        """B4 W4: system metrics (peak_equity, loss_streak, blocked_seen,
+        market_status) and every asset's builder stores, on a path that
+        cannot be taken down by one thread. Previously lived only inside
+        _vtm_management_loop -- W1 found that thread can hang silently for
+        hours, and it took every save down with it on 16 Sep.
+
+        Callable from run_trading_cycle's tail, the independent PersistLoop
+        thread, AND (still) the VTM loop itself -- self._last_periodic_
+        persist_ts is a shared guard, so having three callers means whoever's
+        turn comes up first each interval does the write, not triplicated I/O.
+        """
+        _interval = self.config["trading"].get("state_save_interval_seconds", 30)
+        _now = time.time()
+        if _now - getattr(self, "_last_periodic_persist_ts", 0.0) < _interval:
+            return
+        self._last_periodic_persist_ts = _now
+
+        if not self.portfolio_manager:
+            return
+        try:
+            # B3 GATE-1 G3: prune anything older than 24h before persisting --
+            # the dedup window is only 4h, no need to carry ancient keys
+            # across every restart forever.
+            _bs_cutoff = _now - 24 * 3600
+            _bs_serialized = [
+                [list(k), v] for k, v in getattr(self, "_blocked_seen", {}).items()
+                if v >= _bs_cutoff
+            ]
+            self.portfolio_manager._save_system_metrics(
+                market_status=self.market_status, blocked_seen=_bs_serialized,
+            )
+        except Exception as _sk:
+            logger.error(f"[PERSIST] System metrics save failed: {_sk}")
+
+        # B7: persist every asset's builder stores (setups, BRC/PPL memory,
+        # zone ladders) so a restart does not wipe them.
+        for _b7_asset, _b7_agg in (self.aggregators or {}).items():
+            try:
+                _b7_builder = getattr(_b7_agg, "_cs_builder", None)
+                if _b7_builder is None and isinstance(_b7_agg, dict):
+                    _b7_cand = _b7_agg.get("performance") or _b7_agg.get("livermore")
+                    _b7_builder = getattr(_b7_cand, "_cs_builder", None)
+                if _b7_builder is not None and hasattr(_b7_builder, "persist_stores"):
+                    _b7_builder.persist_stores()
+            except Exception as _b7_e:
+                logger.warning(f"[PERSIST] {_b7_asset}: persist_stores failed: {_b7_e}")
+
+    def _periodic_persist_loop(self):
+        """B4 W4: independent of the VTM thread on purpose -- polls every 10s
+        so _persist_periodic_state's 30s guard is never missed by more than
+        that, but the actual write cadence is still the shared guard's, not
+        this loop's poll interval. Wrapped so an error here can never end
+        the thread either (same containment reasoning as W2)."""
+        logger.info("[PERSIST-LOOP] Independent persist loop starting.")
+        while self.is_running:
+            try:
+                self._persist_periodic_state()
+            except Exception as e:
+                logger.error(f"[PERSIST-LOOP] Error — continuing: {e}", exc_info=True)
+            time.sleep(10)
+        logger.info("[PERSIST-LOOP] Independent persist loop has stopped.")
+
+    def _persist_on_shutdown(self):
+        """B4 W5: save-on-shutdown backstop.
+
+        stop() (below) already persists portfolio/position state, which
+        itself calls _save_system_metrics -- but never persisted builder
+        stores (setups, BRC/PPL memory, zone ladders). W1's own finding
+        was that ALL persistence before this batch lived only inside the
+        VTM thread, so a hang there meant total loss regardless of how the
+        process eventually exited. This method is registered as an atexit
+        hook (fires on normal interpreter shutdown from ANY path -- the
+        module-level KeyboardInterrupt handler included, whether or not it
+        goes through stop() first) AND called directly from stop() for the
+        common graceful-Ctrl+C path, so it does not wait on atexit timing.
+        Deliberately idempotent-safe to run twice: every underlying save is
+        a full overwrite, not an append, so running from both call sites
+        costs a little redundant I/O, never a wrong result.
+        """
+        logger.info("[SHUTDOWN] persisting state before exit…")
+        try:
+            if self.portfolio_manager:
+                _bs_cutoff = time.time() - 24 * 3600
+                _bs_serialized = [
+                    [list(k), v] for k, v in getattr(self, "_blocked_seen", {}).items()
+                    if v >= _bs_cutoff
+                ]
+                self.portfolio_manager._save_system_metrics(
+                    market_status=getattr(self, "market_status", {}),
+                    blocked_seen=_bs_serialized,
+                )
+            for _a, _agg in (self.aggregators or {}).items():
+                try:
+                    _b = getattr(_agg, "_cs_builder", None)
+                    if _b is None and isinstance(_agg, dict):
+                        _cand = _agg.get("performance") or _agg.get("livermore")
+                        _b = getattr(_cand, "_cs_builder", None)
+                    if _b is not None and hasattr(_b, "persist_stores"):
+                        _b.persist_stores()
+                except Exception as _be:
+                    logger.warning(f"[SHUTDOWN] {_a}: persist_stores failed: {_be}")
+            logger.info("[SHUTDOWN] state persisted")
+        except Exception as e:
+            logger.error(f"[SHUTDOWN] persist failed: {e}", exc_info=True)
 
     def _reconcile_exchange_positions(self):
         """
@@ -4838,6 +4981,7 @@ class TradingBot:
                                         if hasattr(self.aggregators.get(position.asset), "_check_lifecycle_phase")
                                         else None
                                     ),
+                                    portfolio_manager=self.portfolio_manager,  # B4 P0g-1
                                 )
                             logger.info(f"[VTM LOOP] ✅ Successfully re-initialized VTM for {position_id}")
                         except Exception as e:
@@ -6834,7 +6978,19 @@ class TradingBot:
                 # ─────────────────────────────────────────────────────────────
 
                 # If we had an original signal that was zeroed out, or if reasoning indicates a block
-                is_blocked = (original_sig != 0) or (reasoning and "hold" not in reasoning.lower())
+                # B4 P6 G2: a council HOLD that actually scored something --
+                # "HOLD (Score: 2.71/4.1)" (council_aggregator.py:3821, built
+                # unconditionally onto every decision_type) -- is a real
+                # refusal, not a natural non-event, but the plain "hold" not
+                # in reasoning test dropped it (measured: 1-of-3 proof
+                # refusals on 16 Sep left no shadow row). A genuine non-event
+                # like "HOLD (no proof — council not convened)" has no
+                # "score:" substring and is correctly left un-blocked.
+                is_blocked = (
+                    (original_sig != 0)
+                    or (reasoning and "hold" not in reasoning.lower())
+                    or (reasoning and "score:" in reasoning.lower())
+                )
 
                 if is_blocked:
                     # Determine block source and reason.
@@ -6873,7 +7029,9 @@ class TradingBot:
                         elif "insufficient_trend_strength" in raw_reason:
                             block_reason = "ADX indicates insufficient trend strength"
 
-                    logger.info(f"[HOLD] {asset_name}: Signal BLOCKED by {block_source} ({block_reason})")
+                    # B4 P6 G6: moved past _gate_id_generic's resolution below
+                    # so the log line can carry the machine gate_id too --
+                    # see the [HOLD] ... gate_id=... line further down.
 
                     # ── Counter-direction suppression (HOLD path) ──────────────────
                     # When the aggregator/council rejects without setting original_signal,
@@ -6933,6 +7091,12 @@ class TradingBot:
                         else:
                             _gate_id_generic = "aggregator_other"
                     _gate_stage_generic = _GATES_REGISTRY.get(_gate_id_generic, {}).get("stage", "unknown")
+
+                    # B4 P6 G6: gate_id appended so the heartbeat's
+                    # log_vs_ledger checker can compare log blocks to ledger
+                    # rows by MACHINE name, not by re-deriving _gid_map's
+                    # human-label mapping a second time in heartbeat.py.
+                    logger.info(f"[HOLD] {asset_name}: Signal BLOCKED by {block_source} ({block_reason}) gate_id={_gate_id_generic}")
 
                     if _gate_stage_generic == "pre_direction" and original_sig == 0:
                         # G4: no invented side for a pre-direction gate with no
@@ -9185,6 +9349,19 @@ class TradingBot:
             self.vtm_thread.start()
             logger.info("[VTM] ✅ VTM management thread started.")
 
+            # B4 W4: saving must not depend on the VTM thread -- it hung
+            # silently for 20h on 16 Sep and every save (system metrics,
+            # builder stores) died with it. This thread is _persist_periodic_
+            # state's second, independent caller (run_trading_cycle's tail is
+            # the third) -- a shared guard means whichever caller's turn
+            # comes up first each interval does the write, so having three
+            # callers is safety margin, not triplicated work.
+            self.persist_thread = Thread(
+                target=self._periodic_persist_loop, daemon=True, name="PersistLoop"
+            )
+            self.persist_thread.start()
+            logger.info("[PERSIST-LOOP] ✅ Independent persist thread started.")
+
             # Start MarketWatcher — real-time adverse-move guard + signal suppression
             try:
                 from src.execution.market_watcher import MarketWatcher
@@ -9365,6 +9542,11 @@ class TradingBot:
                     logger.info("[STOP] DynamicThresholds cache saved for %s", _dt_asset)
         except Exception as _dt_err:
             logger.warning("[STOP] DynamicThresholds save error: %s", _dt_err)
+
+        # B4 W5: builder stores (setups, BRC/PPL memory, zone ladders) --
+        # the one piece of shutdown persistence this method was missing.
+        # Also registered as an atexit hook for paths that never reach here.
+        self._persist_on_shutdown()
 
         # Stop the autotrainer
         if self.autotrainer:
@@ -9670,15 +9852,26 @@ def main():
         print("=" * 70)
 
     # Create and run the trading bot
+    bot = None
     try:
         bot = TradingBot(_config_path)
+        # B4 W5: fires on ANY normal interpreter shutdown -- the backstop for
+        # a path that never reaches TradingBot.stop() (e.g. an exception
+        # during bot.start() before its own try block is entered). Harmless
+        # to also fire after stop() already ran (see _persist_on_shutdown's
+        # own idempotency note).
+        atexit.register(bot._persist_on_shutdown)
         bot.start()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (KeyboardInterrupt)")
         print("\n[STOPPED] Bot stopped by user.")
+        if bot is not None:
+            bot._persist_on_shutdown()
     except Exception as e:
         logger.exception(f"Fatal error in bot: {e}")
         print(f"\n[FATAL] Bot crashed: {e}")
+        if bot is not None:
+            bot._persist_on_shutdown()
         sys.exit(1)
 
 

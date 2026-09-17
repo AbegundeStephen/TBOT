@@ -1507,8 +1507,15 @@ class InstitutionalCouncilAggregator:
                 # ✅ TASK 19: Calibrated Flash Veto (Phase 3)
                 # Reason: 2.5x ATR was too tight for CPI/FOMC; 3.0x Volume missed real institutional moves.
                 if candle_body < 0 and candle_size > (2.8 * atr_20) and vol_ratio > 2.5:
+                    # B4 P13: this council instance is per-asset -- it blocks
+                    # THIS asset, not every asset the bot trades. Reworded;
+                    # ratified behavior otherwise (fires on down candles only,
+                    # blocks both directions including the short it favours --
+                    # flagged to Desire, not changed).
                     logger.warning(
-                        f"[FLASH VETO] 🚨 BLACK SWAN DETECTED: Velocity {candle_size/atr_20:.1f}x ATR + Volume {vol_ratio:.1f}x AVG. Blocking all trades."
+                        f"[FLASH VETO] 🚨 BLACK SWAN DETECTED on {self.asset_type}: "
+                        f"Velocity {candle_size/atr_20:.1f}x ATR + Volume {vol_ratio:.1f}x AVG. "
+                        f"Blocking {self.asset_type} trades."
                     )
                     return 0, {
                         "timestamp": timestamp,
@@ -6285,7 +6292,7 @@ class InstitutionalCouncilAggregator:
         """Log council decision with bidirectional breakdown"""
         logger.info("")
         logger.info("=" * 80)
-        logger.info(f"🏛️  COUNCIL DECISION - {details['regime']}")
+        logger.info(f"🏛️  COUNCIL DECISION - {self.asset_type} - {details['regime']}")
         logger.info("=" * 80)
         logger.info(f"Timestamp: {details['timestamp']}")
         logger.info(f"")
@@ -6336,8 +6343,13 @@ class InstitutionalCouncilAggregator:
         logger.info(f"")
         logger.info(f"DECISION: {details['decision_type']}")
         logger.info(f"SIGNAL:   {details['signal']:+2d}")
+        # B4 REPLAYER-2 R6: asset added so a gate block can be paired with
+        # the council's own verdict for the SAME asset -- previously this
+        # line carried no asset identity at all, only the "COUNCIL DECISION"
+        # banner three lines above it did (and even that had none until the
+        # fix just above). Format kept machine-parseable: "SCORE: <ASSET> ...".
         logger.info(
-            f"SCORE:    {details['total_score']:.2f} / {details['required_score']:.2f}"
+            f"SCORE:    {self.asset_type} {details['total_score']:.2f} / {details['required_score']:.2f}"
         )
         logger.info("=" * 80)
         logger.info("")
