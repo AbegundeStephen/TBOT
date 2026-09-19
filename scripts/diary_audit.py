@@ -43,3 +43,22 @@ except Exception:
     registry = {}
 zero_rows = sorted(g for g in registry if g not in seen_gate_ids)
 print("\ngates in gates.json with zero rows ever:", zero_rows if zero_rows else "(none)")
+
+# B5-6: proof table -- every proof key, its live episodes, its shadow
+# episodes, and whether it's actually spent ("burned": True, set only by a
+# LIVE entry -- Desire's ruling: a shadow trade never burns a proof).
+try:
+    used_proofs = json.load(open("logs/used_proofs.json", encoding="utf-8"))
+except Exception:
+    used_proofs = {}
+
+print(f"\nproof key -> live episodes / shadow episodes / spent")
+for key in sorted(used_proofs):
+    entry = used_proofs[key]
+    live_eps = entry.get("episodes", [])
+    shadow_eps = entry.get("shadow_episodes", [])
+    spent = "yes" if entry.get("burned") else "no"
+    print(f"  {key:28s} live={len(live_eps):3d} {live_eps} "
+          f"shadow={len(shadow_eps):3d} {shadow_eps}  spent={spent}")
+if not used_proofs:
+    print("  (no proof entries on disk)")

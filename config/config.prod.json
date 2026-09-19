@@ -1453,6 +1453,7 @@
     "runner_trail_enabled": false,
     "min_reward_ccy": 5.0,
     "max_target_atr": 2.5,
+    "use_ai_validation": false,
     "current_phase": "1",
     "autotrainer_enabled": false,
     "break_magnitude_filter_enabled": false,

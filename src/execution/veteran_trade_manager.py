@@ -1062,17 +1062,32 @@ class VeteranTradeManager:
         return 1.0
 
     def _next_structural_levels(self, atr: float) -> list:
-        """P0g-2: candidate levels beyond the current target, in the trade's
-        direction, nearest first. TREND reads the same zone-ladder the
-        structure-target engine already uses; REVERSION has no ladder, only
-        the single opposite-side zone line, so its walk is at most one step.
+        """P0g-2 / B5-1: candidate levels in the trade's direction, side-
+        filtered and deduped -- NOT pre-sorted for a walk direction. The old
+        final sort here ("nearest-to-entry first") made the walk in
+        _check_worthwhileness only ever able to move TOWARD entry, since
+        that caller's loop takes the first improving level it sees; the
+        actual outward filter+sort now lives there, against the walk's
+        current candidate, which this function has no visibility into.
+        TREND reads the same zone-ladder the structure-target engine
+        already uses; REVERSION has no ladder, only the single opposite-
+        side zone line -- side-checked now (B5-1c), since nothing here
+        used to stop a short from being handed a level above its entry.
         """
         levels = []
         try:
             if self.trade_type == "REVERSION":
                 _lvl = self.zone_current_upper if self.side == "long" else self.zone_current_lower
                 if _lvl:
-                    levels = [float(_lvl)]
+                    _lvl = float(_lvl)
+                    _ok_side = (_lvl > self.entry_price) if self.side == "long" else (_lvl < self.entry_price)
+                    if _ok_side:
+                        levels = [_lvl]
+                    else:
+                        logger.info(
+                            "[TP-WALK] %s: zone level %.5f is on the wrong side of entry %.5f — ignored",
+                            self.asset, _lvl, self.entry_price,
+                        )
             else:
                 _ladder = getattr(self, "zone_ladder_4h", []) or []
                 for _l in _ladder:
@@ -1084,11 +1099,7 @@ class VeteranTradeManager:
                         levels.append(_p)
                     elif self.side == "short" and _p < self.entry_price:
                         levels.append(_p)
-                levels = sorted(set(levels), reverse=(self.side == "short"))
-                if self.side == "long":
-                    levels = sorted(l for l in levels)
-                # nearest-to-entry first either way
-                levels = sorted(levels, key=lambda p: abs(p - self.entry_price))
+                levels = list(set(levels))
         except Exception as e:
             logger.debug(f"[TP-WALK] {self.asset}: level lookup error: {e}")
         return levels
@@ -1113,11 +1124,34 @@ class VeteranTradeManager:
 
         reward = _reward_ccy(tp)
         if reward < min_reward_ccy:
-            for i, level in enumerate(self._next_structural_levels(atr), start=1):
+            # B5-1a: walk OUTWARD only -- levels strictly farther from entry
+            # than the candidate we're starting from, nearest-of-those first.
+            # The old code sorted every candidate nearest-to-entry-first with
+            # no floor, so the walk could only ever step INWARD, toward
+            # entry -- proven live 18 Sep: REVERSION's own correct 1.87300
+            # candidate got replaced by a worse 1.87638 (0.12 ATR, $0.12).
+            _start_dist = abs(tp - self.entry_price)
+            _candidates = sorted(
+                (p for p in self._next_structural_levels(atr) if abs(p - self.entry_price) > _start_dist),
+                key=lambda p: abs(p - self.entry_price),
+            )
+            for i, level in enumerate(_candidates, start=1):
                 level_atr = (abs(level - self.entry_price) / atr) if atr else 0.0
                 if level_atr > max_target_atr:
                     break
                 level_reward = _reward_ccy(level)
+                # B5-1b: never take a step that pays less than what we
+                # already have -- the old code accepted the next candidate
+                # unconditionally, with no comparison against the incoming
+                # reward.
+                if level_reward <= reward:
+                    logger.info(
+                        "[TP-WALK] %s %s L%d %.5f = $%.2f (%.2fATR) -> %.5f = $%.2f (%.2fATR) rejected (pays less)",
+                        self.asset, self.side, i, tp, reward,
+                        (abs(tp - self.entry_price) / atr) if atr else 0.0,
+                        level, level_reward, level_atr,
+                    )
+                    continue
                 logger.info(
                     "[TP-WALK] %s %s L%d %.5f = $%.2f (%.2fATR) -> %.5f = $%.2f (%.2fATR) %s",
                     self.asset, self.side, i, tp, reward,
@@ -3682,7 +3716,14 @@ class VeteranTradeManager:
                     # the walk now reads the TREND-style zone ladder rather
                     # than REVERSION's single zone line.
                     try:
-                        _mut_levels = self._next_structural_levels(atr_value)
+                        # B5-1: _next_structural_levels no longer pre-sorts
+                        # (that sort was the walk-direction bug) -- this
+                        # caller wants the NEAREST real level as a fresh
+                        # target, so it sorts for its own purpose here.
+                        _mut_levels = sorted(
+                            self._next_structural_levels(atr_value),
+                            key=lambda p: abs(p - self.entry_price),
+                        )
                         _mut_tp = _mut_levels[0] if _mut_levels else (
                             current_price + (2.0 * atr_value) if self.side == "long"
                             else current_price - (2.0 * atr_value)

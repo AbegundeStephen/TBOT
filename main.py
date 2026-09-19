@@ -430,7 +430,16 @@ class TradingBot:
         self.chart_sender = None
 
         self.params = SimpleNamespace(
-            use_ai_validation=True,
+            # B5-3: this was hardcoded True and never read from config, so
+            # the P9 report gate (below, "Status: ENABLED/DISABLED") could
+            # never take its DISABLED branch. For the record: the validator
+            # itself is not dead -- validate_signal increments total_checks
+            # on every non-zero council signal (hybrid_validator.py:174,
+            # gated at council_aggregator.py:3998), and the council only
+            # produced one four times in seven days. "Total Checks: 0" was
+            # an accurate statement about a short-lived process, not a
+            # broken validator.
+            use_ai_validation=self.config.get("phase_config", {}).get("use_ai_validation", False),
             ai_sr_threshold=0.020,
             ai_pattern_confidence=0.50,
             ai_enable_adaptive=True,
@@ -897,6 +906,31 @@ class TradingBot:
                     logger.info("[DB] ✓ Database linked to MT5 handler")
 
                 logger.info("[OK] MT5 Execution Handler initialized")
+
+                # B5-7: reconcile the leverage figure. mt5.account_info().leverage
+                # is a single ACCOUNT-wide setting (200, confirmed live) while
+                # config.json carries a leverage per asset (100 for FX, 20 for
+                # BTC) that the bot's own margin math (notional / leverage)
+                # uses -- config=100 vs broker=200 means the bot's margin
+                # figure runs DOUBLE the broker's on the same position
+                # ($11.54 vs MT5's $5.77). Conservative direction, so nothing
+                # is at risk, but exposure limits are enforced against a
+                # number that isn't the broker's. Report only -- Desire
+                # decides whether config follows the broker, this does not
+                # change it.
+                try:
+                    import MetaTrader5 as _mt5_lev
+                    _acct = _mt5_lev.account_info()
+                    if _acct:
+                        for _a in assets_by_exchange["mt5"]:
+                            _cfg_leverage = self.config.get("assets", {}).get(_a, {}).get("leverage", 1)
+                            if int(_acct.leverage) != int(_cfg_leverage):
+                                logger.warning(
+                                    "[CONFIG] %s leverage: config=%d, broker=%d — using config (conservative)",
+                                    _a, _cfg_leverage, _acct.leverage,
+                                )
+                except Exception as _lev_err:
+                    logger.debug(f"[CONFIG] leverage reconcile check failed: {_lev_err}")
 
             except Exception as e:
                 logger.error(f"[FAIL] MT5 handler: {e}")
@@ -2991,6 +3025,38 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
 
+    def _resolve_generic_gate_id(self, *, block_source: str = "", reasoning: str = "", block_reason: str = ""):
+        """B3 G2 / B5-5a: shared gate_id resolution for internal aggregator-
+        block paths that don't already carry a known gate_id. Extracted out
+        of the [HOLD] block (its sole caller until B5-5a) so the SAME logic
+        can be reused by the second, previously-missed shadow-open call
+        site (~line 8500) rather than drifting into its own copy. Returns
+        (gate_id, gate_stage)."""
+        _gid_map = {
+            "Cost Gate": "cost_gate",
+            "R:R Gate": "rr_gate",
+            "Candle Momentum Reversal": "candle_momentum",
+            "Opposite Trend Veto": "opposite_trend",
+            "AI Validation": "ai_reject",
+        }
+        gate_id = _gid_map.get(block_source)
+        if gate_id is None:
+            _rr = (reasoning or "").lower()
+            if "low_regime_confidence" in _rr or "low regime confidence" in (block_reason or "").lower():
+                gate_id = "regime_confidence"
+            elif "blocked_by_trap_filter" in _rr:
+                gate_id = "trap_filter"
+            elif "blocked_by_governor" in _rr:
+                gate_id = "governor"
+            elif "ny_open_block" in _rr:
+                gate_id = "ny_open"
+            elif "stale price" in (block_source or "").lower():
+                gate_id = "stale_price"
+            else:
+                gate_id = "aggregator_other"
+        gate_stage = _GATES_REGISTRY.get(gate_id, {}).get("stage", "unknown")
+        return gate_id, gate_stage
+
     # ------------------------------------------------------------------ #
     #  Shadow-trade helper — call at every gate that blocks a real signal #
     # ------------------------------------------------------------------ #
@@ -3155,6 +3221,7 @@ class TradingBot:
                         except Exception:
                             pass
 
+            _shadow_episode_id = episode_id_override or self._episode_id_for(asset_name, details)
             self.shadow_trader.open_position(
                 asset=asset_name,
                 side=_side,
@@ -3168,7 +3235,7 @@ class TradingBot:
                 composite_state=_comp_state_dict,
                 trail_mult=_trail_mult,   # S7c
                 be_r=_be_r,               # S7c
-                episode_id=episode_id_override or self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5 / DIARY-1 D4
+                episode_id=_shadow_episode_id,   # FRAME-1 SEG 5 / DIARY-1 D4
                 lane=lane,                       # LANES L1
                 bypass_guards=bypass_guards,     # LANES L1
                 pair_id=pair_id,                 # DIARY-1 D4
@@ -3178,6 +3245,25 @@ class TradingBot:
                 price_age_s=price_age_s,          # B4 P10
             )
             logger.debug(f"[SHADOW] Opened {_side} for {asset_name} (gate={gate_label})")
+
+            # B5-6 (Desire ruled): a shadow trade never burns a proof, but
+            # its history must still be visible against the proof record --
+            # append-only, never sets the proof "burned" (see
+            # _record_shadow_proof_reference's own docstring for why a
+            # plain dict-membership check on used_proofs would otherwise
+            # have made this block a real live entry from ever using the
+            # same proof again).
+            try:
+                _pr_cs = details.get("composite_state") or {}
+                _pr_ref = float(
+                    details.get("setup_ref")
+                    or (_pr_cs.get("setup_ref") if isinstance(_pr_cs, dict) else getattr(_pr_cs, "setup_ref", None))
+                    or 0.0
+                )
+                if _pr_ref > 0:
+                    self._record_shadow_proof_reference(asset_name, _side, _pr_ref, _shadow_episode_id)
+            except Exception as _pr_shadow_err:
+                logger.debug(f"[PROOF-GATE] shadow reference skipped: {_pr_shadow_err}")
         except Exception as _e:
             logger.debug(f"[SHADOW] _shadow_open_blocked failed: {_e}")
 
@@ -4619,6 +4705,12 @@ class TradingBot:
                 # every iteration is cheap; the INFO line is throttled to
                 # once/60s so it's a heartbeat, not log spam.
                 logger.debug("[VTM-LOOP] tick")
+                # B5-4b: updated on EVERY iteration (not just the throttled
+                # watchdog log below) -- an outside stall detector reads
+                # this to know the loop is alive even between the 60s
+                # [VTM-LOOP] alive lines.
+                self._vtm_last_tick = time.time()
+                self._vtm_last_call = "top_of_loop"
                 _now_w3 = time.time()
                 if _now_w3 - _last_watchdog_log >= 60:
                     _last_watchdog_log = _now_w3
@@ -4639,11 +4731,26 @@ class TradingBot:
                 # one of three (run_trading_cycle's tail, the independent
                 # PersistLoop thread); the shared guard inside it means only
                 # one of the three actually does the write each interval.
+                # B5-4a: timed -- W1 narrowed the 16 Sep stop to a hang, not
+                # an exception or a flag change (the try/except already
+                # existed, is_running is only ever flipped at shutdown). A
+                # hung thread leaves no evidence of where it hung; this is
+                # how the NEXT one names itself.
+                self._vtm_last_call = "persist_periodic_state"
+                _pp_t0 = time.time()
                 self._persist_periodic_state()
+                _pp_dt = time.time() - _pp_t0
+                if _pp_dt > 10:
+                    logger.warning("[VTM-LOOP] persist_periodic_state took %.1fs", _pp_dt)
 
                 # Check if there are any positions to manage to avoid unnecessary work
                 if self.portfolio_manager and self.portfolio_manager.get_open_positions_count() > 0:
+                    self._vtm_last_call = "check_VTM_positions"
+                    _cv_t0 = time.time()
                     self._check_VTM_positions()
+                    _cv_dt = time.time() - _cv_t0
+                    if _cv_dt > 10:
+                        logger.warning("[VTM-LOOP] check_VTM_positions took %.1fs", _cv_dt)
 
                     # Periodic ticket-level reconciliation against the broker.
                     # Catches positions closed directly on the exchange mid-session
@@ -4651,7 +4758,17 @@ class TradingBot:
                     _now = time.time()
                     if _now - _last_reconcile >= reconcile_interval:
                         _last_reconcile = _now
+                        # B5-4a: this is the suspect -- sync_positions_with_mt5
+                        # calls the MT5 Python API, which takes no timeout
+                        # argument. NOT PROVEN as the 16 Sep cause (a hung
+                        # thread leaves no evidence of where); timed
+                        # regardless, since it's correct to know either way.
+                        self._vtm_last_call = "reconcile_exchange_positions"
+                        _rec_t0 = time.time()
                         self._reconcile_exchange_positions()
+                        _rec_dt = time.time() - _rec_t0
+                        if _rec_dt > 10:
+                            logger.warning("[VTM-LOOP] reconcile took %.1fs — MT5 slow or hanging", _rec_dt)
 
                     # Phase 1.2: persist VTM/position state after the management
                     # pass so an unclean shutdown does not reset trade lifecycle.
@@ -4732,13 +4849,34 @@ class TradingBot:
         so _persist_periodic_state's 30s guard is never missed by more than
         that, but the actual write cadence is still the shared guard's, not
         this loop's poll interval. Wrapped so an error here can never end
-        the thread either (same containment reasoning as W2)."""
+        the thread either (same containment reasoning as W2).
+
+        B5-4b: also the VTM loop's outside stall detector -- this thread is
+        independent of the VTM thread by construction, so it can notice a
+        hang the VTM loop's OWN try/except never gets a chance to catch
+        (nothing raises when a call just never returns). This is the line
+        that would have caught the 16 Sep hang within minutes instead of
+        twenty hours.
+        """
         logger.info("[PERSIST-LOOP] Independent persist loop starting.")
+        _last_stall_log = 0.0
         while self.is_running:
             try:
                 self._persist_periodic_state()
             except Exception as e:
                 logger.error(f"[PERSIST-LOOP] Error — continuing: {e}", exc_info=True)
+
+            try:
+                _age = time.time() - getattr(self, "_vtm_last_tick", time.time())
+                if _age > 180 and time.time() - _last_stall_log >= 60:
+                    _last_stall_log = time.time()
+                    logger.error(
+                        "[VTM-LOOP] STALLED — no tick for %.0fs. Last call: %s",
+                        _age, getattr(self, "_vtm_last_call", "?"),
+                    )
+            except Exception as _stall_err:
+                logger.debug(f"[PERSIST-LOOP] stall check error: {_stall_err}")
+
             time.sleep(10)
         logger.info("[PERSIST-LOOP] Independent persist loop has stopped.")
 
@@ -5097,6 +5235,7 @@ class TradingBot:
                                         "long" if pyramid_signal > 0 else "short",
                                         float(sig_details.get("setup_ref") or _pyr_cs_get("setup_ref") or 0.0),
                                         int(sig_details.get("setup_age") or _pyr_cs_get("setup_age") or 0),
+                                        episode_id=sig_details.get("episode_id") or self._episode_id_for(asset_name, sig_details),  # B5-6
                                     )
                                 except Exception as _pe:
                                     logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used (pyramid) ({_pe})")
@@ -5472,15 +5611,29 @@ class TradingBot:
             logger.warning(f"[PROOF-GATE] Could not restore used-proof ledger: {_e}")
             self.used_proofs = {}
 
-    def _mark_proof_used(self, asset_name: str, side: str, ref: float, age: int):
-        """BATCH-W1 SEG 3: record that this proof has funded an entry."""
+    def _mark_proof_used(self, asset_name: str, side: str, ref: float, age: int, episode_id: str = None):
+        """BATCH-W1 SEG 3 / B5-6: record that this proof has funded a LIVE
+        entry -- the only thing that genuinely burns a proof (Desire's
+        ruling). "burned": True is the field the proof_reused gate actually
+        keys on now, not mere presence in the dict -- a shadow-only
+        reference (_record_shadow_proof_reference) creates/updates the same
+        keyed entry without ever setting it, so a shadow trade can never
+        block a later live entry from spending the same proof.
+        """
         try:
             _key = f"{asset_name}|{side}|{ref:.5f}"
-            self.used_proofs[_key] = {
+            _entry = self.used_proofs.get(_key) or {"episodes": [], "shadow_episodes": []}
+            _entry.setdefault("episodes", [])
+            _entry.setdefault("shadow_episodes", [])
+            _entry.update({
                 "ts": datetime.now().isoformat(),
                 "age_at_entry": age,
                 "ref": ref,
-            }
+                "burned": True,
+            })
+            if episode_id and episode_id not in _entry["episodes"]:
+                _entry["episodes"].append(episode_id)
+            self.used_proofs[_key] = _entry
             import json as _json
             self._used_proofs_path.parent.mkdir(parents=True, exist_ok=True)
             self._used_proofs_path.write_text(_json.dumps(self.used_proofs, indent=2))
@@ -5489,6 +5642,34 @@ class TradingBot:
             )
         except Exception as _e:
             logger.warning(f"[PROOF-GATE] Could not persist used-proof ledger: {_e}")
+
+    def _record_shadow_proof_reference(self, asset_name: str, side: str, ref: float, episode_id: str) -> None:
+        """B5-6 (Desire ruled): a shadow trade never burns a proof -- it
+        only records that this shadow episode was tried against it, so the
+        proof's full history (live AND shadow) stays visible without ever
+        setting "burned". If conditions change and the proof is still
+        alive, it can still be spent live; this call must never cause that
+        to be refused. Additive-only: never overwrites a live entry's
+        "burned"/"ts"/"age_at_entry" fields.
+        """
+        try:
+            if not ref or ref <= 0 or not episode_id:
+                return
+            _key = f"{asset_name}|{side}|{ref:.5f}"
+            _entry = self.used_proofs.get(_key) or {
+                "ref": ref, "burned": False, "episodes": [], "shadow_episodes": [],
+                "ts": datetime.now().isoformat(),
+            }
+            _entry.setdefault("episodes", [])
+            _entry.setdefault("shadow_episodes", [])
+            if episode_id not in _entry["shadow_episodes"]:
+                _entry["shadow_episodes"].append(episode_id)
+                self.used_proofs[_key] = _entry
+                import json as _json
+                self._used_proofs_path.parent.mkdir(parents=True, exist_ok=True)
+                self._used_proofs_path.write_text(_json.dumps(self.used_proofs, indent=2))
+        except Exception as _e:
+            logger.debug(f"[PROOF-GATE] {asset_name}: shadow reference record failed: {_e}")
 
     def check_min_time_between_trades(
         self, asset_name: str, current_lsm_state: str | None = None
@@ -7068,29 +7249,9 @@ class TradingBot:
                     # called _shadow_open_blocked at all -- measured 16 Sep,
                     # this is exactly why Cost Gate refused ~179 times in three
                     # weeks with the diary holding 1 row (and R:R Gate 75->0).
-                    _gid_map = {
-                        "Cost Gate": "cost_gate",
-                        "R:R Gate": "rr_gate",
-                        "Candle Momentum Reversal": "candle_momentum",
-                        "Opposite Trend Veto": "opposite_trend",
-                        "AI Validation": "ai_reject",
-                    }
-                    _gate_id_generic = _gid_map.get(block_source)
-                    if _gate_id_generic is None:
-                        _rr = (raw_reason or "").lower()
-                        if "low_regime_confidence" in _rr or "low regime confidence" in (block_reason or "").lower():
-                            _gate_id_generic = "regime_confidence"
-                        elif "blocked_by_trap_filter" in _rr:
-                            _gate_id_generic = "trap_filter"
-                        elif "blocked_by_governor" in _rr:
-                            _gate_id_generic = "governor"
-                        elif "ny_open_block" in _rr:
-                            _gate_id_generic = "ny_open"
-                        elif "stale price" in (block_source or "").lower():
-                            _gate_id_generic = "stale_price"
-                        else:
-                            _gate_id_generic = "aggregator_other"
-                    _gate_stage_generic = _GATES_REGISTRY.get(_gate_id_generic, {}).get("stage", "unknown")
+                    _gate_id_generic, _gate_stage_generic = self._resolve_generic_gate_id(
+                        block_source=block_source, reasoning=raw_reason, block_reason=block_reason,
+                    )
 
                     # B4 P6 G6: gate_id appended so the heartbeat's
                     # log_vs_ledger checker can compare log blocks to ledger
@@ -7246,7 +7407,12 @@ class TradingBot:
             _pr_key = f"{asset_name}|{_pr_side}|{_pr_ref:.5f}"
             _pr_used = self.used_proofs.get(_pr_key)
 
-            if _pr_ref > 0 and _pr_used is not None \
+            # B5-6: "burned" is the real gate now, not mere presence in the
+            # dict -- a shadow-only reference (_record_shadow_proof_reference)
+            # creates/updates this same entry without ever setting it, and
+            # must never be able to block a live entry from spending the
+            # proof (Desire's ruling: only a live entry burns a proof).
+            if _pr_ref > 0 and _pr_used is not None and _pr_used.get("burned") \
                and _pr_age >= int(_pr_used.get("age_at_entry", 0)):
                 # DATA-3 ITEM 4: record this gate's decision.
                 try:
@@ -7615,6 +7781,7 @@ class TradingBot:
                         "long" if signal > 0 else "short",
                         float(details.get("setup_ref") or _cs_get("setup_ref") or 0.0),
                         int(details.get("setup_age") or _cs_get("setup_age") or 0),
+                        episode_id=details.get("episode_id") or self._episode_id_for(asset_name, details),  # B5-6
                     )
                 except Exception as _pe:
                     logger.warning(f"[PROOF-GATE] {asset_name}: could not mark proof used ({_pe})")
@@ -8440,6 +8607,13 @@ class TradingBot:
                                     f"[SHADOW-S6] {asset_name}: composite_state EMPTY — "
                                     f"shadow record will be blind"
                                 )
+                        # B5-5a: this call site had no gate_id/gate_stage at
+                        # all -- one of the two places open_position() is
+                        # called directly (main.py:3199 is the other, via
+                        # _shadow_open_blocked, which already passes real
+                        # ids). Confirmed live: this gap is why most
+                        # [SHADOW] Refused lines showed gate=unknown.
+                        _gate_id_s6, _gate_stage_s6 = self._resolve_generic_gate_id(reasoning=_reasoning)
                         self.shadow_trader.open_position(
                             asset=asset_name,
                             side=_side,
@@ -8454,6 +8628,7 @@ class TradingBot:
                             trail_mult=_trail_mult,   # S7c
                             be_r=_be_r,               # S7c
                             episode_id=self._episode_id_for(asset_name, details),   # FRAME-1 SEG 5 (argument was MISSING here -- both weekend shadows came through this site)
+                            gate_id=_gate_id_s6, gate_stage=_gate_stage_s6,  # B5-5a
                         )
             except Exception as _se:
                 logger.debug(f"[SHADOW] Open failed: {_se}")
@@ -8562,6 +8737,13 @@ class TradingBot:
         """Toggle AI validation on/off"""
         if hasattr(self, "ai_validator") and self.ai_validator is not None:
             self.ai_validator.use_ai_validation = enable
+            # B5-3: self.params.use_ai_validation (gates the hourly report
+            # schedule) and self.ai_validator.use_ai_validation (gates
+            # actual validation) are two switches on two different objects.
+            # A runtime toggle here must move both, or the report's
+            # ENABLED/DISABLED status can disagree with what the validator
+            # is actually doing.
+            self.params.use_ai_validation = enable
             status = "ENABLED" if enable else "DISABLED"
             logger.info(f"[AI] Validation layer {status}")
             return f"✓ AI Validation {status}"
