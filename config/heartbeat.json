@@ -3,6 +3,7 @@
   "promises": [
     { "id": "vtm.loop_alive",       "type": "cadence", "tag": "[VTM-LOOP] alive", "min": 1, "window_min": 3, "enabled": true, "note": "B4 W3 -- if this fails the VTM management thread is gone or hung; treat as stop-everything" },
     { "id": "vtm.sync_running",     "type": "cadence", "tag": "[SYNC] MT5:",      "min": 1, "window_min": 3, "enabled": true, "when": "positions_open", "note": "B4 W3 -- deviation from the doc's literal promise: gated on positions_open, since [SYNC] MT5: only ever logs while >=1 position is open and would otherwise FAIL every window while flat" },
+    { "id": "vtm.no_stall",         "type": "cadence", "tag": "[VTM-LOOP] STALLED", "max": 0, "window_min": 1440, "enabled": true, "note": "B5-4c -- zero STALLED lines per day. This is the line that would have saved twenty hours on 16 Sep." },
     { "id": "clock.startup",        "type": "cadence", "tag": "[CLOCK]",           "min": 1,  "window_min": 43200, "note": "once per process" },
     { "id": "gear.read",            "type": "cadence", "tag": "[GEAR]",            "min": 1,  "window_min": 1440 },
     { "id": "atr4.per_bar",         "type": "cadence", "tag": "[ATR4]",            "min": 1,  "window_min": 300,  "per_asset": true, "when": "market_open" },

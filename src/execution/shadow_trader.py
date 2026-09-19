@@ -603,15 +603,33 @@ class ShadowTradingEngine:
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
 
-        # S5.1 — Dedup: skip if a shadow position already open for same asset+side
+        # S5.1 — Dedup: skip if a shadow position already open for same
+        # asset+side+gate_id. B5-5b: was asset+side ONLY -- a signal blocked
+        # by cost_gate opens a shadow, then EVERY later cycle where a
+        # DIFFERENT gate (proof_reused, cooldown, ...) blocks the same
+        # asset+side hit this guard too, since G3's upstream dedup in
+        # main.py keys on gate_id and treats a different gate as a genuinely
+        # new event -- meaning it reaches here, where the OLD asset+side-only
+        # check refused it as a "duplicate" of a position it has nothing to
+        # do with. Measured live: 40 refusals, all duplicate_open, zero
+        # diary rows -- every one of them a genuinely distinct blocked
+        # signal that deserved its own tracked shadow position. gate_id in
+        # the key preserves the ORIGINAL purpose (the same gate blocking the
+        # same asset+side every cycle must not open N overlapping positions
+        # tracking identical P&L) while letting distinct gates' blocks
+        # coexist, each recordable.
         # LANES L1: Lane C bypasses this. A random control group must hold several
         # independent samples on one asset at once; deduping it would silently
         # collapse a 24/day cap into ~6/day and bias the sample toward quiet
         # periods -- the exact bias the control exists to remove.
         for _existing in (self.open_positions if not bypass_guards else []):
-            if _existing.asset.upper() == asset_key and _existing.side == side:
+            if (
+                _existing.asset.upper() == asset_key
+                and _existing.side == side
+                and _existing.gate_id == gate_id
+            ):
                 logger.debug(
-                    f"[SHADOW] Dedup: {asset_key} {side.upper()} already open, skipping"
+                    f"[SHADOW] Dedup: {asset_key} {side.upper()} gate={gate_id} already open, skipping"
                 )
                 self._refuse(asset, side, gate_id, "duplicate_open")
                 return None

@@ -205,6 +205,7 @@ class Position:
         self.margin_type = margin_type
         self.is_futures = is_futures
         self.closing = False
+        self.intended_close_reason = None  # B5-2: pre-declared reason a later close should report
         self.min_lot = min_lot
         self.lot_precision = lot_precision
         self.disable_partials = disable_partials
@@ -2922,12 +2923,29 @@ class PortfolioManager:
             position.trade_manager, "geometry_refused", False
         ):
             _reason = getattr(position.trade_manager, "geometry_refused_reason", "unknown")
+            # B5-2: the audit vocabulary distinguishes WHY the gauntlet
+            # refused, not just that it did -- _finalise_stop_and_target's
+            # own reason string names which check failed.
+            if _reason.startswith("not_worthwhile"):
+                _close_reason = "not_worthwhile"
+            elif _reason.startswith("rr "):
+                _close_reason = "rr_refused"
+            else:
+                _close_reason = "geometry_refused"
             logger.warning(
                 f"[VTM] {asset}: geometry refused at open ({_reason}) — closing immediately."
             )
+            # B5-2: pre-declare the intended reason so a reconciliation pass
+            # that ends up being the one to actually finalize this close
+            # (see _reconcile_positions_for_asset's own note) reports THIS
+            # reason, not its own generic "closed_on_exchange" default --
+            # confirmed live 18 Sep: a geometry_refused close's EXIT event
+            # recorded closed_on_exchange instead, with no way to tell a
+            # refusal from a stop-out in the diary.
+            position.intended_close_reason = _close_reason
             self.close_position(
                 position_id=position.position_id,
-                reason="geometry_refused",
+                reason=_close_reason,
             )
 
         # 6. Database Logging
@@ -4277,6 +4295,17 @@ class PortfolioManager:
         broker_ids = [str(p.get("id")) for p in broker_positions if p.get("id")]
 
         for pos in list(local_positions):
+            # B5-2: if something already declared WHY this position is
+            # being closed (e.g. the stop/target gauntlet's geometry_
+            # refused), prefer that over the generic "closed_on_exchange"
+            # inferred here just because the ticket is gone by the time
+            # this poll runs -- confirmed live (18 Sep): a geometry_refused
+            # close's own broker order can complete before this reconcile
+            # pass notices, and reconcile's own close call was the one that
+            # actually finalized the exit event, silently overwriting the
+            # real reason with a broker-inferred default.
+            _reason = getattr(pos, "intended_close_reason", None) or "closed_on_exchange"
+
             # A. Exact ID match (MT5 ticket or Binance order id)
             local_exchange_id = (
                 str(pos.mt5_ticket) if pos.mt5_ticket else str(pos.binance_order_id)
@@ -4286,10 +4315,10 @@ class PortfolioManager:
                 if local_exchange_id not in broker_ids:
                     logger.warning(
                         f"[RECONCILE] Ticket {local_exchange_id} ({pos.position_id}) "
-                        f"missing from broker — queueing for recorder."
+                        f"missing from broker — queueing for recorder (reason={_reason})."
                     )
                     self.last_close_was_manual[pos.asset] = True
-                    to_close.append((pos, "closed_on_exchange"))
+                    to_close.append((pos, _reason))
                 else:
                     # ID alive on broker — skip side-check
                     continue
@@ -4302,10 +4331,10 @@ class PortfolioManager:
                 if pos.side.lower() not in broker_sides:
                     logger.warning(
                         f"[RECONCILE] Side {pos.side.upper()} ({pos.position_id}) "
-                        f"missing from broker — queueing for recorder."
+                        f"missing from broker — queueing for recorder (reason={_reason})."
                     )
                     self.last_close_was_manual[pos.asset] = True
-                    to_close.append((pos, "closed_on_exchange"))
+                    to_close.append((pos, _reason))
 
         # 2. Broker reports 0 positions — queue everything
         if not broker_positions and local_positions:
@@ -4315,7 +4344,7 @@ class PortfolioManager:
             for pos in local_positions:
                 if not any(p is pos for p, _ in to_close):
                     self.last_close_was_manual[pos.asset] = True
-                    to_close.append((pos, "closed_on_exchange"))
+                    to_close.append((pos, getattr(pos, "intended_close_reason", None) or "closed_on_exchange"))
 
         return to_close
 

@@ -390,11 +390,19 @@ def report():
 # "abandoned_restart_gap" (a restart bookkeeping closure, no real exit),
 # which get filtered out below rather than counted as trade outcomes.
 
-# B4 P0c: geometry_refused is a rule-driven immediate close (the gauntlet
-# refused the trade's placement after the fill already happened), not a
-# real "held to a market outcome" trade -- excluded the same way the other
-# administrative closes are, so it can't skew R:R/exit-reason stats.
-_ADMIN_CLOSE_REASONS = {"abandoned_restart_gap", "abandoned", "manual_flat", "geometry_refused", ""}
+# B4 P0c / B5-2: geometry_refused and its more specific siblings are all
+# rule-driven immediate closes (the gauntlet refused the trade's placement
+# after the fill already happened), not a real "held to a market outcome"
+# trade -- excluded the same way the other administrative closes are, so
+# they can't skew R:R/exit-reason stats. not_worthwhile/rr_refused are the
+# two specific gauntlet-refusal reasons _finalise_stop_and_target actually
+# returns today; no_target is reserved vocabulary for a target-picker-found-
+# nothing case that isn't wired to a real call site yet (B4's own scope
+# decision), added here so it's recognized the moment something does emit it.
+_ADMIN_CLOSE_REASONS = {
+    "abandoned_restart_gap", "abandoned", "manual_flat",
+    "geometry_refused", "not_worthwhile", "rr_refused", "no_target", "",
+}
 
 _DEPTH_BUCKET_EDGES = (0.25, 0.5)
 _DEPTH_BUCKET_LABELS = ("<0.25", "0.25-0.5", ">0.5")
