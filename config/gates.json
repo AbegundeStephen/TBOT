@@ -5,7 +5,7 @@
     "calendar":           {"stage": "pre_direction"},
     "flash_veto":         {"stage": "pre_direction"},
     "stale_price":        {"stage": "pre_direction"},
-    "session_window":     {"stage": "pre_direction", "note": "B4 P6 G1: found live, not in the original registry -- check_market_hours's preferred-session filter ('[MARKET] ... Outside preferred session window'). No _shadow_open_blocked call exists at this site (same gap as watcher_suppress) -- registry-only for now, matching G1's own rule that the list must match the code even where the code has a known instrumentation gap."},
+    "session_window":     {"stage": "post_approval", "note": "B6-3: the preferred-session window, the rollover dead zone and the session-open cooldown now block ENTRIES only, at the entry point in trade_asset ([ENTRY-WINDOW] BLOCKED) -- with a gate row and a shadow. Was check_market_hours: pre-direction, stopped the whole asset, unrecorded (B4 P6 G1)."},
     "council_score":      {"stage": "post_council"},
     "cost_gate":          {"stage": "post_council"},
     "rr_gate":            {"stage": "post_council"},
@@ -33,6 +33,8 @@
     "geometry_refused":   {"stage": "post_approval", "note": "B4 P0c: the shared stop/target gauntlet's floor/clamp/R:R refusal, discovered AFTER the fill (this codebase commits to a fill before VTM ever runs) -- results in an immediate close, not a blocked signal."},
     "not_worthwhile":     {"stage": "post_approval", "note": "B4 P0g-3: worthwhileness check specifically (no level pays min_reward_ccy, or risk exceeds the per-trade budget) -- a narrower case of geometry_refused, kept distinct per the doc's own instruction."},
     "lane_b":             {"stage": "control"},
-    "lane_c":             {"stage": "control"}
+    "lane_c":             {"stage": "control"},
+    "proof_outscored":    {"stage": "post_council", "note": "B6-2: passed the council but lost the one position to a larger margin on the same candle. Recorded, never traded, NOT burned -- it can come back."},
+    "opposite_side_active": {"stage": "post_approval", "note": "B6-2: a passing proof blocked because the asset already holds the opposite side (one position per asset). Was silent; now recorded."}
   }
 }

@@ -220,6 +220,10 @@ class MT5ExecutionHandler:
         self._pending_alerts: list = []
         self._alert_occurrence_counts: Dict[str, int] = {}
 
+        # B6-6: lets the broker sync tell a stale restored position (closed at
+        # the broker before this process started) from a real, new close.
+        import time as _time_b6
+        self._process_started_ts = _time_b6.time()
         logger.info("MT5ExecutionHandler with Multi-Asset support initialized")
 
         # Auto-sync enabled assets on startup
@@ -2174,6 +2178,7 @@ class MT5ExecutionHandler:
                             "swap": float(getattr(d, "swap", 0.0) or 0.0),
                             "commission": float(getattr(d, "commission", 0.0) or 0.0),
                             "fill_price": float(getattr(d, "price", 0.0) or 0.0) or None,
+                            "deal_time": int(getattr(d, "time", 0) or 0),   # B6-6: epoch s (server = UTC)
                         }
 
                 _time.sleep(0.25)  # brief backoff before retry
@@ -2541,6 +2546,14 @@ class MT5ExecutionHandler:
 
             # Get MT5 positions
             mt5_positions = mt5.positions_get(symbol=symbol)
+            # B6-6: None means MT5 did not answer ("Terminal not responsive",
+            # "No IPC connection" -- 19 Sep 06:35-06:46) -- NOT "no positions".
+            # Without this, every tracked ticket would be booked as closed at
+            # market price during an outage. The per-tick path already has this.
+            if mt5_positions is None:
+                logger.warning(f"[SYNC] {asset}: MT5 positions query failed (last_error={mt5.last_error()}) — "
+                               f"sync skipped this pass, nothing closed")
+                return False
             mt5_count = len(mt5_positions) if mt5_positions else 0
 
             # Get portfolio positions
@@ -2680,6 +2693,23 @@ class MT5ExecutionHandler:
                         exit_price, broker_data, _raw_profit = \
                             self._record_mt5_external_close(pos, asset, current_price, symbol)
 
+                        # B6-6: a position restored from a stale save whose broker close
+                        # happened BEFORE this process started was already booked by the
+                        # previous process (19 Sep 23:20: #136535990, closed 18 Sep 05:04,
+                        # booked a second time). Drop it from the book -- no second EXIT,
+                        # no loss-streak step, no Telegram.
+                        _deal_ts = (broker_data or {}).get("deal_time") or 0
+                        if _deal_ts and _deal_ts < getattr(self, "_process_started_ts", 0) - 60:
+                            logger.warning(
+                                f"[SYNC] Ticket #{pos.mt5_ticket} ({asset}) closed at the broker before this "
+                                f"process started — stale restored position dropped, no second exit recorded."
+                            )
+                            self.portfolio_manager.positions.pop(pos.position_id, None)
+                            try:
+                                self.portfolio_manager.save_portfolio_state(include_metrics=False)
+                            except Exception:
+                                pass
+                            continue
 
                         # ── Telegram alert — position closed outside the bot ─
                         try:
@@ -2711,7 +2741,7 @@ class MT5ExecutionHandler:
                         self.portfolio_manager.close_position(
                             position_id=pos.position_id,
                             exit_price=exit_price,
-                            reason="closed_on_exchange",
+                            reason=getattr(pos, "intended_close_reason", None) or "closed_on_exchange",   # B6-6: finishes B5-2
                             already_closed_on_exchange=True,
                             preloaded_broker_data=broker_data,
                         )

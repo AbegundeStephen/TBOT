@@ -56,19 +56,43 @@ class _TailHandler(logging.Handler):
         self.buffer = deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self.started_at = time.time()   # HF-2 H4: warm-up window anchor
+        self._watch = []                # B6-8: [(tag, matcher)] from the registry
+        self.by_tag = {}                # B6-8: tag -> deque of (ts, msg)
 
     def emit(self, record):
         try:
             if record.name == "HEARTBEAT" or "[HEARTBEAT]" in record.getMessage():
                 return
+            _msg = record.getMessage()
             with self._lock:
-                self.buffer.append((record.created, record.getMessage()))
+                self.buffer.append((record.created, _msg))
+                # B6-8: lines of a watched registry tag also go to that tag's
+                # own register, so a 24-hour promise is counted over 24 hours.
+                for _tag, _m in self._watch:
+                    try:
+                        if _m(_msg):
+                            self.by_tag[_tag].append((record.created, _msg))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
     def snapshot(self):
         with self._lock:
             return list(self.buffer)
+
+    def watch(self, tag_matchers):
+        """B6-8: register the registry's tags. The 50,000-line tail reaches
+        back only 9-18 hours at the measured 2,800-5,600 lines an hour
+        (21 Sep), so 24-hour promises used to read 0."""
+        with self._lock:
+            self._watch = list(tag_matchers)
+            for _tag, _m in self._watch:
+                self.by_tag.setdefault(_tag, deque(maxlen=5000))
+
+    def snapshot_tags(self):
+        with self._lock:
+            return {t: list(d) for t, d in self.by_tag.items()}
 
 
 # HF-2 H3: root logger, exactly once, process-wide -- a second
@@ -113,6 +137,13 @@ class HeartbeatMonitor:
         self.assets = list(self.config.get("assets", {}).keys())
         self.handler = _get_tail_handler()
         self._promises = self._load_registry()
+        # B6-8: per-tag register -- long windows are counted over their real length.
+        self._snap_tags = {}
+        try:
+            _tags = sorted({p.get("tag") for p in self._promises if p.get("tag")})
+            self.handler.watch([(t, self._tag_matcher(t)) for t in _tags])
+        except Exception as _we:
+            logger.error("[HEARTBEAT] tag register setup failed: %s", _we)
         self._state = {}   # promise_id -> {"failing": bool, "last_error_ts": float}
         self._warmup_logged = set()     # HF-2 H4: promise ids already logged once
         self._market_skip_logged = set()  # HF-2 H6: (promise_id, asset) already logged once
@@ -180,8 +211,15 @@ class HeartbeatMonitor:
         return lambda msg: tag in msg
 
     def _count_tag(self, snap, tag, window_min, asset=None):
-        lines = self._lines_in_window(snap, window_min)
-        match = self._tag_matcher(tag)
+        # B6-8: prefer the tag's own register -- it covers the whole window.
+        _reg = (getattr(self, "_snap_tags", None) or {}).get(tag)
+        if _reg is not None:
+            _cut = time.time() - window_min * 60
+            lines = [msg for ts, msg in _reg if ts >= _cut]
+            match = lambda _msg: True   # already matched on the way in
+        else:
+            lines = self._lines_in_window(snap, window_min)
+            match = self._tag_matcher(tag)
         n = 0
         for msg in lines:
             if match(msg) and (asset is None or asset in msg):
@@ -368,7 +406,12 @@ class HeartbeatMonitor:
         a second time."""
         window_min = p.get("window_min", 1440)
         tag = p.get("tag", "Signal BLOCKED by")
-        lines = self._lines_in_window(snap, window_min)
+        _reg = (getattr(self, "_snap_tags", None) or {}).get(tag)   # B6-8
+        if _reg is not None:
+            _cut = time.time() - window_min * 60
+            lines = [msg for ts, msg in _reg if ts >= _cut]
+        else:
+            lines = self._lines_in_window(snap, window_min)
         tag_match = self._tag_matcher(tag)
         _log_counts = {}
         for msg in lines:
@@ -387,6 +430,18 @@ class HeartbeatMonitor:
             gid = r.get("gate_id")
             if gid:
                 _ledger_counts[gid] = _ledger_counts.get(gid, 0) + 1
+
+        # B6-8: a blocked signal's diary row is written when its shadow CLOSES
+        # (shadow_trader -> write_episode at close), so a block whose shadow is
+        # still open IS recorded, just not on disk yet. Count open shadows too.
+        try:
+            _st = getattr(self.bot, "shadow_trader", None) if self.bot else None
+            for _sp in list(getattr(_st, "open_positions", None) or []):
+                _g = getattr(_sp, "gate_id", None)
+                if _g:
+                    _ledger_counts[_g] = _ledger_counts.get(_g, 0) + 1
+        except Exception:
+            pass
 
         bad = [
             f"{gid}: {n} log blocks, 0 ledger rows"
@@ -549,6 +604,7 @@ class HeartbeatMonitor:
         # lock -- every promise evaluates against this same immutable list,
         # never against the live buffer other threads keep appending to.
         snap = self.handler.snapshot()
+        self._snap_tags = self.handler.snapshot_tags()   # B6-8
 
         ok_count = 0
         for p in self._promises:

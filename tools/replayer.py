@@ -562,6 +562,8 @@ def load_closed_trades(include_all=False):
     """
     rows = []
     skipped_admin = skipped_stale = skipped_pre_ppl = skipped_stale_price = skipped_pre_p10_lanec = 0
+    skipped_dup = 0          # B6-7
+    _seen_b6 = set()         # B6-7
     for f in sorted(glob.glob("logs/episodes/*.jsonl")):
         for line in open(f, encoding="utf-8"):
             if not line.strip():
@@ -593,13 +595,22 @@ def load_closed_trades(include_all=False):
             if not include_all and not _is_ppl_row(e):
                 skipped_pre_ppl += 1
                 continue
+            # B6-7: the same closed trade can be written twice (19 Sep: #136535990
+            # booked at its close on the 18th and again at the 23:20 restart).
+            # Keep the first row per trade.
+            _dk = (e.get("source") or "live", e.get("episode_id") or "", e.get("asset"),
+                   e.get("side"), str(e.get("entry_time")))
+            if _dk in _seen_b6:
+                skipped_dup += 1
+                continue
+            _seen_b6.add(_dk)
             rows.append(_derive(e))
     n_assets = len(set(r.get("asset") for r in rows))
     _tail = " -- use --all to include" if skipped_pre_ppl and not include_all else ""
     print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "
           f"({skipped_admin} admin closures, {skipped_stale} stale-state, "
           f"{skipped_stale_price} stale-price lane-C, {skipped_pre_p10_lanec} "
-          f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded{_tail})")
+          f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded, {skipped_dup} duplicate{_tail})")
     return rows
 
 

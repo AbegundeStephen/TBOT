@@ -131,6 +131,7 @@ class CompositeState:
     brc_proof_dist_atr: Optional[float] = None
     brc_retest_depth: Optional[float] = None
     brc_test_of_proof: bool = False
+    proofs: List[Dict] = field(default_factory=list)   # B6-2: every proven setup this candle, one dict each
     bos_bullish_4h: bool = False
     bos_bearish_4h: bool = False
     choch_bullish_4h: bool = False
