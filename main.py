@@ -117,6 +117,18 @@ from src.execution.shadow_trader import ShadowTradingEngine  # T3.1
 from src.data.btc_flow_harvester import BTCFlowHarvester  # BTC Flow batch, 17-Aug
 
 
+class _RedactingFormatter(logging.Formatter):
+    """HOTFIX TOKEN-1 (21 Sep): an ordinary log formatter that blanks out any
+    Telegram bot token (8-10 digits, a colon, 35 characters) in the FINISHED
+    log line -- message, arguments and error tracebacks alike -- so it cannot
+    reach a log file whichever part of the bot wrote it."""
+    import re as _re_tok1
+    _TOKEN_RE = _re_tok1.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}")
+
+    def format(self, record):
+        return self._TOKEN_RE.sub("<telegram-token-redacted>", super().format(record))
+
+
 def setup_logging(config):
     """Setup logging with proper encoding and rotation"""
     from src.utils.instance_paths import suffixed_path as _p_inst
@@ -151,7 +163,11 @@ def setup_logging(config):
     # carries the bot token. It has been written to the log in plain text.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    formatter = logging.Formatter(
+    # HOTFIX TOKEN-1 (21 Sep): the bot token was found in 15,305 log lines on
+    # the box. httpx was quietened above (FRAME-1 SEG 3) but other paths still
+    # print it. Mask it in the final line, for both the log file and the
+    # console (which run_bot.ps1 copies into logs/bot_YYYYMMDD.log).
+    formatter = _RedactingFormatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     file_handler.setFormatter(formatter)
