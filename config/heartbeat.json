@@ -5,7 +5,7 @@
     { "id": "vtm.sync_running",     "type": "cadence", "tag": "[SYNC] MT5:",      "min": 1, "window_min": 3, "enabled": true, "when": "positions_open", "note": "B4 W3 -- deviation from the doc's literal promise: gated on positions_open, since [SYNC] MT5: only ever logs while >=1 position is open and would otherwise FAIL every window while flat" },
     { "id": "vtm.no_stall",         "type": "cadence", "tag": "[VTM-LOOP] STALLED", "max": 0, "window_min": 1440, "enabled": true, "note": "B5-4c -- zero STALLED lines per day. This is the line that would have saved twenty hours on 16 Sep." },
     { "id": "clock.startup",        "type": "cadence", "tag": "[CLOCK]",           "min": 1,  "window_min": 43200, "note": "once per process" },
-    { "id": "gear.read",            "type": "cadence", "tag": "[GEAR]",            "min": 1,  "window_min": 1440 },
+    { "id": "gear.read",            "type": "cadence", "tag": "[GEAR]",            "min": 1,  "window_min": 120, "note": "B6-8: [GEAR] now prints hourly per builder; the 1440 window was checked against a one-off line and failed daily by design" },
     { "id": "atr4.per_bar",         "type": "cadence", "tag": "[ATR4]",            "min": 1,  "window_min": 300,  "per_asset": true, "when": "market_open" },
     { "id": "atr4.nonzero",         "type": "non_null","field": "atr4",            "when": "setup_active", "per_asset": true, "enabled": false },
     { "id": "struct1h.per_candle",  "type": "cadence", "tag": "[S2-STRUCTURE]",    "min": 1,  "window_min": 75,   "per_asset": true, "when": "market_open" },
@@ -51,6 +51,15 @@
 
     { "id": "gate.log_vs_ledger",      "type": "log_vs_ledger", "tag": "Signal BLOCKED by", "window_min": 1440, "enabled": true, "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all." },
 
+    { "id": "b6.proof_council_cap",  "type": "cadence", "tag": "[PROOF-COUNCIL]",   "max": 300, "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard; the line only prints when an asset has 2+ proofs" },
+    { "id": "b6.proof_set_cap",      "type": "cadence", "tag": "[PROOF-SET]",       "max": 4,   "window_min": 60, "per_asset": true, "enabled": true, "note": "B6-1 -- at most once per 1H bar per asset" },
+    { "id": "b6.outscored_cap",      "type": "cadence", "tag": "[PROOF-OUTSCORED]", "max": 60,  "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard" },
+    { "id": "b6.proof_hold_cap",     "type": "cadence", "tag": "[PROOF-HOLD]",      "max": 120, "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard" },
+    { "id": "b6.entry_window_cap",   "type": "cadence", "tag": "[ENTRY-WINDOW]",    "max": 200, "window_min": 60, "enabled": true, "note": "B6-3 -- prints each cycle a passing proof waits outside its window; runaway guard" },
+    { "id": "b6.persist_skip_cap",   "type": "cadence", "tag": "[PERSIST] .* save skipped", "max": 20, "window_min": 60, "enabled": true, "note": "B6-4 -- once per builder per pending restore" },
+    { "id": "b6.mt5_query_failed",   "type": "cadence", "tag": "[SYNC] .* positions query failed", "max": 10, "window_min": 60, "enabled": true, "note": "B6-6 -- more than 10 an hour = MT5 is not answering (19 Sep 06:35 outage pattern)" },
+    { "id": "b6.stale_restore",      "type": "cadence", "tag": "[SYNC] .* stale restored position dropped", "max": 3, "window_min": 1440, "enabled": true, "note": "B6-6 -- expected only right after a restart" },
+    { "id": "b6.save_after_close",   "type": "cadence", "tag": "[STATE] Save after close failed", "max": 0, "window_min": 1440, "enabled": true, "note": "B6-6 -- should never print" },
     { "id": "replayer.runs",        "type": "file_fresh", "file": "logs/replayer_arms_*.json", "window_min": 10080, "enabled": false, "note": "B3 REPLAYER-2 R5 -- enable once the 30/10/3 threshold is first met" },
     { "id": "rl1.proposals_file",   "type": "file_fresh", "file": "logs/rl1_proposals.jsonl",  "window_min": 10080, "enabled": false, "note": "B3 RL-1 -- enable post-threshold" }
   ]

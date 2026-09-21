@@ -703,9 +703,16 @@ class TradingBot:
                         _tick = _dt.datetime.fromtimestamp(_t.time, _dt.timezone.utc).replace(tzinfo=None)
                         _now = _dt.datetime.utcnow()
                         _gap = (_now - _tick).total_seconds()
-                        (logger.warning if abs(_gap) > 900 else logger.info)(
-                            "[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (%s)", _tick, _now, _gap,
-                            "server=UTC" if abs(_gap) <= 900 else "SERVER OFFSET — 4H boundaries may be wrong")
+                        if not MarketHours.should_trade("gold"):
+                            # B6-9: on a weekend start GOLD's last tick is Friday's
+                            # close -- a 24h+ "gap" is the market being shut, not a
+                            # server offset (19 Sep 23:20: gap 87,726s, false alarm).
+                            logger.info("[CLOCK] skipped — GOLD market closed (last tick %s); "
+                                        "the check runs at the next start with GOLD open", _tick)
+                        else:
+                            (logger.warning if abs(_gap) > 900 else logger.info)(
+                                "[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (%s)", _tick, _now, _gap,
+                                "server=UTC" if abs(_gap) <= 900 else "SERVER OFFSET — 4H boundaries may be wrong")
                     except Exception as _ce:
                         logger.warning("[CLOCK] could not compare MT5 tick to UTC: %s", _ce)
                 else:
@@ -3057,6 +3064,141 @@ class TradingBot:
         gate_stage = _GATES_REGISTRY.get(gate_id, {}).get("stage", "unknown")
         return gate_id, gate_stage
 
+    @staticmethod
+    def _composite_for_proof(cs, proof):
+        """B6-2: a copy of this candle's composite state re-pointed at ONE
+        proof (its own H, R1, H2, tier, age), so the council, the gates, the
+        shadow record and the stop all read that proof, not the published one."""
+        import copy as _copy_b6
+        _c = _copy_b6.copy(cs)
+        for _k, _v in (proof.get("fields") or {}).items():
+            setattr(_c, _k, _v)
+        return _c
+
+    @staticmethod
+    def _council_memory_snapshot(council):
+        """B6-2: the council carries memory from one sitting to the next --
+        score_history (each judge is nudged by 15% of its change since the
+        last sitting, and the CHASE_HARD override counts maxed sittings) and
+        _judge_zero_streak (the dead-judge ceiling). Several proofs sitting on
+        one candle must not feed each other's scores through that memory."""
+        return (list(getattr(council, "score_history", None) or []),
+                dict(getattr(council, "_judge_zero_streak", None) or {}))
+
+    @staticmethod
+    def _council_memory_restore(council, snap):
+        _h, _z = snap
+        if getattr(council, "score_history", None) is not None:
+            council.score_history.clear()        # same deque object, keeps its maxlen
+            council.score_history.extend(_h)
+        if hasattr(council, "_judge_zero_streak"):
+            council._judge_zero_streak = dict(_z)
+
+    def _council_per_proof(self, asset_name, council, df, mtf_regime, cs, proofs,
+                           current_price, asset_cfg):
+        """B6-2 (Desire 21 Sep, rulings 5-7). Each proof sits before the council
+        on its own. Winner = largest margin (total_score - required_score) over
+        its OWN pass mark; tie -> most tests at its level, then the older proof.
+        Passing losers are recorded (gate proof_outscored), never traded, and
+        stay unspent -- they can come back. Refused proofs get the same shadow
+        record the single-proof path gives. Returns the winner's
+        (signal, details, composite_state) to carry on down trade_asset."""
+        _rows = []
+        _mem0 = self._council_memory_snapshot(council)
+        for _p in proofs:
+            self._council_memory_restore(council, _mem0)   # every proof meets the same council memory
+            _cs_p = self._composite_for_proof(cs, _p)
+            _gd = dict(mtf_regime)
+            _gd["composite_state"] = _cs_p
+            _gd.pop("episode_id", None)
+            _ep = self._episode_id_for(asset_name, _gd)          # fresh id per proof
+            _sig, _det = council.get_aggregated_signal(
+                df,
+                current_regime=_gd.get("regime", "NEUTRAL"),
+                is_bull_market=_gd.get("is_bull", False),
+                governor_data=_gd,
+                live_price=current_price,
+            )
+            _det = dict(_det or {})
+            _det["episode_id"] = _ep
+            _det["setup_ref"] = _p.get("ref")
+            _det["setup_age"] = (_p.get("fields") or {}).get("setup_age")
+            _det["composite_state"] = _cs_p.to_dict() if hasattr(_cs_p, "to_dict") else {}
+            _margin = float(_det.get("total_score") or 0.0) - float(_det.get("required_score") or 0.0)
+            _rows.append({"proof": _p, "cs": _cs_p, "sig": int(_sig or 0), "det": _det, "margin": _margin,
+                          "mem": self._council_memory_snapshot(council)})
+            logger.info(
+                "[PROOF-COUNCIL] %s: %s dir=%+d H=%.5g score=%.2f/%.2f margin=%+.2f -> %s",
+                asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
+                float(_det.get("total_score") or 0.0), float(_det.get("required_score") or 0.0),
+                _margin, "PASS" if _sig else "HOLD",
+            )
+        _passing = [r for r in _rows if r["sig"] != 0]
+        _pool = list(_passing if _passing else _rows)
+        _pool.sort(key=lambda r: (-r["margin"], -int(r["proof"].get("tests", 0) or 0),
+                                  str(r["proof"].get("first_ts") or "")))
+        _win = _pool[0]
+        for r in _rows:
+            if r is _win:
+                continue
+            if r["sig"] != 0:
+                self._record_proof_outscored(asset_name, r, _win, df, current_price, asset_cfg)
+            else:
+                self._record_proof_hold(asset_name, r, df, current_price, asset_cfg)
+        self._council_memory_restore(council, _win["mem"])   # keep only the winner's sitting
+        mtf_regime["episode_id"] = _win["det"]["episode_id"]
+        self._episode_id_for(asset_name, {"episode_id": _win["det"]["episode_id"]})   # park the winner's id
+        logger.info(
+            "[PROOF-COUNCIL] %s: %d proofs, %d passed -> %s %s dir=%+d H=%.5g margin=%+.2f",
+            asset_name, len(_rows), len(_passing),
+            "TRADE" if _win["sig"] else "none passed —", _win["proof"].get("kind"),
+            int(_win["proof"].get("dir", 0) or 0), float(_win["proof"].get("ref") or 0.0), _win["margin"],
+        )
+        return _win["sig"], _win["det"], _win["cs"]
+
+    def _record_proof_outscored(self, asset_name, r, win, df, current_price, asset_cfg):
+        """B6-2: passed the council but lost the one position to a larger margin
+        on the same candle. Recorded, never traded, NOT burned (ruling 7)."""
+        _p = r["proof"]
+        try:
+            from src.utils.gate_ledger import write_gate_decision
+            write_gate_decision(
+                r["det"].get("episode_id"), asset_name, "proof_outscored", "BLOCKED",
+                {"proof_ref": _p.get("ref"), "margin": r["margin"],
+                 "winner_ref": win["proof"].get("ref"), "winner_margin": win["margin"]},
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[PROOF-OUTSCORED] %s: %s dir=%+d H=%.5g margin=%+.2f lost to H=%.5g margin=%+.2f "
+            "— recorded, not traded, stays unspent",
+            asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
+            r["margin"], float(win["proof"].get("ref") or 0.0), win["margin"],
+        )
+        self._shadow_open_blocked(
+            asset_name, r["sig"], r["det"], df, current_price, "proof_outscored", asset_cfg,
+            episode_id_override=r["det"].get("episode_id"),
+            gate_id="proof_outscored", gate_stage="post_council",
+        )
+
+    def _record_proof_hold(self, asset_name, r, df, current_price, asset_cfg):
+        """B6-2: a proof the council refused, when it is not the one carrying on
+        down the normal path. Same record the single-proof path makes: a shadow
+        in the proof's own direction, with its own composite and episode id."""
+        _p = r["proof"]
+        _side = "long" if int(_p.get("dir", 0) or 0) > 0 else "short"
+        _gid, _gstage = self._resolve_generic_gate_id(reasoning=r["det"].get("reasoning", "") or "")
+        logger.info(
+            "[PROOF-HOLD] %s: %s dir=%+d H=%.5g score=%.2f/%.2f — council HOLD, recorded (gate_id=%s)",
+            asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
+            float(r["det"].get("total_score") or 0.0), float(r["det"].get("required_score") or 0.0), _gid,
+        )
+        self._shadow_open_blocked(
+            asset_name, 0, r["det"], df, current_price, "council_hold", asset_cfg,
+            side_override=_side, episode_id_override=r["det"].get("episode_id"),
+            gate_id=_gid, gate_stage=_gstage,
+        )
+
     # ------------------------------------------------------------------ #
     #  Shadow-trade helper — call at every gate that blocks a real signal #
     # ------------------------------------------------------------------ #
@@ -3176,7 +3318,11 @@ class TradingBot:
                     _aggregator.get("performance")
                     or _aggregator.get("livermore")
                 )
-            if _target_agg and hasattr(_target_agg, '_cached_composite') and \
+            # B6-2: a per-proof record must carry ITS proof's composite (its own
+            # H, R1, H2). When the caller passes one in details, use it.
+            if isinstance((details or {}).get("composite_state"), dict) and (details or {}).get("composite_state"):
+                _comp_state_dict = details["composite_state"]
+            elif _target_agg and hasattr(_target_agg, '_cached_composite') and \
                _target_agg._cached_composite is not None:
                 try:
                     _comp_state_dict = _target_agg._cached_composite.to_dict()
@@ -3557,6 +3703,13 @@ class TradingBot:
                             _carried += 1
                             if not getattr(_old_cs, _f):
                                 _empty.append(_f)
+                    # B6-4: hand over a restore the old builder never applied (it ran
+                    # no candle -- e.g. restarted while the market was shut) instead of
+                    # the new builder reading a file the old one had overwritten with
+                    # empty memory (the 18 and 21 Sep morning wipes). When the old
+                    # builder WAS running this is None, which also stops the new one
+                    # re-applying a 30-second-old disk copy over live carried memory.
+                    _old_builder_state["_pending_restore"] = getattr(_old_cs, "_pending_restore", None)
                     logger.info("[RELOAD-STATE] carried=%d keys, empty=%s", _carried, _empty or "none")
                     logger.info(
                         "[C3] %s: captured %d structural state fields before "
@@ -4502,6 +4655,12 @@ class TradingBot:
                 if _ms[0] == "CLOSED":
                     logger.debug(f"[LANE-C] {asset_name}: skipped — market closed ({_ms[1]})")
                     continue
+                # B6-3: lane C is the control group for ENTRIES, so it keeps to the
+                # same entry windows real entries use (Desire's default, 21 Sep).
+                _ew_ok, _ew_why = self.check_entry_window(asset_name)
+                if not _ew_ok:
+                    logger.debug(f"[LANE-C] {asset_name}: skipped — {_ew_why}")
+                    continue
 
                 # Spread the quota across the session rather than firing it all
                 # in the first hour: one chance per cycle, sized so the expected
@@ -4775,7 +4934,7 @@ class TradingBot:
                     if _now - _last_state_save >= state_save_interval:
                         _last_state_save = _now
                         try:
-                            self.portfolio_manager.save_portfolio_state()
+                            self.portfolio_manager.save_portfolio_state(include_metrics=False)   # B6-6: metrics are _persist_periodic_state's job
                         except Exception as _se:
                             logger.error(f"[VTM LOOP] Periodic state save failed: {_se}")
 
@@ -5597,13 +5756,24 @@ class TradingBot:
             if self._used_proofs_path.exists():
                 import json as _json
                 _raw = _json.loads(self._used_proofs_path.read_text())
-                _cut = datetime.now() - timedelta(hours=72)
-                self.used_proofs = {
-                    k: v for k, v in _raw.items()
-                    if datetime.fromisoformat(v["ts"]) > _cut
-                }
+                # B6-5 (Desire's 18 Sep ruling): a proof spent by a LIVE position is
+                # burned permanently and stays as a ghost record -- no release path.
+                # The old 72-hour drop WAS a release path (it deleted 1.88926 at the
+                # 19 Sep 23:20 restart); removed. Entries written before B5 carry no
+                # "burned" field, but _mark_proof_used was live-only, so every one
+                # of them was spent by a live entry: they are burned.
+                self.used_proofs = {}
+                for k, v in _raw.items():
+                    if not isinstance(v, dict):
+                        continue
+                    if "burned" not in v:
+                        v["burned"] = True
+                        v.setdefault("episodes", [])
+                        v.setdefault("shadow_episodes", [])
+                    self.used_proofs[k] = v
                 logger.info(
-                    f"[PROOF-GATE] Restored {len(self.used_proofs)} used proof(s) from disk"
+                    f"[PROOF-GATE] Restored {len(self.used_proofs)} used proof(s) from disk "
+                    f"({sum(1 for _v in self.used_proofs.values() if _v.get('burned'))} burned)"
                 )
             else:
                 logger.info("[PROOF-GATE] No used-proof ledger on disk — starting empty")
@@ -5849,18 +6019,33 @@ class TradingBot:
         if _prev_open is not None and _prev_open[0] != "OPEN":
             logger.info(f"[MARKET] {asset_name}: OPEN")
 
-        # 3. Rollover Dead Zone Protection (21:30 - 23:30 UTC)
-        # Reason: Spreads explode and liquidity vanishes during this period.
+        # B6-3 (Desire 21 Sep, ruling 4): the rollover dead zone and the
+        # preferred-session window used to return False HERE, which stopped the
+        # whole asset -- no proof counting, no kill checks, no heartbeat lines --
+        # for 7-10 hours a night. They now live in check_entry_window() and
+        # block ENTRIES only, at the entry point in trade_asset.
+        return True
+
+    def check_entry_window(self, asset_name: str):
+        """B6-3: may a NEW entry be placed right now? Returns (True, "") or
+        (False, reason). Moved unchanged from check_market_hours: the
+        21:30-23:30 UTC rollover dead zone and the per-asset preferred-session
+        window (trading.session_filter_enabled). BTC has no window."""
+        asset_name_upper = asset_name.upper()
+        asset_cfg = self.config["assets"].get(asset_name, {})
+        if asset_cfg.get("asset_type", "") == "crypto" or "BTC" in asset_name_upper:
+            return True, ""
+
+        # Rollover Dead Zone (21:30 - 23:30 UTC): spreads explode, liquidity vanishes.
         if MarketHours.is_rollover_dead_zone():
             current_hour = datetime.now().hour
             if self.last_market_status_log.get(asset_name) != current_hour:
                 logger.info(f"[MARKET] {asset_name}: Rollover Dead Zone (21:30-23:30 UTC) — Blocking entry.")
                 self.last_market_status_log[asset_name] = current_hour
-            return False
+            return False, "rollover dead zone (21:30-23:30 UTC)"
 
-        # 4. Preferred session filter — blocks entries during low-liquidity hours
-        # per asset (e.g. no GBPAUD during late Asian session, no GOLD outside
-        # London/NY).  Controlled by trading.session_filter_enabled in config.
+        # Preferred session filter -- per asset (e.g. no GBPAUD in late Asia,
+        # no GOLD outside London/NY). trading.session_filter_enabled in config.
         if self.config.get("trading", {}).get("session_filter_enabled", True):
             if not MarketHours.is_preferred_session(asset_name):
                 current_hour = datetime.now().hour
@@ -5870,9 +6055,9 @@ class TradingBot:
                         f"(UTC hour: {MarketHours.get_gmt_time().hour:02d}:00)"
                     )
                     self.last_market_status_log[f"{asset_name}_session"] = current_hour
-                return False
+                return False, f"outside preferred session window (UTC hour {MarketHours.get_gmt_time().hour:02d})"
 
-        return True
+        return True, ""
 
     def _startup_quarantine_active(self, asset_name: str) -> bool:
         """
@@ -6037,11 +6222,13 @@ class TradingBot:
             logger.info(f"[SKIP] {asset_name}: Market closed")
             return
 
-        # Session-open cooldown: block new entries for the first N minutes after
-        # a closed→open transition (e.g. Sunday open, US market open for USTEC).
-        # Existing positions are not affected — only new entries are gated here.
-        if self._update_session_open_state(asset_name, True):
-            return  # logged inside the method
+        # B6-3 (Desire 21 Sep, ruling 4): the market is open, so the bot reads
+        # it -- proofs, kills and heartbeats all run. The entry window (preferred
+        # session + rollover dead zone) and the session-open cooldown now block
+        # ENTRIES only, at the entry point below. Tracked every cycle so window
+        # openings are still seen for the cooldown.
+        _entry_ok, _entry_reason = self.check_entry_window(asset_name)
+        _entry_cooldown = self._update_session_open_state(asset_name, _entry_ok)
 
         # Change 1.3: startup quarantine — holds ALL assets (including BTC,
         # which _update_session_open_state deliberately exempts) for the first
@@ -6302,14 +6489,26 @@ class TradingBot:
                     # before this branch is ever reached -- so this line is a
                     # harmless no-op here, not a fix. Kept per instruction;
                     # the actual gap was in _update_asset_signal (below).
-                    mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
-                    signal, details = aggregator["council"].get_aggregated_signal(
-                        df,
-                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                        is_bull_market=mtf_regime.get("is_bull", False),
-                        governor_data=mtf_regime,
-                        live_price=current_price
-                    )
+                    # B6-2 (Desire 21 Sep, rulings 5-7): with two or more proofs,
+                    # each sits before the council on its own; the largest margin
+                    # over its own pass mark takes the one position; the rest are
+                    # recorded, never traded, and stay unspent.
+                    _b6_proofs = list(getattr(_cs, "proofs", None) or []) if _cs is not None else []
+                    if len(_b6_proofs) >= 2:
+                        signal, details, _cs = self._council_per_proof(
+                            asset_name, aggregator["council"], df, mtf_regime, _cs, _b6_proofs,
+                            current_price, asset_cfg,
+                        )
+                        mtf_regime["composite_state"] = _cs
+                    else:
+                        mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
+                        signal, details = aggregator["council"].get_aggregated_signal(
+                            df,
+                            current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                            is_bull_market=mtf_regime.get("is_bull", False),
+                            governor_data=mtf_regime,
+                            live_price=current_price
+                        )
                 details["aggregator_mode"] = "council"
                 # Surface Livermore context so the trade manager doesn't open
                 # council trades blind (no entry_type, no state-aware stops,
@@ -6825,6 +7024,13 @@ class TradingBot:
                             f"[SUPPRESS] {asset_name}: {_new_side.upper()} signal suppressed — "
                             f"same-side {_new_side.upper()} position already active (no pyramiding)."
                         )
+                        # B6-2 (rulings 5/7): one position per asset -- the blocked
+                        # proof is recorded (it used to vanish) and stays unspent.
+                        self._shadow_open_blocked(
+                            asset_name, signal, details, df, current_price,
+                            "same_side_active", asset_cfg,
+                            gate_id="same_side_active", gate_stage="post_approval",
+                        )
                         signal = 0
                         details["same_side_suppressed"] = True
 
@@ -6843,6 +7049,12 @@ class TradingBot:
                                 f"active {_opposite.upper()} position exists. "
                                 f"Regime: {_regime_data.get('regime', 'NEUTRAL')}. "
                                 f"Counter-direction evaluation skipped."
+                            )
+                            # B6-2: recorded, not silent (rulings 5/7).
+                            self._shadow_open_blocked(
+                                asset_name, signal, details, df, current_price,
+                                "opposite_side_active", asset_cfg,
+                                gate_id="opposite_side_active", gate_stage="post_approval",
                             )
                             signal = 0
                             # Mark as silent suppression so the HOLD handler does
@@ -7595,6 +7807,31 @@ class TradingBot:
                         pass
                 return
 
+            # B6-3: the entry window -- the one place the session filter, the
+            # rollover dead zone and the session-open cooldown now act.
+            if (not _entry_ok) or _entry_cooldown:
+                _ew_why = _entry_reason if not _entry_ok else "session-open cooldown"
+                try:
+                    from src.utils.gate_ledger import write_gate_decision
+                    write_gate_decision(details.get("episode_id"), asset_name, "session_window",
+                                        "BLOCKED", {"reason": _ew_why})
+                except Exception:
+                    pass
+                logger.info(f"[ENTRY-WINDOW] {asset_name}: BLOCKED — {_ew_why}. "
+                            f"Proof and council stand; the entry waits for the window.")
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "session_window", asset_cfg,
+                    gate_id="session_window", gate_stage="post_approval",
+                )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "session_window",
+                                                                  "episode_id": details.get("episode_id")})
+                    except Exception:
+                        pass
+                return
+
             # Store BEFORE state
             positions_before = self.portfolio_manager.get_asset_positions(asset_name)
             position_ids_before = {p.position_id for p in positions_before}
@@ -8316,7 +8553,11 @@ class TradingBot:
             try:
                 _eurusd_assets = [a for a in self.config.get("assets", {})
                                   if "EURUSD" in a.upper() or "EUR_USD" in a.upper()]
-                if _eurusd_assets:
+                # B6-9: only the assets whose scores read this (GOLD, USTEC, USOIL,
+                # EURJPY) need it. BTC fetched a shut EURUSD every weekend cycle --
+                # 532 [DATA-FRESH] warnings on 19-20 Sep, for a value BTC never uses.
+                _dxy_users = {"GOLD", "XAUUSD", "USTEC", "US100", "NAS100", "USOIL", "EURJPY"}
+                if _eurusd_assets and asset_name.upper() in _dxy_users:
                     _eu_sym = self.config["assets"][_eurusd_assets[0]].get("symbol", "EURUSD")
                     _eu_df = None
                     try:
@@ -9707,7 +9948,7 @@ class TradingBot:
         try:
             if self.portfolio_manager:
                 logger.info("[SHUTDOWN] Saving portfolio state...")
-                self.portfolio_manager.save_portfolio_state()
+                self.portfolio_manager.save_portfolio_state(include_metrics=False)   # B6-6
         except Exception as e:
             logger.error(f"Error saving portfolio state on exit: {e}")
 

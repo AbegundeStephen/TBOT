@@ -938,8 +938,12 @@ class PortfolioManager:
         except Exception as e:
             logger.error(f"[STATE] Failed to save system metrics: {e}")
 
-    def save_portfolio_state(self):
-        """Saves the current open positions to a file atomically."""
+    def save_portfolio_state(self, include_metrics=True):
+        """Saves the current open positions to a file atomically.
+        B6-6: include_metrics=False skips the account-state write. That write
+        passes NO market status and NO block list, and save_system_state()
+        replaces the whole file -- so every call blanked both until the next
+        30-second _persist_periodic_state() (which passes the real values)."""
         if self.is_paper_mode:
             logger.info("[STATE] Paper mode, skipping state save.")
             return
@@ -949,7 +953,8 @@ class PortfolioManager:
         # below -- placed here (rather than "inside the try:" as originally
         # specified) because the no-positions early return happens before
         # that try: block even starts in the real code.
-        self._save_system_metrics()
+        if include_metrics:
+            self._save_system_metrics()
 
         # If there are no positions, ensure no state file is left
         if not self.positions:
@@ -3553,13 +3558,13 @@ class PortfolioManager:
             if hasattr(self, "_trade_close_callback") and self._trade_close_callback:
                 _initial_risk = getattr(position, "initial_risk_usd", None)
                 if _initial_risk and _initial_risk > 0:
-                    _pnl_r = pnl / _initial_risk
+                    _pnl_r = partial_pnl / _initial_risk   # B6-9c: was the undefined name 'pnl'
                 else:
                     _sl = getattr(position, "initial_stop_loss", None)
                     if _sl and position.entry_price and position.quantity:
                         _sl_dist = abs(position.entry_price - _sl)
                         _risk_est = _sl_dist * position.quantity
-                        _pnl_r = pnl / _risk_est if _risk_est > 0 else None
+                        _pnl_r = partial_pnl / _risk_est if _risk_est > 0 else None   # B6-9c
                     else:
                         _pnl_r = None
                 if _pnl_r is not None:
@@ -3994,6 +3999,14 @@ class PortfolioManager:
                 f"[CLOSE] {position_id} already removed from portfolio by "
                 f"reconciliation — exchange close still completed successfully."
             )
+        # B6-6: rewrite the saved book straight away. The periodic save only runs
+        # while a position is open (main.py VTM loop), so after the LAST close the
+        # file kept the closed trade and the next restart booked it a second time
+        # (19 Sep 23:20, #136535990). With no positions this removes the file.
+        try:
+            self.save_portfolio_state(include_metrics=False)
+        except Exception as _sp_b6:
+            logger.error(f"[STATE] Save after close failed: {_sp_b6}")
 
         # Track whether this close was manual (Telegram / force-close) so the
         # cooldown bypass in check_min_time_between_trades() works correctly.

@@ -622,11 +622,20 @@ class ShadowTradingEngine:
         # independent samples on one asset at once; deduping it would silently
         # collapse a 24/day cap into ~6/day and bias the sample toward quiet
         # periods -- the exact bias the control exists to remove.
+        # B6-2: the proof level this shadow belongs to (0.0 when not a proof
+        # signal). Two different proofs blocked by the same gate are two
+        # records -- every proof is independent (Desire, 21 Sep).
+        try:
+            _b6_new_ref = float((signal_details or {}).get("setup_ref")
+                                or (composite_state or {}).get("setup_ref") or 0.0)
+        except Exception:
+            _b6_new_ref = 0.0
         for _existing in (self.open_positions if not bypass_guards else []):
             if (
                 _existing.asset.upper() == asset_key
                 and _existing.side == side
                 and _existing.gate_id == gate_id
+                and abs(float(getattr(_existing, "setup_ref", 0.0) or 0.0) - _b6_new_ref) < 1e-9
             ):
                 logger.debug(
                     f"[SHADOW] Dedup: {asset_key} {side.upper()} gate={gate_id} already open, skipping"

@@ -250,6 +250,17 @@ class CompositeStateBuilder:
 
     def persist_stores(self):
         """B7: write every _STATE_KEYS store to disk so a restart does not wipe setups."""
+        # B6-4: never overwrite the saved file while this builder still holds a
+        # restore it has not applied -- it has run no candle yet, so its stores
+        # are empty and its last-bar time is None. Saving then is what wiped
+        # five assets' memory on the mornings of 18 and 21 Sep.
+        if getattr(self, "_pending_restore", None) is not None:
+            if not getattr(self, "_persist_skip_logged", False):
+                self._persist_skip_logged = True
+                logger.info("[PERSIST] %s: save skipped — restore still pending (no candle processed yet)",
+                            self.asset_type)
+            return
+        self._persist_skip_logged = False
         try:
             import os, pickle, time
             os.makedirs(self._PERSIST_DIR, exist_ok=True)
@@ -1651,15 +1662,17 @@ class CompositeStateBuilder:
                     # above consumes RETEST_FAILED: ref_state is set by BRC,
                     # which runs after this loop within the same call, so a
                     # same-cycle read would always see the unset default.
+                    # B6-1: the kill flag is per setup (asset, kind, dir, H).
                     if _death_reason is None and self._ref_dead_pending.pop(
-                        (_asset, _s.get("kind")), False
+                        self._ppl_setup_key(_asset, _s), False
                     ):
                         _death_reason = "REF_INVALIDATED"
 
                     if _death_reason is not None:
                         state.setup_died = True
                         state.setup_death_reason = _death_reason
-                        self._ref_dead_pending.pop((_asset, _s.get("kind")), None)   # PPL 8g: a dead setup's DEAD flag must not outlive it
+                        self._ref_dead_pending.pop(self._ppl_setup_key(_asset, _s), None)   # PPL 8g / B6-1
+                        self._ppl.pop(self._ppl_setup_key(_asset, _s), None)                 # B6-1: its record dies with it
                         logger.info(
                             "[MEASURE-8.4-DEATH] %s: kind=%s dir=%+d age_at_death=%s reason=%s",
                             self.asset_type, _s.get("kind"), _s.get("dir"),
@@ -1938,6 +1951,12 @@ class CompositeStateBuilder:
         #     TF_CONT (BOS):   last_swing_high_4h / last_swing_low_4h
         # ══════════════════════════════════════════════════════════════════
         try:
+            # B6-8: compute the 4H ATR every candle for every asset (it logs
+            # [ATR4] once per new 4H bar). It used to run only inside the proof
+            # block, so the atr4.per_bar heartbeat failed for any asset with no
+            # live setup (GOLD all of 21 Sep, BTC on 19 Sep).
+            if df_4h is not None and len(df_4h) >= 16:
+                self._atr4_now(df_4h, self.asset_type)
             _brc_active = bool(getattr(state, "setup_active", False))
             _brc_dir    = int(getattr(state, "setup_dir", 0) or 0)
             _brc_kind   = getattr(state, "setup_kind", None)
@@ -2053,66 +2072,50 @@ class CompositeStateBuilder:
                                     _brc_ref, ("%.5g" % _r1_now) if _r1_now else "none")
                         self._ref_state_last[self.asset_type] = _new_ref_state
                     state.ref_state = _new_ref_state
-                    if _new_ref_state == "DEAD":
-                        self._ref_dead_pending[(self.asset_type, _brc_kind)] = True
-                        self._ppl.pop((self.asset_type, _brc_kind), None)
+                    # B6-1: the R1 kill is raised per setup inside _ppl_evaluate_all
+                    # (each setup's own 4H close against its own R1). The per-lane
+                    # flag set here killed whichever setup of that lane the death
+                    # loop reached first, not the one whose R1 broke.
 
                     if _atr4 is None:
                         logger.error("[PPL] %s: no 4H ATR — counts REFUSED this cycle", self.asset_type)
-                    elif _r1_now is None:
-                        logger.error("[PPL] %s: no R1 on a live setup — counts REFUSED (should have been refused at birth)", self.asset_type)
                     else:
-                        _ppl_out = self._ppl_step(
-                            self.asset_type, _brc_kind, _brc_dir, _brc_ref, float(_r1_now), _brc_tier_used,
-                            df, df_4h, _atr4, self._ppl_spread(self.asset_type, _brc_close), _pcfg, _gear,
+                        # B6-1 (Desire 21 Sep, rulings 1-3): EVERY live setup in BOTH
+                        # lanes is proof-checked this candle, each with its own record.
+                        # Was: only the published setup (trend lane first, reversal
+                        # only when the trend lane was empty) -- EURUSD's reversal
+                        # long sat unchecked at count 2 from 18 Sep 17:03.
+                        _head_out, _proofs = self._ppl_evaluate_all(
+                            state, df, df_4h, _atr4, self._ppl_spread(self.asset_type, _brc_close),
+                            _pcfg, _gear, _brc_kind, _brc_dir, _brc_ref,
                         )
-                        state.brc_count = int(_ppl_out.get("count", 0))
-                        state.brc_h2 = _ppl_out.get("h2")
-                        state.ref_h = _ppl_out.get("h2")          # VTM/shadow read ref_h; H2 is its successor
-                        state.brc_test_of_proof = bool(_ppl_out.get("test_of_proof"))
-                        if _ppl_out.get("expired"):
-                            self._ppl_expire_setup(self.asset_type, _brc_kind)
-                        if _ppl_out.get("tier"):
-                            _brc_tier_used = _ppl_out.get("tier")   # RETEST | RUNNER
-                        _proof_ok = bool(_ppl_out.get("proof"))
+                        _ppl_out = _head_out
+                        if _head_out is not None:
+                            state.brc_count = int(_head_out.get("count", 0))
+                            state.brc_h2 = _head_out.get("h2")
+                            state.ref_h = _head_out.get("h2")          # VTM/shadow read ref_h; H2 is its successor
+                            state.brc_test_of_proof = bool(_head_out.get("test_of_proof"))
+                            if _head_out.get("tier"):
+                                _brc_tier_used = _head_out.get("tier")   # RETEST | RUNNER
+                        state.proofs = _proofs
+                        _proof_ok = bool(_proofs)
+                        if _proof_ok:
+                            # Publish the first proof (most tests, then oldest) into the
+                            # single-proof fields every existing reader uses. With two
+                            # or more proofs, main.py gives each its own council sitting.
+                            _p0 = _proofs[0]
+                            for _f, _v in _p0["fields"].items():
+                                setattr(state, _f, _v)
+                            _brc_kind, _brc_dir, _brc_ref = _p0["kind"], _p0["dir"], _p0["ref"]
+                            _brc_tier_used = _p0["fields"].get("brc_tier")
 
                     if _proof_ok:
-                        # ── Build 2: age the proof in BARS ────────────────────
-                        # Same proof at the same reference across several bars is
-                        # ONE proof getting older, not several proofs. A different
-                        # reference means a genuinely new proof — reset to 0.
-                        _mem = self._brc_memory.get(self.asset_type)
-
-                        if _mem is None or _mem.get("ref") != _brc_ref:
-                            # New proof at a new level.
-                            _age = 0
-                            _first_ts = _bar_ts
-                        elif _bar_ts is not None and _bar_ts != _mem.get("last_ts"):
-                            # Same proof, but a NEW bar has closed — it ages by 1.
-                            _age = int(_mem.get("age", 0)) + 1
-                            _first_ts = _mem.get("first_ts")
-                        else:
-                            # Same proof, same bar — another cycle within the bar.
-                            # Do NOT age. This is the ~22x-per-bar case.
-                            _age = int(_mem.get("age", 0))
-                            _first_ts = _mem.get("first_ts")
-
-                        self._brc_memory[self.asset_type] = {
-                            "ref": _brc_ref,
-                            "first_ts": _first_ts,
-                            "last_ts": _bar_ts,
-                            "age": _age,
-                        }
-
-                        state.brc_confirmed = True
-                        state.brc_direction = _brc_dir
-                        state.brc_kind = _brc_kind
-                        state.brc_tier = _brc_tier_used
-                        if _ppl_out:
-                            state.brc_proof_dist_atr = _ppl_out.get("proof_dist_atr")
-                            state.brc_retest_depth = _ppl_out.get("retest_depth")
-                        state.brc_age = _age
-                        state.brc_first_confirmed_ts = _first_ts
+                        # B6-1: age, first-seen time, distance and depth now come per
+                        # proof from _ppl_evaluate_all (already set on state above).
+                        # The old single per-asset memory reset whenever the
+                        # published proof changed.
+                        _age = int(getattr(state, "brc_age", 0) or 0)
+                        _first_ts = getattr(state, "brc_first_confirmed_ts", None)
 
                         logger.info(
                             "[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g "
@@ -2161,7 +2164,7 @@ class CompositeStateBuilder:
                         #
                         # Proof condition no longer holds — forget it. If it
                         # re-forms later that is a NEW proof starting at age 0.
-                        self._brc_memory.pop(self.asset_type, None)
+                        pass   # B6-1: per-proof memory is swept inside _ppl_evaluate_all
         except Exception as _brc_err:
             logger.warning("[BRC] compute error (non-blocking): %s", _brc_err)
 
@@ -3158,6 +3161,13 @@ class CompositeStateBuilder:
                     logger.info("[GEAR] count1=%s count3=%s (source=%s)", c1, c3, self._GEAR_PATH)
             else:
                 c1, c3 = _cached[1], _cached[2]
+                # B6-8: the [GEAR] line only printed on a cache miss, so the daily
+                # gear.read promise failed every day by design. Once an hour per
+                # builder proves the gear is still being read.
+                import time as _time_b6
+                if _time_b6.time() - getattr(self, "_gear_log_ts", 0.0) >= 3600:
+                    self._gear_log_ts = _time_b6.time()
+                    logger.info("[GEAR] count1=%s count3=%s (source=%s, hourly)", c1, c3, self._GEAR_PATH)
         except FileNotFoundError:
             pass
         except Exception as _e:
@@ -3191,7 +3201,7 @@ class CompositeStateBuilder:
             logger.error("[ATR4] %s: exception: %s. Counts REFUSED this cycle.", asset, _e)
             return None
 
-    def _ppl_step(self, asset, kind, direction, h, r1, h_tier, df_1h, df_4h, atr4, spread, pcfg, gear):
+    def _ppl_step(self, asset, kind, direction, h, r1, h_tier, df_1h, df_4h, atr4, spread, pcfg, gear, key=None):
         """
         PPL v1 proof engine (Desire, 13-14 Sep 2026).
           gear = (count1_tf, count3_tf), each "1H"|"4H"
@@ -3203,8 +3213,12 @@ class CompositeStateBuilder:
           kill    = 4H close beyond R1 (mirrored here; the real kill is _ref_state -> REF_INVALIDATED)
           expiry  = count 0 for more than N closes on count1_tf -> expire (not a death)
         """
-        key = (asset, kind)
         d = 1 if direction == 1 else -1
+        # B6-1 (Desire 21 Sep, ruling 2): one proof record PER SETUP, not per lane.
+        # Was (asset, kind): a newer setup taking the front spot replaced the
+        # record and erased a chain already at count 2 (live: BTC H=81401 on
+        # 19 Sep, GOLD H=4371.9 and US100 H=29572 on 18 Sep).
+        key = key or (asset, kind, d, round(float(h), 8))
         c1tf, c3tf = gear
         out = dict(count=0, h2=None, tier=None, proof=False, proof_dist_atr=None,
                    retest_depth=None, test_of_proof=False, expired=False, dead=False, gear="%s/%s" % gear)
@@ -3255,8 +3269,12 @@ class CompositeStateBuilder:
                     self._ppl.pop(key, None)
                     return out
 
-            # H2 ratchet on the count-3 frame, after the break candle
-            if rec["count"] >= 1 and newB and tsB > rec["break_ts"]:
+            # H2 ratchet on the count-3 frame, after the break candle.
+            # B6-1 (Desire 21 Sep, ruling 3): only while count == 1. From the
+            # retest (count 2) on, H2 is frozen -- a new top comes only with a
+            # new setup, never from price drifting. Was ">= 1": in a slow grind
+            # H2 kept moving and the proof line ran away (BTC, 20 Sep 01:00-03:00).
+            if rec["count"] == 1 and newB and tsB > rec["break_ts"]:
                 rec["h2_prior"] = rec["h2"]
                 if (d == 1 and cB > rec["h2"]) or (d == -1 and cB < rec["h2"]):
                     logger.info("[H2-RATCHET] %s %s dir=%+d tf=%s H2 %.5g -> %.5g", asset, kind, d, c3tf, rec["h2"], cB)
@@ -3272,7 +3290,7 @@ class CompositeStateBuilder:
                     logger.info("[TEST-OF-PROOF] %s %s dir=%+d close1=%.5g beyond R1=%.5g — waiting on the 4H", asset, kind, d, c1, r1)
                 elif lower:
                     span = abs(rec["h2"] - r1)
-                    rec.update(count=2, tier="RETEST", first_retest_ts=ts1,
+                    rec.update(count=2, tier="RETEST", first_retest_ts=ts1, h2_frozen=rec["h2"],   # B6-1
                                retest_depth=(abs(rec["h2"] - c1) / span) if span > 0 else None)
                     logger.info("[COUNT-2] %s %s dir=%+d RETEST close1=%.5g H2=%.5g R1=%.5g depth=%s",
                                 asset, kind, d, c1, rec["h2"], r1,
@@ -3284,7 +3302,7 @@ class CompositeStateBuilder:
                     else:
                         rec["streak"] = 1 if prev is None else 0
                     if rec["streak"] >= int(pcfg.get("ppl_runner_streak_n", 4)):
-                        rec.update(count=2, tier="RUNNER", first_retest_ts=ts1, retest_depth=0.0)
+                        rec.update(count=2, tier="RUNNER", first_retest_ts=ts1, retest_depth=0.0, h2_frozen=rec["h2"])   # B6-1
                         logger.info("[COUNT-2] %s %s dir=%+d RUNNER streak=%d close1=%.5g H2=%.5g",
                                     asset, kind, d, rec["streak"], c1, rec["h2"])
 
@@ -3292,7 +3310,10 @@ class CompositeStateBuilder:
             if rec["count"] == 2 and newB and tsB > rec["first_retest_ts"]:
                 tol = max(float(pcfg.get("ppl_proof_tolerance_atr4", 0.15)) * float(atr4),
                           float(pcfg.get("ppl_proof_spread_floor_mult", 2.0)) * float(spread or 0.0))
-                h2p = rec["h2_prior"] if rec["h2_prior"] is not None else rec["h2"]
+                # B6-1: measured against the H2 frozen at count 2 (ruling 3).
+                h2p = rec.get("h2_frozen")
+                if h2p is None:
+                    h2p = rec["h2_prior"] if rec["h2_prior"] is not None else rec["h2"]
                 cleared = (cB >= h2p + tol) if d == 1 else (cB <= h2p - tol)
                 dist = ((cB - h2p) if d == 1 else (h2p - cB)) / float(atr4)
                 logger.info("[COUNT-3-CHECK] %s %s dir=%+d tf=%s close=%.5g H2=%.5g tol=%.5g dist=%.2fATR4 -> %s",
@@ -3316,14 +3337,123 @@ class CompositeStateBuilder:
             logger.error("[PPL] %s %s: engine error — counts REFUSED this cycle: %s", asset, kind, _e)
             return out
 
-    def _ppl_expire_setup(self, asset, kind):
-        """PPL: remove a count-0 setup from its lane queue without a death reason."""
+    def _ppl_expire_setup(self, asset, kind, key=None):
+        """PPL: remove a count-0 setup from its lane queue without a death reason.
+        B6-1: removes ONLY the setup whose record expired ("slot freed", P6
+        ruling 14 Sep). It used to remove every setup of that lane."""
         _store = self._active_setup if kind == "TF_CONT" else self._active_setup_mr
         _q = _store.get(asset)
+        if isinstance(_q, dict):
+            _q = [_q]
         if isinstance(_q, list):
-            _store[asset] = [s for s in _q if s.get("kind") != kind]
-        elif isinstance(_q, dict) and _q.get("kind") == kind:
-            _store[asset] = []
+            if key is None:
+                _store[asset] = [s for s in _q if s.get("kind") != kind]
+            else:
+                _store[asset] = [s for s in _q if self._ppl_setup_key(asset, s) != key]
+        if key is not None:
+            self._ppl.pop(key, None)
+
+    def _ppl_setup_key(self, asset, s):
+        """B6-1: the identity of one setup -- asset, lane kind, direction, frozen H."""
+        return (asset, s.get("kind"), 1 if int(s.get("dir", 0) or 0) == 1 else -1,
+                round(float(s.get("ref") or 0.0), 8))
+
+    def _ppl_evaluate_all(self, state, df_1h, df_4h, atr4, spread, pcfg, gear,
+                          head_kind, head_dir, head_ref):
+        """B6-1 (Desire 21 Sep, rulings 1-3): run the proof engine for EVERY live
+        setup in BOTH lanes this candle, each with its own record. Returns
+        (head_out, proofs): head_out is the published setup's own result (for
+        the existing single-setup fields and logs); proofs is one dict per
+        proven setup, ordered most tests first, then oldest. Each proof carries
+        the exact state fields main.py sets when that proof sits before the
+        council on its own (B6-2)."""
+        asset = self.asset_type
+        _live = set()
+        _head_out = None
+        _proofs = []
+        try:
+            _bar_ts = df_1h["timestamp"].iloc[-1] if "timestamp" in df_1h.columns else df_1h.index[-1]
+        except Exception:
+            _bar_ts = None
+        # One-off clean-up of pre-B6 per-lane keys (2-part) carried by a restore.
+        for _d in (self._ppl, self._ref_dead_pending):
+            for _k in [k for k in list(_d.keys())
+                       if isinstance(k, tuple) and len(k) != 4 and k and k[0] == asset]:
+                _d.pop(_k, None)
+        for _store in (self._active_setup, self._active_setup_mr):
+            _q = _store.get(asset)
+            if isinstance(_q, dict):
+                _q = [_q]
+            for _s in list(_q or []):
+                _ref, _r1 = _s.get("ref"), _s.get("ref_1")
+                if _ref is None or _r1 is None or float(_ref) <= 0 or float(_r1) <= 0:
+                    continue
+                _key = self._ppl_setup_key(asset, _s)
+                _live.add(_key)
+                _kind = _s.get("kind")
+                _dir = 1 if int(_s.get("dir", 0) or 0) == 1 else -1
+                _out = self._ppl_step(asset, _kind, _dir, float(_ref), float(_r1), _s.get("ref_tier"),
+                                      df_1h, df_4h, atr4, spread, pcfg, gear, key=_key)
+                if (head_ref is not None and _kind == head_kind and _dir == (1 if int(head_dir or 0) == 1 else -1)
+                        and abs(float(_ref) - float(head_ref)) <= 1e-9 * max(1.0, abs(float(_ref)))):
+                    _head_out = _out
+                if _out.get("dead"):
+                    # 4H close beyond THIS setup's R1 -> its own death check kills it
+                    self._ref_dead_pending[_key] = True
+                if _out.get("expired"):
+                    self._ppl_expire_setup(asset, _kind, _key)
+                    _live.discard(_key)
+                    continue
+                if not _out.get("proof"):
+                    continue
+                # Proof age in bars, per proof (was one memory per asset).
+                _mem = self._brc_memory.get(_key)
+                if _mem is None:
+                    _age, _first = 0, _bar_ts
+                elif _bar_ts is not None and _bar_ts != _mem.get("last_ts"):
+                    _age, _first = int(_mem.get("age", 0)) + 1, _mem.get("first_ts")
+                else:
+                    _age, _first = int(_mem.get("age", 0)), _mem.get("first_ts")
+                self._brc_memory[_key] = {"ref": float(_ref), "first_ts": _first,
+                                          "last_ts": _bar_ts, "age": _age}
+                _tests = int(_s.get("ref_tests", 0) or 0)
+                _fields = {
+                    "setup_active": True, "setup_kind": _kind, "setup_dir": _dir,
+                    "setup_age": int(_s.get("age", 0) or 0), "setup_energy_trend": _s.get("energy"),
+                    "setup_ref": float(_ref), "setup_ref_tier": _s.get("ref_tier"),
+                    "setup_ref_tests": _tests,
+                    "ref_1": float(_r1), "ref_1_tests": int(_s.get("ref_1_tests", 0) or 0),
+                    "brc_r1": float(_r1), "brc_r1_tag": _s.get("r1_tag"),
+                    "brc_ref_tier": _s.get("ref_tier"),
+                    "brc_confirmed": True, "brc_direction": _dir, "brc_kind": _kind,
+                    "brc_tier": _out.get("tier") or _s.get("ref_tier"), "brc_count": 3,
+                    "brc_h2": _out.get("h2"), "ref_h": _out.get("h2"),
+                    "brc_proof_dist_atr": _out.get("proof_dist_atr"),
+                    "brc_retest_depth": _out.get("retest_depth"),
+                    "brc_age": _age, "brc_first_confirmed_ts": _first,
+                }
+                if _kind == "MR_REV":
+                    _fields.update({
+                        "setup_active_mr": True, "setup_kind_mr": _kind, "setup_dir_mr": _dir,
+                        "setup_age_mr": int(_s.get("age", 0) or 0), "setup_ref_mr": float(_ref),
+                        "setup_ref_tier_mr": _s.get("ref_tier"), "setup_ref_tests_mr": _tests,
+                    })
+                _proofs.append({"key": _key, "kind": _kind, "dir": _dir, "ref": float(_ref),
+                                "tests": _tests, "first_ts": _first, "fields": _fields})
+        # Records of setups that no longer exist (died, evicted, expired) go too.
+        for _d in (self._ppl, self._brc_memory):
+            for _k in [k for k in list(_d.keys())
+                       if isinstance(k, tuple) and len(k) == 4 and k[0] == asset and k not in _live]:
+                _d.pop(_k, None)
+        self._brc_memory.pop(asset, None)   # pre-B6 single per-asset proof memory
+        _proofs.sort(key=lambda p: (-p["tests"], str(p["first_ts"])))
+        if len(_proofs) >= 2 and self._brc_log_ts.get((asset, "PROOF-SET")) != _bar_ts:
+            self._brc_log_ts[(asset, "PROOF-SET")] = _bar_ts
+            logger.info("[PROOF-SET] %s: %d live proofs — %s", asset, len(_proofs),
+                        " | ".join("%s %+d H=%.5g tests=%d age=%d" % (
+                            p["kind"], p["dir"], p["ref"], p["tests"], p["fields"]["brc_age"])
+                            for p in _proofs))
+        return _head_out, _proofs
 
     def _ppl_spread(self, asset, price):
         """PPL: spread in PRICE units — observed median when n>=5, else the friction map."""
