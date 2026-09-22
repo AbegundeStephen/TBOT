@@ -652,6 +652,10 @@ class TradingBot:
                 self.system_validator.record_trade_outcome
             )
 
+        # B7-14: trial-only trades report to the trial ledger when they close.
+        if getattr(self, "portfolio_manager", None) is not None:
+            self.portfolio_manager._trial_close_callback = self._on_trial_trade_closed
+
         # DIARY-1 D5: heartbeat monitor -- every component's promise, checked
         # every 5 minutes on the same timer as the [VALIDATOR] watchdog.
         try:
@@ -3080,6 +3084,118 @@ class TradingBot:
         gate_stage = _GATES_REGISTRY.get(gate_id, {}).get("stage", "unknown")
         return gate_id, gate_stage
 
+    # ── B7-14 / B7-15: council trial and smallest-size windows ─────────────
+    def _b7_trial_cfg(self):
+        return self.config.get("phase_config", {}) or {}
+
+    def _b7_trial_ledger(self):
+        led = getattr(self, "_b7_trial_ledger_cache", None)
+        if led is None:
+            import json as _json_b7, os as _os_b7
+            led = {"started": None, "trades": 0, "total_r": 0.0, "reverted": False,
+                   "completed_alerted": False}
+            from src.utils.instance_paths import suffixed_path as _p_inst_b7   # B11 instance-aware path
+            self._b7_trial_path = _p_inst_b7("data/council_trial.json")
+            try:
+                if _os_b7.path.exists(self._b7_trial_path):
+                    with open(self._b7_trial_path, encoding="utf-8") as _fh:
+                        led.update(_json_b7.load(_fh))
+            except Exception as _e:
+                logger.error(f"[TRIAL] ledger read failed: {_e}")
+            self._b7_trial_ledger_cache = led
+        return led
+
+    def _b7_trial_ledger_save(self):
+        import json as _json_b7, os as _os_b7
+        try:
+            led = self._b7_trial_ledger()
+            _os_b7.makedirs(_os_b7.path.dirname(str(self._b7_trial_path)) or ".", exist_ok=True)
+            _tmp = str(self._b7_trial_path) + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _fh:
+                _json_b7.dump(led, _fh, indent=2, default=str)
+            _os_b7.replace(_tmp, str(self._b7_trial_path))
+        except Exception as _e:
+            logger.error(f"[TRIAL] ledger save failed: {_e}")
+
+    def _b7_telegram(self, text):
+        try:
+            _tg = getattr(self, "telegram_bot", None)
+            if _tg and getattr(_tg, "_is_ready", False):
+                _coro = _tg.send_message(text=text, parse_mode="HTML")
+                if _coro:
+                    self._send_telegram_notification(_coro)
+        except Exception as _e:
+            logger.debug(f"[TRIAL] telegram failed: {_e}")
+
+    def _council_trial_active(self):
+        """B7-14: the trial is on when phase_config.council_trial_addons_off is
+        true (default false) and the loss limit has not switched it back."""
+        _on = bool(self._b7_trial_cfg().get("council_trial_addons_off", False))
+        if not _on:
+            return False
+        led = self._b7_trial_ledger()
+        if not led.get("started"):
+            led["started"] = datetime.now().isoformat(timespec="seconds")
+            self._b7_trial_ledger_save()
+            logger.info("[TRIAL] Council trial started: add-ons off in both checks, starting bars "
+                        "in use, trial-only trades at the smallest size.")
+            self._b7_telegram("🧪 <b>COUNCIL TRIAL STARTED</b>\nAdd-ons off; trial-only trades at the smallest size.")
+        try:
+            _days = (datetime.now() - datetime.fromisoformat(str(led.get("started")))).days
+        except Exception:
+            _days = 0
+        _max_days = int(self._b7_trial_cfg().get("council_trial_max_days", 28))
+        if not led.get("completed_alerted") and _days >= _max_days:
+            led["completed_alerted"] = True
+            self._b7_trial_ledger_save()
+            _msg = (f"✅ <b>COUNCIL TRIAL COMPLETE</b> ({_days} days): {led.get('trades', 0)} trial trades, "
+                    f"{float(led.get('total_r', 0.0)):+.2f}R. Review and decide.")
+            logger.info("[TRIAL] " + _msg)
+            self._b7_telegram(_msg)
+        return not led.get("reverted", False)
+
+    def _trial_min_size(self, asset_name, details):
+        """B7-14 / B7-15: (True, reason) when this entry must use the smallest size."""
+        if (details or {}).get("trial_only"):
+            return True, "trial-only: passed only because the council's add-ons were off"
+        _cfg = self._b7_trial_cfg()
+        _assets = [str(a).upper() for a in _cfg.get("trial_min_size_assets", ["EURUSD", "USOIL", "USTEC"])]
+        if asset_name.upper() in _assets:
+            _until = str(_cfg.get("trial_min_size_until", "") or "")
+            if not _until:
+                return True, "post-fix window (no end date set in phase_config.trial_min_size_until)"
+            if datetime.now().strftime("%Y-%m-%d") <= _until:
+                return True, f"post-fix window until {_until}"
+        return False, ""
+
+    def _on_trial_trade_closed(self, asset_name, r_value, position_id):
+        """B7-14: a trial-only trade closed -- update the ledger, apply the loss
+        limit (switches the trial off), and alert when the trade count is reached."""
+        led = self._b7_trial_ledger()
+        _cfg = self._b7_trial_cfg()
+        led["trades"] = int(led.get("trades", 0)) + 1
+        led["total_r"] = float(led.get("total_r", 0.0)) + float(r_value or 0.0)
+        _limit = float(_cfg.get("council_trial_loss_limit_r", 10.0))
+        _max_trades = int(_cfg.get("council_trial_max_trades", 30))
+        logger.info(
+            f"[TRIAL] trial trade closed: {asset_name} {position_id} R={r_value} | "
+            f"{led['trades']} trial trades, total {led['total_r']:+.2f}R (limit -{_limit:.0f}R)"
+        )
+        _msg = None
+        if not led.get("reverted") and led["total_r"] <= -_limit:
+            led["reverted"] = True
+            _msg = (f"🛑 <b>COUNCIL TRIAL SWITCHED OFF</b>: trial trades reached {led['total_r']:+.2f}R "
+                    f"(limit -{_limit:.0f}R). The full council bars are back.")
+            logger.warning("[TRIAL] " + _msg)
+        elif not led.get("completed_alerted") and led["trades"] >= _max_trades:
+            led["completed_alerted"] = True
+            _msg = (f"✅ <b>COUNCIL TRIAL COMPLETE</b>: {led['trades']} trial trades, "
+                    f"{led['total_r']:+.2f}R. Review and decide.")
+            logger.info("[TRIAL] " + _msg)
+        self._b7_trial_ledger_save()
+        if _msg:
+            self._b7_telegram(_msg)
+
     @staticmethod
     def _composite_for_proof(cs, proof):
         """B6-2: a copy of this candle's composite state re-pointed at ONE
@@ -3112,43 +3228,69 @@ class TradingBot:
 
     def _council_per_proof(self, asset_name, council, df, mtf_regime, cs, proofs,
                            current_price, asset_cfg):
-        """B6-2 (Desire 21 Sep, rulings 5-7). Each proof sits before the council
-        on its own. Winner = largest margin (total_score - required_score) over
-        its OWN pass mark; tie -> most tests at its level, then the older proof.
-        Passing losers are recorded (gate proof_outscored), never traded, and
-        stay unspent -- they can come back. Refused proofs get the same shadow
-        record the single-proof path gives. Returns the winner's
-        (signal, details, composite_state) to carry on down trade_asset."""
+        """B6-2 + B7-12 / B7-13 (Desire, 21 Sep).
+        Proofs are grouped by (kind, direction) and the council sits ONCE per
+        group: its score depends on the market and the direction, not the
+        exact level (every same-kind, same-direction proof scored identically
+        on 21 Sep -- four EURUSD sells all 3.40). Every proof still gets its own
+        record, episode id and composite. Winner = largest margin over its own
+        pass mark; tie -> most tests at its level, then the older proof
+        (ruling 6). Passing losers are recorded (proof_outscored), never traded,
+        and stay unspent. Per-proof log lines print once per candle unless the
+        verdict or score changes (B7-13). Returns the winner's
+        (signal, details, composite_state)."""
+        _candle = self._b7_candle_key(df)
+        _groups = {}
+        for _p in proofs:
+            _groups.setdefault((_p.get("kind"), int(_p.get("dir", 0) or 0)), []).append(_p)
         _rows = []
         _mem0 = self._council_memory_snapshot(council)
-        for _p in proofs:
-            self._council_memory_restore(council, _mem0)   # every proof meets the same council memory
-            _cs_p = self._composite_for_proof(cs, _p)
+        for (_kind, _dir), _members in _groups.items():
+            _members.sort(key=lambda p: (-int(p.get("tests", 0) or 0), str(p.get("first_ts") or "")))
+            self._council_memory_restore(council, _mem0)   # every group meets the same council memory
+            _rep = _members[0]
+            _cs_rep = self._composite_for_proof(cs, _rep)
             _gd = dict(mtf_regime)
-            _gd["composite_state"] = _cs_p
+            _gd["composite_state"] = _cs_rep
             _gd.pop("episode_id", None)
-            _ep = self._episode_id_for(asset_name, _gd)          # fresh id per proof
-            _sig, _det = council.get_aggregated_signal(
+            _ep_rep = self._episode_id_for(asset_name, _gd)
+            _sig, _det0 = council.get_aggregated_signal(
                 df,
                 current_regime=_gd.get("regime", "NEUTRAL"),
                 is_bull_market=_gd.get("is_bull", False),
                 governor_data=_gd,
                 live_price=current_price,
             )
-            _det = dict(_det or {})
-            _det["episode_id"] = _ep
-            _det["setup_ref"] = _p.get("ref")
-            _det["setup_age"] = (_p.get("fields") or {}).get("setup_age")
-            _det["composite_state"] = _cs_p.to_dict() if hasattr(_cs_p, "to_dict") else {}
-            _margin = float(_det.get("total_score") or 0.0) - float(_det.get("required_score") or 0.0)
-            _rows.append({"proof": _p, "cs": _cs_p, "sig": int(_sig or 0), "det": _det, "margin": _margin,
-                          "mem": self._council_memory_snapshot(council)})
-            logger.info(
-                "[PROOF-COUNCIL] %s: %s dir=%+d H=%.5g score=%.2f/%.2f margin=%+.2f -> %s",
-                asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
-                float(_det.get("total_score") or 0.0), float(_det.get("required_score") or 0.0),
-                _margin, "PASS" if _sig else "HOLD",
-            )
+            _det0 = dict(_det0 or {})
+            _mem_after = self._council_memory_snapshot(council)
+            _margin = float(_det0.get("total_score") or 0.0) - float(_det0.get("required_score") or 0.0)
+            for _i, _p in enumerate(_members):
+                if _i == 0:
+                    _cs_p, _ep = _cs_rep, _ep_rep
+                else:
+                    _cs_p = self._composite_for_proof(cs, _p)
+                    _gd_m = dict(mtf_regime)
+                    _gd_m["composite_state"] = _cs_p
+                    _gd_m.pop("episode_id", None)
+                    _ep = self._episode_id_for(asset_name, _gd_m)          # its own id
+                _det = dict(_det0)
+                _det["episode_id"] = _ep
+                _det["setup_ref"] = _p.get("ref")
+                _det["setup_age"] = (_p.get("fields") or {}).get("setup_age")
+                _det["composite_state"] = _cs_p.to_dict() if hasattr(_cs_p, "to_dict") else {}
+                _rows.append({"proof": _p, "cs": _cs_p, "sig": int(_sig or 0), "det": _det,
+                              "margin": _margin, "mem": _mem_after})
+            _verdict = ("PASS" if _sig else "HOLD",
+                        round(float(_det0.get("total_score") or 0.0), 2),
+                        round(float(_det0.get("required_score") or 0.0), 2))
+            if self._b7_log_once(asset_name, ("group", _kind, _dir), _candle, _verdict):
+                logger.info(
+                    "[PROOF-COUNCIL] %s: %s dir=%+d x%d proof(s) H=%s score=%.2f/%.2f margin=%+.2f -> %s",
+                    asset_name, _kind, _dir, len(_members),
+                    ",".join("%.5g" % float(p.get("ref") or 0.0) for p in _members),
+                    float(_det0.get("total_score") or 0.0), float(_det0.get("required_score") or 0.0),
+                    _margin, "PASS" if _sig else "HOLD",
+                )
         _passing = [r for r in _rows if r["sig"] != 0]
         _pool = list(_passing if _passing else _rows)
         _pool.sort(key=lambda r: (-r["margin"], -int(r["proof"].get("tests", 0) or 0),
@@ -3164,33 +3306,63 @@ class TradingBot:
         self._council_memory_restore(council, _win["mem"])   # keep only the winner's sitting
         mtf_regime["episode_id"] = _win["det"]["episode_id"]
         self._episode_id_for(asset_name, {"episode_id": _win["det"]["episode_id"]})   # park the winner's id
-        logger.info(
-            "[PROOF-COUNCIL] %s: %d proofs, %d passed -> %s %s dir=%+d H=%.5g margin=%+.2f",
-            asset_name, len(_rows), len(_passing),
-            "TRADE" if _win["sig"] else "none passed —", _win["proof"].get("kind"),
-            int(_win["proof"].get("dir", 0) or 0), float(_win["proof"].get("ref") or 0.0), _win["margin"],
-        )
+        _summary = (len(_rows), len(_passing), _win["proof"].get("kind"),
+                    float(_win["proof"].get("ref") or 0.0), round(_win["margin"], 2))
+        if self._b7_log_once(asset_name, ("summary",), _candle, _summary):
+            logger.info(
+                "[PROOF-COUNCIL] %s: %d proofs in %d group(s), %d passed -> %s %s dir=%+d H=%.5g margin=%+.2f",
+                asset_name, len(_rows), len(_groups), len(_passing),
+                "TRADE" if _win["sig"] else "none passed —", _win["proof"].get("kind"),
+                int(_win["proof"].get("dir", 0) or 0), float(_win["proof"].get("ref") or 0.0), _win["margin"],
+            )
         return _win["sig"], _win["det"], _win["cs"]
+
+    @staticmethod
+    def _b7_candle_key(df):
+        """B7-13: the newest candle's time, used to print per-proof lines once per candle."""
+        try:
+            return str(df["timestamp"].iloc[-1]) if "timestamp" in df.columns else str(df.index[-1])
+        except Exception:
+            return None
+
+    def _b7_log_once(self, asset_name, key, candle, verdict):
+        """B7-13: True when a per-proof line should print -- the first time in a
+        candle, or again if its verdict or score changed within the candle."""
+        store = getattr(self, "_b7_log_seen", None)
+        if store is None:
+            store = self._b7_log_seen = {}
+        k = (asset_name,) + tuple(key)
+        last = store.get(k)
+        if last is not None and last[0] == candle and last[1] == verdict:
+            return False
+        store[k] = (candle, verdict)
+        return True
 
     def _record_proof_outscored(self, asset_name, r, win, df, current_price, asset_cfg):
         """B6-2: passed the council but lost the one position to a larger margin
         on the same candle. Recorded, never traded, NOT burned (ruling 7)."""
         _p = r["proof"]
-        try:
-            from src.utils.gate_ledger import write_gate_decision
-            write_gate_decision(
-                r["det"].get("episode_id"), asset_name, "proof_outscored", "BLOCKED",
-                {"proof_ref": _p.get("ref"), "margin": r["margin"],
-                 "winner_ref": win["proof"].get("ref"), "winner_margin": win["margin"]},
+        # B7-13: one ledger row and one log line per proof per candle (the
+        # shadow record below keeps its own duplicate check).
+        if self._b7_log_once(
+            asset_name, ("outscored", _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0)),
+            self._b7_candle_key(df), (round(r["margin"], 2), float(win["proof"].get("ref") or 0.0)),
+        ):
+            try:
+                from src.utils.gate_ledger import write_gate_decision
+                write_gate_decision(
+                    r["det"].get("episode_id"), asset_name, "proof_outscored", "BLOCKED",
+                    {"proof_ref": _p.get("ref"), "margin": r["margin"],
+                     "winner_ref": win["proof"].get("ref"), "winner_margin": win["margin"]},
+                )
+            except Exception:
+                pass
+            logger.info(
+                "[PROOF-OUTSCORED] %s: %s dir=%+d H=%.5g margin=%+.2f lost to H=%.5g margin=%+.2f "
+                "— recorded, not traded, stays unspent",
+                asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
+                r["margin"], float(win["proof"].get("ref") or 0.0), win["margin"],
             )
-        except Exception:
-            pass
-        logger.info(
-            "[PROOF-OUTSCORED] %s: %s dir=%+d H=%.5g margin=%+.2f lost to H=%.5g margin=%+.2f "
-            "— recorded, not traded, stays unspent",
-            asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
-            r["margin"], float(win["proof"].get("ref") or 0.0), win["margin"],
-        )
         self._shadow_open_blocked(
             asset_name, r["sig"], r["det"], df, current_price, "proof_outscored", asset_cfg,
             episode_id_override=r["det"].get("episode_id"),
@@ -3204,11 +3376,17 @@ class TradingBot:
         _p = r["proof"]
         _side = "long" if int(_p.get("dir", 0) or 0) > 0 else "short"
         _gid, _gstage = self._resolve_generic_gate_id(reasoning=r["det"].get("reasoning", "") or "")
-        logger.info(
-            "[PROOF-HOLD] %s: %s dir=%+d H=%.5g score=%.2f/%.2f — council HOLD, recorded (gate_id=%s)",
-            asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
-            float(r["det"].get("total_score") or 0.0), float(r["det"].get("required_score") or 0.0), _gid,
-        )
+        # B7-13: once per proof per candle, unless its score changes.
+        if self._b7_log_once(
+            asset_name, ("hold", _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0)),
+            self._b7_candle_key(df),
+            (round(float(r["det"].get("total_score") or 0.0), 2), round(float(r["det"].get("required_score") or 0.0), 2)),
+        ):
+            logger.info(
+                "[PROOF-HOLD] %s: %s dir=%+d H=%.5g score=%.2f/%.2f — council HOLD, recorded (gate_id=%s)",
+                asset_name, _p.get("kind"), int(_p.get("dir", 0) or 0), float(_p.get("ref") or 0.0),
+                float(r["det"].get("total_score") or 0.0), float(r["det"].get("required_score") or 0.0), _gid,
+            )
         self._shadow_open_blocked(
             asset_name, 0, r["det"], df, current_price, "council_hold", asset_cfg,
             side_override=_side, episode_id_override=r["det"].get("episode_id"),
@@ -3616,12 +3794,21 @@ class TradingBot:
             # MR weight. Commodities/indices share GOLD. BTC is its own bucket.
             # GBPAUD split out (Window-G Segment C, 20-Aug) — see the matching
             # note at the other _FX_ASSETS site above.
-            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "USDJPY"}
-            if "BTC" in asset_name.upper():
+            # B7-9: the SAME mapping as the startup path (search
+            # _DEDICATED_ASSETS above). This list was not updated when USTEC,
+            # USOIL and EURUSD got their own tuned tables on 13 Jul (771aa82),
+            # so every preset switch -- which runs seconds after every restart --
+            # put EURUSD on the shared FX table (conservative = 3.8; its own is
+            # 2.7) and USOIL / USTEC on GOLD's 3.1 (own 2.6 / 2.5).
+            # Confirmed live 21 Sep 19:01:56.
+            _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD", "GBPAUD"}
+            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY"}
+            _au_b7 = asset_name.upper()
+            if "BTC" in _au_b7:
                 _preset_key = "BTC"
-            elif asset_name.upper() == "GBPAUD":
-                _preset_key = "GBPAUD"
-            elif asset_name.upper() in _FX_ASSETS:
+            elif _au_b7 in _DEDICATED_ASSETS:
+                _preset_key = _au_b7
+            elif _au_b7 in _FX_ASSETS:
                 _preset_key = "FX"
             else:
                 _preset_key = "GOLD"
@@ -6509,6 +6696,10 @@ class TradingBot:
                     # each sits before the council on its own; the largest margin
                     # over its own pass mark takes the one position; the rest are
                     # recorded, never traded, and stay unspent.
+                    # B7-14: the trial switch applies to the trade pass only (the pass
+                    # that places orders). The signal pass keeps the full council, so
+                    # practice records keep measuring the council as designed.
+                    mtf_regime["council_trial_active"] = self._council_trial_active()
                     _b6_proofs = list(getattr(_cs, "proofs", None) or []) if _cs is not None else []
                     if len(_b6_proofs) >= 2:
                         signal, details, _cs = self._council_per_proof(
@@ -7847,6 +8038,14 @@ class TradingBot:
                     except Exception:
                         pass
                 return
+
+            # B7-14 / B7-15: the broker's smallest size for trades that passed only
+            # because the council's add-ons were off, and for every trade on a
+            # market still in its post-fix window (EURUSD, USOIL, USTEC).
+            _b7_min, _b7_why = self._trial_min_size(asset_name, details)
+            if _b7_min:
+                details["trial_min_size"] = True
+                details["trial_min_size_reason"] = _b7_why
 
             # Store BEFORE state
             positions_before = self.portfolio_manager.get_asset_positions(asset_name)

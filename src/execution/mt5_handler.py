@@ -857,6 +857,14 @@ class MT5ExecutionHandler:
                     )
                     volume_lots = config_max_lots
 
+                # B7-14 / B7-15: trial-only trades, and every trade on a market
+                # still in its post-fix window, use the broker's smallest size.
+                if (signal_details or {}).get("trial_min_size") and volume_lots > symbol_info.volume_min:
+                    logger.info(
+                        f"[TRIAL-SIZE] {asset}: {volume_lots} lots -> {symbol_info.volume_min} "
+                        f"({(signal_details or {}).get('trial_min_size_reason')})"
+                    )
+                    volume_lots = symbol_info.volume_min
                 volume_lots = min(symbol_info.volume_max, volume_lots)
                 actual_usd = volume_lots * current_price * contract_size
 

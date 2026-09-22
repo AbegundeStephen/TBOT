@@ -4227,6 +4227,14 @@ class PortfolioManager:
             ),   # DIARY-1 D3
         })
 
+        # B7-14: trial-only trades report their result to the trial ledger
+        # (loss limit, trade count, length) -- see TradingBot._on_trial_trade_closed.
+        if getattr(position, "trial_only", False) and getattr(self, "_trial_close_callback", None):
+            try:
+                self._trial_close_callback(position.asset, _gross_r, position_id)
+            except Exception as _tc_b7:
+                logger.error(f"[TRIAL] close report failed: {_tc_b7}")
+
         logger.info(
             f"✓ Position closed successfully:\n"
             f"  Asset:     {position.asset} {position.side.upper()}\n"
