@@ -21,6 +21,14 @@ FIRST_START = datetime(2025, 6, 1, tzinfo=timezone.utc)   # only used if a file 
 def refresh(mt5, sym, now_utc):
     path = os.path.join("data", "raw", f"{sym}_15m.csv")
     old = pd.read_csv(path, parse_dates=[0], index_col=0) if os.path.exists(path) else None
+    # HOTFIX (22 Sep, post-B8): a file written with an explicit UTC offset
+    # (tz-aware index) reads back tz-aware here, while freshly fetched bars
+    # below are built tz-naive. Concatenating the two silently degrades the
+    # index to dtype=object, and the next .sort_index() crashes with
+    # "Cannot compare tz-naive and tz-aware timestamps" -- reproduced locally
+    # against a file the box had already written with a "+00:00" suffix.
+    if old is not None and getattr(old.index, "tz", None) is not None:
+        old.index = old.index.tz_localize(None)
     if old is not None and len(old):
         start = old.index.max().to_pydatetime().replace(tzinfo=timezone.utc) + timedelta(minutes=15)
     else:
