@@ -54,7 +54,7 @@
     { "id": "b6.proof_council_cap",  "type": "cadence", "tag": "[PROOF-COUNCIL]",   "max": 300, "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard; the line only prints when an asset has 2+ proofs" },
     { "id": "b6.proof_set_cap",      "type": "cadence", "tag": "[PROOF-SET]",       "max": 4,   "window_min": 60, "per_asset": true, "enabled": true, "note": "B6-1 -- at most once per 1H bar per asset" },
     { "id": "b6.outscored_cap",      "type": "cadence", "tag": "[PROOF-OUTSCORED]", "max": 60,  "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard" },
-    { "id": "b6.proof_hold_cap",     "type": "cadence", "tag": "[PROOF-HOLD]",      "max": 120, "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard" },
+    { "id": "b6.proof_hold_cap",     "type": "cadence", "tag": "[PROOF-HOLD]",      "max": 600, "window_min": 60, "enabled": true, "note": "B6-2 runaway guard; B7-13 raised from 120 (lines now print once per candle anyway)" },
     { "id": "b6.entry_window_cap",   "type": "cadence", "tag": "[ENTRY-WINDOW]",    "max": 200, "window_min": 60, "enabled": true, "note": "B6-3 -- prints each cycle a passing proof waits outside its window; runaway guard" },
     { "id": "b6.persist_skip_cap",   "type": "cadence", "tag": "[PERSIST] .* save skipped", "max": 20, "window_min": 60, "enabled": true, "note": "B6-4 -- once per builder per pending restore" },
     { "id": "b6.mt5_query_failed",   "type": "cadence", "tag": "[SYNC] .* positions query failed", "max": 10, "window_min": 60, "enabled": true, "note": "B6-6 -- more than 10 an hour = MT5 is not answering (19 Sep 06:35 outage pattern)" },

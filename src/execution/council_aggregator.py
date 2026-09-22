@@ -2351,6 +2351,8 @@ class InstitutionalCouncilAggregator:
             signal = 0
             total_score = 0.0
             required_score = self.trend_aligned_threshold
+            _b7_trial = bool((governor_data or {}).get("council_trial_active"))   # B7-14: trial switch for this sitting
+            _b7_raises = []   # B7-8: every second-check raise, applied or not
             chosen_scores = {}
             decision_type = "HOLD"
             lifecycle_phase = (
@@ -2889,11 +2891,71 @@ class InstitutionalCouncilAggregator:
             _sell_score_pct = (sell_total * _sell_scale / _achievable_max) if _achievable_max > 0 else 0.0
             # The hardcoded 5.0 assumed the weights always sum to 5.0 — true by
             # coincidence in five slots, false the moment a sixth weight exists.
+            # ── B7-8 / B7-11 / B7-14: the first-check bar, in plain parts ─────
+            # start = the market's own tuned bar for that side (trend or
+            # counter, by the mood) before any add-on. full = the bar as
+            # designed, every add-on included. B7-11: the council's own rule --
+            # no bar above 85% of the most a proof can score -- now caps the full
+            # bar here too (it used to act only in the second check, so Friday
+            # 18 Sep's oil sell faced 4.05 of a possible 4.10). B7-14: with the
+            # trial on, the decision uses the start bar; full is still recorded.
+            try:
+                _b7_buy_counter = not (is_bull or _is_neutral_regime)
+                _b7_sell_counter = not ((not is_bull) or _is_neutral_regime)
+            except NameError:
+                _b7_buy_counter = _b7_sell_counter = False
+            _b7_start_buy = float(self.counter_trend_threshold if _b7_buy_counter else self.trend_aligned_threshold)
+            _b7_start_sell = float(self.counter_trend_threshold if _b7_sell_counter else self.trend_aligned_threshold)
+            _b7_full_buy, _b7_full_sell = float(_buy_threshold), float(_sell_threshold)
+            if _achievable_max > 0:
+                _b7_cap = 0.85 * _achievable_max
+                if max(_b7_full_buy, _b7_full_sell) > _b7_cap + 1e-9:
+                    logger.info(
+                        "[THRESHOLD-CAP] %s: first check -- buy %.2f / sell %.2f capped at 85%% "
+                        "of achievable %.2f = %.2f (B7-11)",
+                        self.asset_type, _b7_full_buy, _b7_full_sell, _achievable_max, _b7_cap,
+                    )
+                _b7_full_buy = min(_b7_full_buy, _b7_cap)
+                _b7_full_sell = min(_b7_full_sell, _b7_cap)
+            if _b7_trial:
+                _buy_threshold, _sell_threshold = _b7_start_buy, _b7_start_sell
+            else:
+                _buy_threshold, _sell_threshold = _b7_full_buy, _b7_full_sell
+            _b7_addons = []
+            _b7_lm = locals().get("_likely_modifier")
+            _b7_lt = locals().get("_likely_type")
+            if _b7_lm and _b7_lt != "CHASE_HARD":
+                _b7_addons.append("structure %s %+.2f" % (_b7_lt, float(_b7_lm)))
+            if locals().get("_is_slightly"):
+                _b7_addons.append("mood slightly-against +0.50 (capped at %.2f)"
+                                  % float(locals().get("_ct_cap", 0.0) or 0.0))
+            if locals().get("_ease"):
+                _b7_addons.append("agree %+.2f" % -float(locals().get("_ease")))
+            if locals().get("_regime_lsm_disagree") and not locals().get("_disagree_gate_shadow"):
+                _b7_addons.append("livermore +0.50 on %s" % ("buy" if is_bull else "sell"))
             _rq_denom = _achievable_max if _achievable_max > 0 else 5.0
             _buy_required_pct  = _buy_threshold  / _rq_denom
             _sell_required_pct = _sell_threshold / _rq_denom
             _buy_clears  = _buy_score_pct  >= _buy_required_pct
             _sell_clears = _sell_score_pct >= _sell_required_pct
+            _b7_cleared_any = bool(_buy_clears or _sell_clears)
+            _b7_full_clear_buy = _buy_score_pct >= (_b7_full_buy / _rq_denom)
+            _b7_full_clear_sell = _sell_score_pct >= (_b7_full_sell / _rq_denom)
+            _b7_sig = (round(_b7_start_buy, 2), round(_b7_full_buy, 2), round(_buy_threshold, 2),
+                       round(_b7_start_sell, 2), round(_b7_full_sell, 2), round(_sell_threshold, 2),
+                       round(buy_total, 2), round(sell_total, 2), bool(_b7_trial), tuple(_b7_addons))
+            if (_b7_sig != getattr(self, "_b7_bar_last", None)
+                    or time.time() - getattr(self, "_b7_bar_ts", 0.0) > 3300):
+                self._b7_bar_last, self._b7_bar_ts = _b7_sig, time.time()
+                logger.info(
+                    "[BAR] %s: buy start %.2f full %.2f uses %.2f | sell start %.2f full %.2f uses %.2f | "
+                    "scores buy %.2f sell %.2f (max %.2f) | add-ons: %s%s",
+                    self.asset_type, _b7_start_buy, _b7_full_buy, _buy_threshold,
+                    _b7_start_sell, _b7_full_sell, _sell_threshold,
+                    buy_total * _buy_scale, sell_total * _sell_scale, _achievable_max,
+                    ", ".join(_b7_addons) or "none",
+                    " | TRIAL: starting bars in use" if _b7_trial else "",
+                )
 
             # Measurement 8.8: funnel stage before the ownership rule gets a
             # chance to touch either flag — the count Section 8.8 needs to
@@ -3166,7 +3228,9 @@ class InstitutionalCouncilAggregator:
                             )
                         )
                         _gov_penalty = 0.5 * (1.0 - _gov_confidence)
-                        required_score += _gov_penalty
+                        _b7_raises.append(("daily trend disagrees", float(_gov_penalty)))   # B7-8
+                        if not _b7_trial:                                                  # B7-14
+                            required_score += _gov_penalty
                         trade_type = "TREND"  # restore for downstream gates
                         logger.info(
                             f"[GOVERNOR] {self.asset_type}: daily trend disagrees "
@@ -3315,7 +3379,10 @@ class InstitutionalCouncilAggregator:
                             )
                         # Honour the same counter-trend ceiling computed above so the
                         # SLIGHTLY_COUNTER raise can't reintroduce the 4.0 bar.
-                        required_score = min(required_score + _te_raise, _ct_cap)
+                        _b7_new_req = min(required_score + _te_raise, _ct_cap)
+                        _b7_raises.append(("slightly against", float(_b7_new_req - required_score)))   # B7-8
+                        if not _b7_trial:                                                              # B7-14
+                            required_score = _b7_new_req
                         logger.info(
                             f"[GOV] ⚠️ SLIGHTLY_COUNTER: required score raised to {required_score:.2f}"
                         )
@@ -3351,7 +3418,9 @@ class InstitutionalCouncilAggregator:
                     # firing once costs a real but recoverable penalty; the
                     # threshold itself already scales 1.0x-1.5x ATR by regime,
                     # this just stops the FINAL step from being all-or-nothing.
-                    required_score += 0.4
+                    _b7_raises.append(("wick trap", 0.4))   # B7-8
+                    if not _b7_trial:                       # B7-14
+                        required_score += 0.4
                     logger.info(
                         f"[TRAP] {self.asset_type}: wick structure flagged — "
                         f"required_score +0.4, not blocked outright"
@@ -3499,7 +3568,9 @@ class InstitutionalCouncilAggregator:
                         if "BTC" in self.asset_type:
                             session_quality = MarketHours.get_btc_session_quality()
                             if session_quality == "LOW":
-                                required_score += 0.5
+                                _b7_raises.append(("BTC low liquidity", 0.5))   # B7-8
+                                if not _b7_trial:                               # B7-14
+                                    required_score += 0.5
                                 logger.info(
                                     f"[SESSION] ⚠️ BTC low liquidity: required score +0.5 → {required_score:.1f}"
                                 )
@@ -3553,9 +3624,11 @@ class InstitutionalCouncilAggregator:
                                 )
 
                             if is_off_session:
-                                required_score += 0.5
+                                # B7-10 (Desire, 21 Sep): no longer raises the bar.
+                                # Entries only happen inside the trading windows (B6-3),
+                                # so this only made night-time practice records stricter.
                                 logger.info(
-                                    f"[SESSION] Required score +0.5 → {required_score:.1f}"
+                                    "[SESSION] off-session: no score raise (removed in B7-10)"
                                 )
 
                 except Exception as e:
@@ -3724,6 +3797,58 @@ class InstitutionalCouncilAggregator:
                 else:
                     decision_type = f"{'BUY' if signal == 1 else 'SELL'} (Confirmed)"
 
+            # ── B7-8 / B7-14: second check, and the verdict against the full bar ──
+            try:
+                _b7_raise_total = sum(v for _, v in _b7_raises)
+                _b7_req_full = float(required_score) + (_b7_raise_total if _b7_trial else 0.0)
+                if _b7_trial and _achievable_max > 0:
+                    _b7_req_full = min(_b7_req_full, 0.85 * _achievable_max)
+                _b7_fcb = locals().get("_b7_full_clear_buy", True)
+                _b7_fcs = locals().get("_b7_full_clear_sell", True)
+                _b7_passes_full = bool(
+                    signal != 0
+                    and ((signal == 1 and _b7_fcb) or (signal == -1 and _b7_fcs))
+                    and total_score >= _b7_req_full - 1e-9
+                )
+                _b7_trial_only = bool(_b7_trial and signal != 0 and not _b7_passes_full)
+                _b7_stage = ("passed" if signal != 0
+                             else "after_first" if locals().get("_b7_cleared_any") else "first")
+                _b7_bar_detail = {
+                    "stage": _b7_stage,
+                    "trial_active": bool(_b7_trial),
+                    "trial_only": _b7_trial_only,
+                    "passes_full": _b7_passes_full,
+                    "start_buy": locals().get("_b7_start_buy"),
+                    "start_sell": locals().get("_b7_start_sell"),
+                    "full_buy": locals().get("_b7_full_buy"),
+                    "full_sell": locals().get("_b7_full_sell"),
+                    "decision_buy": locals().get("_buy_threshold"),
+                    "decision_sell": locals().get("_sell_threshold"),
+                    "req_start": float(self.trend_aligned_threshold),
+                    "req_full": round(_b7_req_full, 4),
+                    "req_decision": float(required_score),
+                    "raises": [[_k, round(_v, 4)] for _k, _v in _b7_raises],
+                    "addons": list(locals().get("_b7_addons") or []),
+                }
+                if _b7_stage != "first":
+                    _b7_sig2 = (_b7_stage, round(float(required_score), 2), round(_b7_req_full, 2),
+                                round(float(total_score), 2), tuple(k for k, _ in _b7_raises))
+                    if (_b7_sig2 != getattr(self, "_b7_bar2_last", None)
+                            or time.time() - getattr(self, "_b7_bar2_ts", 0.0) > 3300):
+                        self._b7_bar2_last, self._b7_bar2_ts = _b7_sig2, time.time()
+                        logger.info(
+                            "[BAR] %s second check: start %.2f + raises (%s) = full %.2f | uses %.2f | "
+                            "score %.2f -> %s%s",
+                            self.asset_type, float(self.trend_aligned_threshold),
+                            ", ".join("%s %+.2f" % (k, v) for k, v in _b7_raises) or "none",
+                            _b7_req_full, float(required_score), float(total_score),
+                            "PASS" if signal != 0 else "REFUSED",
+                            " | TRIAL-ONLY (would fail the full council)" if _b7_trial_only else "",
+                        )
+            except Exception as _b7_e:
+                _b7_bar_detail = {"error": str(_b7_e)}
+                _b7_trial_only = False
+
             # Map back chosen details
             if signal == 1:
                 chosen_scores = buy_scores
@@ -3878,6 +4003,8 @@ class InstitutionalCouncilAggregator:
                 "decision_type": decision_type,
                 "total_score": total_score,
                 "required_score": required_score,
+                "bar": locals().get("_b7_bar_detail"),                     # B7-7 / B7-8
+                "trial_only": bool(locals().get("_b7_trial_only", False)),  # B7-14
                 "scores": chosen_scores,
                 "judge_scores": {
                     "trend": _judge_scores_src.get("trend", 0.0),
