@@ -43,3 +43,36 @@ def write_refusal(asset, kind, direction, ref, price, dist, band,
             f.write(json.dumps(_row) + "\n")
     except Exception:
         pass
+
+
+def write_break_check(asset, kind, direction, h, close, band, dist_atr, tier,
+                      result, gear, tf, candle_ts=None):
+    """B8-7 (Desire, 22 Sep, option B): one row per stage-1 break check --
+    breaks AND near-misses, with the distance each time -- so the 0.10 break
+    band can later be judged on complete data. Same daily file and folder as
+    write_refusal above (its old caller, the break-size filter, was removed
+    by CU-1 on 14 Sep). Silent on failure: telemetry must never break a cycle."""
+    try:
+        os.makedirs(_DIR, exist_ok=True)
+        _now = datetime.now(timezone.utc)
+        _row = {
+            "ts": _now.isoformat(),
+            "event": "break_check",
+            "asset": asset,
+            "kind": kind,
+            "dir": int(direction),
+            "h": float(h),
+            "close": float(close),
+            "band": float(band),
+            "dist_atr4": round(float(dist_atr), 4) if dist_atr is not None else None,
+            "tier": tier,
+            "result": result,
+            "gear": gear,
+            "tf": tf,
+            "candle_ts": str(candle_ts) if candle_ts is not None else None,
+        }
+        _path = os.path.join(_DIR, f"p1_{_now.strftime('%Y-%m-%d')}.jsonl")
+        with open(_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_row) + "\n")
+    except Exception:
+        pass

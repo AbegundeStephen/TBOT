@@ -826,6 +826,10 @@ class VeteranTradeManager:
         # re-attach rather than pickle.
         if "council_ref" in state:
             del state["council_ref"]
+        # B8-11: same for portfolio_manager (B4 P0g-1) -- a link back to the
+        # whole bot. Re-attached by the portfolio when the position is loaded.
+        if "portfolio_manager" in state:
+            del state["portfolio_manager"]
         # _sl_lock is a raw threading.Lock() (A13) — not picklable at all.
         # Left in here it either crashes the save outright or, once already
         # None from a prior bad round-trip, silently pickles as None and
@@ -845,6 +849,7 @@ class VeteranTradeManager:
         self.__dict__.update(state)
         self.telegram = None
         self.council_ref = None
+        self.portfolio_manager = None   # B8-11: re-attached by load_portfolio_state
         self._sl_lock = threading.Lock()
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
@@ -4215,7 +4220,10 @@ class VeteranTradeManager:
             }
             self._move_history = (getattr(self, "_move_history", []) + [rec])[-50:]
             _os_ram.makedirs("logs/vtm_moves", exist_ok=True)
-            with open(f"logs/vtm_moves/moves_{_time_ram.strftime('%Y-%m-%d')}.jsonl", "a") as f:
+            _b8_moves_path = f"logs/vtm_moves/moves_{_time_ram.strftime('%Y-%m-%d')}.jsonl"
+            if (getattr(self, "signal_details", None) or {}).get("_presend_probe"):
+                _b8_moves_path = _os_ram.devnull   # B8-10: the pre-send copy is not a trade
+            with open(_b8_moves_path, "a") as f:
                 f.write(_json_ram.dumps(rec, default=str) + "\n")
             # Segment 6: notify/digest honor auto_move_notify_enabled (default
             # ON) — the ledger itself (ring + JSONL, above) always records

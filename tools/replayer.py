@@ -430,6 +430,32 @@ def _bucket(value, edges=_DEPTH_BUCKET_EDGES, labels=_DEPTH_BUCKET_LABELS):
 _PPL_CUTOFF = pd.Timestamp("2026-09-14T16:21:00+02:00")
 
 
+_TRADE_LABELS = None
+
+
+def _trade_labels():
+    """B8-5: episode_id -> your Telegram answer (the latest one wins), from
+    logs/trade_labels.jsonl. A label row carries the trade's database id; the
+    matching "record" row maps that id to the episode id."""
+    global _TRADE_LABELS
+    if _TRADE_LABELS is None:
+        _TRADE_LABELS, by_trade, rows = {}, {}, []
+        try:
+            with open("logs/trade_labels.jsonl", encoding="utf-8") as f:
+                rows = [json.loads(l) for l in f if l.strip()]
+        except Exception:
+            rows = []
+        for r in rows:
+            if r.get("type") == "record" and r.get("trade_id") is not None and r.get("episode_id"):
+                by_trade[r["trade_id"]] = r["episode_id"]
+        for r in rows:
+            if r.get("type") == "label" and r.get("label"):
+                ep = r.get("episode_id") or by_trade.get(r.get("trade_id"))
+                if ep:
+                    _TRADE_LABELS[ep] = r["label"]
+    return _TRADE_LABELS
+
+
 def _is_ppl_row(e):
     ts = e.get("close_time") or e.get("entry_time")
     if not ts:
@@ -605,6 +631,8 @@ def load_closed_trades(include_all=False):
             if e.get("external"):
                 skipped_external += 1          # B7-2: opened by hand, not the bot's trade
                 continue
+            if "label" not in e:
+                e["label"] = _trade_labels().get(e.get("episode_id"))   # B8-5
             # B6-7: the same closed trade can be written twice (19 Sep: #136535990
             # booked at its close on the 18th and again at the 23:20 restart).
             # Keep the first row per trade.
@@ -659,6 +687,7 @@ _BY_FIELDS = {
     "source":       lambda e: e.get("source") or "shadow",                     # B7-4: live vs practice
     "trial":        lambda e: ("trial-only" if e.get("trial_only") else "normal")
                               if e.get("source") == "live" else None,           # B7-14
+    "label":        lambda e: e.get("label"),                                   # B8-5
 }
 
 
@@ -891,22 +920,32 @@ def run_arms(knob, include_all=False):
     if knob not in _ARM_VALUES:
         print(f"unknown knob {knob!r} -- choose from {list(_ARM_VALUES)}")
         return
-    print("Replay path = 1H bars; results are directional, not precise "
-          "(1H sims inflate expectancy, per calibrate()'s own finding). "
-          "15m path pending.\n")
+    # B8-9: the replay walks the 15-minute price files (load_path) -- the old
+    # heading said "1H bars". It now also says how many trades it could re-run;
+    # on 22 Sep it re-ran none (the files end 28 Aug) and printed empty tables.
+    print("Replay path = 15m bars (data/raw/<symbol>_15m.csv); results are directional, not precise.\n")
     rows = load_closed_trades(include_all=include_all)
     by_asset_arm = defaultdict(lambda: defaultdict(list))
+    _replayed = 0
     for e in rows:
+        _hit = False
         for value in _ARM_VALUES[knob]:
             r = _replay_row_arm(e, knob, value)
             if r is not None:
                 by_asset_arm[e.get("asset")][value].append(r)
+                _hit = True
+        _replayed += 1 if _hit else 0
+    print(f"replayed {_replayed} of {len(rows)} trades")
+    if rows and not _replayed:
+        print("NOTHING REPLAYED: no trade has a price path -- the 15-minute files in "
+              "data/raw do not cover these dates. Run tools/refresh_15m.py first.")
 
     out = {
         "knob": knob,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "header": "Replay path = 1H bars; results are directional, not precise "
-                  "(1H sims inflate). 15m path pending.",
+        "header": "Replay path = 15m bars; results are directional, not precise.",
+        "replayed": _replayed,
+        "rows": len(rows),
         "assets": {},
     }
     print(f"{'asset':<8} {'arm':>12} {'n':>5} {'mean_R':>8} {'CI90_lo':>8} "

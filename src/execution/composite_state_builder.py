@@ -319,7 +319,10 @@ class CompositeStateBuilder:
             _saved_last_bar_ts = _payload.get("__last_bar_ts")
             _idx = df["timestamp"] if "timestamp" in df.columns else df.index
             _bars_passed = int((_idx > _saved_last_bar_ts).sum()) if _saved_last_bar_ts is not None else None
-            _max_bars = int((getattr(self, "phase_config", {}) or {}).get("builder_state_max_bars", 6))
+            # B8-1: 6 -> 120 by default (set builder_state_max_bars in config too).
+            # The missed candles are now replayed through the proof engine, so a
+            # longer gap is reconciled rather than trusted or thrown away.
+            _max_bars = int((getattr(self, "phase_config", {}) or {}).get("builder_state_max_bars", 120))
             _saved_at = _payload.get("__saved_at", 0)
             _age_h = (time.time() - float(_saved_at)) / 3600 if _saved_at else 0.0
             if _bars_passed is None or _bars_passed > _max_bars:
@@ -332,6 +335,9 @@ class CompositeStateBuilder:
                     setattr(self, k, _payload[k]); _n += 1
             logger.info("[PERSIST] %s: restored %d stores (bars passed=%d, saved %.0fh ago)",
                         self.asset_type, _n, _bars_passed, _age_h)
+            # B8-1: the candles closed since the save are replayed on this
+            # builder's first proof-engine run (see _b8_catchup).
+            self._b8_catchup_from = _saved_last_bar_ts if (_bars_passed or 0) > 0 else None
         except Exception as _e:
             logger.warning("[PERSIST] %s: pending restore apply failed: %s", self.asset_type, _e)
 
@@ -1497,6 +1503,9 @@ class CompositeStateBuilder:
                 return 0.0, 0.0
 
         try:
+            # B8-3: phase_config.trend_angle_capture_enabled (true) now switches it.
+            if not bool((getattr(self, "phase_config", {}) or {}).get("trend_angle_capture_enabled", True)):
+                _angle = lambda _v: (0.0, 0.0)
             _a1, _r1 = _angle(df["close"].values if df is not None else None)
             state.trend_angle_deg = _a1
             state.trend_angle_r2 = _r1
@@ -2095,6 +2104,11 @@ class CompositeStateBuilder:
                         # Was: only the published setup (trend lane first, reversal
                         # only when the trend lane was empty) -- EURUSD's reversal
                         # long sat unchecked at count 2 from 18 Sep 17:03.
+                        # B8-1: after a restart or a builder rebuild, first replay
+                        # every missed candle through the same engine.
+                        if getattr(self, "_b8_catchup_from", None) is not None:
+                            self._b8_catchup(state, df, df_4h, _atr4,
+                                             self._ppl_spread(self.asset_type, _brc_close), _pcfg, _gear)
                         _head_out, _proofs = self._ppl_evaluate_all(
                             state, df, df_4h, _atr4, self._ppl_spread(self.asset_type, _brc_close),
                             _pcfg, _gear, _brc_kind, _brc_dir, _brc_ref,
@@ -3269,6 +3283,15 @@ class CompositeStateBuilder:
                 dist = ((cA - h) if d == 1 else (h - cA)) / float(atr4)
                 logger.info("[COUNT-1-CHECK] %s %s dir=%+d tf=%s close=%.5g H=%.5g band=%.5g dist=%.2fATR4 tier=%s -> %s",
                             asset, kind, d, c1tf, cA, h, band, dist, h_tier, "BREAK" if broke else "no")
+                # B8-7: the P1 recorder -- every break check, breaks and near-misses.
+                # phase_config.p1_refusal_ledger_enabled (true) now switches it.
+                if bool(pcfg.get("p1_refusal_ledger_enabled", True)):
+                    try:
+                        from src.utils.p1_ledger import write_break_check
+                        write_break_check(asset, kind, d, h, cA, band, dist, h_tier,
+                                          "BREAK" if broke else "no", "%s/%s" % gear, c1tf, tsA)
+                    except Exception:
+                        pass
                 if broke:
                     rec.update(count=1, h2=cB, h2_prior=cB, break_ts=tsA, streak=0, last_c1=None)
                     logger.info("[COUNT-1] %s %s dir=%+d tf=%s BREAK close=%.5g H=%.5g H2=%.5g", asset, kind, d, c1tf, cA, h, cB)
@@ -3367,6 +3390,44 @@ class CompositeStateBuilder:
         """B6-1: the identity of one setup -- asset, lane kind, direction, frozen H."""
         return (asset, s.get("kind"), 1 if int(s.get("dir", 0) or 0) == 1 else -1,
                 round(float(s.get("ref") or 0.0), 8))
+
+    def _b8_catchup(self, state, df_1h, df_4h, atr4, spread, pcfg, gear):
+        """B8-1 (Desire, 22 Sep): after a restart -- or the hourly rebuild of this
+        builder -- reconcile every restored setup with the candles it missed.
+        Each missed closed 1H candle is replayed, oldest first, through the SAME
+        proof engine (_ppl_evaluate_all), with only the 4H candles that had
+        closed by then (no look-ahead). A setup whose level broke is killed, one
+        that passed a stage moves on and keeps waiting, and a proof that
+        completed stays proven -- so the normal run that follows sends it to
+        the council. The newest candle is left to that normal run."""
+        since = getattr(self, "_b8_catchup_from", None)
+        self._b8_catchup_from = None
+        if since is None or df_1h is None or df_4h is None:
+            return 0
+        try:
+            import pandas as _pd
+            _t1 = (_pd.to_datetime(df_1h["timestamp"]) if "timestamp" in df_1h.columns
+                   else _pd.Series(_pd.to_datetime(df_1h.index))).reset_index(drop=True)
+            _t4 = (_pd.to_datetime(df_4h["timestamp"]) if "timestamp" in df_4h.columns
+                   else _pd.Series(_pd.to_datetime(df_4h.index))).reset_index(drop=True)
+            _since = _pd.to_datetime(since)
+            _missed = [i for i in range(len(_t1) - 1) if _t1[i] > _since]
+            _done = 0
+            for i in _missed:
+                _closed4 = ((_t4 + _pd.Timedelta(hours=4)) <= (_t1[i] + _pd.Timedelta(hours=1))).values
+                _d4 = df_4h.loc[_closed4] if "timestamp" in df_4h.columns else df_4h[_closed4]
+                if len(_d4) < 2:
+                    continue
+                self._ppl_evaluate_all(state, df_1h.iloc[: i + 1], _d4, atr4, spread, pcfg, gear,
+                                       None, None, None)
+                _done += 1
+            logger.info("[CATCH-UP] %s: replayed %d missed 1H candle(s) since %s through the proof engine",
+                        self.asset_type, _done, since)
+            return _done
+        except Exception as _e:
+            logger.warning("[CATCH-UP] %s: replay failed (%s) -- setups kept as restored",
+                           self.asset_type, _e)
+            return 0
 
     def _ppl_evaluate_all(self, state, df_1h, df_4h, atr4, spread, pcfg, gear,
                           head_kind, head_dir, head_ref):

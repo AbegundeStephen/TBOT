@@ -775,6 +775,13 @@ class Position:
         # through to the VTM constructor at position-open time.
         if "council_ref" in state:
             del state["council_ref"]
+        # B8-11: portfolio_manager (B4 P0g-1) is a live link back to the whole
+        # bot -- portfolio, Telegram, trading bot, database client, locks. It
+        # was never excluded here, so every save of an open trade walked the
+        # entire bot and the fallback wrote one warning per part it could not
+        # save (35,823 lines on 22 Sep in 2.5 hours). Re-attached on load.
+        if "portfolio_manager" in state:
+            del state["portfolio_manager"]
         return state
 
     def __setstate__(self, state):
@@ -788,6 +795,7 @@ class Position:
         self.db_manager = None
         self.telegram = None
         self.council_ref = None
+        self.portfolio_manager = None   # B8-11: re-attached by load_portfolio_state
         # Always reset closing flags on reload to prevent stuck positions
         self.closing = False
         self.last_close_attempt = None
@@ -1209,6 +1217,12 @@ class PortfolioManager:
                 # Re-link the db_manager
                 if self.db_manager:
                     position.db_manager = self.db_manager
+                # B8-11: saves no longer carry the portfolio link; re-attach it
+                # (the trade manager uses it to convert the $5 target and the
+                # risk figures into dollars).
+                position.portfolio_manager = self
+                if getattr(position, "trade_manager", None) is not None:
+                    position.trade_manager.portfolio_manager = self
 
                 self.positions[position_id] = position
 
@@ -2884,6 +2898,17 @@ class PortfolioManager:
             council_ref=self._resolve_council_ref(asset),  # Gate Tier 4.1
             portfolio_manager=self,  # B4 P0g-1
         )
+        # B8-10 (Desire, 22 Sep, option A): the pre-send check. The MT5 handler
+        # calls add_position with _presend_probe BEFORE the order is sent: the
+        # position is built exactly as it will be (same trade manager, same $5 /
+        # R:R / floor gauntlet) and never stored, reported as opened, or saved.
+        if (signal_details or {}).get("_presend_probe"):
+            _tm_b8 = getattr(position, "trade_manager", None)
+            self._b8_presend_verdict = (
+                bool(_tm_b8 is not None and getattr(_tm_b8, "geometry_refused", False)),
+                getattr(_tm_b8, "geometry_refused_reason", None) if _tm_b8 is not None else "no trade manager",
+            )
+            return False
         if use_dynamic_management and ohlc_data:
             if position.trade_manager:
                 logger.info(
@@ -4195,6 +4220,9 @@ class PortfolioManager:
                 (_exit_vtm.signal_details.get("entry_measure") or {}).get("entry_atr")
                 if _exit_vtm else None
             ),
+            # B8-4: the starting stop, so the replayer and bandit can re-run live
+            # trades like practice trades (each counts as 1, tagged "live").
+            "initial_stop_loss": getattr(_exit_vtm, "initial_stop_loss", None) if _exit_vtm else None,
             "external": bool(getattr(position, "external", False)),     # B7-2
             "adopted": bool(getattr(position, "adopted", False)),       # B7-2
             "trial_only": bool(getattr(position, "trial_only", False)), # B7-14

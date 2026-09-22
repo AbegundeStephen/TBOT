@@ -145,7 +145,7 @@ class HeartbeatMonitor:
         # B6-8: per-tag register -- long windows are counted over their real length.
         self._snap_tags = {}
         try:
-            _tags = sorted({p.get("tag") for p in self._promises if p.get("tag")})
+            _tags = sorted({t for p in self._promises for t in (p.get("tag"), p.get("trigger")) if t})   # B8-2
             self.handler.watch([(t, self._tag_matcher(t)) for t in _tags])
         except Exception as _we:
             logger.error("[HEARTBEAT] tag register setup failed: %s", _we)
@@ -281,6 +281,8 @@ class HeartbeatMonitor:
             for a in self.assets:
                 if not self.config.get("assets", {}).get(a, {}).get("enabled", False):
                     continue
+                if self._in_daily_break(a, window_min):
+                    continue   # B8-2: the market's nightly pause
                 if _market_gated and self._is_market_closed(a):
                     if (pid, a) not in self._market_skip_logged:
                         self._market_skip_logged.add((pid, a))
@@ -557,6 +559,68 @@ class HeartbeatMonitor:
         ok = (time.time() - newest) <= win_s
         return ok, ("" if ok else f"{pattern}: newest match is stale (> {p.get('window_min')} min)")
 
+    # B8-2: nightly pauses (UTC). GOLD, USTEC and USOIL stop for about an hour
+    # each night; the per-candle alarms failed through it (22 Sep 22:18-23:04
+    # UTC). Times widened a little either side; the check's own window after
+    # the pause is skipped too. Override with "daily_break_utc" in the registry.
+    _DAILY_BREAK_UTC_B8 = {"GOLD": ("21:50", "23:15"), "USTEC": ("21:50", "23:15"), "USOIL": ("21:50", "23:15")}
+
+    def _in_daily_break(self, asset, window_min=0):
+        try:
+            if not hasattr(self, "_b8_breaks"):
+                try:
+                    with open(self.registry_path, encoding="utf-8") as _f:
+                        self._b8_breaks = json.load(_f).get("daily_break_utc") or self._DAILY_BREAK_UTC_B8
+                except Exception:
+                    self._b8_breaks = self._DAILY_BREAK_UTC_B8
+            span = self._b8_breaks.get(asset)
+            if not span:
+                return False
+            _g = time.gmtime()
+            m = _g.tm_hour * 60 + _g.tm_min
+            h1, m1 = (int(x) for x in span[0].split(":"))
+            h2, m2 = (int(x) for x in span[1].split(":"))
+            start, end = h1 * 60 + m1, h2 * 60 + m2 + int(window_min or 0)
+            return (start <= m <= end) if end < 1440 else (m >= start or m <= end - 1440)
+        except Exception:
+            return False
+
+    def _asset_of(self, msg):
+        for a in self.assets:
+            if any(x in msg for x in _ASSET_ALIASES_B7.get(a, (a,))):
+                return a
+        return None
+
+    def _check_follows(self, p, snap):
+        """B8-2: "when X happens, Y must follow within N minutes" -- the condition
+        the ten switched-off alarms were written for (the heartbeat could only
+        evaluate "market open", so they shipped disabled). Every trigger line old
+        enough for its follow-up to be due must have one, for the same market
+        when per_asset."""
+        win = float(p.get("window_min", 240))
+        within = float(p.get("within_min", 15))
+        now = time.time()
+        reg = getattr(self, "_snap_tags", None) or {}
+        trig, fol = reg.get(p["trigger"]), reg.get(p["tag"])
+        if trig is None or fol is None:
+            tm, fm = self._tag_matcher(p["trigger"]), self._tag_matcher(p["tag"])
+            trig = [(ts, m) for ts, m in snap if tm(m)]
+            fol = [(ts, m) for ts, m in snap if fm(m)]
+        missing = []
+        for ts, m in trig:
+            if not (now - win * 60 <= ts <= now - within * 60):
+                continue
+            a = self._asset_of(m) if p.get("per_asset") else None
+            if a is not None and self._in_daily_break(a):
+                continue
+            if not any(ts <= fts <= ts + within * 60 and (a is None or self._asset_of(fm_) == a)
+                       for fts, fm_ in fol):
+                missing.append(a or "?")
+        if missing:
+            return False, (f"{p['trigger']} -> {p['tag']}: no follow-up within {within:.0f} min "
+                           f"for {sorted(set(missing))}")
+        return True, ""
+
     def _evaluate(self, p, snap):
         """Returns (passed, detail) where passed is True/False for a real
         promise result, or None if the checker itself errored -- a checker
@@ -577,6 +641,8 @@ class HeartbeatMonitor:
                 return self._check_log_vs_ledger(p, snap)
             if ptype == "file_fresh":
                 return self._check_file_fresh(p)
+            if ptype == "follows":
+                return self._check_follows(p, snap)   # B8-2
         except Exception as e:
             return None, f"checker error: {e}"
         return True, ""

@@ -656,6 +656,15 @@ class TradingBot:
         if getattr(self, "portfolio_manager", None) is not None:
             self.portfolio_manager._trial_close_callback = self._on_trial_trade_closed
 
+        # B8-3: one line at start listing every phase_config setting, so what the
+        # bot is really running with is visible in the log.
+        try:
+            _pc_b8 = self.config.get("phase_config", {}) or {}
+            logger.info("[SWITCHES] %d phase_config settings: %s", len(_pc_b8),
+                        ", ".join(f"{k}={_pc_b8[k]}" for k in sorted(_pc_b8) if not str(k).startswith("_")))
+        except Exception as _sw_b8:
+            logger.warning(f"[SWITCHES] could not list settings: {_sw_b8}")
+
         # DIARY-1 D5: heartbeat monitor -- every component's promise, checked
         # every 5 minutes on the same timer as the [VALIDATOR] watchdog.
         try:
@@ -4692,7 +4701,9 @@ class TradingBot:
                 # two closed records exist -- four restarts ate the rest.
                 try:
                     if getattr(self, "shadow_trader", None):
-                        _n_saved = self.shadow_trader.save_open_positions()
+                        _n_saved = (self.shadow_trader.save_open_positions()
+                                    if self.config.get("phase_config", {}).get("shadow_persist_enabled", True)
+                                    else 0)   # B8-3: shadow_persist_enabled (true) now switches it
                     if getattr(self, "scalp_alert_engine", None) and \
                        getattr(self.scalp_alert_engine, "_shadow", None):
                         self.scalp_alert_engine._shadow.save_open_positions()
@@ -6835,10 +6846,12 @@ class TradingBot:
             # -- the same suppression re-fires every ~5 minutes for hours, and
             # without this guard 650 cycles would look like 650 samples.
             try:
-                for _lane_obj, _lane_tag in (
+                # B8-3: phase_config.lane_b_enabled (true) now really switches lane B.
+                _b8_lane_b_on = bool(self.config.get("phase_config", {}).get("lane_b_enabled", True))
+                for _lane_obj, _lane_tag in ((
                     (self.strategies.get(asset_name, {}).get("trend_following"), "B-TF"),
                     (self.strategies.get(asset_name, {}).get("mean_reversion"), "B-MR"),
-                ):
+                ) if _b8_lane_b_on else ()):
                     _intent = getattr(_lane_obj, "_lane_b_intent", None) if _lane_obj else None
                     # MEASURE-2 S3: Lane B has never fired. Two candidates:
                     #   (A) no ownership suppressions have occurred at all
@@ -8202,6 +8215,18 @@ class TradingBot:
             # ============================================================
             # 7. Handle Success & DB Logging
             # ============================================
+            # B8-10: refused before sending -- record it as a practice trade with its
+            # reason. Nothing was sent, so its proof stays unspent.
+            if not success and details.get("presend_refused"):
+                try:
+                    _pr_b8 = str(details.get("presend_refused"))
+                    self._shadow_open_blocked(
+                        asset_name, signal, details, df, current_price, "presend_refused", asset_cfg,
+                        gate_id=("not_worthwhile" if _pr_b8.startswith("not_worthwhile") else "geometry_refused"),
+                        gate_stage="post_approval",
+                    )
+                except Exception as _b8_se:
+                    logger.debug(f"[PRESEND] practice record failed: {_b8_se}")
             if success:
                 # Phase 2.1: close the funnel — this evaluation became a trade.
                 if getattr(self, "funnel_logger", None) is not None:
