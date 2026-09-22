@@ -30,6 +30,11 @@ _ERROR_REPEAT_S = 3600           # at most hourly while still failing
 _OK_SUMMARY_S = 3600             # once an hour
 
 
+# B7-19: names an asset appears under in log lines. GOLD's MT5 symbol is
+# XAUUSDm, so per-asset promises on fetch lines could never match "GOLD".
+_ASSET_ALIASES_B7 = {"GOLD": ("GOLD", "XAUUSD")}
+
+
 class _TailHandler(logging.Handler):
     """Appends every formatted log record to a bounded deque -- the
     heartbeat's own view of the log, independent of file rotation/rereads.
@@ -222,7 +227,7 @@ class HeartbeatMonitor:
             match = self._tag_matcher(tag)
         n = 0
         for msg in lines:
-            if match(msg) and (asset is None or asset in msg):
+            if match(msg) and (asset is None or any(a in msg for a in _ASSET_ALIASES_B7.get(asset, (asset,)))):
                 n += 1
         return n
 

@@ -93,6 +93,9 @@ class ShadowPosition:
     judge_driver: str = "unknown"    # which judge contributed most to the score
     score_pct_of_max: float = 0.0    # total_score / achievable_max (Item 2.5)
     qualify_tag: str = ""            # plain-English score-margin label (Item 2.6)
+    council_score: float = 0.0       # B7-7: the council's score for this sitting
+    council_bar: float = 0.0         # B7-7: the bar it was compared with
+    council_bar_detail: Dict = field(default_factory=dict)   # B7-7: start/full/decision bars, stage, raises
     livermore_state_1h: str = ""
     # K1: 4H is the context timeframe under the locked hierarchy. Recording
     # only 1H captured the trigger and discarded the permission, so any model
@@ -395,6 +398,9 @@ class ShadowPosition:
             # the archive — proof identity, stop provenance, R-units. ──
             "brc_confirmed":    self.brc_confirmed,
             "brc_kind":         self.brc_kind,
+            "council_score":    self.council_score,          # B7-7
+            "council_bar":      self.council_bar,            # B7-7
+            "council_bar_detail": self.council_bar_detail,   # B7-7
             "stop_source":      self.stop_source,
             "initial_stop_loss": self.initial_stop_loss,
             "friction_source":  self.friction_source,
@@ -842,6 +848,14 @@ class ShadowTradingEngine:
         _t4_tests = _t4_sib("setup_ref_tests", int, 0)
         _t4_age = _t4_sib("setup_age", int, 0)
         _t4_retest = signal_details.get("retest_type") or ""
+        # B7-7: brc_kind / brc_confirmed had the same nesting problem fixed for
+        # setup_ref above (flat reads only), so the proof kind was blank on all
+        # 40 council-refusal rows studied on 21 Sep.
+        if not _t4_kind:
+            _t4_kind = _t4_sib("brc_kind", str, "")
+        if not _t4_brc:
+            _t4_brc = bool(_t4_sib("brc_confirmed", bool, False))
+        _b7_bar = signal_details.get("bar") if isinstance(signal_details.get("bar"), dict) else {}
 
         # S7e: machine-stable gate identity — text before the first "(",
         # e.g. "HOLD (Score: 2.71/4.1)" -> "HOLD"; "NY_OPEN (session)" -> "NY_OPEN"
@@ -856,6 +870,9 @@ class ShadowTradingEngine:
             judge_driver=_judge_driver,
             score_pct_of_max=_score_pct_of_max,
             qualify_tag=_qualify_tag,
+            council_score=float(_total_score or 0.0),       # B7-7
+            council_bar=float(_required_score or 0.0),      # B7-7
+            council_bar_detail=_b7_bar,                     # B7-7
             livermore_state_1h=_lsm_1h,
             livermore_state_4h=_lsm_4h,
             brc_confirmed=_t4_brc,

@@ -201,6 +201,11 @@ class Position:
         # trivially picklable (unlike the full signal_details dict, which is
         # why _sanitize_for_pickle exists at all).
         self.episode_id = (signal_details or {}).get("episode_id")
+        # B7-2 / B7-14: plain flags, kept on the position for the same reason
+        # as episode_id above (signal_details itself is not kept).
+        self.external = bool((signal_details or {}).get("external", False))     # opened outside the bot
+        self.adopted = bool((signal_details or {}).get("adopted", False))       # taken over from MT5
+        self.trial_only = bool((signal_details or {}).get("trial_only", False)) # passed only with the council's add-ons off
         self.leverage = leverage
         self.margin_type = margin_type
         self.is_futures = is_futures
@@ -546,6 +551,11 @@ class Position:
         ✅ CORRECTED: Check if position should close
         Prioritizes VTM exit signals over traditional SL/TP
         """
+        # B7-3 (Desire, 21 Sep, option B): hands off trades opened outside the
+        # bot. The broker's own stop and target manage them; the bot never
+        # closes, trails or moves them.
+        if getattr(self, "external", False):
+            return False, ""
         # 1. Check VTM first (if active)
         if self.trade_manager:
             exit_info = self.trade_manager.check_exit(current_price)
@@ -1206,11 +1216,13 @@ class PortfolioManager:
                 f"[STATE] Successfully loaded and re-initialized {len(self.positions)} positions."
             )
 
-            # Clean up state file after successful load
-            self.state_file.unlink()
-            logger.info(
-                f"[STATE] Removed state file {self.state_file} after successful load."
-            )
+            # B7-1: keep the file. Deleting it here opened a gap after every
+            # restart: a second restart before the next save found no file and
+            # re-adopted open trades from MT5 without their episode ids (2 Sep:
+            # loaded 19:24:23, restarted 19:40:37, "No portfolio state file").
+            # A closed trade restored from an old file is dropped by the B6-6
+            # broker-sync check, with no second exit.
+            logger.info(f"[STATE] Kept state file {self.state_file} after load (B7-1).")
 
         except Exception as e:
             logger.error(f"[STATE] Failed to load portfolio state: {e}", exc_info=True)
@@ -3106,6 +3118,15 @@ class PortfolioManager:
             f"| ID: {position.position_id}"
         )
 
+        # B7-1: save the book straight away, as B6-6 does after every close.
+        # A restart before the next periodic save lost the new trade from the
+        # file, and the bot then re-adopted it from MT5 without its episode id
+        # (16 Sep GBPAUD: entered 18:22:50, restarted 18:23:21).
+        try:
+            self.save_portfolio_state(include_metrics=False)
+        except Exception as _sp_b7:
+            logger.error(f"[STATE] Save after entry failed: {_sp_b7}")
+
         return True
 
     def update_positions_with_ohlc(self, ohlc_data_dict: dict):
@@ -3853,19 +3874,28 @@ class PortfolioManager:
 
         self.realized_pnl_today += pnl
 
-        # ✨ NEW: Record strategy performance
+        # B7-2 (Desire, 21 Sep, option B): a trade opened outside the bot stays
+        # out of the bot's own scorecards -- win rate and losing streak. Daily
+        # P&L (above) and equity-based drawdown still count it.
         trade_type = getattr(position, "trade_type", "TREND")
-        self.performance_tracker.record_trade(trade_type, pnl)
-
-        # ✨ NEW: Track consecutive losses
-        if pnl < 0:
-            self.loss_streak += 1
-            logger.warning(f"[STREAK] Loss streak incremented: {self.loss_streak}")
+        if getattr(position, "external", False):
+            logger.info(
+                f"[STREAK] {position.asset}: trade opened outside the bot -- not counted "
+                f"in the win rate or the losing streak (B7-2)."
+            )
         else:
-            if self.loss_streak > 0:
-                logger.info(f"[STREAK] Loss streak of {self.loss_streak} reset to 0.")
-            self.loss_streak = 0
-            self._loss_streak_alerted = False  # Reset alert guard when streak clears
+            # ✨ NEW: Record strategy performance
+            self.performance_tracker.record_trade(trade_type, pnl)
+
+            # ✨ NEW: Track consecutive losses
+            if pnl < 0:
+                self.loss_streak += 1
+                logger.warning(f"[STREAK] Loss streak incremented: {self.loss_streak}")
+            else:
+                if self.loss_streak > 0:
+                    logger.info(f"[STREAK] Loss streak of {self.loss_streak} reset to 0.")
+                self.loss_streak = 0
+                self._loss_streak_alerted = False  # Reset alert guard when streak clears
 
         # Update capital
         if self.is_paper_mode:
@@ -4150,8 +4180,29 @@ class PortfolioManager:
             "pnl": pnl,
             "pnl_pct": pnl_pct,
             "gross_r": _gross_r,
+            # B7-4: the fields the replayer needs, so live trades stop being
+            # skipped. pnl is the broker's own P&L (profit + swap + commission)
+            # whenever the broker reported it, and the spread is already inside
+            # the fill prices -- so this R is AFTER the broker's costs.
+            "close_time": datetime.now(),
+            "close_price": exit_price,
+            # The replayer treats a row with no close_reason as an admin
+            # closure and drops it -- the live row only had exit_reason.
+            "close_reason": reason,
+            "net_pnl_r": _gross_r,
+            "r_basis": "broker_pnl" if broker_profit is not None else "local_calc",
+            "entry_atr": (
+                (_exit_vtm.signal_details.get("entry_measure") or {}).get("entry_atr")
+                if _exit_vtm else None
+            ),
+            "external": bool(getattr(position, "external", False)),     # B7-2
+            "adopted": bool(getattr(position, "adopted", False)),       # B7-2
+            "trial_only": bool(getattr(position, "trial_only", False)), # B7-14
             "mfe_r": round(_mfe_r, 3) if _mfe_r is not None else None,
-            "mae_r": round(_mae_r, 3) if _mae_r is not None else None,
+            # B7-5: same sign as practice trades (negative = price went against
+            # the trade). The live calc above measures it as a positive distance,
+            # which is why no live trade ever showed a -1R low.
+            "mae_r": round(-_mae_r, 3) if _mae_r is not None else None,
             "intended_stop": _intended_price,
             "exit_slippage": (
                 abs(exit_price - _intended_price) if _intended_price else None
