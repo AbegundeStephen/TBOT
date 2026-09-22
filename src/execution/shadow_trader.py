@@ -96,6 +96,8 @@ class ShadowPosition:
     council_score: float = 0.0       # B7-7: the council's score for this sitting
     council_bar: float = 0.0         # B7-7: the bar it was compared with
     council_bar_detail: Dict = field(default_factory=dict)   # B7-7: start/full/decision bars, stage, raises
+    rr_at_entry: float = None        # B8-8: target distance / starting-stop distance
+    tp_dist_atr: float = None        # B8-8: target distance in ATR
     livermore_state_1h: str = ""
     # K1: 4H is the context timeframe under the locked hierarchy. Recording
     # only 1H captured the trigger and discarded the permission, so any model
@@ -401,6 +403,8 @@ class ShadowPosition:
             "council_score":    self.council_score,          # B7-7
             "council_bar":      self.council_bar,            # B7-7
             "council_bar_detail": self.council_bar_detail,   # B7-7
+            "rr_at_entry":      self.rr_at_entry,            # B8-8
+            "tp_dist_atr":      self.tp_dist_atr,            # B8-8
             "stop_source":      self.stop_source,
             "initial_stop_loss": self.initial_stop_loss,
             "friction_source":  self.friction_source,
@@ -856,6 +860,15 @@ class ShadowTradingEngine:
         if not _t4_brc:
             _t4_brc = bool(_t4_sib("brc_confirmed", bool, False))
         _b7_bar = signal_details.get("bar") if isinstance(signal_details.get("bar"), dict) else {}
+        # B8-8: this practice trade's own reward-to-risk at entry, and its
+        # target in ATR, for the gate 4 R:R recalibration.
+        try:
+            _b8_risk = abs(float(entry_price) - float(_stop_loss))
+            _b8_rew = abs(float(_take_profit_t9c) - float(entry_price))
+            _b8_rr = round(_b8_rew / _b8_risk, 3) if _b8_risk > 0 else None
+            _b8_tp_atr = round(_b8_rew / float(atr), 3) if atr else None
+        except Exception:
+            _b8_rr, _b8_tp_atr = None, None
 
         # S7e: machine-stable gate identity — text before the first "(",
         # e.g. "HOLD (Score: 2.71/4.1)" -> "HOLD"; "NY_OPEN (session)" -> "NY_OPEN"
@@ -873,6 +886,8 @@ class ShadowTradingEngine:
             council_score=float(_total_score or 0.0),       # B7-7
             council_bar=float(_required_score or 0.0),      # B7-7
             council_bar_detail=_b7_bar,                     # B7-7
+            rr_at_entry=_b8_rr,                             # B8-8
+            tp_dist_atr=_b8_tp_atr,                         # B8-8
             livermore_state_1h=_lsm_1h,
             livermore_state_4h=_lsm_4h,
             brc_confirmed=_t4_brc,

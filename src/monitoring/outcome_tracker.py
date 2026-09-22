@@ -36,17 +36,42 @@ class OutcomeTracker:
             )
             entry["resolved"] = True
 
+    # B8-5 (Desire, 22 Sep, option A): trade records and your Telegram answers
+    # are written to logs/trade_labels.jsonl as well as kept in memory, so a
+    # restart no longer wipes them and the replayer can join each answer to
+    # its trade by episode id ("python tools/replayer.py --by label").
+    _LABELS_PATH = "logs/trade_labels.jsonl"
+
+    def _append(self, row):
+        try:
+            import json as _json, os as _os
+            from datetime import datetime as _dt, timezone as _tz
+            row = dict(row, ts=_dt.now(_tz.utc).isoformat(timespec="seconds"))
+            _os.makedirs(_os.path.dirname(self._LABELS_PATH) or ".", exist_ok=True)
+            with open(self._LABELS_PATH, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(row, default=str) + "\n")
+            return True
+        except Exception:
+            return False
+
     def record(self, position, vtm, reason, human_label=None):
-        self._records.append({
+        rec = {
             "trade_id": getattr(position, "db_trade_id", None),
-            "asset": getattr(vtm, "asset", None),
+            "episode_id": getattr(position, "episode_id", None),
+            "asset": getattr(vtm, "asset", None) or getattr(position, "asset", None),
             "exit_reason": reason,
             "human_label": human_label,
-        })
+        }
+        self._records.append(rec)
+        self._append(dict(rec, type="record"))
 
     def attach_human_label(self, trade_id, label):
+        episode_id = None
         for rec in self._records:
             if rec["trade_id"] == trade_id:
                 rec["human_label"] = label
-                return True
-        return False
+                episode_id = rec.get("episode_id")
+        # Saved even when the in-memory record is gone after a restart -- the
+        # replayer links it to its trade through the matching "record" row.
+        return self._append({"type": "label", "trade_id": trade_id,
+                             "episode_id": episode_id, "label": label})

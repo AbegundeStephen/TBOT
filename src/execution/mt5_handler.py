@@ -912,6 +912,37 @@ class MT5ExecutionHandler:
             # ─────────────────────────────────────────────────────────────────
 
             # Execute order
+            # B8-10 (Desire, 22 Sep, option A): run the stop/target gauntlet ($5
+            # minimum target, R:R, stop floor) BEFORE sending, on a throw-away
+            # copy of the position built exactly as add_position builds it. A
+            # trade it refuses is never opened: no spread cost, and its proof is
+            # not burned (the burn only runs after a real fill). 22 Sep EURUSD
+            # was opened and closed at 12:10 for a $2.86 target.
+            try:
+                import math as _math_b8
+                _lp_b8 = (max(0, int(round(-_math_b8.log10(symbol_info.volume_step))))
+                          if symbol_info.volume_step > 0 else 0)
+                _b8_details = dict(signal_details or {})
+                _b8_details["_presend_probe"] = True
+                self.portfolio_manager._b8_presend_verdict = None
+                self.portfolio_manager.add_position(
+                    asset=asset, symbol=symbol, side=side, entry_price=current_price,
+                    position_size_usd=actual_usd, mt5_ticket=None, ohlc_data=ohlc_data,
+                    use_dynamic_management=True, signal_details=_b8_details,
+                    vtm_overrides=vtm_overrides, min_lot=symbol_info.volume_min,
+                    lot_precision=_lp_b8, disable_partials=bool(locals().get("_disable_partials", False)),
+                    leverage=self.config.get("assets", {}).get(asset, {}).get("leverage", 1),
+                )
+                _b8_v = getattr(self.portfolio_manager, "_b8_presend_verdict", None)
+                if _b8_v and _b8_v[0]:
+                    logger.warning(f"[PRESEND] {asset} {side.upper()}: refused before sending -- {_b8_v[1]}. "
+                                   f"No order placed; proof not spent.")
+                    if signal_details is not None:
+                        signal_details["presend_refused"] = str(_b8_v[1])
+                    return False
+                logger.info(f"[PRESEND] {asset} {side.upper()}: stop/target check passed before sending")
+            except Exception as _b8_e:
+                logger.error(f"[PRESEND] {asset}: pre-send check failed ({_b8_e}) -- sending as before")
             requested_price = current_price
             
             mt5_ticket, execution_price = self._execute_mt5_order(

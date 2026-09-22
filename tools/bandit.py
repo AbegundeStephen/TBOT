@@ -27,8 +27,8 @@ from replayer import (  # noqa: E402
     _RUNNER_TRAIL_DEFAULT, BE_TRIGGER_R,
 )
 
-HEADER = ("Replay path = 1H bars; results are directional, not precise "
-          "(1H sims inflate). 15m path pending.")
+HEADER = ("Replay path = 15m bars (data/raw/<symbol>_15m.csv); "
+          "results are directional, not precise.")   # B8-9: was "1H bars"
 
 # The setting each knob's arm list is measured against -- current live
 # config values, not arbitrary arm-list entries. trail_mult/be_r match the
@@ -116,18 +116,55 @@ def propose(knob, rows):
     return proposals
 
 
+def _replayable(r):
+    """B8-9: only rows the arm replay can re-run count toward the 30/10/3
+    threshold (the same fields _replay_row_arm needs). Live rows qualify once
+    they carry their starting stop (B8-4); each counts as 1, tagged "live"."""
+    return bool(r.get("asset") and r.get("side") and r.get("entry_price")
+                and (r.get("initial_stop_loss") or r.get("stop_loss"))
+                and r.get("entry_atr") and r.get("entry_time") and r.get("close_time"))
+
+
+def _stamp_run(result, n_total, n_live, n_trailing, n_assets, n_props):
+    """B8-9: one line per run, so the weekly heartbeat check proves the
+    bandit ran even when it has nothing to propose."""
+    try:
+        with open(_PROPOSALS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "run_at": datetime.now(timezone.utc).isoformat(), "result": result,
+                "replayable": n_total, "live": n_live, "trailing": n_trailing,
+                "assets": n_assets, "proposals": n_props,
+            }) + "\n")
+    except Exception as e:
+        print(f"run stamp failed: {e}")
+
+
 def main():
     print(HEADER)
     _ensure_header_file()
 
-    rows = load_closed_trades(include_all=False)
+    rows_all = load_closed_trades(include_all=False)
+    rows = [r for r in rows_all if _replayable(r)]
     n_total = len(rows)
+    n_live = sum(1 for r in rows if r.get("source") == "live")
     n_trailing = sum(1 for r in rows if r.get("exit_via") == "trail")
     n_assets = len(set(r.get("asset") for r in rows))
+    print(f"rows: {len(rows_all)} closed, {n_total} replayable "
+          f"({n_total - n_live} practice, {n_live} live -- each counts as 1), "
+          f"{n_trailing} trailing exits, {n_assets} assets")
 
     if n_total < _MIN_CLOSED or n_trailing < _MIN_TRAILING or n_assets < _MIN_ASSETS:
         print(f"below threshold (n={n_total}) -- need >= {_MIN_CLOSED} closed, "
               f">= {_MIN_TRAILING} trailing exits, >= {_MIN_ASSETS} assets")
+        _stamp_run("below_threshold", n_total, n_live, n_trailing, n_assets, 0)
+        return
+
+    _n_rep = sum(v["n"] for t in (_arm_tables_by_asset(k, rows) for k in _ARM_VALUES)
+                 for a in t.values() for v in a.values())
+    if _n_rep == 0:
+        print("NOTHING REPLAYED: no trade has a price path (the 15-minute files do "
+              "not cover these dates) -- nothing was compared. Run tools/refresh_15m.py.")
+        _stamp_run("nothing_replayed", n_total, n_live, n_trailing, n_assets, 0)
         return
 
     all_proposals = []
@@ -136,11 +173,13 @@ def main():
 
     if not all_proposals:
         print("above threshold, but no arm's CI clears its current setting this run.")
+        _stamp_run("no_arm_clears", n_total, n_live, n_trailing, n_assets, 0)
         return
 
     with open(_PROPOSALS_FILE, "a", encoding="utf-8") as f:
         for p in all_proposals:
             f.write(json.dumps(p, default=str) + "\n")
+    _stamp_run("proposed", n_total, n_live, n_trailing, n_assets, len(all_proposals))
 
 
 if __name__ == "__main__":

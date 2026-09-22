@@ -1225,7 +1225,7 @@ class InstitutionalCouncilAggregator:
             new_score = max(2.0, min(adj_score + delta, 5.0))
             if abs(delta) > 1e-9:
                 logger.info(
-                    f"[LIFECYCLE] 🧭 Livermore overlay: lsm_phase={lsm_phase} adx_phase={phase_label} "
+                    f"[LIFECYCLE] 🧭 {self.asset_type} Livermore overlay: lsm_phase={lsm_phase} adx_phase={phase_label} "
                     f"required_score {adj_score:.2f} → {new_score:.2f} (Δ{delta:+.2f})"
                 )
             self._last_lifecycle_tag = f"LSM_LIFECYCLE_{lsm_phase}"
@@ -3110,6 +3110,7 @@ class InstitutionalCouncilAggregator:
                     -1, sell_total, _sell_threshold, sell_scores
                 )
 
+            _b8_second_start = float(required_score)   # B8-12: the chosen side's first-check bar -- where the second check starts
             # Capture initial consensus before penalties and vetos.
             # Build 3: when the ownership rule kills a side, `signal` is already
             # 0 here — so surface the intended direction instead. main.py uses
@@ -3733,13 +3734,27 @@ class InstitutionalCouncilAggregator:
                 # market is.  ESTABLISHING lowers the bar; EXHAUSTED / EXTENDED
                 # raise it.  Never blocks outright — that's the veto layer's job.
                 # ════════════════════════════════════════════════════════════
-                required_score, lifecycle_phase = self._check_lifecycle_phase(
+                # B8-12: the life-cycle step moves the pass mark like the other
+                # raises (fading +0.30, confirmation -0.10, ...). B7 missed it:
+                # it now shows in the [BAR] build-up and is OFF in the trial.
+                _b8_req_before_lc = float(required_score)
+                if _b8_req_before_lc <= 0 and time.time() - getattr(self, "_b8_zero_warn_ts", 0.0) > 3600:
+                    self._b8_zero_warn_ts = time.time()
+                    logger.warning(
+                        "[BAR] %s: second check reached the life-cycle step with a pass mark of %.2f "
+                        "-- a council should never judge against zero (B8-12 trace; once an hour)",
+                        self.asset_type, _b8_req_before_lc,
+                    )
+                _b8_lc_score, lifecycle_phase = self._check_lifecycle_phase(
                     df=df,
                     signal=signal,
                     adx=adx,
                     current_required_score=required_score,
                     governor_data=governor_data,
                 )
+                _b7_raises.append(("life cycle %s" % lifecycle_phase, float(_b8_lc_score) - _b8_req_before_lc))
+                if not _b7_trial:
+                    required_score = _b8_lc_score
 
                 # Final execution check
                 # Quality gate aligned with the council's own score threshold.
@@ -3824,7 +3839,7 @@ class InstitutionalCouncilAggregator:
                     "full_sell": locals().get("_b7_full_sell"),
                     "decision_buy": locals().get("_buy_threshold"),
                     "decision_sell": locals().get("_sell_threshold"),
-                    "req_start": float(self.trend_aligned_threshold),
+                    "req_start": float(locals().get("_b8_second_start", required_score)),   # B8-12: was the trend base
                     "req_full": round(_b7_req_full, 4),
                     "req_decision": float(required_score),
                     "raises": [[_k, round(_v, 4)] for _k, _v in _b7_raises],
@@ -3839,7 +3854,7 @@ class InstitutionalCouncilAggregator:
                         logger.info(
                             "[BAR] %s second check: start %.2f + raises (%s) = full %.2f | uses %.2f | "
                             "score %.2f -> %s%s",
-                            self.asset_type, float(self.trend_aligned_threshold),
+                            self.asset_type, float(locals().get("_b8_second_start", required_score)),   # B8-12
                             ", ".join("%s %+.2f" % (k, v) for k, v in _b7_raises) or "none",
                             _b7_req_full, float(required_score), float(total_score),
                             "PASS" if signal != 0 else "REFUSED",
