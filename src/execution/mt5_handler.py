@@ -2618,6 +2618,10 @@ class MT5ExecutionHandler:
                     imported_count = 0
                     for pos in orphaned:
                         pos_type = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+                        # B7-2: every order this bot sends carries magic 234000 (see
+                        # the order requests in this file). Anything else was opened
+                        # outside the bot -- by hand -- and is marked external.
+                        _external = int(getattr(pos, "magic", 0) or 0) != 234000
 
                         success = self.portfolio_manager.add_position(
                             asset=asset,
@@ -2629,9 +2633,12 @@ class MT5ExecutionHandler:
                             take_profit=pos.tp if pos.tp > 0 else None,
                             mt5_ticket=pos.ticket,
                             ohlc_data=ohlc_data,
-                            use_dynamic_management=True,
+                            # B7-3 (Desire, 21 Sep, option B): no trade manager for a
+                            # hand trade -- the bot never moves its stop or target.
+                            use_dynamic_management=not _external,
                             entry_time=datetime.fromtimestamp(pos.time),
-                            signal_details={"imported": True, "ticket": pos.ticket},
+                            signal_details={"imported": True, "ticket": pos.ticket,
+                                            "adopted": True, "external": _external},
                             min_lot=symbol_info.volume_min,
                             lot_precision=lot_precision,
                         )
@@ -2641,6 +2648,28 @@ class MT5ExecutionHandler:
                                 f"[SYNC] ✅ Adopted {pos_type} ticket #{pos.ticket} "
                                 f"@ {pos.price_open} for {asset}"
                             )
+                            if _external:
+                                logger.warning(
+                                    f"[SYNC] Ticket #{pos.ticket} ({asset}) was opened outside the bot "
+                                    f"-- recorded as EXTERNAL: not managed, kept out of the bot's "
+                                    f"scorecards, still counted for account safety (B7-2/B7-3)."
+                                )
+                                if not pos.sl or pos.sl <= 0:
+                                    try:
+                                        _bot = getattr(self, 'trading_bot', None)
+                                        _telegram = getattr(_bot, 'telegram_bot', None)
+                                        _send_fn = getattr(_bot, '_send_telegram_notification', None)
+                                        if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                                            _coro = _telegram.send_message(
+                                                text=(f"⚠️ <b>HAND TRADE WITH NO STOP</b>\n"
+                                                      f"{asset} {pos_type.upper()} #{pos.ticket} @ {pos.price_open}\n"
+                                                      f"The bot will not manage it. Set a stop in MT5."),
+                                                parse_mode="HTML",
+                                            )
+                                            if _coro:
+                                                _send_fn(_coro)
+                                    except Exception as _tg_b7:
+                                        logger.debug(f"[SYNC] no-stop alert failed: {_tg_b7}")
                         else:
                             logger.warning(
                                 f"[SYNC] ⚠️ Failed to adopt ticket #{pos.ticket} for {asset}"

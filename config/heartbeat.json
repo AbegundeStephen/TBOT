@@ -18,7 +18,7 @@
     { "id": "kill.once_per_bar",    "type": "cadence", "tag": "[KILL-R1]",         "max": 1,  "window_min": 240,  "per_asset": true, "note": "max, not min" },
     { "id": "death.reasons",        "type": "set",     "tag": "[MEASURE-8.4-DEATH]", "extract": "reason=", "allowed": ["REF_INVALIDATED","LSM_STATE_FLIP","OPPOSING_BOS","OPPOSING_CHOCH"] },
     { "id": "death.no_1h_kills",    "type": "set",     "tag": "[MEASURE-8.4-DEATH]", "extract": "reason=", "forbidden": ["FAILED_BREAKOUT","RETEST_FAILED","REF_ROLE_FLIPPED"] },
-    { "id": "noproof.per_cycle",    "type": "cadence", "tag": "[NO-PROOF]",        "min": 1,  "window_min": 15,   "per_asset": true, "when": "market_open" },
+    { "id": "noproof.per_cycle",    "type": "cadence", "tag": "[COUNCIL-ENTRY]",   "min": 1,  "window_min": 15,   "per_asset": true, "when": "market_open", "note": "B7-19: was [NO-PROOF], which an asset with a live proof never prints -- false FAILs on every asset with proofs" },
     { "id": "brc.confirmed_fields", "type": "non_null","tag": "[BRC]",             "extract": ["h2=","tier=","gear="], "when": "tag_present", "enabled": false },
     { "id": "stoph.on_retest_entry","type": "cadence", "tag": "[STOP-H]",          "min": 1,  "window_min": 5,    "when": "entry_with_tier_RETEST", "enabled": false },
     { "id": "gate.trace",           "type": "cadence", "tag": "[GATE-ID-TRACE]",   "min": 1,  "window_min": 15,   "when": "council_convened", "enabled": false },
@@ -60,6 +60,13 @@
     { "id": "b6.mt5_query_failed",   "type": "cadence", "tag": "[SYNC] .* positions query failed", "max": 10, "window_min": 60, "enabled": true, "note": "B6-6 -- more than 10 an hour = MT5 is not answering (19 Sep 06:35 outage pattern)" },
     { "id": "b6.stale_restore",      "type": "cadence", "tag": "[SYNC] .* stale restored position dropped", "max": 3, "window_min": 1440, "enabled": true, "note": "B6-6 -- expected only right after a restart" },
     { "id": "b6.save_after_close",   "type": "cadence", "tag": "[STATE] Save after close failed", "max": 0, "window_min": 1440, "enabled": true, "note": "B6-6 -- should never print" },
+    { "id": "b7.bar_cap",            "type": "cadence", "tag": "[BAR]",             "max": 900, "window_min": 60, "enabled": true, "note": "B7-8 -- runaway guard; prints when a bar changes or hourly" },
+    { "id": "b7.trial_size_cap",     "type": "cadence", "tag": "[TRIAL-SIZE]",      "max": 100, "window_min": 60, "enabled": true, "note": "B7-14/15 -- runaway guard" },
+    { "id": "b7.trial_cap",          "type": "cadence", "tag": "[TRIAL]",           "max": 100, "window_min": 60, "enabled": true, "note": "B7-14 -- runaway guard" },
+    { "id": "b7.save_after_entry",   "type": "cadence", "tag": "[STATE] Save after entry failed", "max": 0, "window_min": 1440, "enabled": true, "note": "B7-1 -- should never print" },
+    { "id": "b7.state_kept",         "type": "cadence", "tag": "[STATE] Kept state file", "max": 20, "window_min": 60, "enabled": true, "note": "B7-1 -- once per start" },
+    { "id": "b7.external_adopted",   "type": "cadence", "tag": "[SYNC] .* opened outside the bot", "max": 20, "window_min": 1440, "enabled": true, "note": "B7-2 -- hand trades taken into the book" },
+    { "id": "b7.external_streak",    "type": "cadence", "tag": "[STREAK] .* opened outside the bot", "max": 20, "window_min": 1440, "enabled": true, "note": "B7-2 -- hand trades kept out of the scorecards" },
     { "id": "replayer.runs",        "type": "file_fresh", "file": "logs/replayer_arms_*.json", "window_min": 10080, "enabled": false, "note": "B3 REPLAYER-2 R5 -- enable once the 30/10/3 threshold is first met" },
     { "id": "rl1.proposals_file",   "type": "file_fresh", "file": "logs/rl1_proposals.jsonl",  "window_min": 10080, "enabled": false, "note": "B3 RL-1 -- enable post-threshold" }
   ]

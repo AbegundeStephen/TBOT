@@ -1277,8 +1277,8 @@ class MeanReversionStrategy(BaseStrategy):
             _mode_label = {
                 "NATURAL_RETRACEMENT":   "Mode1(Pullback/LONG)",
                 "NATURAL_REBOUND":       "Mode1(Rebound/SHORT)" if _rebound_on else "SILENT_ZONE",
-                "SECONDARY_RETRACEMENT": "Mode2(Counter/LONG)",
-                "SECONDARY_REBOUND":     "Mode2(Counter/SHORT)",
+                "SECONDARY_RETRACEMENT": "Mode2(Break/SHORT)",   # B7-18: BUILD V sells here
+                "SECONDARY_REBOUND":     "Mode2(Break/LONG)",    # B7-18: ...and buys here
                 "MAIN_UP":               "HOLD(no-fade)",
                 "MAIN_DOWN":             "HOLD(no-fade)",
             }
@@ -1291,8 +1291,8 @@ class MeanReversionStrategy(BaseStrategy):
                     "shorting the rebound in a downtrend (needs Wyckoff upthrust)" if _rebound_on
                     else "silent zone — no MR setup, longs blocked"
                 ),
-                "SECONDARY_RETRACEMENT": "counter-trend LONG — fading a deep pullback, expecting a bounce",
-                "SECONDARY_REBOUND":     "counter-trend SHORT — fading a deep bounce, expecting reversion down",
+                "SECONDARY_RETRACEMENT": "reversal SHORT — the deep pullback broke its floor; selling the break (BUILD V)",
+                "SECONDARY_REBOUND":     "reversal LONG — the deep rebound broke its ceiling; buying the break (BUILD V)",
                 "MAIN_UP":               "Mode 3 (climax fade) removed — fires without proof, holding",
                 "MAIN_DOWN":             "Mode 3 (climax fade) removed — fires without proof, holding",
             }

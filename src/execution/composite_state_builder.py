@@ -1054,23 +1054,30 @@ class CompositeStateBuilder:
                                 _n2_dn_min = getattr(state, "livermore_anchor_main_down_min_1h", None)
                                 _n2_bad = []
 
-                                if _n2_s in _n2_up:
-                                    if _n2_lo is None:
-                                        _n2_bad.append("natural_low MISSING in up-state")
-                                    elif float(_n2_lo) >= _n2_px:
+                                # B7-16 (P11 step 1): follow livermore_state_machine.py's
+                                # own rules instead of stricter ones.
+                                # - A natural low/high is published only after a pivot
+                                #   is confirmed (first minor bounce/dip) and is released
+                                #   by LSM-RETIRE, so None is a normal reading -- no
+                                #   longer reported as MISSING.
+                                # - The machine keeps a natural low until price closes
+                                #   more than one minor unit below it (its retire rule,
+                                #   minor_mult 1.0 x ATR), so only a low more than one
+                                #   unit above the close is a real fault. Same for highs.
+                                _n2_unit = float(locals().get("_m1_atr") or 0.0)
+                                if _n2_s in _n2_up and _n2_lo is not None:
+                                    if float(_n2_lo) - _n2_px > _n2_unit:
                                         _n2_bad.append(
                                             f"natural_low {float(_n2_lo):.5g} is "
                                             f"{(float(_n2_lo)-_n2_px)/_n2_px*100:+.1f}% vs price "
-                                            f"(a LOW above PRICE)"
+                                            f"(a LOW more than one minor unit above PRICE)"
                                         )
-                                elif _n2_s in _n2_down:
-                                    if _n2_hi is None:
-                                        _n2_bad.append("natural_high MISSING in down-state")
-                                    elif float(_n2_hi) <= _n2_px:
+                                elif _n2_s in _n2_down and _n2_hi is not None:
+                                    if _n2_px - float(_n2_hi) > _n2_unit:
                                         _n2_bad.append(
                                             f"natural_high {float(_n2_hi):.5g} is "
                                             f"{(float(_n2_hi)-_n2_px)/_n2_px*100:+.1f}% vs price "
-                                            f"(a HIGH below PRICE)"
+                                            f"(a HIGH more than one minor unit below PRICE)"
                                         )
                                 # SECONDARY_RETRACEMENT / SECONDARY_REBOUND: no check.
                                 # None is the correct, intended reading here now.
@@ -1084,10 +1091,16 @@ class CompositeStateBuilder:
                                 # (BTC 4 Sep, USOIL 8 Sep), both times
                                 # investigated as faults before the price data
                                 # showed the anchor was right.
-                                if _n2_up_max is not None and float(_n2_up_max) < _n2_px:
-                                    _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} < price")
-                                if _n2_dn_min is not None and float(_n2_dn_min) > _n2_px:
-                                    _n2_bad.append(f"main_down_min {float(_n2_dn_min):.5g} > price")
+                                # B7-16: the machine only maintains main_up_max in
+                                # MAIN_UP / NATURAL_RETRACEMENT and main_down_min in
+                                # MAIN_DOWN / NATURAL_REBOUND. In any other state they are
+                                # the previous leg's mark, and price beyond them is normal.
+                                if (_n2_s in _n2_up and _n2_up_max is not None
+                                        and float(_n2_up_max) < _n2_px):
+                                    _n2_bad.append(f"main_up_max {float(_n2_up_max):.5g} < price in {_n2_s}")
+                                if (_n2_s in _n2_down and _n2_dn_min is not None
+                                        and float(_n2_dn_min) > _n2_px):
+                                    _n2_bad.append(f"main_down_min {float(_n2_dn_min):.5g} > price in {_n2_s}")
 
                                 if _n2_bad:
                                     logger.warning(
@@ -1608,14 +1621,11 @@ class CompositeStateBuilder:
                     # has slid out of the window and can never be seen again,
                     # even though nothing here kills the setup for being old.
                     # Logged once per setup, not every cycle.
-                    if _s["age"] > 8 and not _s.get("_past_window_logged"):
-                        _s["_past_window_logged"] = True
-                        logger.info(
-                            "[SETUP-PAST-PROOF-WINDOW] %s: %s dir=%+d age=%d — "
-                            "older than the 8-candle retest window, can no "
-                            "longer confirm via BRC unless it re-forms.",
-                            self.asset_type, _s.get("kind"), _s.get("dir"), _s["age"],
-                        )
+                    # B7-17: the "[SETUP-PAST-PROOF-WINDOW]" line was removed. It
+                    # described the old proof engine's 8-candle look-back; today's
+                    # engine keeps counting a setup until it is killed, so the line
+                    # told readers a live setup was dead.
+                    pass
 
                     # ---- evidence-based death check ----------------
                     # A setup dies when the tape invalidates it. Order: master

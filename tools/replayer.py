@@ -16,6 +16,12 @@ import argparse, json, glob, random, re, statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys as _sys_b7
+# B7-6: run from anywhere. The replayer imports src.* lazily; run the documented
+# way ("python tools/replayer.py") Python only puts tools/ on the path, so it
+# crashed with "No module named 'src'" as soon as a row had a close price.
+if str(Path(__file__).resolve().parents[1]) not in _sys_b7.path:
+    _sys_b7.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 ARMS = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3]   # floor 0.8 — the 15m study found no
@@ -563,6 +569,7 @@ def load_closed_trades(include_all=False):
     rows = []
     skipped_admin = skipped_stale = skipped_pre_ppl = skipped_stale_price = skipped_pre_p10_lanec = 0
     skipped_dup = 0          # B6-7
+    skipped_external = 0     # B7-2
     _seen_b6 = set()         # B6-7
     for f in sorted(glob.glob("logs/episodes/*.jsonl")):
         for line in open(f, encoding="utf-8"):
@@ -595,6 +602,9 @@ def load_closed_trades(include_all=False):
             if not include_all and not _is_ppl_row(e):
                 skipped_pre_ppl += 1
                 continue
+            if e.get("external"):
+                skipped_external += 1          # B7-2: opened by hand, not the bot's trade
+                continue
             # B6-7: the same closed trade can be written twice (19 Sep: #136535990
             # booked at its close on the 18th and again at the 23:20 restart).
             # Keep the first row per trade.
@@ -610,7 +620,8 @@ def load_closed_trades(include_all=False):
     print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "
           f"({skipped_admin} admin closures, {skipped_stale} stale-state, "
           f"{skipped_stale_price} stale-price lane-C, {skipped_pre_p10_lanec} "
-          f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded, {skipped_dup} duplicate{_tail})")
+          f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded, {skipped_dup} duplicate, "
+          f"{skipped_external} opened by hand{_tail})")
     return rows
 
 
@@ -645,6 +656,9 @@ _BY_FIELDS = {
     "asset":        lambda e: e.get("asset"),
     "lane":         lambda e: e.get("lane"),
     "side":         lambda e: e.get("side"),
+    "source":       lambda e: e.get("source") or "shadow",                     # B7-4: live vs practice
+    "trial":        lambda e: ("trial-only" if e.get("trial_only") else "normal")
+                              if e.get("source") == "live" else None,           # B7-14
 }
 
 
