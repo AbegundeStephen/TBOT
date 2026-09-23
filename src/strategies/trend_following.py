@@ -597,7 +597,23 @@ class TrendFollowingStrategy(BaseStrategy):
         # consistent with buying/selling an already-extended move right
         # before it exhausts, not a healthy continuation.
         # ══════════════════════════════════════════════════════════════════
+        # B9 S13 (Desire, 23 Sep): the ceiling was a veto built on 17 trades. It is
+        # now a confidence penalty, and every case it WOULD have blocked is tagged
+        # so the decision can be remade on hundreds of observations.
         if signal != 0 and self.max_adx_ceiling is not None and latest["adx"] >= self.max_adx_ceiling:
+            # NOTE: max_adx_ceiling_penalty lives in phase_config (see SETTINGS),
+            # not this strategy's own per-asset config block -- same nesting
+            # _pc/self.config.get("phase_config") already uses a few lines below.
+            _b9_pen = float((self.config.get("phase_config", {}) or {}).get("max_adx_ceiling_penalty", 0.35))
+            confidence = max(0.0, confidence * (1.0 - _b9_pen))
+            if not silent:
+                logger.info(
+                    "[%s] %s: ADX %.1f >= ceiling %.1f — confidence cut %.0f%% "
+                    "(B9: penalty, was a veto) [ADX-CEILING-TAG]",
+                    self.name, self.config.get("asset", "?"), latest["adx"],
+                    self.max_adx_ceiling, _b9_pen * 100,
+                )
+        if False:
             if not silent:
                 logger.info(
                     "[%s] signal=%+d suppressed — ADX %.1f >= ceiling %.1f "
@@ -658,7 +674,11 @@ class TrendFollowingStrategy(BaseStrategy):
                             "[%s] %s: signal=%+d suppressed — proof unusable "
                             "(kind=%s dir=%+d age=%d max=none): %s",
                             getattr(self, "name", "TF"),
-                            getattr(self, "asset", "?"), signal,
+                            # B9 S15c: self.asset/self.asset_type are never set on this
+                            # class (confirmed) -- main.py stores the asset name on the
+                            # config dict it passes in (cfg["asset"] = asset_name), so
+                            # self.config is the only place it's actually reachable from.
+                            self.config.get("asset", "?"), signal,
                             _brc_kind, _brc_dir, _brc_age,
                             "direction opposes signal" if _brc_dir != signal
                             else "wrong kind" if not _brc_ok

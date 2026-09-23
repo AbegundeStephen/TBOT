@@ -1958,7 +1958,12 @@ class VeteranTradeManager:
             # fail this check against its own unrounded quantity every single
             # retry, permanently blocking VTM re-init. Small epsilon absorbs
             # float-representation noise, not a real shortfall.
-            if self.position_size < min_lot - 1e-9:
+            # B9 S2: the size arrives as dollars-at-the-middle-price divided by the
+            # FILL price, so a min-lot long is short by a fraction of a tick --
+            # 0.0099993 vs 0.01 on BTC, 22 Sep 12:02:36. Tolerance is half a lot
+            # step, not 1e-9: anything inside that IS the minimum lot.
+            _b9_tol = max(float(min_lot) * 0.01, 1e-9)
+            if self.position_size < min_lot - _b9_tol:
                 logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot {min_lot} for {self.asset}.")
                 # We raise an exception here to signal the manager to abort trade creation
                 raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
@@ -2811,7 +2816,11 @@ class VeteranTradeManager:
                     _lc_df,
                     1 if is_long else -1,
                     self._calculate_adx(),
-                    0,  # required_score unused for this read-only call
+                    # B9 S15b: this read-only call passes 0, which the council's
+                    # overlay then logs as "required_score 0.00 -> 2.00" -- 12,135
+                    # lines of it. -1 marks it as not-a-pass-mark so the overlay
+                    # can stay quiet (see the matching guard in council_aggregator).
+                    -1,  # read-only: not a pass mark
                     governor_data={"composite_state": _cs},
                 )
                 if _phase_label == "EXHAUSTED":

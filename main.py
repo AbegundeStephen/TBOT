@@ -45,6 +45,10 @@ if _g_Path(_g_sys.executable).resolve() != _VENV:
     _g_sys.exit(0)
 print(f"[GUARD] OK — running under {_g_sys.executable}")
 
+# B9 S7: one bot per instance. Must run before MT5, the log or any state file.
+from src.utils.single_instance import claim as _b9_claim_lock
+_b9_claim_lock("tbot")
+
 # Load environment variables from .env file at startup
 load_dotenv()
 
@@ -4002,6 +4006,11 @@ class TradingBot:
                         for _f, _v in _old_builder_state.items():
                             setattr(_new_cs, _f, _v)
                         logger.info(
+                            "[PERSIST] %s: restored %d stores (carried over in memory "
+                            "from the previous builder, saved file deliberately skipped)",
+                            asset_name, len(_old_builder_state),
+                        )
+                        logger.info(
                             "[C3] %s: preserved %d structural state fields "
                             "across preset change (hybrid path)",
                             asset_name, len(_old_builder_state),
@@ -4085,6 +4094,11 @@ class TradingBot:
                         for _f, _v in _old_builder_state.items():
                             setattr(_new_cs, _f, _v)
                         logger.info(
+                            "[PERSIST] %s: restored %d stores (carried over in memory "
+                            "from the previous builder, saved file deliberately skipped)",
+                            asset_name, len(_old_builder_state),
+                        )
+                        logger.info(
                             "[C3] %s: preserved %d structural state fields "
                             "across preset change (council companion path)",
                             asset_name, len(_old_builder_state),
@@ -4150,6 +4164,11 @@ class TradingBot:
                     if _new_cs is not None and _old_builder_state:
                         for _f, _v in _old_builder_state.items():
                             setattr(_new_cs, _f, _v)
+                        logger.info(
+                            "[PERSIST] %s: restored %d stores (carried over in memory "
+                            "from the previous builder, saved file deliberately skipped)",
+                            asset_name, len(_old_builder_state),
+                        )
                         logger.info(
                             "[C3] %s: preserved %d structural state fields "
                             "across preset change (performance path)",
@@ -4876,10 +4895,15 @@ class TradingBot:
                     logger.debug(f"[LANE-C] {asset_name}: skipped — {_ew_why}")
                     continue
 
+                # B9 S10: a deferred trigger from an earlier cycle gets first refusal
+                # today -- it already won the dice roll below once; it was only ever
+                # blocked by a stale price, so it should not have to win twice.
+                _b9_was_pending = getattr(self, "_b9_lane_c_pending", {}).pop(asset_name, None) is not None
+
                 # Spread the quota across the session rather than firing it all
                 # in the first hour: one chance per cycle, sized so the expected
                 # count lands near the cap over a ~24h trading day.
-                if _rnd.random() > (_per_asset_per_day / _cycles_per_day):
+                if not _b9_was_pending and _rnd.random() > (_per_asset_per_day / _cycles_per_day):
                     continue
 
                 df = self._df_1h_cache.get(asset_name)
@@ -4908,9 +4932,15 @@ class TradingBot:
                     _price_age_s = None
                 if _price_age_s is None or _price_age_s > 5400:
                     logger.info(
-                        "[LANE-C] %s: skipped — price is %.0f min old",
+                        # B9 S10: do not drop the trigger -- queue it. It fires on the
+                        # next cycle that has a fresh price (normally the next candle
+                        # close). 3 of 24 fired on 23 Sep; the rest were dropped.
+                        "[LANE-C] %s: deferred — price is %.0f min old, will retry on the next fresh price",
                         asset_name, (_price_age_s / 60) if _price_age_s is not None else -1,
                     )
+                    if not hasattr(self, "_b9_lane_c_pending"):
+                        self._b9_lane_c_pending = {}
+                    self._b9_lane_c_pending[asset_name] = _today
                     continue
 
                 if _rnd.random() < _biased_pct:
@@ -5473,8 +5503,14 @@ class TradingBot:
                                     close=ohlc_data["close"],
                                     volume=ohlc_data["volume"],
                                     quantity=position.quantity,
-                                    signal_details=getattr(position, 'signal_details', {}),
-                                    trade_type=getattr(position, 'signal_details', {}).get("trade_type", "TREND"),
+                                    # B9 S3b: Position has never had .signal_details (see
+                                    # portfolio_manager.py's own note). Use the slim proof
+                                    # snapshot saved at entry, so a rebuilt manager keeps its
+                                    # tier, its H and its structure refs instead of falling
+                                    # back to a 2-ATR stop.
+                                    signal_details=(getattr(position, 'proof_snapshot', None)
+                                                    or getattr(position, 'signal_details', {})),
+                                    trade_type=(getattr(position, 'proof_snapshot', None) or {}).get("trade_type", "TREND"),
                                     # Re-init for an already-open position: accept whatever
                                     # size the live trade has, even if it's below the broker
                                     # minimum (e.g. 0.0029 BTC after partial closes).
@@ -5482,7 +5518,7 @@ class TradingBot:
                                     min_lot_override=position.quantity,
                                     # Item 5: no producer populates these keys yet — resolves
                                     # to None today, starts flowing once a future tier does.
-                                    structure_levels_ref=getattr(position, 'signal_details', {}).get("structure_levels_ref"),
+                                    structure_levels_ref=(getattr(position, 'proof_snapshot', None) or {}).get("structure_levels_ref"),
                                     entry_retest_type=getattr(position, 'signal_details', {}).get("retest_type"),
                                     telegram=self.telegram_bot,  # Brain rebuild Part 0.3
                                     council_ref=(  # Gate Tier 4.1
@@ -5873,6 +5909,24 @@ class TradingBot:
                 except Exception as e:
                     logger.debug(f"[TELEGRAM] Daily summary error: {e}")
 
+            # B9 S5f: 35 alarm failures a day were only visible to a grep. One line a day.
+            try:
+                from collections import Counter as _C_b9
+                from src.utils.instance_paths import suffixed_path as _suffixed_path
+                _f = _suffixed_path("logs/trading_bot.log")
+                _c = _C_b9()
+                with open(_f, encoding="utf-8", errors="ignore") as _fh:
+                    for _l in _fh:
+                        if "[HEARTBEAT] FAIL " in _l:
+                            _c[_l.split("[HEARTBEAT] FAIL ", 1)[1].split(":", 1)[0]] += 1
+                logger.warning("[ALARM-DIGEST] %s", dict(_c) or "no alarm failures")
+                if _c:
+                    self._send_telegram_notification(self.telegram_bot.send_message(
+                        text="🔔 Alarms yesterday: " + ", ".join(f"{k} x{v}" for k, v in _c.most_common()),
+                        parse_mode="HTML"))
+            except Exception as _dg_err:
+                logger.debug(f"[ALARM-DIGEST] skipped ({_dg_err})")
+
     def check_trading_limits(self) -> bool:
         """Check if trading limits are reached.
 
@@ -6024,6 +6078,27 @@ class TradingBot:
             logger.info(
                 f"[PROOF-GATE] {asset_name}: proof ref={ref:.5g} age={age} marked USED"
             )
+            # B9 S17 (Desire, 23 Sep): marking it used is not enough -- the live
+            # setup kept re-confirming for 41 candles after EURUSD's 12:10 trade on
+            # 22 Sep. Kill it here, at the single live-only burn site.
+            try:
+                # Same lookup shape _reconcile_exchange_positions' shutdown-persist
+                # path already uses: self.aggregators[asset] is either an object
+                # with its own _cs_builder, or a dict of named slots.
+                _agg = (self.aggregators or {}).get(asset_name)
+                _cs_b = getattr(_agg, "_cs_builder", None)
+                if _cs_b is None and isinstance(_agg, dict):
+                    for _slot in ("council", "livermore", "performance"):
+                        _cand = _agg.get(_slot)
+                        _cs_b = getattr(_cand, "_cs_builder", None)
+                        if _cs_b is not None:
+                            break
+                if _cs_b is not None and hasattr(_cs_b, "kill_spent_setup"):
+                    _cs_b.kill_spent_setup(asset_name, side, float(ref))
+                else:
+                    logger.warning("[PROOF-SPENT] %s: builder not reachable — setup left alive", asset_name)
+            except Exception as _kill_err:
+                logger.warning(f"[PROOF-SPENT] {asset_name}: kill skipped ({_kill_err})")
         except Exception as _e:
             logger.warning(f"[PROOF-GATE] Could not persist used-proof ledger: {_e}")
 

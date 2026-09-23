@@ -1223,6 +1223,8 @@ class InstitutionalCouncilAggregator:
                 return adj_score, phase_label
 
             new_score = max(2.0, min(adj_score + delta, 5.0))
+            if float(adj_score) < 0:      # B9 S15b: read-only call, not a sitting
+                return new_score, phase_label
             if abs(delta) > 1e-9:
                 logger.info(
                     f"[LIFECYCLE] 🧭 {self.asset_type} Livermore overlay: lsm_phase={lsm_phase} adx_phase={phase_label} "
@@ -1297,6 +1299,13 @@ class InstitutionalCouncilAggregator:
         # council_verdict gate-ledger rows despite composite_state building
         # fine and Livermore warm-start/rebuild both confirmed working.
         logger.info(f"[COUNCIL-ENTRY] {self.asset_type}")
+        try:
+            _age_min = (pd.Timestamp.utcnow().tz_localize(None) - pd.Timestamp(str(df.index[-1])).tz_localize(None)).total_seconds() / 60.0
+            if _age_min > 120:
+                logger.warning("[COUNCIL-STALE] %s: newest bar is %.0f min old — "
+                               "judging on an old frame", self.asset_type, _age_min)
+        except Exception:
+            pass
         self.stats["total_evaluations"] += 1
         timestamp = str(df.index[-1]) if len(df) > 0 else "unknown"
 
@@ -1617,6 +1626,20 @@ class InstitutionalCouncilAggregator:
             # ================================================================
             # ⚖️ DYNAMIC COUNCIL WEIGHTS (Phase 4)
             # ================================================================
+            # B9 S5a: [COUNCIL-ENTRY] prints before the proof check, so "entered"
+            # is not "sat". Everything below this point IS a sitting -- the alarms
+            # hang off this line instead.
+            logger.info("[COUNCIL-CONVENED] %s", self.asset_type)
+            try:
+                _cand = str(getattr(df, "index", [None])[-1])
+                _seen = getattr(self, "_b9_sit_count", {})
+                _seen[(self.asset_type, _cand)] = _seen.get((self.asset_type, _cand), 0) + 1
+                self._b9_sit_count = _seen
+                if _seen[(self.asset_type, _cand)] > 1:
+                    logger.warning("[COUNCIL-RESIT] %s: sitting #%d on candle %s",
+                                   self.asset_type, _seen[(self.asset_type, _cand)], _cand)
+            except Exception:
+                pass
             w_trend = self.w_trend
             w_structure = self.w_structure
             w_momentum = self.w_momentum
@@ -2804,6 +2827,23 @@ class InstitutionalCouncilAggregator:
                 else:
                     self._judge_zero_streak[_jname] = 0
                 if self._judge_zero_streak[_jname] >= _streak_n:
+                    # B9 S14c (policy D, Desire 23 Sep): a judge starved of data does
+                    # not get to lower the bar. Exempt judges still score 0 -- they
+                    # simply stop discounting the achievable maximum.
+                    if _jname in (_pc_cfg_early.get("dead_judge_exempt") or []):
+                        if self._judge_zero_streak[_jname] == _streak_n:
+                            logger.warning(
+                                "[JUDGE-DEAD] %s: %s silent for %d sittings — EXEMPT, "
+                                "ceiling not discounted (data problem, not a market read)",
+                                self.asset_type, _jname, _streak_n,
+                            )
+                        continue
+                    if self._judge_zero_streak[_jname] == _streak_n:
+                        logger.warning(
+                            "[JUDGE-DEAD] %s: %s silent for %d sittings — ceiling drops "
+                            "by %.2f, so the bar drops with it",
+                            self.asset_type, _jname, _streak_n, float(_jweight),
+                        )
                     _dead_extra += float(_jweight)
                     _dead_names.append(_jname)
 
