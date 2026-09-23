@@ -23,6 +23,10 @@ project_root = os.path.dirname(src_dir)  # TBOT root
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# B9 S7: one bot per instance. Must run before MT5, the log or any state file.
+from src.utils.single_instance import claim as _b9_claim_lock
+_b9_claim_lock("tbot_dashboard")
+
 
 def _subprocess_env():
     """

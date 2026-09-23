@@ -201,6 +201,27 @@ class Position:
         # trivially picklable (unlike the full signal_details dict, which is
         # why _sanitize_for_pickle exists at all).
         self.episode_id = (signal_details or {}).get("episode_id")
+        # B9 S3a: a SLIM, picklable copy of what the trade manager needs if it is
+        # ever rebuilt. The full signal_details dict is not stored (that is what
+        # _sanitize_for_pickle exists to avoid); these are plain values.
+        try:
+            _sd = signal_details or {}
+            _cs = _sd.get("composite_state") or {}
+            _get = (lambda k: _cs.get(k)) if isinstance(_cs, dict) else (lambda k: getattr(_cs, k, None))
+            self.proof_snapshot = {
+                "composite_state": {
+                    "brc_tier": _get("brc_tier"), "brc_h2": _get("brc_h2"),
+                    "brc_gear": _get("brc_gear"), "setup_ref": _get("setup_ref"),
+                    "ref_1": _get("ref_1"), "ref_2": _get("ref_2"), "ref_h": _get("ref_h"),
+                    "brc_retest_depth": _get("brc_retest_depth"),
+                    "nearby_4h_level": _get("nearby_4h_level"),
+                },
+                "trade_type": _sd.get("trade_type", "TREND"),
+                "structure_levels_ref": _sd.get("structure_levels_ref"),
+                "retest_type": _sd.get("retest_type"),
+            }
+        except Exception:
+            self.proof_snapshot = {}
         # B7-2 / B7-14: plain flags, kept on the position for the same reason
         # as episode_id above (signal_details itself is not kept).
         self.external = bool((signal_details or {}).get("external", False))     # opened outside the bot
@@ -1852,7 +1873,9 @@ class PortfolioManager:
                 if mt5_balance is not None and mt5_balance > 0:
                     total_capital += mt5_balance
                     balances_found.append(f"MT5: ${mt5_balance:,.2f}")
-                    logger.info(f"[MT5] ✓ Balance fetched: ${mt5_balance:,.2f}")
+                    # B9 S15d: this value is EQUITY (balance + open P&L). Calling it
+                    # "balance" cost an hour on 23 Sep chasing a $9.72 phantom venue.
+                    logger.info(f"[MT5] ✓ Equity fetched: ${mt5_balance:,.2f} (balance + open P&L)")
                 else:
                     logger.warning(f"[MT5] Balance is 0 or None")
                     errors.append("MT5 balance unavailable or 0")
@@ -3700,6 +3723,17 @@ class PortfolioManager:
         reraise=False,
         default_return=None,
     )
+    def _b9_alert(self, text: str):
+        """B9: one place for the batch's Telegram alerts. Never raises."""
+        try:
+            _tg = getattr(self, "telegram_bot", None)
+            if _tg and getattr(_tg, "_is_ready", False):
+                _coro = _tg.send_message(text=text, parse_mode="HTML")
+                if _coro and getattr(_tg, "trading_bot", None):
+                    _tg.trading_bot._send_telegram_notification(_coro)
+        except Exception as _e:
+            logger.debug(f"[B9-ALERT] failed: {_e}")
+
     def close_position(
         self,
         asset: str = None,
@@ -3778,6 +3812,28 @@ class PortfolioManager:
             preloaded_broker_data  # may be None; overridden below if not pre-closed
         )
 
+        # B9 S1a: callers that say "close this now" (the refusal paths, the
+        # pre-emptive close, the naked-stop emergency close) pass no price.
+        # It was handed straight to the broker handler, which needs one for its
+        # pre-close log line -- and died on None before the order was sent.
+        # 22 Sep 12:10:10 EURUSD: TypeError, no order, trade stayed open 5h26m.
+        if exit_price is None:
+            try:
+                _h = self.execution_handlers.get(
+                    self.config["assets"].get(position.asset, {}).get("exchange", "binance")
+                )
+                exit_price = _h.get_current_price(symbol=_h._resolve_symbol(position.asset)) if _h else None
+            except Exception as _px_err:
+                logger.warning(f"[CLOSE] {position.asset}: live price fetch failed ({_px_err})")
+                exit_price = None
+            if exit_price is None:
+                exit_price = position.entry_price
+                logger.warning(
+                    "[CLOSE] %s: no live price -- using entry %.5g for the pre-close "
+                    "estimate only; the broker fill decides the real exit.",
+                    position.asset, position.entry_price,
+                )
+
         if already_closed_on_exchange:
             # Position was already closed directly on the exchange (e.g. manually
             # closed via the MT5/Binance terminal).  The sync loop detected the ticket
@@ -3830,7 +3886,43 @@ class PortfolioManager:
         # ================================================================
         # ✅ STEP 2: ABORT OR PROCEED
         # ================================================================
+        # B9 S1c: one retry before giving up, then a Telegram alert and a flag on
+        # the position. A close that fails is the bot believing a trade is shut
+        # while the broker still holds it -- that must never be log-only again.
+        if not exchange_closed and not already_closed_on_exchange and not self.is_paper_mode:
+            try:
+                import time as _t_b9
+                _t_b9.sleep(1.0)
+                _h2 = self.execution_handlers.get(
+                    self.config["assets"].get(position.asset, {}).get("exchange", "binance")
+                )
+                if _h2 is not None:
+                    _r2 = _h2._close_position(
+                        position=position, current_price=exit_price,
+                        asset_name=position.asset, reason=reason,
+                    )
+                    if isinstance(_r2, dict):
+                        broker_close_data = _r2
+                        exchange_closed = bool(_r2.get("ok", True))
+                    else:
+                        exchange_closed = bool(_r2)
+                    logger.warning(
+                        "[CLOSE-RETRY] %s: second close attempt -> %s",
+                        position.asset, "OK" if exchange_closed else "FAILED",
+                    )
+            except Exception as _retry_err:
+                logger.error(f"[CLOSE-RETRY] {position.asset}: retry threw {_retry_err}")
+
         if not exchange_closed:
+            try:
+                position.refused_but_live = True
+                self._b9_alert(
+                    f"⚠️ CLOSE FAILED: {position.asset} {position.side.upper()} "
+                    f"({position.position_id}) is STILL OPEN at the broker.\n"
+                    f"Reason wanted: {reason}. Close it by hand or /close {position.asset}."
+                )
+            except Exception:
+                pass
             logger.error(
                 f"[CRITICAL] Position close failed on exchange!\n"
                 f"  Position ID: {position_id}\n"
@@ -4371,6 +4463,11 @@ class PortfolioManager:
             except Exception as e:
                 logger.debug(f"[GATE3.2] retracement-depth outcome tagging failed: {e}")
 
+        try:
+            position.exit_recorded = True          # B9 S6
+        except Exception:
+            pass
+
         return trade_result
 
     def reconcile_positions(self, asset: str, broker_positions: List[Dict]) -> List:
@@ -4404,6 +4501,15 @@ class PortfolioManager:
             # pass notices, and reconcile's own close call was the one that
             # actually finalized the exit event, silently overwriting the
             # real reason with a broker-inferred default.
+            # B9 S6: a position already closed and recorded must not be re-filed by
+            # the reconcile. 7 trades wrote two identical exits (18 Sep GBPAUD's
+            # arrived 42h apart) -- the database and every scorecard counted both.
+            if getattr(pos, "exit_recorded", False) or getattr(pos, "closing", False):
+                logger.info(
+                    "[RECONCILE] %s (%s): exit already recorded — not filing a second one.",
+                    asset, getattr(pos, "position_id", "?"),
+                )
+                continue
             _reason = getattr(pos, "intended_close_reason", None) or "closed_on_exchange"
 
             # A. Exact ID match (MT5 ticket or Binance order id)

@@ -54,7 +54,14 @@ def load_path(asset, start, end):
             f"{p} carries pre-2023 timestamps — the 2020-epoch corruption. "
             f"Run DATA-4 Item 2 before replaying."
         )
-    return df.loc[str(start):str(end)]
+    # B9 S4: price files carry a +00:00 marker on some days and not on others;
+    # trade times always carry it. Put both on the same clock before slicing.
+    df.index = (df.index.tz_localize("UTC") if df.index.tz is None
+                else df.index.tz_convert("UTC"))
+    _s, _e = pd.Timestamp(start), pd.Timestamp(end)
+    _s = _s.tz_localize("UTC") if _s.tzinfo is None else _s.tz_convert("UTC")
+    _e = _e.tz_localize("UTC") if _e.tzinfo is None else _e.tz_convert("UTC")
+    return df.loc[_s:_e]
 
 
 def estimate_atr_at(asset, entry_time, lookback_bars=40):
@@ -107,7 +114,12 @@ def estimate_atr_at(asset, entry_time, lookback_bars=40):
             f"{p} carries pre-2023 timestamps — check this file's integrity "
             f"before replaying."
         )
-    window = df.loc[:str(entry_time)].tail(max(lookback_bars, 40))
+    # B9 S4: same reason as load_path -- match the hourly file's clock to the trade's.
+    df.index = (df.index.tz_localize("UTC") if df.index.tz is None
+                else df.index.tz_convert("UTC"))
+    _t = pd.Timestamp(entry_time)
+    _t = _t.tz_localize("UTC") if _t.tzinfo is None else _t.tz_convert("UTC")
+    window = df.loc[:_t].tail(max(lookback_bars, 40))
     if len(window) < 29:   # need at least 28 bars + 1 for the slow ATR
         return None
     high, low, close = (window["high"].values, window["low"].values,
@@ -580,6 +592,30 @@ def _derive(e):
     return e
 
 
+_B9_SNAPS = {}
+
+
+def _b9_resolve_snapshot(e):
+    """B9 S9: rows written after B9 carry composite_state_ref instead of the
+    snapshot itself. Load it on demand so every --by field keeps working."""
+    if e.get("composite_state") or not e.get("composite_state_ref"):
+        return e
+    _ref = e["composite_state_ref"]
+    if not _B9_SNAPS:
+        import glob as _g
+        for _f in _g.glob("logs/episodes/snapshots_*.jsonl"):
+            try:
+                with open(_f, encoding="utf-8") as _fh:
+                    for _l in _fh:
+                        if _l.strip():
+                            _r = json.loads(_l)
+                            _B9_SNAPS[_r.get("ref")] = _r.get("composite_state")
+            except Exception:
+                pass
+    e["composite_state"] = _B9_SNAPS.get(_ref) or {}
+    return e
+
+
 def load_closed_trades(include_all=False):
     """B8/R1/P10/R6: real closed-trade rows (not per-cycle snapshots, not
     admin closes). PPL-only by default (R1); --all includes pre-PPL rows
@@ -642,7 +678,7 @@ def load_closed_trades(include_all=False):
                 skipped_dup += 1
                 continue
             _seen_b6.add(_dk)
-            rows.append(_derive(e))
+            rows.append(_b9_resolve_snapshot(_derive(e)))
     n_assets = len(set(r.get("asset") for r in rows))
     _tail = " -- use --all to include" if skipped_pre_ppl and not include_all else ""
     print(f"closed trades: {len(rows)} usable rows across {n_assets} assets "

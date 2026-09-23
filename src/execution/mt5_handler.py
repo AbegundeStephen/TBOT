@@ -940,7 +940,9 @@ class MT5ExecutionHandler:
                     if signal_details is not None:
                         signal_details["presend_refused"] = str(_b8_v[1])
                     return False
-                logger.info(f"[PRESEND] {asset} {side.upper()}: stop/target check passed before sending")
+                logger.info((f"[PRESEND] {asset} {side.upper()}: stop/target check passed before sending"
+                         if (_b9_v := getattr(self.portfolio_manager, "_b8_presend_verdict", None)) and _b9_v[1] != "no trade manager"
+                         else f"[PRESEND] {asset} {side.upper()}: NOT CHECKED — the probe trade manager did not build"))
             except Exception as _b8_e:
                 logger.error(f"[PRESEND] {asset}: pre-send check failed ({_b8_e}) -- sending as before")
             requested_price = current_price
@@ -1881,16 +1883,23 @@ class MT5ExecutionHandler:
 
             # Local pre-close estimate (kept for the log line only — the real
             # numbers come from the broker after the fill)
+            # B9 S1b: this whole block is a log line. It sat BEFORE the order and
+            # threw on a None price, so the close never ran. Guarded: a display
+            # number must never stop a close.
             est_size_usd = quantity * entry_price
-            if side == "long":
-                est_pnl = (current_price - entry_price) * quantity
-            else:
-                est_pnl = (entry_price - current_price) * quantity
-            est_pnl_pct = (est_pnl / est_size_usd) * 100 if est_size_usd > 0 else 0
+            try:
+                _cp = float(current_price) if current_price is not None else float(entry_price)
+                if side == "long":
+                    est_pnl = (_cp - entry_price) * quantity
+                else:
+                    est_pnl = (entry_price - _cp) * quantity
+                est_pnl_pct = (est_pnl / est_size_usd) * 100 if est_size_usd > 0 else 0
+            except Exception:
+                _cp, est_pnl, est_pnl_pct = float(entry_price), 0.0, 0.0
 
             logger.info(
                 f"[CLOSE] {asset_name} {side.upper()} ({position_id}) — submitting close…\n"
-                f"  Entry: ${entry_price:,.5f} → Pre-close cache: ${current_price:,.5f}\n"
+                f"  Entry: ${entry_price:,.5f} → Pre-close cache: ${_cp:,.5f}\n"
                 f"  Est P&L (pre-fill): ${est_pnl:,.2f} ({est_pnl_pct:+.2f}%)\n"
                 f"  Reason: {reason}"
             )

@@ -33,7 +33,27 @@ def write_episode(record: dict) -> None:
         # file the live instance reads, corrupting both instances' diaries.
         _dir = Path(_suffixed_path("logs/episodes"))
         _dir.mkdir(parents=True, exist_ok=True)
-        _path = _dir / f"episodes_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        # B9 S9: the market snapshot is 96% of every row and repeats across rows
+        # from the same cycle. Store it once under its own hash, keep a reference
+        # in the row. Nothing is lost -- the snapshot file holds the full copy.
+        _day = datetime.now().strftime('%Y-%m-%d')
+        _path = _dir / f"episodes_{_day}.jsonl"
+        try:
+            _cs = record.get("composite_state")
+            if _cs:
+                import hashlib as _hl
+                _blob = json.dumps(_cs, default=str, sort_keys=True)
+                _ref = _hl.sha1(_blob.encode("utf-8")).hexdigest()[:16]
+                _snap = _dir / f"snapshots_{_day}.jsonl"
+                _seen = globals().setdefault("_B9_SNAP_SEEN", set())
+                if _ref not in _seen:
+                    with open(_snap, "a", encoding="utf-8") as _sf:
+                        _sf.write(json.dumps({"ref": _ref, "composite_state": _cs}, default=str) + "\n")
+                    _seen.add(_ref)
+                record.pop("composite_state", None)
+                record["composite_state_ref"] = _ref
+        except Exception as _snap_err:
+            logger.warning(f"[EPISODE] snapshot split skipped ({_snap_err})")
         with open(_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
         logger.info(f"[EPISODE] {record.get('episode_id')} closed and written")

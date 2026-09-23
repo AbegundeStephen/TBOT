@@ -1854,30 +1854,62 @@ class CompositeStateBuilder:
                                     "born_state_4h": getattr(state, "livermore_state_4h", None),
                                 })
 
-                                # P4-EVICT: make room if full.
-                                if len(_q) >= _P4_CAP:
-                                    _victim = self._p4_pick_eviction(_q)
-                                    if _victim is not None:
-                                        _q.remove(_victim)
-                                        logger.warning(
-                                            "[SETUP-EVICTED] %s: queue full (%d) — "
-                                            "dropped %s dir=%+d age=%s ref=%.5g "
-                                            "to admit ref=%.5g",
-                                            self.asset_type, _P4_CAP,
-                                            _victim.get("kind"),
-                                            int(_victim.get("dir", 0)),
-                                            _victim.get("age"),
-                                            float(_victim.get("ref") or 0.0),
-                                            _f1_ref,
-                                        )
-                                _q.append(_new_setup)
-                                logger.info(
-                                    "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
-                                    self.asset_type, _new_setup["kind"],
-                                    int(_new_setup["dir"]), _f1_ref, _f1_tier,
-                                    _new_setup.get("ref_role"),
-                                    _new_setup.get("ref_tests", 0),
-                                )
+                                # B9 S11 (Desire, 23 Sep): a new setup within a third of an ATR of a
+                                # live one is the SAME line -- keep the better-tested one. And a
+                                # setup that is not within a third of an ATR of a ladder line is not
+                                # a level we trade, so it is not born at all.
+                                _b9_born = True
+                                try:
+                                    _b9_tol = 0.33 * float(_atr4_birth or 0.0)
+                                    if _b9_tol > 0:
+                                        _b9_dir = int(_new_setup["dir"])
+                                        _b9_near = [s for s in _q if int(s.get("dir", 0) or 0) == _b9_dir
+                                                    and abs(float(s.get("ref") or 0.0) - float(_f1_ref)) <= _b9_tol]
+                                        if _b9_near:
+                                            _b9_best = max(_b9_near, key=lambda s: int(s.get("ref_tests", 0) or 0))
+                                            logger.info(
+                                                "[SETUP-MERGED] %s: %s dir=%+d ref=%.5g folded into live "
+                                                "ref=%.5g (within %.5g = 0.33 ATR, tests %s vs %s)",
+                                                self.asset_type, _new_setup["kind"], _b9_dir, float(_f1_ref),
+                                                float(_b9_best.get("ref") or 0.0), _b9_tol,
+                                                _new_setup.get("ref_tests"), _b9_best.get("ref_tests"),
+                                            )
+                                            _b9_born = False
+                                        elif _f1_tier not in ("ZONE_LADDER",):
+                                            logger.info(
+                                                "[SETUP-RETIRED] %s: %s dir=%+d ref=%.5g tier=%s — not a "
+                                                "ladder line, not born (B9 S11)",
+                                                self.asset_type, _new_setup["kind"], _b9_dir, float(_f1_ref), _f1_tier,
+                                            )
+                                            _b9_born = False
+                                except Exception as _b9_merge_err:
+                                    logger.debug(f"[SETUP-MERGED] {self.asset_type}: merge check skipped ({_b9_merge_err})")
+
+                                if _b9_born:
+                                    # P4-EVICT: make room if full.
+                                    if len(_q) >= _P4_CAP:
+                                        _victim = self._p4_pick_eviction(_q)
+                                        if _victim is not None:
+                                            _q.remove(_victim)
+                                            logger.warning(
+                                                "[SETUP-EVICTED] %s: queue full (%d) — "
+                                                "dropped %s dir=%+d age=%s ref=%.5g "
+                                                "to admit ref=%.5g",
+                                                self.asset_type, _P4_CAP,
+                                                _victim.get("kind"),
+                                                int(_victim.get("dir", 0)),
+                                                _victim.get("age"),
+                                                float(_victim.get("ref") or 0.0),
+                                                _f1_ref,
+                                            )
+                                    _q.append(_new_setup)
+                                    logger.info(
+                                        "[SETUP-BORN] %s: %s dir=%+d ref=%.5g tier=%s role=%s tests=%d",
+                                        self.asset_type, _new_setup["kind"],
+                                        int(_new_setup["dir"]), _f1_ref, _f1_tier,
+                                        _new_setup.get("ref_role"),
+                                        _new_setup.get("ref_tests", 0),
+                                    )
 
                 # ---- STEP 3: arbitration — who holds the slot? -----------
                 # Desire's rule: most tests at its own reference wins. The
@@ -2170,11 +2202,19 @@ class CompositeStateBuilder:
                                     "[PROOF-DISTINCT] %s: %s dir=%+d ref=%.5g close=%.5g ts=%s tier=%s — new proof.",
                                     self.asset_type, _brc_kind, _brc_dir, _brc_ref, _brc_close, _bar_ts, _brc_tier_used,
                                 )
+                                # B9 S5b: named trigger for the council.sits_on_proof alarm
+                                # (a burned proof re-confirming must never re-sit -- this
+                                # fires only on a genuine first confirmation).
+                                logger.info("[PROOF-NEW] %s: %s dir=%+d ref=%.5g — first confirmation",
+                                            self.asset_type, _brc_kind, _brc_dir, float(_brc_ref or 0.0))
                         else:
                             _k = (self.asset_type, "REPEAT")
                             if _bar_ts is not None and self._brc_log_ts.get(_k) != _bar_ts:
                                 self._brc_log_ts[_k] = _bar_ts
                                 logger.info(
+                                    # B9 S5b: repeats are logged here; a FIRST confirmation
+                                    # logs [PROOF-NEW] at the same site (see the _age == 0
+                                    # branch above) so the council alarm can tell them apart.
                                     "[PROOF-REPEAT] %s: %s dir=%+d ref=%.5g age=%d — "
                                     "re-confirmation of an already-counted proof.",
                                     self.asset_type, _brc_kind, _brc_dir, _brc_ref, _age,
@@ -2222,6 +2262,17 @@ class CompositeStateBuilder:
                          so that regime_age_hours reflects elapsed *bar* time, not
                          wall-clock time.  Defaults to datetime.now() for live use.
         """
+        # B9 S16b: flag a 4H state that has not moved in a very long time, so the
+        # 29 Sep review has a list rather than an impression. GOLD: 304 -> 340
+        # candles in one state while every other market transitioned.
+        try:
+            _b9_lsm4 = getattr(state, "livermore_state_4h", None)
+            _b9_age4 = getattr(state, "livermore_state_age_4h", None)
+            if int(_b9_age4 or 0) >= 96 and int(_b9_age4 or 0) % 24 == 0:
+                logger.warning("[LSM-STUCK] %s: 4H state %s unchanged for %s candles (~%d days)",
+                               self.asset_type, _b9_lsm4, _b9_age4, int(_b9_age4) // 6)
+        except Exception:
+            pass
         logger.info("[LIFECYCLE-ENTER] %s regime=%s lsm4=%s age4=%s",
                     getattr(state, "asset_type", getattr(self, "asset_type", "?")), regime_name,
                     getattr(state, "livermore_state_4h", None), getattr(state, "livermore_state_age_4h", None))
@@ -2668,11 +2719,18 @@ class CompositeStateBuilder:
                     _u_regs = []
                     if _hh and state.broken_level_up:
                         _u_regs.append(
-                            (float(state.broken_level_up), "swing_low", "UP")
+                            # B9 S8: the post-break role only holds while price is on
+                            # the right side of it. A broken high with price back BELOW
+                            # is resistance again, not support.
+                            (float(state.broken_level_up),
+                             "swing_low" if _u_px > float(state.broken_level_up) else "swing_high",
+                             "UP")
                         )
                     if _ll and state.broken_level_dn:
                         _u_regs.append(
-                            (float(state.broken_level_dn), "swing_high", "DOWN")
+                            (float(state.broken_level_dn),
+                             "swing_high" if _u_px < float(state.broken_level_dn) else "swing_low",
+                             "DOWN")
                         )
                     if _u_regs and _atr_raw > 0 and _u_px > 0:
                         _u_asset = self.asset_type
@@ -3278,7 +3336,13 @@ class CompositeStateBuilder:
             # count 0 -> 1
             if rec["count"] == 0 and newA:
                 rec["count0_bars"] += 1
-                band = 0.0 if h_tier == "ZONE_LADDER" else float(pcfg.get("ppl_break_band_atr4_untested", 0.10)) * float(atr4)
+                # B9 S12 (Desire, 23 Sep): a zero band on ladder lines is why 16 of 16
+                # checks on 23 Sep were breaks -- a setup born on a line broke on its
+                # first candle by 0.04 ATR. A small band on tested lines, the existing
+                # one on untested lines. Both are config keys, both are measured.
+                band = (float(pcfg.get("ppl_break_band_atr4_ladder", 0.05))
+                        if h_tier == "ZONE_LADDER"
+                        else float(pcfg.get("ppl_break_band_atr4_untested", 0.10))) * float(atr4)
                 broke = (cA > h + band) if d == 1 else (cA < h - band)
                 dist = ((cA - h) if d == 1 else (h - cA)) / float(atr4)
                 logger.info("[COUNT-1-CHECK] %s %s dir=%+d tf=%s close=%.5g H=%.5g band=%.5g dist=%.2fATR4 tier=%s -> %s",
@@ -3340,6 +3404,16 @@ class CompositeStateBuilder:
                                     asset, kind, d, rec["streak"], c1, rec["h2"])
 
             # count 2 -> 3 on the count-3 frame, against PRIOR H2 (Option A)
+            # B9 S5c: when the count-3 frame has no new candle (market shut -- USTEC
+            # overnight), say so once per asset per hour. Silence looked like a
+            # missed check to the alarm; it is a closed market.
+            if rec["count"] == 2 and not newB:
+                _k3 = (asset, kind, "NOCANDLE")
+                if self._brc_log_ts.get(_k3) != tsB:
+                    self._brc_log_ts[_k3] = tsB
+                    logger.info("[COUNT-3-CHECK] %s %s dir=%+d — no new %s candle "
+                                "(market closed or gear frame not advanced) — skipped",
+                                asset, kind, d, c3tf)
             if rec["count"] == 2 and newB and tsB > rec["first_retest_ts"]:
                 tol = max(float(pcfg.get("ppl_proof_tolerance_atr4", 0.15)) * float(atr4),
                           float(pcfg.get("ppl_proof_spread_floor_mult", 2.0)) * float(spread or 0.0))
@@ -3385,6 +3459,54 @@ class CompositeStateBuilder:
                 _store[asset] = [s for s in _q if self._ppl_setup_key(asset, s) != key]
         if key is not None:
             self._ppl.pop(key, None)
+
+    def kill_spent_setup(self, asset, side, ref, tol=None):
+        """B9 S17 (Desire, 23 Sep): a proof spent by a live entry dies at once.
+
+        Removes the live setup(s) at that reference from both lane queues and
+        drops their PPL records, so the engine stops re-confirming a proof the
+        council may never act on again. The used_proofs ledger, the ghost record
+        and the episode link are untouched -- this kills the setup, not the
+        history. Matched on reference within a small tolerance because the entry
+        price and the stored H are the same number written by two paths.
+        """
+        _killed = []
+        try:
+            _d = 1 if str(side).lower().startswith("l") else -1
+            _tol = float(tol) if tol is not None else max(abs(float(ref)) * 1e-6, 1e-9)
+            for _kind, _store in (("TF_CONT", self._active_setup),
+                                  ("MR_REV", self._active_setup_mr)):
+                _q = _store.get(asset)
+                if isinstance(_q, dict):
+                    _q = [_q]
+                if not isinstance(_q, list):
+                    continue
+                _keep = []
+                for _s in _q:
+                    _same_dir = (1 if int(_s.get("dir", 0) or 0) == 1 else -1) == _d
+                    _same_ref = abs(float(_s.get("ref") or 0.0) - float(ref)) <= _tol
+                    if _same_dir and _same_ref:
+                        _key = self._ppl_setup_key(asset, _s)
+                        self._ppl.pop(_key, None)
+                        _killed.append((_kind, float(_s.get("ref") or 0.0)))
+                    else:
+                        _keep.append(_s)
+                _store[asset] = _keep
+            if _killed:
+                logger.info(
+                    "[PROOF-SPENT] %s: killed %d live setup(s) at ref=%.5g after a live "
+                    "entry — %s. Ledger and ghost record kept.",
+                    asset, len(_killed), float(ref),
+                    ", ".join(f"{k}@{r:.5g}" for k, r in _killed),
+                )
+            else:
+                logger.info(
+                    "[PROOF-SPENT] %s: no live setup found at ref=%.5g to kill "
+                    "(already gone, or the reference differs)", asset, float(ref),
+                )
+        except Exception as _e:
+            logger.warning("[PROOF-SPENT] %s: kill failed (%s) — setup left alive", asset, _e)
+        return _killed
 
     def _ppl_setup_key(self, asset, s):
         """B6-1: the identity of one setup -- asset, lane kind, direction, frozen H."""
