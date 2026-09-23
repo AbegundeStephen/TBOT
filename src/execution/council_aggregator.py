@@ -1631,7 +1631,13 @@ class InstitutionalCouncilAggregator:
             # hang off this line instead.
             logger.info("[COUNCIL-CONVENED] %s", self.asset_type)
             try:
-                _cand = str(getattr(df, "index", [None])[-1])
+                # B10 C4: key on the proof and the minute, not the candle. The candle
+                # id repeats all hour (and can be a plain row number), so B9 counted
+                # every six-minute re-check as a re-sitting -- 230 of 244.
+                _min_rs = int(time.time() // 60)
+                if getattr(self, "_b10_resit_min", None) != _min_rs:
+                    self._b10_resit_min, self._b9_sit_count = _min_rs, {}
+                _cand = "H=%s minute=%d" % (getattr(locals().get("_composite_state"), "setup_ref", None), _min_rs)
                 _seen = getattr(self, "_b9_sit_count", {})
                 _seen[(self.asset_type, _cand)] = _seen.get((self.asset_type, _cand), 0) + 1
                 self._b9_sit_count = _seen
@@ -2428,7 +2434,8 @@ class InstitutionalCouncilAggregator:
             _effective_counter_threshold = min(
                 self.counter_trend_threshold + self._rsm_cap_council,
                 (
-                    self.counter_trend_threshold + 0.50
+                    # B10 C1 (Desire, 23 Sep, option B): was a flat +0.50
+                    self.counter_trend_threshold + float((getattr(self, "phase_config", {}) or {}).get("mood_against_raise", 0.25))
                     if _is_slightly
                     else self.counter_trend_threshold
                 )
@@ -2967,8 +2974,9 @@ class InstitutionalCouncilAggregator:
             if _b7_lm and _b7_lt != "CHASE_HARD":
                 _b7_addons.append("structure %s %+.2f" % (_b7_lt, float(_b7_lm)))
             if locals().get("_is_slightly"):
-                _b7_addons.append("mood slightly-against +0.50 (capped at %.2f)"
-                                  % float(locals().get("_ct_cap", 0.0) or 0.0))
+                _b7_addons.append("mood slightly-against %+.2f (capped at %.2f)"   # B10 C1
+                                  % (float((getattr(self, "phase_config", {}) or {}).get("mood_against_raise", 0.25)),
+                                     float(locals().get("_ct_cap", 0.0) or 0.0)))
             if locals().get("_ease"):
                 _b7_addons.append("agree %+.2f" % -float(locals().get("_ease")))
             if locals().get("_regime_lsm_disagree") and not locals().get("_disagree_gate_shadow"):
@@ -3311,7 +3319,10 @@ class InstitutionalCouncilAggregator:
                     # Matches Performance aggregator's gatekeeper behaviour in SLIGHTLY regimes.
                     elif trade_type == "SLIGHTLY_COUNTER":
                         trade_type = "TREND"  # Restore for downstream gates
-                        _te_raise = 0.50
+                        # B10 C1 (Desire, 23 Sep, option B): shrink the daily-trend raise and
+                        # tag every case. Practice trades against the daily trend did no worse
+                        # (n=22, 59% win, +0.099%) than with it (n=172, 60%, +0.006%).
+                        _te_raise = float((getattr(self, "phase_config", {}) or {}).get("mood_against_raise", 0.25))
                         try:
                             from types import SimpleNamespace as _NS
 
@@ -3372,8 +3383,8 @@ class InstitutionalCouncilAggregator:
                             )
                             if _te.conditions_met >= 2:
                                 # Reduce raise proportionally to evidence strength; floor at 0.20
-                                _te_raise = max(
-                                    0.20, 0.50 - abs(_te.total_score) * 0.50
+                                _te_raise = max(   # B10 C1: scales with the configured raise
+                                    min(0.20, _te_raise), _te_raise - abs(_te.total_score) * _te_raise
                                 )
                                 logger.info(
                                     f"[COUNCIL] 🔄 TRANSITION evidence softens SLIGHTLY_COUNTER raise: "
@@ -3422,6 +3433,10 @@ class InstitutionalCouncilAggregator:
                         # SLIGHTLY_COUNTER raise can't reintroduce the 4.0 bar.
                         _b7_new_req = min(required_score + _te_raise, _ct_cap)
                         _b7_raises.append(("slightly against", float(_b7_new_req - required_score)))   # B7-8
+                        logger.info("[MOOD-AGAINST] %s: %s against a %s daily trend -- bar %+.2f "
+                                    "(B10: was +0.50) [tagged]", self.asset_type,
+                                    "BUY" if signal == 1 else "SELL", consensus_regime,
+                                    float(_b7_new_req - required_score))
                         if not _b7_trial:                                                              # B7-14
                             required_score = _b7_new_req
                         logger.info(
@@ -3468,6 +3483,10 @@ class InstitutionalCouncilAggregator:
                     )
 
                 # 3. DEAD VOLATILITY — retired (CU-1 C9), telemetry only
+                # B10 C3: the volume reading is only taken here, inside the veto checks,
+                # which run only when a sitting already has a buy or sell. The volume
+                # alarm now hangs off this line (B9 hung it off every sitting).
+                logger.info("[COUNCIL-GATES] %s -- volume check running", self.asset_type)
                 _vol_gate_passed = self._check_volatility_gate_adaptive(df, atr_fast, atr_slow)
                 # DATA-4 ITEM 1C: record this gate's decision either way.
                 try:
@@ -3892,10 +3911,17 @@ class InstitutionalCouncilAggregator:
                             or time.time() - getattr(self, "_b7_bar2_ts", 0.0) > 3300):
                         self._b7_bar2_last, self._b7_bar2_ts = _b7_sig2, time.time()
                         logger.info(
-                            "[BAR] %s second check: start %.2f + raises (%s) = full %.2f | uses %.2f | "
-                            "score %.2f -> %s%s",
+                            "[BAR] %s second check: start %.2f + raises (%s) + other %+.2f [add-ons: %s] = full %.2f "
+                            "| uses %.2f | score %.2f -> %s%s",
                             self.asset_type, float(locals().get("_b8_second_start", required_score)),   # B8-12
                             ", ".join("%s %+.2f" % (k, v) for k, v in _b7_raises) or "none",
+                            # B10 C2: what the named raises do not explain, printed. The
+                            # 22 Sep USOIL line read "start 2.60 + raises (none) = full
+                            # 3.60" and hid a full point. "other" makes the sum add up;
+                            # the add-on list names the candidates.
+                            float(_b7_req_full) - float(locals().get("_b8_second_start", required_score))
+                            - sum(v for _, v in _b7_raises),
+                            ", ".join(locals().get("_b7_addons") or []) or "none",
                             _b7_req_full, float(required_score), float(total_score),
                             "PASS" if signal != 0 else "REFUSED",
                             " | TRIAL-ONLY (would fail the full council)" if _b7_trial_only else "",

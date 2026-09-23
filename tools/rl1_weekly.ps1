@@ -27,4 +27,10 @@ if ($LASTEXITCODE -ne 0) { $fail = 1 }
 "`n--- replayer by asset ---" | Out-File $out -Append -Encoding utf8
 & $py tools\replayer.py --by asset 2>&1 | Out-File $out -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
+"`n--- B10 D3: trail x breakeven grid ---" | Out-File $out -Append -Encoding utf8
+& $py tools\replayer.py --grid 2>&1 | Out-File $out -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+"`n--- B10 D4: proofs versus random ---" | Out-File $out -Append -Encoding utf8
+& $py tools\weekly_report.py 2>&1 | Out-File $out -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
 exit $fail

@@ -7766,6 +7766,37 @@ class TradingBot:
                     # human-label mapping a second time in heartbeat.py.
                     logger.info(f"[HOLD] {asset_name}: Signal BLOCKED by {block_source} ({block_reason}) gate_id={_gate_id_generic}")
 
+                    # B10 C5 (Desire, 23 Sep): a confirmed proof the council keeps
+                    # refusing must be SEEN. USOIL 22 Sep: proof ready 10:05, refused
+                    # every six minutes -- 3.62 against 3.85 -- for four hours, in
+                    # silence. One timer per market: it starts at the first scored
+                    # refusal and resets when no proof is being scored or a position
+                    # is open; warns after proof_held_alarm_min, then hourly.
+                    try:
+                        _hp_min = float((self.config.get("phase_config", {}) or {}).get("proof_held_alarm_min", 60))
+                        _hp = self.__dict__.setdefault("_b10_held", {})
+                        _now_hp = time.time()
+                        _scored_hp = "Score" in str(block_reason)
+                        _in_pos_hp = bool(self.portfolio_manager.get_asset_positions(asset_name))
+                        if not _scored_hp or _in_pos_hp:
+                            _hp.pop(asset_name, None)
+                        else:
+                            _rec_hp = _hp.setdefault(asset_name, {"since": _now_hp, "warned": 0.0})
+                            _held_hp = (_now_hp - _rec_hp["since"]) / 60.0
+                            if _held_hp >= _hp_min and _now_hp - _rec_hp["warned"] >= 3600:
+                                _rec_hp["warned"] = _now_hp
+                                _cs_hp = details.get("composite_state") if isinstance(details, dict) else None
+                                _ref_hp = (details.get("setup_ref") if isinstance(details, dict) else None) or (
+                                    _cs_hp.get("setup_ref") if isinstance(_cs_hp, dict)
+                                    else getattr(_cs_hp, "setup_ref", None))
+                                logger.warning(f"[PROOF-HELD] {asset_name}: a confirmed proof (H={_ref_hp}) has been "
+                                               f"refused for {_held_hp:.0f} min -- latest verdict: {block_reason}")
+                                self._send_telegram_notification(self.telegram_bot.send_message(
+                                    text=f"⏳ {asset_name}: proof held {_held_hp:.0f} min by the council -- {block_reason}",
+                                    parse_mode="HTML"))
+                    except Exception as _hp_e:
+                        logger.debug(f"[PROOF-HELD] {asset_name}: check skipped ({_hp_e})")
+
                     if _gate_stage_generic == "pre_direction" and original_sig == 0:
                         # G4: no invented side for a pre-direction gate with no
                         # intended direction -- record, don't shadow.
