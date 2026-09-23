@@ -1127,6 +1127,19 @@ class VeteranTradeManager:
         def _reward_ccy(_tp):
             return abs(_tp - self.entry_price) * float(self.position_size or 0) * quote_to_usd
 
+        # B10 B2: the target cap applies to the CHOSEN target, not only to walk
+        # candidates. USOIL 22 Sep got a 75.64 target -- 17 ATR -- because its
+        # first target already paid $5, so the capped walk below never ran.
+        try:
+            if atr and max_target_atr > 0 and tp and abs(tp - self.entry_price) > max_target_atr * atr:
+                _tp_cap = (self.entry_price + max_target_atr * atr) if self.side == "long" \
+                    else (self.entry_price - max_target_atr * atr)
+                logger.info("[TP-CAP] %s %s: target %.5f is %.1f ATR away -- capped to %.5f (%.1f ATR)",
+                            self.asset, self.side, tp, abs(tp - self.entry_price) / atr, _tp_cap, max_target_atr)
+                tp = _tp_cap
+        except Exception as _cap_e:
+            logger.debug(f"[TP-CAP] {self.asset}: cap skipped ({_cap_e})")
+
         reward = _reward_ccy(tp)
         if reward < min_reward_ccy:
             # B5-1a: walk OUTWARD only -- levels strictly farther from entry
@@ -1273,6 +1286,24 @@ class VeteranTradeManager:
         _min_rr = float(self.risk_config.get("min_rr", 1.5))
         reward_dist = abs(tp - self.entry_price) if tp else 0.0
         rr = (reward_dist / risk_dist) if risk_dist > 0 else 0.0
+        # B10 B3 (gate 4 cost model): the same R:R after real costs. Measured
+        # 23 Sep: real cost runs EURUSD 2.1-3.2x the friction map, USOIL 4.0x,
+        # GBPAUD 0.45x. Logged on every check; it only DECIDES when
+        # gate4_net_rr_enabled is switched on -- ships OFF, Desire's switch.
+        try:
+            _pc4 = self.risk_config.get("phase_config", {}) or {}
+            from src.execution.shadow_trader import FRICTION_PENALTIES as _FP4, _DEFAULT_FRICTION as _DF4
+            _fr4 = float(_FP4.get(str(self.asset).upper(), _DF4))
+            _mult4 = float((_pc4.get("gate4_real_cost_mult", {}) or {}).get(str(self.asset).upper(), 1.0))
+            _cost4 = float(self.entry_price) * _fr4 * _mult4
+            _rr_net = ((reward_dist - _cost4) / (risk_dist + _cost4)) if (risk_dist + _cost4) > 0 else 0.0
+            _use4 = bool(_pc4.get("gate4_net_rr_enabled", False))
+            logger.info("[RR-NET] %s %s: rr %.2f -> after costs %.2f (friction %.3f%% x %.2f = %.5g) | min %.2f | deciding=%s",
+                        self.asset, self.side, rr, _rr_net, _fr4 * 100, _mult4, _cost4, _min_rr, _use4)
+            if _use4:
+                rr = _rr_net
+        except Exception as _rr4_e:
+            logger.debug(f"[RR-NET] {self.asset}: skipped ({_rr4_e})")
         if rr < _min_rr:
             _reason = f"rr {rr:.2f} < {_min_rr:.2f}"
             _log_final(tp, False, _reason)
@@ -4681,6 +4712,18 @@ class VeteranTradeManager:
         # not a decorative placeholder.
         _tier_ppl = (getattr(self, "brc_tier", None) or "").upper()
         _h_ref = getattr(self, "ref_2", None)
+        # B10 B4: the stop must anchor on the H of the proof that won the council.
+        # BTC 22 Sep: the stop anchored on 81,917 while the confirmation printed
+        # beside the entry was a different proof (81,111) -- five were live.
+        try:
+            _em_b10 = ((getattr(self, "signal_details", None) or {}).get("entry_measure") or {})
+            _pref_b10 = _em_b10.get("proof_ref")
+            if _h_ref and _pref_b10 and abs(float(_pref_b10) - float(_h_ref)) > max(abs(float(_h_ref)) * 1e-6, 1e-9):
+                logger.warning("[PROOF-MISMATCH] %s: stop anchored on H=%.5g but the trade's proof is H=%.5g%s",
+                               self.asset, float(_h_ref), float(_pref_b10),
+                               " (pre-send probe)" if (getattr(self, "signal_details", None) or {}).get("_presend_probe") else "")
+        except Exception:
+            pass
         if _tier_ppl == "RETEST" and _h_ref and atr > 0:
             _base = float(self.risk_config.get("structural_stop_allowance_atr", 0.3))
             _mult = self._ppl_grade_mult()

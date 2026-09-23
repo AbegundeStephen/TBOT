@@ -29,6 +29,8 @@ import re
 import sys
 from datetime import datetime, timedelta
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # B10 D8: the Windows console died on "≈"
+
 SYMBOL = {
     "BTC": "BTCUSDm", "GOLD": "XAUUSDm", "USTEC": "USTECm",
     "EURUSD": "EURUSDm", "USOIL": "USOILm", "GBPAUD": "GBPAUDm",
@@ -150,7 +152,7 @@ def main():
     r1 = before(scan([r"\[R1-ORIGIN\] " + asset], asset), t_in, 3)
     c1 = before(scan([r"\[COUNT-1\] " + asset], asset), t_in, 3)
     c2 = before(scan([r"\[COUNT-2\] " + asset], asset), t_in, 3)
-    c3 = before(scan([r"\[COUNT-3-CHECK\] " + asset + r".*-> yes"], asset), t_in, 2)
+    c3 = before(scan([r"\[COUNT-3-CHECK\] " + asset + r".*-> PROOF"], asset), t_in, 2)   # B10 D8: the check prints PROOF, not yes
 
     print("\n--- THE PROOF ------------------------------------------------------------")
     for label, rows in (("setup born", born), ("origin R1", r1), ("stage 1 break", c1),
@@ -167,18 +169,21 @@ def main():
         b = brc[-1][1]
         lv["H (ref)"] = num(b, "ref")
         lv["H2"] = num(b, "h2")
-        lv["close at confirm"] = num(b, "close")
+        lv["close when printed"] = num(b, "close")   # B10 D8: not the close-through
         print("\n  reading of the confirm line:")
         print(f"    H (ref) = {lv['H (ref)']}   the level the setup is built on, and the stop anchor")
         print(f"    H2      = {lv['H2']}   best close after the break, frozen at the retest")
-        print(f"    close   = {lv['close at confirm']}   the close-through that confirmed it")
-        print(f"    tier    = {re.search(r'tier=(\\w+)', b).group(1) if re.search(r'tier=(\\w+)', b) else '?'}"
+        _tier_m = re.search(r"tier=(\w+)", b)   # B10 D8: the old in-string regex always printed "?"
+        print(f"    close   = {lv['close when printed']}   price when this line printed -- NOT the close-through (stage 3 above)")
+        print(f"    tier    = {_tier_m.group(1) if _tier_m else '?'}"
               "   RETEST = it pulled back and came back; RUNNER = it never pulled back")
-        print(f"    depth   = {num(b, 'depth')}   pullback as a fraction of the run")
-        print(f"    dist    = {num(b, 'dist')}   |entry - H| in ATR4 — how far price had already travelled")
-        print(f"    age     = {num(b, 'age', int)} candles since the break")
+        print(f"    depth   = {num(b, 'depth')}   pullback as a fraction of the whole run from the origin R1")
+        print(f"    dist    = {num(b, 'dist')}   how far past H2 the close-through landed, in 4-hour ATR")
+        print(f"    age     = {num(b, 'age', int)} candles since the proof confirmed")
     if r1:
         lv["R1 (origin)"] = num(r1[-1][1], "R1")
+    if c3:
+        lv["close-through"] = num(c3[-1][1], "close")   # B10 D8
     if c2:
         lv["c1 (retest close)"] = num(c2[-1][1], "close1")
         if lv.get("H2") is None:
@@ -215,7 +220,7 @@ def main():
         print("  (no stop moves or interventions logged)")
 
     print("\n--- LEVELS ---------------------------------------------------------------")
-    for k in ("R1 (origin)", "H (ref)", "H2", "c1 (retest close)", "close at confirm",
+    for k in ("R1 (origin)", "H (ref)", "H2", "c1 (retest close)", "close-through",
               "entry (bot)", "stop"):
         if lv.get(k) is not None:
             print(f"  {k:<20} {lv[k]}")

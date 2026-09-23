@@ -354,12 +354,41 @@ def calibrate(result_json="logs/backtests/20260822_164803/result.json"):
     return passed
 
 
+# B10 D2: the clean-data start -- B7 live, 22 Sep 11:52:05 box time (09:52:05 UTC).
+# --clean leaves out everything earlier; without it nothing changes.
+_CLEAN_ONLY = False
+_CLEAN_START_UTC = "2026-09-22T09:52:05+00:00"
+_CLEAN_SKIPPED = [0]
+
+
+def _hf_utc_times(e):
+    """B10 D2: old live rows carry box-local times with no zone marker; practice
+    rows carry +00:00. Put both on UTC as rows are read, so live and practice
+    line up and the replay window is the right one. An unmarked time is
+    box-local on a live row and UTC on a practice row. Box-local comes from
+    THIS machine's clock settings -- correct on the trading box."""
+    from datetime import datetime as _dt, timezone as _tz
+    _local = e.get("source") != "shadow"
+    for _k in ("entry_time", "close_time", "exit_time", "open_time"):
+        _v = e.get(_k)
+        if not isinstance(_v, str) or not _v:
+            continue
+        try:
+            _d = _dt.fromisoformat(_v.replace("Z", "+00:00"))
+            if _d.tzinfo is None:
+                _d = _d.astimezone() if _local else _d.replace(tzinfo=_tz.utc)
+            e[_k] = _d.astimezone(_tz.utc).isoformat()
+        except Exception:
+            pass
+    return e
+
+
 def load_episodes():
     eps = []
     for f in sorted(glob.glob("logs/episodes/*.jsonl")):
         for line in open(f, encoding="utf-8"):
             if line.strip():
-                eps.append(json.loads(line))
+                eps.append(_hf_utc_times(json.loads(line)))   # B10 D2
     usable = [e for e in eps if e.get("episode_id") and e.get("entry_atr")]
     print(f"episodes: {len(eps)} total, {len(usable)} usable "
           f"({len(eps) - len(usable)} missing id or entry_atr)")
@@ -526,6 +555,11 @@ def _sl_path_fields(e):
     try:
         et = pd.Timestamp(e.get("entry_time"))
         ft = pd.Timestamp(path[0][0])
+        # B10 D2: stop-path stamps are naive UTC (utcnow at all six writers);
+        # entry times are UTC-aware. Mixed, the subtraction threw and
+        # first_move_bar silently went missing on every practice row.
+        et = et.tz_localize("UTC") if et.tzinfo is None else et.tz_convert("UTC")
+        ft = ft.tz_localize("UTC") if ft.tzinfo is None else ft.tz_convert("UTC")
         # 1H bars -- the timeframe the whole management stack runs on.
         out["first_move_bar"] = max(0, int((ft - et).total_seconds() // 3600))
     except Exception:
@@ -638,8 +672,11 @@ def load_closed_trades(include_all=False):
             if not line.strip():
                 continue
             try:
-                e = json.loads(line)
+                e = _hf_utc_times(json.loads(line))   # B10 D2
             except Exception:
+                continue
+            if _CLEAN_ONLY and str(e.get("entry_time") or "") < _CLEAN_START_UTC:   # B10 D2
+                _CLEAN_SKIPPED[0] += 1
                 continue
             if not e.get("close_time") or not e.get("entry_time"):
                 continue
@@ -686,6 +723,8 @@ def load_closed_trades(include_all=False):
           f"{skipped_stale_price} stale-price lane-C, {skipped_pre_p10_lanec} "
           f"pre-P10 lane-C, {skipped_pre_ppl} pre-PPL excluded, {skipped_dup} duplicate, "
           f"{skipped_external} opened by hand{_tail})")
+    if _CLEAN_ONLY:   # B10 D2
+        print(f"clean-data mode: {_CLEAN_SKIPPED[0]} rows before 22 Sep 11:52:05 box time (B7 live) left out")
     return rows
 
 
@@ -949,6 +988,53 @@ def _replay_row_arm(e, knob, value):
     return None
 
 
+_GRID_TRAIL = [0.6, 0.8, 1.0, 1.3]
+_GRID_BE = [0.75, 1.0, 1.25]
+
+
+def run_grid(include_all=False):
+    """B10 D3 (Desire, 22 Sep: every trail and breakeven setting side by side on
+    every practice trade). Replays each closed trade's real 15m path once per
+    trail x breakeven pair -- twelve settings -- writes one row per trade per
+    setting to logs/grid/grid_<date>.jsonl, and prints mean R with a 90%
+    bootstrap CI per setting. Offline on purpose: twelve live practice positions
+    per signal would swamp the book the practice lane exists to measure."""
+    import os as _os_g
+    from datetime import datetime as _dt_g
+    rows = load_closed_trades(include_all=include_all)
+    res = defaultdict(list)
+    out_rows = []
+    replayed = 0
+    for e in rows:
+        asset, side = e.get("asset"), e.get("side")
+        entry, stop, atr = e.get("entry_price"), e.get("initial_stop_loss") or e.get("stop_loss"), e.get("entry_atr")
+        if not (asset and side and entry and stop and atr):
+            continue
+        path = load_path(asset, e.get("entry_time"), e.get("close_time"))
+        if path is None or path.empty:
+            continue
+        replayed += 1
+        for tr in _GRID_TRAIL:
+            for be in _GRID_BE:
+                r = _replay_with_be(entry, stop, side, atr, path, be, mult=tr)
+                if r is None:
+                    continue
+                res[(tr, be)].append(r)
+                out_rows.append({"episode_id": e.get("episode_id"), "asset": asset,
+                                 "trail": tr, "be_r": be, "R": round(float(r), 4)})
+    print(f"grid: replayed {replayed} of {len(rows)} trades x {len(_GRID_TRAIL) * len(_GRID_BE)} settings")
+    print(f"{'trail':>6} {'be_r':>6} {'n':>5} {'mean_R':>8} {'CI90_lo':>8} {'CI90_hi':>8}")
+    for key in sorted(res):
+        m, lo, hi = _bootstrap_ci(res[key])
+        print(f"{key[0]:>6} {key[1]:>6} {len(res[key]):>5} {m:>+8.3f} {lo:>+8.3f} {hi:>+8.3f}")
+    _os_g.makedirs("logs/grid", exist_ok=True)
+    _p = f"logs/grid/grid_{_dt_g.now().strftime('%Y%m%d')}.jsonl"
+    with open(_p, "w", encoding="utf-8") as f:
+        for r in out_rows:
+            f.write(json.dumps(r) + "\n")
+    print(f"wrote {_p}")
+
+
 def run_arms(knob, include_all=False):
     """R4: re-run every closed row's exit stack under each arm value, report
     n / mean R / bootstrap 90% CI / worst-10% per asset x arm, and write the
@@ -1021,14 +1107,21 @@ if __name__ == "__main__":
                           "proof_dist_h/exit_via/gate_id/gate_stage/asset/lane/side")
     ap.add_argument("--arms", choices=sorted(_ARM_VALUES.keys()),
                      help="R4: per-asset arm table (trail_mult/be_r/grade_table) with bootstrap 90%% CI")
+    ap.add_argument("--grid", action="store_true",
+                     help="B10 D3: every trail x breakeven setting side by side on every closed trade")
+    ap.add_argument("--clean", action="store_true",
+                     help="B10 D2: only trades from the clean-data start (22 Sep 11:52:05 box time, B7 live)")
     ap.add_argument("--all", action="store_true",
                      help="R1: include pre-PPL rows too (default: PPL-only, cutoff 2026-09-14T16:21+02:00)")
     ap.add_argument("--result-json", default="logs/backtests/20260822_164803/result.json")
     a = ap.parse_args()
+    _CLEAN_ONLY = bool(a.clean)   # B10 D2
     if a.calibrate:
         calibrate(a.result_json)
     elif a.report:
         report()
+    elif a.grid:
+        run_grid(include_all=a.all)   # B10 D3
     elif a.arms:
         run_arms(a.arms, include_all=a.all)
     elif a.by:

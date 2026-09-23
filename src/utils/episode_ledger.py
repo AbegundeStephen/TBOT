@@ -28,6 +28,26 @@ def write_episode(record: dict) -> None:
     """Append one closed episode to today's daily ledger file."""
     try:
         record.setdefault("schema_version", 2)   # DIARY-1: v1 = pre-15 Sep rows; v2 = management path + state_age + pair fields
+        # B10 D1: live rows wrote box-local times with no zone; practice rows write
+        # UTC with +00:00, so the two sorted two hours apart. Every time goes out
+        # in UTC. An unmarked time means box-local on a live row and UTC on a
+        # practice row (the practice engine stamps with utcnow).
+        from datetime import timezone as _tz_d1
+        _naive_is_local = record.get("source") != "shadow"
+        for _k in ("entry_time", "close_time", "open_time", "exit_time"):
+            _v = record.get(_k)
+            try:
+                if isinstance(_v, datetime):
+                    _dt = _v
+                elif isinstance(_v, str) and _v:
+                    _dt = datetime.fromisoformat(_v.replace("Z", "+00:00"))
+                else:
+                    continue
+                if _dt.tzinfo is None:
+                    _dt = _dt.astimezone() if _naive_is_local else _dt.replace(tzinfo=_tz_d1.utc)
+                record[_k] = _dt.astimezone(_tz_d1.utc).isoformat()
+            except Exception:
+                pass
         # HF-2 I3: logs/episodes/ was the known gap in B11's path-suffixing --
         # instance B's episodes would otherwise land in the SAME daily ledger
         # file the live instance reads, corrupting both instances' diaries.

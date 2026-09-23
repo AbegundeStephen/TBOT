@@ -918,6 +918,32 @@ class MT5ExecutionHandler:
             # trade it refuses is never opened: no spread cost, and its proof is
             # not burned (the burn only runs after a real fill). 22 Sep EURUSD
             # was opened and closed at 12:10 for a $2.86 target.
+            # B10 B1 (Desire, 23 Sep): the freshness gate. No live entry further
+            # than max_entry_distance_atr from its proof's reference (H) -- the same
+            # entry_distance_atr the diary records. Lane-A practice trades in %
+            # return: 0-1 ATR +0.091%, 1-2 -0.006%, 2-3 +0.031%, 3+ -0.030%. Both
+            # 22 Sep live losses entered past it (USOIL 3.45, BTC ~5.7). Refused
+            # like any pre-send refusal: no order placed, proof not spent.
+            try:
+                _pc_b10 = self.config.get("phase_config", {}) or {}
+                _lim_b10 = float(_pc_b10.get("max_entry_distance_atr", 2.5))
+                _em_b10 = (signal_details or {}).get("entry_measure") or {}
+                _d_b10 = _em_b10.get("entry_distance_atr")
+                if _lim_b10 > 0:
+                    if _d_b10 is None or float(_d_b10) < 0:
+                        logger.warning(f"[FRESHNESS] {asset} {side.upper()}: not measured (no entry distance) -- sending")
+                    elif float(_d_b10) > _lim_b10:
+                        logger.warning(f"[FRESHNESS] {asset} {side.upper()}: refused before sending -- entry "
+                                       f"{float(_d_b10):.2f} ATR from its reference {_em_b10.get('proof_ref')} "
+                                       f"(limit {_lim_b10:.2f}). No order placed; proof not spent.")
+                        if signal_details is not None:
+                            signal_details["presend_refused"] = f"freshness {float(_d_b10):.2f}ATR > {_lim_b10:.2f}"
+                        return False
+                    else:
+                        logger.info(f"[FRESHNESS] {asset} {side.upper()}: entry {float(_d_b10):.2f} ATR from its "
+                                    f"reference -- within {_lim_b10:.2f}")
+            except Exception as _fg_e:
+                logger.error(f"[FRESHNESS] {asset}: gate check failed ({_fg_e}) -- sending as before")
             try:
                 import math as _math_b8
                 _lp_b8 = (max(0, int(round(-_math_b8.log10(symbol_info.volume_step))))

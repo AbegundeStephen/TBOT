@@ -338,6 +338,9 @@ class CompositeStateBuilder:
             # B8-1: the candles closed since the save are replayed on this
             # builder's first proof-engine run (see _b8_catchup).
             self._b8_catchup_from = _saved_last_bar_ts if (_bars_passed or 0) > 0 else None
+            # B10 A4: deploy hygiene runs on this builder's first proof-engine pass,
+            # before the catch-up (it needs the live phase_config, not available here).
+            self._b10_hygiene_ref = (_saved_last_bar_ts, _bars_passed)
         except Exception as _e:
             logger.warning("[PERSIST] %s: pending restore apply failed: %s", self.asset_type, _e)
 
@@ -2138,6 +2141,8 @@ class CompositeStateBuilder:
                         # long sat unchecked at count 2 from 18 Sep 17:03.
                         # B8-1: after a restart or a builder rebuild, first replay
                         # every missed candle through the same engine.
+                        if getattr(self, "_b10_hygiene_ref", None) is not None:
+                            self._b10_deploy_hygiene(_pcfg)          # B10 A4
                         if getattr(self, "_b8_catchup_from", None) is not None:
                             self._b8_catchup(state, df, df_4h, _atr4,
                                              self._ppl_spread(self.asset_type, _brc_close), _pcfg, _gear)
@@ -2268,7 +2273,12 @@ class CompositeStateBuilder:
         try:
             _b9_lsm4 = getattr(state, "livermore_state_4h", None)
             _b9_age4 = getattr(state, "livermore_state_age_4h", None)
-            if int(_b9_age4 or 0) >= 96 and int(_b9_age4 or 0) % 24 == 0:
+            # B10 D7: once a day (every 6th 4-hour candle) and once per age -- the
+            # builder runs every six minutes, so B9's line would have repeated through
+            # its whole 4-hour window, and only every fourth day at that.
+            if (int(_b9_age4 or 0) >= 96 and int(_b9_age4 or 0) % 6 == 0
+                    and self._brc_log_ts.get(("LSM-STUCK", self.asset_type)) != int(_b9_age4)):
+                self._brc_log_ts[("LSM-STUCK", self.asset_type)] = int(_b9_age4)
                 logger.warning("[LSM-STUCK] %s: 4H state %s unchanged for %s candles (~%d days)",
                                self.asset_type, _b9_lsm4, _b9_age4, int(_b9_age4) // 6)
         except Exception:
@@ -3347,6 +3357,16 @@ class CompositeStateBuilder:
                 dist = ((cA - h) if d == 1 else (h - cA)) / float(atr4)
                 logger.info("[COUNT-1-CHECK] %s %s dir=%+d tf=%s close=%.5g H=%.5g band=%.5g dist=%.2fATR4 tier=%s -> %s",
                             asset, kind, d, c1tf, cA, h, band, dist, h_tier, "BREAK" if broke else "no")
+                # B10 A2 (Desire, 23 Sep, option D): a setup whose FIRST break check
+                # finds price already far past its line was born late -- a fast run
+                # left no tested line near price when the structure broke. FLAG ONLY:
+                # the 2.5-ATR entry gate (B10 B1) decides whether it may trade.
+                # 188 setups measured: 184 within 1 ATR4; BTC 5.69 and EURUSD 4.46,
+                # 2.29, 1.23 beyond.
+                if rec["count0_bars"] == 1 and dist > float(pcfg.get("born_late_flag_atr4", 1.0)):
+                    rec["born_dist_atr4"] = float(dist)
+                    logger.warning("[BORN-LATE] %s %s dir=%+d H=%.5g: first check found price %.2f ATR4 past "
+                                   "the line (flag only -- the entry gate decides)", asset, kind, d, h, dist)
                 # B8-7: the P1 recorder -- every break check, breaks and near-misses.
                 # phase_config.p1_refusal_ledger_enabled (true) now switches it.
                 if bool(pcfg.get("p1_refusal_ledger_enabled", True)):
@@ -3385,6 +3405,19 @@ class CompositeStateBuilder:
                     out["test_of_proof"] = True
                     rec["streak"] = 0
                     logger.info("[TEST-OF-PROOF] %s %s dir=%+d close1=%.5g beyond R1=%.5g — waiting on the 4H", asset, kind, d, c1, r1)
+                elif lower and abs(rec["h2"] - h) > 0 and (
+                        abs(rec["h2"] - c1) < float(pcfg.get("ppl_min_pullback_frac", 0.25)) * abs(rec["h2"] - h)):
+                    # B10 A1 (Desire, 23 Sep): a dip smaller than a quarter of the
+                    # push since the break -- H to H2 -- is a PAUSE, not a pullback.
+                    # It neither counts toward the runner streak nor resets it, and
+                    # H2 stays where it is. BTC 21 Sep 20:05: a 56-point dip on a
+                    # 4,039-point push (1.4%) turned a runner into a "retest" and put
+                    # its stop 7.7 ATR away. USOIL 22 Sep 09:05 bounced 82% of its
+                    # push back to the line -- a genuine retest, unchanged by this.
+                    logger.info("[COUNT-2-PAUSE] %s %s dir=%+d close1=%.5g H2=%.5g push=%.5g dip=%.1f%% "
+                                "-- a pause, not a pullback (streak held at %d)",
+                                asset, kind, d, c1, rec["h2"], abs(rec["h2"] - h),
+                                100.0 * abs(rec["h2"] - c1) / abs(rec["h2"] - h), int(rec.get("streak") or 0))
                 elif lower:
                     span = abs(rec["h2"] - r1)
                     rec.update(count=2, tier="RETEST", first_retest_ts=ts1, h2_frozen=rec["h2"],   # B6-1
@@ -3398,7 +3431,8 @@ class CompositeStateBuilder:
                         rec["streak"] += 1
                     else:
                         rec["streak"] = 1 if prev is None else 0
-                    if rec["streak"] >= int(pcfg.get("ppl_runner_streak_n", 4)):
+                    # B10 A1: three rising closes make a runner (was four; Desire 23 Sep).
+                    if rec["streak"] >= int(pcfg.get("ppl_runner_streak_n", 3)):
                         rec.update(count=2, tier="RUNNER", first_retest_ts=ts1, retest_depth=0.0, h2_frozen=rec["h2"])   # B6-1
                         logger.info("[COUNT-2] %s %s dir=%+d RUNNER streak=%d close1=%.5g H2=%.5g",
                                     asset, kind, d, rec["streak"], c1, rec["h2"])
@@ -3428,6 +3462,7 @@ class CompositeStateBuilder:
                 if cleared:
                     rec["count"] = 3
                     rec["proof_dist_atr"] = dist   # HF-2 E1: persist past the proving cycle
+                    rec["proof_ts"] = tsB           # B10 A4: when it confirmed, for deploy hygiene
                     out.update(proof=True, proof_dist_atr=dist)
                     logger.info("[COUNT-3] %s %s dir=%+d tf=%s PROOF close=%.5g H2=%.5g dist=%.2fATR4 tier=%s gear=%s/%s",
                                 asset, kind, d, c3tf, cB, h2p, dist, rec["tier"], c1tf, c3tf)
@@ -3639,6 +3674,44 @@ class CompositeStateBuilder:
                        if isinstance(k, tuple) and len(k) == 4 and k[0] == asset and k not in _live]:
                 _d.pop(_k, None)
         self._brc_memory.pop(asset, None)   # pre-B6 single per-asset proof memory
+        # B10 A3 (Desire, 23 Sep): clean the stack every cycle, not only at birth.
+        # (a) A proof already spent by a live trade dies now. B9's kill-on-spend
+        #     acts only at the moment of use, so proofs spent before B9 stayed
+        #     live -- BTC 81,917 and EURUSD 1.148 still listed at age 45-49.
+        # (b) Near-neighbours collapse: two proofs of the same kind and direction
+        #     within b9_setup_merge_atr x ATR4 are one line -- keep the better
+        #     tested (then the older). B9's merge only stopped NEW duplicates, so
+        #     GBPAUD kept 10 and EURUSD grew to 11.
+        try:
+            _spent = self._b10_spent_refs(asset)
+            _drop = set()
+            for _p in _proofs:
+                _pside = "long" if int(_p["dir"]) == 1 else "short"
+                if any(_sd == _pside and abs(_p["ref"] - _sr) <= max(abs(_sr) * 1e-6, 1e-9) for _sd, _sr in _spent):
+                    _drop.add(_p["key"])
+                    logger.info("[PROOF-SWEEP] %s: %s %+d H=%.5g already spent by a live trade -- killed",
+                                asset, _p["kind"], _p["dir"], _p["ref"])
+            _tol = float(pcfg.get("b9_setup_merge_atr", 0.33)) * float(atr4 or 0.0)
+            if _tol > 0:
+                _kept = []
+                for _p in sorted([q for q in _proofs if q["key"] not in _drop],
+                                 key=lambda q: (-q["tests"], str(q["first_ts"]))):
+                    _twin = next((k for k in _kept if k["kind"] == _p["kind"] and k["dir"] == _p["dir"]
+                                  and abs(k["ref"] - _p["ref"]) <= _tol), None)
+                    if _twin is not None:
+                        _drop.add(_p["key"])
+                        logger.info("[PROOF-SWEEP] %s: %s %+d H=%.5g folded into H=%.5g (within %.5g; tests %d vs %d)",
+                                    asset, _p["kind"], _p["dir"], _p["ref"], _twin["ref"], _tol,
+                                    _p["tests"], _twin["tests"])
+                    else:
+                        _kept.append(_p)
+            if _drop:
+                for _p in _proofs:
+                    if _p["key"] in _drop:
+                        self._ppl_expire_setup(asset, _p["kind"], _p["key"])
+                _proofs = [_p for _p in _proofs if _p["key"] not in _drop]
+        except Exception as _sw_e:
+            logger.warning("[PROOF-SWEEP] %s: sweep skipped (%s)", asset, _sw_e)
         _proofs.sort(key=lambda p: (-p["tests"], str(p["first_ts"])))
         if len(_proofs) >= 2 and self._brc_log_ts.get((asset, "PROOF-SET")) != _bar_ts:
             self._brc_log_ts[(asset, "PROOF-SET")] = _bar_ts
@@ -3647,6 +3720,75 @@ class CompositeStateBuilder:
                             p["kind"], p["dir"], p["ref"], p["tests"], p["fields"]["brc_age"])
                             for p in _proofs))
         return _head_out, _proofs
+
+    def _b10_spent_refs(self, asset):
+        """B10 A3: (side, H) of every proof already burned by a live trade, read
+        from main.py's used-proofs ledger. Re-read only when the file changes."""
+        import json as _json_b10
+        from src.utils.instance_paths import suffixed_path as _sp_b10
+        _path = _sp_b10("logs/used_proofs.json")
+        try:
+            _mt = os.path.getmtime(_path)
+        except OSError:
+            return []
+        if getattr(self, "_b10_spent_mt", None) != _mt:
+            _by_asset = {}
+            try:
+                with open(_path, encoding="utf-8") as _f:
+                    _raw = _json_b10.load(_f) or {}
+                for _k, _v in _raw.items():
+                    try:
+                        _a, _side, _ref = str(_k).split("|")
+                        if isinstance(_v, dict) and _v.get("burned"):
+                            _by_asset.setdefault(_a, []).append((_side, float(_ref)))
+                    except Exception:
+                        continue
+            except Exception as _e:
+                logger.warning("[PROOF-SWEEP] used-proofs ledger unreadable (%s)", _e)
+            self._b10_spent, self._b10_spent_mt = _by_asset, _mt
+        return (getattr(self, "_b10_spent", {}) or {}).get(asset, [])
+
+    def _b10_deploy_hygiene(self, pcfg):
+        """B10 A4 (Desire, 23 Sep): after a restart, a proof confirmed long before
+        it may not trade on whatever rules the restart brought in. Both 22 Sep
+        live losses were that: BTC's proof confirmed 21 Sep 22:03 and USOIL's
+        10:05, both refused for hours by the old bar, both released within two
+        hours of B7 lowering it. A proof confirmed more than
+        deploy_hygiene_max_age_h hours before this restart goes back to stage 2
+        -- H2 stays frozen -- and needs a fresh close-through. A proof with no
+        confirmation time (confirmed before B10) counts as old. Runs BEFORE the
+        B8-1 catch-up, so a proof completed while the bot was off is still
+        confirmed fresh by the catch-up, as ruled on 22 Sep."""
+        _saved_ts, _bars_passed = self._b10_hygiene_ref
+        self._b10_hygiene_ref = None
+        _lim = float((pcfg or {}).get("deploy_hygiene_max_age_h", 6))
+        _demoted = []
+        try:
+            for _k, _rec in list((getattr(self, "_ppl", {}) or {}).items()):
+                if not (isinstance(_k, tuple) and len(_k) == 4) or not isinstance(_rec, dict):
+                    continue
+                if _rec.get("count") != 3:
+                    continue
+                _age_h = None
+                try:
+                    if _rec.get("proof_ts") is not None and _saved_ts is not None:
+                        _age_h = ((pd.Timestamp(_saved_ts) - pd.Timestamp(_rec["proof_ts"])).total_seconds() / 3600.0
+                                  + float(_bars_passed or 0))
+                except Exception:
+                    _age_h = None
+                if _age_h is not None and _age_h <= _lim:
+                    continue
+                _rec["count"] = 2
+                _rec["first_retest_ts"] = _rec.get("last_tsB") or _rec.get("first_retest_ts")
+                _rec.pop("proof_dist_atr", None)
+                (getattr(self, "_brc_memory", {}) or {}).pop(_k, None)
+                _demoted.append("%s %+d H=%.5g age=%s" % (_k[1], int(_k[2]), float(_k[3]),
+                                                        ("%.0fh" % _age_h) if _age_h is not None else "pre-B10"))
+        except Exception as _e:
+            logger.warning("[DEPLOY-HYGIENE] %s: pass failed (%s) -- proofs left as restored", self.asset_type, _e)
+        logger.info("[DEPLOY-HYGIENE] %s: %d old proof(s) sent back to stage 2 -- each needs a fresh "
+                    "close-through (limit %.0fh)%s", self.asset_type, len(_demoted), _lim,
+                    (": " + "; ".join(_demoted)) if _demoted else "")
 
     def _ppl_spread(self, asset, price):
         """PPL: spread in PRICE units — observed median when n>=5, else the friction map."""
