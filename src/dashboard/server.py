@@ -951,17 +951,57 @@ def get_market_scanner():
     market with its live setups (stage, direction, R2/R1, distance to the
     next stage), written by main.py every cycle to logs/scanner_state.json
     (same cross-process file-dump pattern as /api/livermore/<asset>).
+
+    Also attaches each market's most recent funnel decisions (logs/funnel/,
+    same file FunnelLogger.record() writes and /api/funnel reads) -- the
+    routine per-cycle "no_raw_signal" hold is skipped in favour of whatever
+    is actually informative (a block, a proof reuse, an execution), falling
+    back to it only when nothing else exists for that market yet.
     """
+    import glob as _glob
+
     try:
         scan_path = os.path.join(project_root, "logs", "scanner_state.json")
         if not os.path.exists(scan_path):
             return jsonify({"available": False, "markets": {}})
         with open(scan_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        markets = data.get("markets", {})
+
+        recent_by_asset = {a: [] for a in markets}
+        try:
+            funnel_dir = os.path.join(project_root, "logs", "funnel")
+            files = sorted(_glob.glob(os.path.join(funnel_dir, "funnel_*.jsonl")))[-2:]
+            for fp in files:
+                with open(fp, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
+                        a = r.get("asset")
+                        if a in recent_by_asset:
+                            recent_by_asset[a].append(r)
+            for a, rows in recent_by_asset.items():
+                informative = [r for r in rows if r.get("stage") != "no_raw_signal"]
+                pool = informative if informative else rows
+                recent_by_asset[a] = pool[-5:][::-1]
+        except Exception as _rfe:
+            logger.debug(f"Scanner recent-decisions read failed: {_rfe}")
+
+        for a, m in markets.items():
+            m["recent"] = [
+                {"ts": r.get("ts"), "stage": r.get("stage"), "reasoning": r.get("reasoning")}
+                for r in recent_by_asset.get(a, [])
+            ]
+
         return jsonify({
             "available": True,
             "updated_at": data.get("updated_at"),
-            "markets": data.get("markets", {}),
+            "markets": markets,
         })
     except Exception as e:
         logger.error(f"Market scanner error: {e}")

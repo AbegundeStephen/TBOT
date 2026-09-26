@@ -1338,6 +1338,12 @@
                     <span class="shadow-title" style="color:var(--accent);">🔎 Market Scanner</span>
                     <span class="shadow-meta" id="scanner-meta">—</span>
                 </div>
+                <div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap;">
+                    <button class="mode-btn active" data-scanfilter="all" onclick="setScannerFilter('all')">All <span id="scan-count-all">0</span></button>
+                    <button class="mode-btn" data-scanfilter="near" onclick="setScannerFilter('near')">Near a signal <span id="scan-count-near">0</span></button>
+                    <button class="mode-btn" data-scanfilter="trade" onclick="setScannerFilter('trade')">In a trade <span id="scan-count-trade">0</span></button>
+                    <button class="mode-btn" data-scanfilter="blocked" onclick="setScannerFilter('blocked')">Blocked <span id="scan-count-blocked">0</span></button>
+                </div>
                 <div id="scanner-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
@@ -3230,6 +3236,9 @@ document.addEventListener('DOMContentLoaded', () => {
 // ────────────────────────────────────────────────────────────
 const SCANNER_STAGE_LABEL = {0: 'waiting for the break', 1: 'waiting for the retest', 2: 'waiting for the trigger'};
 const SCANNER_NEXT_LABEL  = {break: 'to break', retest: 'to retest', trigger: 'to trigger'};
+const SCANNER_NEAR_ATR = 1.0;   // "near a signal" threshold: within 1 ATR of its next stage
+let scannerFilter = 'all';
+let scannerMarkets = null;   // last-fetched data, so filter clicks don't refetch
 
 async function loadScannerSection() {
     const el = document.getElementById('scanner-content');
@@ -3238,13 +3247,21 @@ async function loadScannerSection() {
         document.getElementById('scanner-meta').textContent =
             d.available && d.updated_at ? ('Updated ' + timeAgo(new Date(d.updated_at).getTime())) : 'no data yet';
         if (!d.available || !Object.keys(d.markets || {}).length) {
+            scannerMarkets = null;
             el.innerHTML = emptyState('🔎', 'No scanner data yet — appears once the bot has run a post-B11-NS cycle');
             return;
         }
-        renderScanner(d.markets);
+        scannerMarkets = d.markets;
+        renderScanner();
     } catch (e) {
         el.innerHTML = err(e);
     }
+}
+
+function setScannerFilter(f) {
+    scannerFilter = f;
+    document.querySelectorAll('[data-scanfilter]').forEach(b => b.classList.toggle('active', b.dataset.scanfilter === f));
+    if (scannerMarkets) renderScanner();
 }
 
 function scannerFmtNum(v) {
@@ -3252,10 +3269,48 @@ function scannerFmtNum(v) {
     return v.toFixed(5).replace(/0+$/, '').replace(/\.$/, '');
 }
 
-function renderScanner(markets) {
+// A market is "blocked" when its most recent decision is neither a routine
+// hold (no proof yet) nor an execution -- i.e. something actually stopped it
+// (a gate, a paused market, a reused proof).
+function scannerIsBlocked(m) {
+    if (m.paused) return true;
+    const top = (m.recent || [])[0];
+    return !!top && top.stage !== 'no_raw_signal' && top.stage !== 'executed';
+}
+
+function scannerIsNear(m) {
+    return (m.setups || []).some(s => typeof s.dist_atr === 'number' && s.dist_atr <= SCANNER_NEAR_ATR);
+}
+
+function renderScanner() {
     const el = document.getElementById('scanner-content');
+    const entries = Object.entries(scannerMarkets).sort((a, b) => a[0].localeCompare(b[0]));
+
+    const counts = {all: entries.length, near: 0, trade: 0, blocked: 0};
+    for (const [, m] of entries) {
+        if (scannerIsNear(m)) counts.near++;
+        if (m.has_position) counts.trade++;
+        if (scannerIsBlocked(m)) counts.blocked++;
+    }
+    document.getElementById('scan-count-all').textContent = counts.all;
+    document.getElementById('scan-count-near').textContent = counts.near;
+    document.getElementById('scan-count-trade').textContent = counts.trade;
+    document.getElementById('scan-count-blocked').textContent = counts.blocked;
+
+    const visible = entries.filter(([, m]) => {
+        if (scannerFilter === 'near') return scannerIsNear(m);
+        if (scannerFilter === 'trade') return m.has_position;
+        if (scannerFilter === 'blocked') return scannerIsBlocked(m);
+        return true;
+    });
+
+    if (!visible.length) {
+        el.innerHTML = emptyState('🔎', 'No markets match this filter right now');
+        return;
+    }
+
     let h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;padding:14px;">';
-    for (const [asset, m] of Object.entries(markets).sort((a, b) => a[0].localeCompare(b[0]))) {
+    for (const [asset, m] of visible) {
         const setups = (m.setups || []).slice().sort((a, b) => b.stage - a.stage);
         h += '<div class="card" style="padding:14px;">';
         h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -3285,6 +3340,17 @@ function renderScanner(markets) {
                         <div style="font-size:11px;color:var(--muted);margin-top:4px;">R2 ${scannerFmtNum(s.r2)} · R1 ${scannerFmtNum(s.r1)}</div>
                       </div>`;
             }
+        }
+        if ((m.recent || []).length) {
+            h += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
+                 '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Recent decisions</div>';
+            for (const r of m.recent) {
+                const when = r.ts ? timeAgo(new Date(r.ts).getTime()) : '—';
+                h += `<div style="font-size:11px;color:var(--muted);font-family:var(--font-mono);padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                        ${when} — ${esc(r.reasoning || r.stage || '—')}
+                      </div>`;
+            }
+            h += '</div>';
         }
         h += '</div>';
     }
