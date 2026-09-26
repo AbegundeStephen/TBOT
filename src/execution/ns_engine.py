@@ -276,7 +276,9 @@ class NSEngine:
             logger.info("[DEPLOY-HYGIENE] %s: new engine caught up %d candle(s); %d setup(s) live; "
                         "%d trigger(s) found while catching up were logged, not traded",
                         self.asset, out["processed"], len(live), len(out["missed"]))
-        out["setups"] = [self._public(s) for s in live]
+        _a1l = float(a1[-1]) if a1[-1] == a1[-1] else None
+        _a4l = float(a4[-1]) if a4[-1] == a4[-1] else None
+        out["setups"] = [self._public(s, float(c1[-1]), _a1l, float(c4[-1]), _a4l) for s in live]
         out["head"] = self._head_fields(live, t1[-1])
         out["ladder"] = self._ladder(st, t1[-1], cs)
         out["brains"] = self._brains(cs, float(c1[-1]), float(a1[-1]) if a1[-1] == a1[-1] else None,
@@ -458,8 +460,26 @@ class NSEngine:
 
     # -- outputs for the state, charts and dashboard --------------------------------------
     @staticmethod
-    def _public(s):
-        return {k: (str(v) if isinstance(v, pd.Timestamp) else v) for k, v in s.items()}
+    def _public(s, c1_last=None, a1_last=None, c4_last=None, a4_last=None):
+        """Dashboard/scanner note: dist_atr/next_stage are display-only estimates
+        computed from the last CLOSED candle -- they read the same numbers the
+        [COUNT-1-CHECK]/[COUNT-2]/[COUNT-3-CHECK] log lines use, but never feed
+        back into any trading decision (setup birth/stage/death logic above is
+        untouched)."""
+        d = {k: (str(v) if isinstance(v, pd.Timestamp) else v) for k, v in s.items()}
+        try:
+            if s["stage"] == 0 and c4_last is not None and a4_last:
+                d["dist_atr"] = round(s["d"] * (s["r2"] - c4_last) / a4_last, 2)
+                d["next_stage"] = "break"
+            elif s["stage"] == 1 and c1_last is not None and a1_last:
+                d["dist_atr"] = round(s["d"] * (c1_last - s["edge"]) / a1_last, 2)
+                d["next_stage"] = "retest"
+            elif s["stage"] == 2 and c1_last is not None and a1_last:
+                d["dist_atr"] = round(s["d"] * (s["h2"] - c1_last) / a1_last, 2)
+                d["next_stage"] = "trigger"
+        except Exception:
+            pass
+        return d
 
     @staticmethod
     def _head_fields(live, now):

@@ -4571,6 +4571,35 @@ class TradingBot:
             except Exception as _lve:
                 logger.debug(f"[LIVERMORE-DASH] State dump failed: {_lve}")
 
+            # B11-NS: market-scanner snapshot for the dashboard's "what every
+            # market sees right now" panel -- one row per NS-configured market
+            # with its live setups (ns_engine.py already attaches dist_atr /
+            # next_stage to each, display-only, no effect on trading decisions).
+            try:
+                _ns_mk_cfg = (self.config.get("phase_config", {}) or {}).get("ns_markets", {}) or {}
+                _scan_snapshot = {}
+                for _scan_asset, _mk_cfg in _ns_mk_cfg.items():
+                    _scan_cs = (self._latest_composite_state or {}).get(_scan_asset)
+                    _scan_setups = (_scan_cs.get("ns_setups") or []) if isinstance(_scan_cs, dict) else []
+                    _scan_snapshot[_scan_asset] = {
+                        "entry": _mk_cfg.get("entry"), "target_atr": _mk_cfg.get("target_atr"),
+                        "exit": _mk_cfg.get("exit"), "setups": _scan_setups,
+                        "paused": self._ns_market_paused(_scan_asset),
+                        "has_position": any(getattr(_p, "asset", None) == _scan_asset
+                                            for _p in self.portfolio_manager.positions.values()),
+                    }
+                _scan_path = _os.path.join(
+                    _os.path.dirname(_os.path.abspath(__file__)),
+                    "logs", "scanner_state.json"
+                )
+                with open(_scan_path, "w", encoding="utf-8") as _scan_f:
+                    _json.dump(
+                        {"markets": _scan_snapshot, "updated_at": datetime.now(timezone.utc).isoformat()},
+                        _scan_f,
+                    )
+            except Exception as _scane:
+                logger.debug(f"[SCANNER-DASH] State dump failed: {_scane}")
+
             # ✨ NEW: Update positions with OHLC data for VTM
             try:
                 ohlc_data_dict = {}

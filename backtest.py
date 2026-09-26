@@ -1079,7 +1079,7 @@ class MLStrategy(bt.Strategy):
             # ── Entry logic ──────────────────────────────────────────────────
             if not self.position:
                 if signal in (1, -1):
-                    size = self._calculate_position_size()
+                    size = self._calculate_position_size(signal, _cs_dict)
                     if size > 0:
                         side_str = "long" if signal == 1 else "short"
                         self._trade_side = side_str
@@ -1147,12 +1147,27 @@ class MLStrategy(bt.Strategy):
         except Exception as e:
             logger.error(f"❌ Error in next(): {e}", exc_info=True)
 
-    def _calculate_position_size(self) -> float:
+    def _calculate_position_size(self, signal: int = None, cs_dict: dict = None) -> float:
         current_price = self.data.close[0]
         equity        = self.broker.getvalue()
         cash          = self.broker.getcash()
         atr_value     = self.atr[0]
         stop_distance = atr_value * self._atr_multiplier
+
+        # B11-NS: size on the tested stop (R2 - 0.3 moves), not the ATR guess --
+        # mirrors mt5_handler.py's [NS-SIZE] fix. Without this, backtest risk-per-trade
+        # silently diverges from what the live bot actually risks on NS-driven entries.
+        try:
+            _cs_sz = cs_dict or {}
+            if signal in (1, -1) and _cs_sz.get("ns_exit") and _cs_sz.get("ns_r2") and _cs_sz.get("ns_atr1"):
+                from src.execution.ns_engine import ns_levels as _ns_levels_sz
+                _st_sz, _ = _ns_levels_sz(signal, float(current_price), float(_cs_sz["ns_r2"]),
+                                          float(_cs_sz["ns_atr1"]), float(self._risk_config.get("min_sl_pct", 0.0) or 0.0), None)
+                if _st_sz is not None:
+                    stop_distance = abs(float(current_price) - float(_st_sz))
+        except Exception as _nsz_e:
+            logger.warning(f"[NS-SIZE] {self.asset_key}: fell back to the ATR stop for sizing ({_nsz_e})")
+
         stop_pct      = stop_distance / current_price if current_price > 0 else 0.004
 
         risk_amount    = equity * self.params.risk_per_trade

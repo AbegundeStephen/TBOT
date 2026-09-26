@@ -944,6 +944,30 @@ def get_livermore_state(asset):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/scanner")
+def get_market_scanner():
+    """
+    Market scanner: what every NS-engine market sees right now -- one row per
+    market with its live setups (stage, direction, R2/R1, distance to the
+    next stage), written by main.py every cycle to logs/scanner_state.json
+    (same cross-process file-dump pattern as /api/livermore/<asset>).
+    """
+    try:
+        scan_path = os.path.join(project_root, "logs", "scanner_state.json")
+        if not os.path.exists(scan_path):
+            return jsonify({"available": False, "markets": {}})
+        with open(scan_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return jsonify({
+            "available": True,
+            "updated_at": data.get("updated_at"),
+            "markets": data.get("markets", {}),
+        })
+    except Exception as e:
+        logger.error(f"Market scanner error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/chart/<asset>")
 def get_chart_image(asset):
     """
