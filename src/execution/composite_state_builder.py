@@ -127,6 +127,8 @@ class CompositeStateBuilder:
         # ── PPL v1 stores, keyed (asset, kind) so a churned-and-reborn setup at
         # the same H keeps its counts.
         self._ppl = {}
+        self._ns_state = {}        # B11-NS: the new engine's memory (saved with the other stores)
+        self._ns_engine = None     # B11-NS: built on first use (not saved)
         self._atr4_cache = {}
         self._gear_cache = None
         self._struct4h = {}
@@ -140,7 +142,7 @@ class CompositeStateBuilder:
             "_livermore_last_1h_ts", "_brc_log_ts",
             "_squeeze_was_active", "_spread_history",
             "_ref_h_anchor", "_ref_state_last", "_ref_dead_pending", "_retest_failed_pending",
-            "_ppl", "_atr4_cache", "_gear_cache", "_struct4h",
+            "_ppl", "_atr4_cache", "_gear_cache", "_struct4h", "_ns_state",
         )
         logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
@@ -1477,7 +1479,9 @@ class CompositeStateBuilder:
         # change per bar maps to 45 degrees. r2 is carried alongside because
         # a steep angle on a poor fit is noise, not a trend -- any future
         # rule must read both or neither.
-        def _angle(_series, _period=50):
+        def _angle(_series, _period=None):
+            # B11: trend_angle_period was in config but never read -- now it is (default 50).
+            _period = int(_period or (getattr(state, "phase_config", {}) or {}).get("trend_angle_period", 50) or 50)
             try:
                 import numpy as _np
                 if _series is None or len(_series) < _period:
@@ -1929,8 +1933,12 @@ class CompositeStateBuilder:
                 return _q[0] if _q else None
 
             if not _already_processed:
-                _cur = _process_lane(self._active_setup, _bos_candidate)
-                _cur_mr = _process_lane(self._active_setup_mr, _choch_candidate)
+                # B11-NS: the old two-lane births (1H BOS/CHoCH on the old ladder) are retired.
+                # The new engine owns every setup. Emptying both lanes also idles the old proof
+                # block further down (it only runs for a live old setup).
+                self._active_setup[_asset] = []
+                self._active_setup_mr[_asset] = []
+                _cur = _cur_mr = None
                 if _candle_ts is not None:
                     self._traj_last_processed_ts[_asset] = _candle_ts
             else:
@@ -2236,6 +2244,33 @@ class CompositeStateBuilder:
                         pass   # B6-1: per-proof memory is swept inside _ppl_evaluate_all
         except Exception as _brc_err:
             logger.warning("[BRC] compute error (non-blocking): %s", _brc_err)
+
+        # -- B11-NS: the new proof engine (tested rules; ns_engine.py) --------------------------
+        try:
+            from src.execution.ns_engine import NSEngine
+            _pcfg_ns = (getattr(state, "phase_config", {}) or {})
+            if getattr(self, "_ns_engine", None) is None:
+                self._ns_engine = NSEngine(self.asset_type)
+            _res_ns = self._ns_engine.update(self._ns_state.get(self.asset_type), df, df_4h, _pcfg_ns, state)
+            self._ns_state[self.asset_type] = _res_ns["state"]
+            state.brc_gear = "%s/%s" % self._ppl_gear(_pcfg_ns)   # keeps the [GEAR] alarm fed
+            state.ns_ladder = _res_ns["ladder"]
+            state.ns_setups = _res_ns["setups"]
+            state.ns_brains = _res_ns["brains"]
+            state.proofs = _res_ns["proofs"]
+            if _res_ns["head"]:
+                for _f, _v in _res_ns["head"].items():
+                    setattr(state, _f, _v)
+            if _res_ns["proofs"]:
+                _p0 = _res_ns["proofs"][0]
+                for _f, _v in _p0["fields"].items():
+                    setattr(state, _f, _v)
+                logger.info("[BRC] %s: CONFIRMED %s dir=%+d ref=%.5g close=%.5g age=0 bar(s) h2=%s tier=%s "
+                            "dist=%s depth=%s gear=%s", self.asset_type, _p0["kind"], _p0["dir"], _p0["ref"],
+                            _p0["fields"]["ns_close"], _p0["fields"]["brc_h2"], _p0["fields"]["brc_tier"],
+                            _p0["fields"]["brc_proof_dist_atr"], _p0["fields"]["brc_retest_depth"], state.brc_gear)
+        except Exception as _ns_err:
+            logger.error("[NS] %s: engine error -- no proofs this cycle: %s", self.asset_type, _ns_err, exc_info=True)
 
         state.sanitise()
         return state

@@ -336,6 +336,7 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
         self.application.add_handler(CommandHandler("overrides", self.cmd_overrides))
         self.application.add_handler(CommandHandler("chart", self.cmd_chart))
+        self.application.add_handler(CommandHandler("resume", self.cmd_resume))   # B11-NS
         self.application.add_handler(CommandHandler("lastdecision", self.cmd_last_decision))
         self.application.add_handler(CommandHandler("modedetails", self.cmd_mode_details))
         self.application.add_handler(CommandHandler("preset_history", self.cmd_preset_history))
@@ -3133,6 +3134,27 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"Test viz error: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """B11-NS: /resume BTC -- switch a paused market back on (its running total restarts at 0R)."""
+        try:
+            if update.effective_user.id not in self.admin_ids:
+                await update.message.reply_text("Admin only")
+                return
+            _a = (context.args[0] if context.args else "BTC").upper()
+            _data = self.trading_bot._ns_pause_load()
+            _rec = _data.get(_a) or {}
+            if not _rec.get("paused"):
+                await update.message.reply_text("%s is not paused." % _a)
+                return
+            from datetime import datetime as _dt
+            _data[_a] = {"total_r": 0.0, "trades": 0, "paused": False,
+                         "resumed_at": _dt.now().isoformat(timespec="seconds"),
+                         "last_pause": {"total_r": _rec.get("total_r"), "paused_at": _rec.get("paused_at")}}
+            self.trading_bot._ns_pause_save(_data)
+            await update.message.reply_text("%s switched back on -- real trades resume; its running total restarts at 0R." % _a)
+        except Exception as _e:
+            await update.message.reply_text("resume failed: %s" % _e)
 
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """

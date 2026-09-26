@@ -1,89 +1,748 @@
 {
   "version": 1,
   "promises": [
-    { "id": "vtm.loop_alive",       "type": "cadence", "tag": "[VTM-LOOP] alive", "min": 1, "window_min": 3, "enabled": true, "note": "B4 W3 -- if this fails the VTM management thread is gone or hung; treat as stop-everything" },
-    { "id": "vtm.sync_running",     "type": "cadence", "tag": "[SYNC] MT5:",      "min": 1, "window_min": 3, "enabled": true, "when": "positions_open", "note": "B4 W3 -- deviation from the doc's literal promise: gated on positions_open, since [SYNC] MT5: only ever logs while >=1 position is open and would otherwise FAIL every window while flat" },
-    { "id": "vtm.no_stall",         "type": "cadence", "tag": "[VTM-LOOP] STALLED", "max": 0, "window_min": 1440, "enabled": true, "note": "B5-4c -- zero STALLED lines per day. This is the line that would have saved twenty hours on 16 Sep." },
-    { "id": "clock.startup",        "type": "cadence", "tag": "[CLOCK]",           "min": 1,  "window_min": 43200, "note": "once per process" },
-    { "id": "gear.read",            "type": "cadence", "tag": "[GEAR]",            "min": 1,  "window_min": 120, "note": "B6-8: [GEAR] now prints hourly per builder; the 1440 window was checked against a one-off line and failed daily by design" },
-    { "id": "atr4.per_bar",         "type": "cadence", "tag": "[ATR4]",            "min": 1,  "window_min": 300,  "per_asset": true, "when": "market_open" },
-    { "id": "atr4.nonzero",          "type": "non_null", "tag": "[ATR4]", "extract": "atr4=", "window_min": 300, "enabled": true, "note": "B8-2: was a field check the heartbeat could not read (it always passed); now reads the newest [ATR4] line" },
-    { "id": "struct1h.per_candle",  "type": "cadence", "tag": "[S2-STRUCTURE]",    "min": 1,  "window_min": 75,   "per_asset": true, "when": "market_open" },
-    { "id": "lifecycle.enter",      "type": "cadence", "tag": "[LIFECYCLE-ENTER]", "min": 1,  "window_min": 75,   "per_asset": true, "when": "market_open" },
-    { "id": "lifecycle.phase",      "type": "cadence", "tag": "[LIFECYCLE]",       "min": 1,  "window_min": 75,   "per_asset": true, "when": "market_open" },
-    { "id": "reftier.on_birth",     "type": "cadence", "tag": "[REF-TIER]",        "min": 1,  "window_min": 1440 },
-    { "id": "r1origin.on_birth",    "type": "cadence", "tag": "[R1-ORIGIN]",       "min": 1,  "window_min": 1440 },
-    { "id": "count1.check",          "type": "follows", "trigger": "[SETUP-BORN]", "tag": "[COUNT-1-CHECK]", "within_min": 75, "window_min": 240, "per_asset": true, "enabled": true, "note": "B8-2: a new setup gets its break check within one candle" },
-    { "id": "count3.check",          "type": "follows", "trigger": "[COUNT-2]", "tag": "[COUNT-3-CHECK]", "within_min": 75, "window_min": 240, "per_asset": true, "enabled": true, "note": "B8-2: a setup at stage 2 gets its close-through check within one candle" },
-    { "id": "kill.once_per_bar",    "type": "cadence", "tag": "[KILL-R1]",         "max": 1,  "window_min": 240,  "per_asset": true, "note": "max, not min" },
-    { "id": "death.reasons",        "type": "set",     "tag": "[MEASURE-8.4-DEATH]", "extract": "reason=", "allowed": ["REF_INVALIDATED","LSM_STATE_FLIP","OPPOSING_BOS","OPPOSING_CHOCH"] },
-    { "id": "death.no_1h_kills",    "type": "set",     "tag": "[MEASURE-8.4-DEATH]", "extract": "reason=", "forbidden": ["FAILED_BREAKOUT","RETEST_FAILED","REF_ROLE_FLIPPED"] },
-    { "id": "noproof.per_cycle",    "type": "cadence", "tag": "[COUNCIL-ENTRY]",   "min": 1,  "window_min": 15,   "per_asset": true, "when": "market_open", "note": "B7-19: was [NO-PROOF], which an asset with a live proof never prints -- false FAILs on every asset with proofs" },
-    { "id": "brc.confirmed_fields",  "type": "non_null", "tag": "[BRC]", "extract": ["h2=", "tier=", "gear="], "window_min": 1440, "enabled": true, "note": "B8-2: on -- the check only needs a [BRC] line to look at" },
-    { "id": "stoph.on_retest_entry", "type": "follows", "trigger": "[TIER-STOP] .* tier=RETEST", "tag": "[STOP-H]", "within_min": 5, "window_min": 1440, "per_asset": true, "enabled": true, "note": "B8-2: a retest entry gets its level-based stop" },
-    { "id": "gate.trace",            "type": "follows", "trigger": "[COUNCIL-CONVENED]", "tag": "[GATE-ID-TRACE]", "within_min": 60, "window_min": 180, "per_asset": true, "enabled": true, "note": "B8-2: council sittings record which gate decided" },
-    { "id": "vol.telemetry",         "type": "follows", "trigger": "[COUNCIL-GATES]", "tag": "[VOL-TELEMETRY]", "within_min": 60, "window_min": 180, "per_asset": true, "enabled": true, "note": "B8-2: council sittings record the volume reading" },
-    { "id": "squeeze.visible",      "type": "cadence", "tag": "[SQUEEZE]",         "min": 1,  "window_min": 10080, "note": "one per week is enough to prove wiring" },
-    { "id": "reload.keys",          "type": "non_null","tag": "[RELOAD-STATE]",    "extract": "carried=", "min_value": 22 },
-    { "id": "persist.saved",        "type": "cadence", "tag": "[PERSIST] .*: saved .* stores","min": 1,  "window_min": 10,   "note": "B4 W6 -- old tag '[PERSIST] .* saved' also matched the STAGED-restore line ('staged saved stores, pending bar-count confirmation'), so the promise could clear itself falsely on the exact failure it exists to catch. Verified against every [PERSIST] line in composite_state_builder.py: only the real save line ('%s: saved %d stores') contains the literal ': saved ' immediately followed later by ' stores' -- the staged-restore, no-saved-stores, refused-restore and restored-success lines all fail at least one of those two literal fragments." },
-    { "id": "persist.restored",      "type": "follows", "trigger": "[PERSIST] .* staged saved stores", "tag": "[PERSIST] .* restored", "within_min": 75, "window_min": 1440, "per_asset": true, "enabled": true, "note": "B8-2: saved setups really come back after a restart or rebuild" },
-    { "id": "mt5.fresh_4h",         "type": "cadence", "tag": "Fetching .* H4",    "min": 1,  "window_min": 60,   "per_asset": true, "when": "market_open" },
-    { "id": "mt5.tick_health",      "type": "cadence", "tag": "No fresh tick data","max": 60, "window_min": 60,   "per_asset": true, "note": "max — a symbol choking", "when": "market_open" },
-    { "id": "lanec.opens",          "type": "cadence", "tag": "[SHADOW] Opened",   "min": 1,  "window_min": 1440 },
-    { "id": "lanec.closes_logged",  "type": "cadence", "tag": "[SHADOW] Closed",   "min": 1,  "window_min": 2880 },
-    { "id": "lanec.daily_reset",    "type": "cadence", "tag": "[LANE-C] new day",  "min": 1,  "window_min": 1500 },
-    { "id": "episode.written",      "type": "cadence", "tag": "[EPISODE] .* closed and written", "min": 1, "window_min": 2880 },
-    { "id": "episode.has_id",       "type": "non_null","ledger_field": "episode_id" },
-    { "id": "episode.schema",       "type": "set",     "ledger_field": "schema_version", "allowed": [1, 2], "missing_as": 1 },
-    { "id": "state.saved",          "type": "cadence", "tag": "[STATE] System state saved", "min": 1, "window_min": 5 },
-    { "id": "funnel.daily",         "type": "cadence", "tag": "[FUNNEL]",          "min": 1,  "window_min": 1440, "per_asset": true, "when": "market_open" },
-    { "id": "validator.report",     "type": "cadence", "tag": "[VALIDATOR]",       "min": 1,  "window_min": 720 },
-    { "id": "config.ema_key",       "type": "non_null","config_path": "assets.*.risk.use_ema_structure" },
-    { "id": "config.allowance_key", "type": "non_null","config_path": "assets.*.risk.structural_stop_allowance_atr" },
-    { "id": "config.gear_file",     "type": "non_null","file": "data/ppl_gear.json" },
-    { "id": "traceback.none",       "type": "cadence", "tag": "Traceback",         "max": 0,  "window_min": 60,   "exclude": "telegram" },
-    { "id": "ppl.no_refusals",      "type": "cadence", "tag": "REFUSED this cycle","max": 0,  "window_min": 60 },
-    { "id": "council.sits_on_proof", "type": "follows", "trigger": "[PROOF-NEW]", "tag": "[COUNCIL-CP2]", "within_min": 30, "window_min": 180, "per_asset": true, "enabled": true, "note": "B8-2: the council sits on every proof" },
-    { "id": "market.status_logged", "type": "cadence", "tag": "[MARKET]",          "min": 1, "window_min": 10080 },
-    { "id": "vtm.pause_on_close",   "type": "cadence", "tag": "[VTM] .* management paused", "min": 1, "window_min": 10080, "note": "at least one closure per week" },
-    { "id": "persist.bars_metric",   "type": "non_null", "tag": "[PERSIST] .* restored", "extract": "bars passed=", "window_min": 1440, "enabled": true, "note": "B8-2: on -- every restore says how many candles it missed" },
-    { "id": "instanceB.alive",      "type": "cadence", "tag": "[GEAR] count1=4H count3=4H", "min": 1, "window_min": 1440, "file": "logs/trading_bot_B.log", "enabled": false, "note": "enable once instance B runs" },
-
-    { "id": "gate.log_vs_ledger",      "type": "log_vs_ledger", "tag": "Signal BLOCKED by", "window_min": 1440, "enabled": true, "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all." },
-
-    { "id": "b6.proof_council_cap",  "type": "cadence", "tag": "[PROOF-COUNCIL]",   "max": 300, "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard; the line only prints when an asset has 2+ proofs" },
-    { "id": "b6.proof_set_cap",      "type": "cadence", "tag": "[PROOF-SET]",       "max": 4,   "window_min": 60, "per_asset": true, "enabled": true, "note": "B6-1 -- at most once per 1H bar per asset" },
-    { "id": "b6.outscored_cap",      "type": "cadence", "tag": "[PROOF-OUTSCORED]", "max": 60,  "window_min": 60, "enabled": true, "note": "B6-2 -- runaway guard" },
-    { "id": "b6.proof_hold_cap",     "type": "cadence", "tag": "[PROOF-HOLD]",      "max": 600, "window_min": 60, "enabled": true, "note": "B6-2 runaway guard; B7-13 raised from 120 (lines now print once per candle anyway)" },
-    { "id": "b6.entry_window_cap",   "type": "cadence", "tag": "[ENTRY-WINDOW]",    "max": 200, "window_min": 60, "enabled": true, "note": "B6-3 -- prints each cycle a passing proof waits outside its window; runaway guard" },
-    { "id": "b6.persist_skip_cap",   "type": "cadence", "tag": "[PERSIST] .* save skipped", "max": 20, "window_min": 60, "enabled": true, "note": "B6-4 -- once per builder per pending restore" },
-    { "id": "b6.mt5_query_failed",   "type": "cadence", "tag": "[SYNC] .* positions query failed", "max": 10, "window_min": 60, "enabled": true, "note": "B6-6 -- more than 10 an hour = MT5 is not answering (19 Sep 06:35 outage pattern)" },
-    { "id": "b6.stale_restore",      "type": "cadence", "tag": "[SYNC] .* stale restored position dropped", "max": 3, "window_min": 1440, "enabled": true, "note": "B6-6 -- expected only right after a restart" },
-    { "id": "b6.save_after_close",   "type": "cadence", "tag": "[STATE] Save after close failed", "max": 0, "window_min": 1440, "enabled": true, "note": "B6-6 -- should never print" },
-    { "id": "b8.catchup_cap",        "type": "cadence", "tag": "[CATCH-UP]", "max": 60, "window_min": 60, "enabled": true, "note": "B8-1 -- runaway guard; one line per restore" },
-    { "id": "b8.presend_cap",        "type": "cadence", "tag": "[PRESEND]", "max": 200, "window_min": 60, "enabled": true, "note": "B8-10 -- runaway guard" },
-    { "id": "b8.switches_listed",    "type": "cadence", "tag": "[SWITCHES]", "max": 20, "window_min": 60, "enabled": true, "note": "B8-3 -- once per start" },
-    { "id": "b9.judge_dead", "type": "cadence", "tag": "[JUDGE-DEAD]", "max": 0, "window_min": 1440, "enabled": true, "note": "B9 S14: a silent judge lowers the bar -- it must be seen, not absorbed" },
-    { "id": "b10.proof_held", "type": "cadence", "tag": "[PROOF-HELD]", "max": 0, "window_min": 1440, "enabled": true, "note": "B10 C5: a confirmed proof refused for over an hour -- USOIL 22 Sep was held four hours in silence" },
-    { "id": "b10.proof_mismatch", "type": "cadence", "tag": "[PROOF-MISMATCH]", "max": 0, "window_min": 1440, "enabled": true, "note": "B10 B4: a stop anchored on a different proof than the one that traded" },
-    { "id": "b10.born_late", "type": "cadence", "tag": "[BORN-LATE]", "max": 0, "window_min": 1440, "enabled": true, "note": "B10 A2: flag only -- every late birth is seen; the entry gate decides" },
-    { "id": "b10.freshness_unmeasured", "type": "cadence", "tag": "[FRESHNESS] .* not measured", "max": 0, "window_min": 1440, "enabled": true, "note": "B10 B1: a live order the freshness gate could not measure" },
-    { "id": "b10.deploy_hygiene", "type": "follows", "trigger": "[PERSIST] .* stores (bars passed", "tag": "[DEPLOY-HYGIENE]", "within_min": 15, "window_min": 1440, "per_asset": true, "enabled": true, "note": "B10 A4: every real restore is followed by the hygiene pass" },
-    { "id": "b10.rr_net", "type": "follows", "trigger": "[FRESHNESS] .* within", "tag": "[RR-NET]", "within_min": 5, "window_min": 1440, "per_asset": true, "enabled": true, "note": "B10 B3: every order through the gate gets its after-cost R:R logged" },
-    { "id": "b10.sweep_ceiling", "type": "cadence", "tag": "[PROOF-SWEEP]", "max": 60, "window_min": 1440, "enabled": true, "note": "B10 A3: ceiling -- a flood would mean the sweep is fighting the builder" },
-    { "id": "b10.pause_ceiling", "type": "cadence", "tag": "[COUNT-2-PAUSE]", "max": 300, "window_min": 1440, "enabled": true, "note": "B10 A1: ceiling -- pauses are normal, a flood is not" },
-    { "id": "b10.tpcap_ceiling", "type": "cadence", "tag": "[TP-CAP]", "max": 60, "window_min": 1440, "enabled": true, "note": "B10 B2: ceiling" },
-    { "id": "b10.mood_ceiling", "type": "cadence", "tag": "[MOOD-AGAINST]", "max": 500, "window_min": 1440, "enabled": true, "note": "B10 C1: ceiling -- the tag is for the review" },
-    { "id": "b7.bar_cap",            "type": "cadence", "tag": "[BAR]",             "max": 900, "window_min": 60, "enabled": true, "note": "B7-8 -- runaway guard; prints when a bar changes or hourly" },
-    { "id": "b7.trial_size_cap",     "type": "cadence", "tag": "[TRIAL-SIZE]",      "max": 100, "window_min": 60, "enabled": true, "note": "B7-14/15 -- runaway guard" },
-    { "id": "b7.trial_cap",          "type": "cadence", "tag": "[TRIAL]",           "max": 100, "window_min": 60, "enabled": true, "note": "B7-14 -- runaway guard" },
-    { "id": "b7.save_after_entry",   "type": "cadence", "tag": "[STATE] Save after entry failed", "max": 0, "window_min": 1440, "enabled": true, "note": "B7-1 -- should never print" },
-    { "id": "b7.state_kept",         "type": "cadence", "tag": "[STATE] Kept state file", "max": 20, "window_min": 60, "enabled": true, "note": "B7-1 -- once per start" },
-    { "id": "b7.external_adopted",   "type": "cadence", "tag": "[SYNC] .* opened outside the bot", "max": 20, "window_min": 1440, "enabled": true, "note": "B7-2 -- hand trades taken into the book" },
-    { "id": "b7.external_streak",    "type": "cadence", "tag": "[STREAK] .* opened outside the bot", "max": 20, "window_min": 1440, "enabled": true, "note": "B7-2 -- hand trades kept out of the scorecards" },
-    { "id": "b8.p1_ledger_fresh",    "type": "file_fresh", "file": "logs/p1_refusals/p1_*.jsonl", "window_min": 1440, "enabled": true, "note": "B8-7 -- every break check is recorded; BTC trades daily so the file is always fresh" },
-    { "id": "b8.zero_pass_mark",     "type": "cadence", "tag": "second check reached the life-cycle step", "max": 0, "window_min": 1440, "enabled": true, "note": "B8-12 -- a council must never judge against a pass mark of 0" },
-    { "id": "replayer.runs",        "type": "file_fresh", "file": "logs/replayer_arms_*.json", "window_min": 11520, "enabled": true, "note": "B8-9: threshold met 22 Sep; the weekly run writes the arms files; 8-day window so a weekly run never looks late" },
-    { "id": "rl1.proposals_file",   "type": "file_fresh", "file": "logs/rl1_proposals.jsonl",  "window_min": 11520, "enabled": true, "note": "B8-9: the bandit stamps every run, so this proves it ran" }
+    {
+      "id": "vtm.loop_alive",
+      "type": "cadence",
+      "tag": "[VTM-LOOP] alive",
+      "min": 1,
+      "window_min": 3,
+      "enabled": true,
+      "note": "B4 W3 -- if this fails the VTM management thread is gone or hung; treat as stop-everything"
+    },
+    {
+      "id": "vtm.sync_running",
+      "type": "cadence",
+      "tag": "[SYNC] MT5:",
+      "min": 1,
+      "window_min": 3,
+      "enabled": true,
+      "when": "positions_open",
+      "note": "B4 W3 -- deviation from the doc's literal promise: gated on positions_open, since [SYNC] MT5: only ever logs while >=1 position is open and would otherwise FAIL every window while flat"
+    },
+    {
+      "id": "vtm.no_stall",
+      "type": "cadence",
+      "tag": "[VTM-LOOP] STALLED",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B5-4c -- zero STALLED lines per day. This is the line that would have saved twenty hours on 16 Sep."
+    },
+    {
+      "id": "clock.startup",
+      "type": "cadence",
+      "tag": "[CLOCK]",
+      "min": 1,
+      "window_min": 43200,
+      "note": "once per process"
+    },
+    {
+      "id": "gear.read",
+      "type": "cadence",
+      "tag": "[GEAR]",
+      "min": 1,
+      "window_min": 120,
+      "note": "B6-8: [GEAR] now prints hourly per builder; the 1440 window was checked against a one-off line and failed daily by design"
+    },
+    {
+      "id": "atr4.per_bar",
+      "type": "cadence",
+      "tag": "[ATR4]",
+      "min": 1,
+      "window_min": 300,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "atr4.nonzero",
+      "type": "non_null",
+      "tag": "[ATR4]",
+      "extract": "atr4=",
+      "window_min": 300,
+      "enabled": true,
+      "note": "B8-2: was a field check the heartbeat could not read (it always passed); now reads the newest [ATR4] line"
+    },
+    {
+      "id": "struct1h.per_candle",
+      "type": "cadence",
+      "tag": "[S2-STRUCTURE]",
+      "min": 1,
+      "window_min": 75,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "lifecycle.enter",
+      "type": "cadence",
+      "tag": "[LIFECYCLE-ENTER]",
+      "min": 1,
+      "window_min": 75,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "lifecycle.phase",
+      "type": "cadence",
+      "tag": "[LIFECYCLE]",
+      "min": 1,
+      "window_min": 75,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "reftier.on_birth",
+      "type": "cadence",
+      "tag": "[REF-TIER]",
+      "min": 1,
+      "window_min": 1440
+    },
+    {
+      "id": "r1origin.on_birth",
+      "type": "cadence",
+      "tag": "[R1-ORIGIN]",
+      "min": 1,
+      "window_min": 1440
+    },
+    {
+      "id": "count1.check",
+      "type": "follows",
+      "trigger": "[SETUP-BORN]",
+      "tag": "[COUNT-1-CHECK]",
+      "within_min": 255,
+      "window_min": 240,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B11-NS: on 4H/1H a new setup's first break check is the next 4H close"
+    },
+    {
+      "id": "count3.check",
+      "type": "follows",
+      "trigger": "[COUNT-2]",
+      "tag": "[COUNT-3-CHECK]",
+      "within_min": 75,
+      "window_min": 240,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: a setup at stage 2 gets its close-through check within one candle"
+    },
+    {
+      "id": "kill.once_per_bar",
+      "type": "cadence",
+      "tag": "[KILL-R1]",
+      "max": 1,
+      "window_min": 240,
+      "per_asset": true,
+      "note": "max, not min"
+    },
+    {
+      "id": "death.reasons",
+      "type": "set",
+      "tag": "[MEASURE-8.4-DEATH]",
+      "extract": "reason=",
+      "allowed": [
+        "LSM_STATE_FLIP",
+        "NS_DUPLICATE",
+        "NS_EXPIRED",
+        "OPPOSING_BOS",
+        "OPPOSING_CHOCH",
+        "REF_INVALIDATED"
+      ]
+    },
+    {
+      "id": "death.no_1h_kills",
+      "type": "set",
+      "tag": "[MEASURE-8.4-DEATH]",
+      "extract": "reason=",
+      "forbidden": [
+        "FAILED_BREAKOUT",
+        "RETEST_FAILED",
+        "REF_ROLE_FLIPPED"
+      ]
+    },
+    {
+      "id": "noproof.per_cycle",
+      "type": "cadence",
+      "tag": "[COUNCIL-ENTRY]",
+      "min": 1,
+      "window_min": 15,
+      "per_asset": true,
+      "when": "market_open",
+      "note": "B7-19: was [NO-PROOF], which an asset with a live proof never prints -- false FAILs on every asset with proofs"
+    },
+    {
+      "id": "brc.confirmed_fields",
+      "type": "non_null",
+      "tag": "[BRC]",
+      "extract": [
+        "h2=",
+        "tier=",
+        "gear="
+      ],
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B8-2: on -- the check only needs a [BRC] line to look at"
+    },
+    {
+      "id": "stoph.on_retest_entry",
+      "type": "follows",
+      "trigger": "[TIER-STOP] .* tier=RETEST",
+      "tag": "[STOP-H]",
+      "within_min": 5,
+      "window_min": 1440,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: a retest entry gets its level-based stop"
+    },
+    {
+      "id": "gate.trace",
+      "type": "follows",
+      "trigger": "[COUNCIL-CONVENED]",
+      "tag": "[GATE-ID-TRACE]",
+      "within_min": 60,
+      "window_min": 180,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: council sittings record which gate decided"
+    },
+    {
+      "id": "vol.telemetry",
+      "type": "follows",
+      "trigger": "[COUNCIL-GATES]",
+      "tag": "[VOL-TELEMETRY]",
+      "within_min": 60,
+      "window_min": 180,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: council sittings record the volume reading"
+    },
+    {
+      "id": "squeeze.visible",
+      "type": "cadence",
+      "tag": "[SQUEEZE]",
+      "min": 1,
+      "window_min": 10080,
+      "note": "one per week is enough to prove wiring"
+    },
+    {
+      "id": "reload.keys",
+      "type": "non_null",
+      "tag": "[RELOAD-STATE]",
+      "extract": "carried=",
+      "min_value": 22
+    },
+    {
+      "id": "persist.saved",
+      "type": "cadence",
+      "tag": "[PERSIST] .*: saved .* stores",
+      "min": 1,
+      "window_min": 10,
+      "note": "B4 W6 -- old tag '[PERSIST] .* saved' also matched the STAGED-restore line ('staged saved stores, pending bar-count confirmation'), so the promise could clear itself falsely on the exact failure it exists to catch. Verified against every [PERSIST] line in composite_state_builder.py: only the real save line ('%s: saved %d stores') contains the literal ': saved ' immediately followed later by ' stores' -- the staged-restore, no-saved-stores, refused-restore and restored-success lines all fail at least one of those two literal fragments."
+    },
+    {
+      "id": "persist.restored",
+      "type": "follows",
+      "trigger": "[PERSIST] .* staged saved stores",
+      "tag": "[PERSIST] .* restored",
+      "within_min": 75,
+      "window_min": 1440,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: saved setups really come back after a restart or rebuild"
+    },
+    {
+      "id": "mt5.fresh_4h",
+      "type": "cadence",
+      "tag": "Fetching .* H4",
+      "min": 1,
+      "window_min": 60,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "mt5.tick_health",
+      "type": "cadence",
+      "tag": "No fresh tick data",
+      "max": 60,
+      "window_min": 60,
+      "per_asset": true,
+      "note": "max \u2014 a symbol choking",
+      "when": "market_open"
+    },
+    {
+      "id": "lanec.opens",
+      "type": "cadence",
+      "tag": "[SHADOW] Opened",
+      "min": 1,
+      "window_min": 1440
+    },
+    {
+      "id": "lanec.closes_logged",
+      "type": "cadence",
+      "tag": "[SHADOW] Closed",
+      "min": 1,
+      "window_min": 2880
+    },
+    {
+      "id": "lanec.daily_reset",
+      "type": "cadence",
+      "tag": "[LANE-C] new day",
+      "min": 1,
+      "window_min": 1500
+    },
+    {
+      "id": "episode.written",
+      "type": "cadence",
+      "tag": "[EPISODE] .* closed and written",
+      "min": 1,
+      "window_min": 2880
+    },
+    {
+      "id": "episode.has_id",
+      "type": "non_null",
+      "ledger_field": "episode_id"
+    },
+    {
+      "id": "episode.schema",
+      "type": "set",
+      "ledger_field": "schema_version",
+      "allowed": [
+        1,
+        2
+      ],
+      "missing_as": 1
+    },
+    {
+      "id": "state.saved",
+      "type": "cadence",
+      "tag": "[STATE] System state saved",
+      "min": 1,
+      "window_min": 5
+    },
+    {
+      "id": "funnel.daily",
+      "type": "cadence",
+      "tag": "[FUNNEL]",
+      "min": 1,
+      "window_min": 1440,
+      "per_asset": true,
+      "when": "market_open"
+    },
+    {
+      "id": "validator.report",
+      "type": "cadence",
+      "tag": "[VALIDATOR]",
+      "min": 1,
+      "window_min": 720
+    },
+    {
+      "id": "config.ema_key",
+      "type": "non_null",
+      "config_path": "assets.*.risk.use_ema_structure"
+    },
+    {
+      "id": "config.allowance_key",
+      "type": "non_null",
+      "config_path": "assets.*.risk.structural_stop_allowance_atr"
+    },
+    {
+      "id": "config.gear_file",
+      "type": "non_null",
+      "file": "data/ppl_gear.json"
+    },
+    {
+      "id": "traceback.none",
+      "type": "cadence",
+      "tag": "Traceback",
+      "max": 0,
+      "window_min": 60,
+      "exclude": "telegram"
+    },
+    {
+      "id": "ppl.no_refusals",
+      "type": "cadence",
+      "tag": "REFUSED this cycle",
+      "max": 0,
+      "window_min": 60
+    },
+    {
+      "id": "council.sits_on_proof",
+      "type": "follows",
+      "trigger": "[PROOF-NEW]",
+      "tag": "[COUNCIL-CP2]",
+      "within_min": 30,
+      "window_min": 180,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B8-2: the council sits on every proof"
+    },
+    {
+      "id": "market.status_logged",
+      "type": "cadence",
+      "tag": "[MARKET]",
+      "min": 1,
+      "window_min": 10080
+    },
+    {
+      "id": "vtm.pause_on_close",
+      "type": "cadence",
+      "tag": "[VTM] .* management paused",
+      "min": 1,
+      "window_min": 10080,
+      "note": "at least one closure per week"
+    },
+    {
+      "id": "persist.bars_metric",
+      "type": "non_null",
+      "tag": "[PERSIST] .* restored",
+      "extract": "bars passed=",
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B8-2: on -- every restore says how many candles it missed"
+    },
+    {
+      "id": "instanceB.alive",
+      "type": "cadence",
+      "tag": "[GEAR] count1=4H count3=4H",
+      "min": 1,
+      "window_min": 1440,
+      "file": "logs/trading_bot_B.log",
+      "enabled": false,
+      "note": "enable once instance B runs"
+    },
+    {
+      "id": "gate.log_vs_ledger",
+      "type": "log_vs_ledger",
+      "tag": "Signal BLOCKED by",
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all."
+    },
+    {
+      "id": "b6.proof_council_cap",
+      "type": "cadence",
+      "tag": "[PROOF-COUNCIL]",
+      "max": 300,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-2 -- runaway guard; the line only prints when an asset has 2+ proofs"
+    },
+    {
+      "id": "b6.proof_set_cap",
+      "type": "cadence",
+      "tag": "[PROOF-SET]",
+      "max": 4,
+      "window_min": 60,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B6-1 -- at most once per 1H bar per asset"
+    },
+    {
+      "id": "b6.outscored_cap",
+      "type": "cadence",
+      "tag": "[PROOF-OUTSCORED]",
+      "max": 60,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-2 -- runaway guard"
+    },
+    {
+      "id": "b6.proof_hold_cap",
+      "type": "cadence",
+      "tag": "[PROOF-HOLD]",
+      "max": 600,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-2 runaway guard; B7-13 raised from 120 (lines now print once per candle anyway)"
+    },
+    {
+      "id": "b6.entry_window_cap",
+      "type": "cadence",
+      "tag": "[ENTRY-WINDOW]",
+      "max": 200,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-3 -- prints each cycle a passing proof waits outside its window; runaway guard"
+    },
+    {
+      "id": "b6.persist_skip_cap",
+      "type": "cadence",
+      "tag": "[PERSIST] .* save skipped",
+      "max": 20,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-4 -- once per builder per pending restore"
+    },
+    {
+      "id": "b6.mt5_query_failed",
+      "type": "cadence",
+      "tag": "[SYNC] .* positions query failed",
+      "max": 10,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B6-6 -- more than 10 an hour = MT5 is not answering (19 Sep 06:35 outage pattern)"
+    },
+    {
+      "id": "b6.stale_restore",
+      "type": "cadence",
+      "tag": "[SYNC] .* stale restored position dropped",
+      "max": 3,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B6-6 -- expected only right after a restart"
+    },
+    {
+      "id": "b6.save_after_close",
+      "type": "cadence",
+      "tag": "[STATE] Save after close failed",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B6-6 -- should never print"
+    },
+    {
+      "id": "b8.catchup_cap",
+      "type": "cadence",
+      "tag": "[CATCH-UP]",
+      "max": 60,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B8-1 -- runaway guard; one line per restore"
+    },
+    {
+      "id": "b8.presend_cap",
+      "type": "cadence",
+      "tag": "[PRESEND]",
+      "max": 200,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B8-10 -- runaway guard"
+    },
+    {
+      "id": "b8.switches_listed",
+      "type": "cadence",
+      "tag": "[SWITCHES]",
+      "max": 20,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B8-3 -- once per start"
+    },
+    {
+      "id": "b9.judge_dead",
+      "type": "cadence",
+      "tag": "[JUDGE-DEAD]",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B9 S14: a silent judge lowers the bar -- it must be seen, not absorbed"
+    },
+    {
+      "id": "b10.proof_held",
+      "type": "cadence",
+      "tag": "[PROOF-HELD]",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 C5: a confirmed proof refused for over an hour -- USOIL 22 Sep was held four hours in silence"
+    },
+    {
+      "id": "b10.proof_mismatch",
+      "type": "cadence",
+      "tag": "[PROOF-MISMATCH]",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 B4: a stop anchored on a different proof than the one that traded"
+    },
+    {
+      "id": "b10.born_late",
+      "type": "cadence",
+      "tag": "[BORN-LATE]",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 A2: flag only -- every late birth is seen; the entry gate decides"
+    },
+    {
+      "id": "b10.freshness_unmeasured",
+      "type": "cadence",
+      "tag": "[FRESHNESS] .* not measured",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 B1: a live order the freshness gate could not measure"
+    },
+    {
+      "id": "b10.deploy_hygiene",
+      "type": "follows",
+      "trigger": "[PERSIST] .* stores (bars passed",
+      "tag": "[DEPLOY-HYGIENE]",
+      "within_min": 15,
+      "window_min": 1440,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B10 A4: every real restore is followed by the hygiene pass"
+    },
+    {
+      "id": "b10.rr_net",
+      "type": "follows",
+      "trigger": "[FRESHNESS] .* within",
+      "tag": "[RR-NET]",
+      "within_min": 5,
+      "window_min": 1440,
+      "per_asset": true,
+      "enabled": true,
+      "note": "B10 B3: every order through the gate gets its after-cost R:R logged"
+    },
+    {
+      "id": "b10.sweep_ceiling",
+      "type": "cadence",
+      "tag": "[PROOF-SWEEP]",
+      "max": 60,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 A3: ceiling -- a flood would mean the sweep is fighting the builder"
+    },
+    {
+      "id": "b10.pause_ceiling",
+      "type": "cadence",
+      "tag": "[COUNT-2-PAUSE]",
+      "max": 300,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 A1: ceiling -- pauses are normal, a flood is not"
+    },
+    {
+      "id": "b10.tpcap_ceiling",
+      "type": "cadence",
+      "tag": "[TP-CAP]",
+      "max": 60,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 B2: ceiling"
+    },
+    {
+      "id": "b10.mood_ceiling",
+      "type": "cadence",
+      "tag": "[MOOD-AGAINST]",
+      "max": 500,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B10 C1: ceiling -- the tag is for the review"
+    },
+    {
+      "id": "b7.bar_cap",
+      "type": "cadence",
+      "tag": "[BAR]",
+      "max": 900,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B7-8 -- runaway guard; prints when a bar changes or hourly"
+    },
+    {
+      "id": "b7.trial_size_cap",
+      "type": "cadence",
+      "tag": "[TRIAL-SIZE]",
+      "max": 100,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B7-14/15 -- runaway guard"
+    },
+    {
+      "id": "b7.trial_cap",
+      "type": "cadence",
+      "tag": "[TRIAL]",
+      "max": 100,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B7-14 -- runaway guard"
+    },
+    {
+      "id": "b7.save_after_entry",
+      "type": "cadence",
+      "tag": "[STATE] Save after entry failed",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B7-1 -- should never print"
+    },
+    {
+      "id": "b7.state_kept",
+      "type": "cadence",
+      "tag": "[STATE] Kept state file",
+      "max": 20,
+      "window_min": 60,
+      "enabled": true,
+      "note": "B7-1 -- once per start"
+    },
+    {
+      "id": "b7.external_adopted",
+      "type": "cadence",
+      "tag": "[SYNC] .* opened outside the bot",
+      "max": 20,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B7-2 -- hand trades taken into the book"
+    },
+    {
+      "id": "b7.external_streak",
+      "type": "cadence",
+      "tag": "[STREAK] .* opened outside the bot",
+      "max": 20,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B7-2 -- hand trades kept out of the scorecards"
+    },
+    {
+      "id": "b8.p1_ledger_fresh",
+      "type": "file_fresh",
+      "file": "logs/p1_refusals/p1_*.jsonl",
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B8-7 -- every break check is recorded; BTC trades daily so the file is always fresh"
+    },
+    {
+      "id": "b8.zero_pass_mark",
+      "type": "cadence",
+      "tag": "second check reached the life-cycle step",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B8-12 -- a council must never judge against a pass mark of 0"
+    },
+    {
+      "id": "replayer.runs",
+      "type": "file_fresh",
+      "file": "logs/replayer_arms_*.json",
+      "window_min": 11520,
+      "enabled": true,
+      "note": "B8-9: threshold met 22 Sep; the weekly run writes the arms files; 8-day window so a weekly run never looks late"
+    },
+    {
+      "id": "rl1.proposals_file",
+      "type": "file_fresh",
+      "file": "logs/rl1_proposals.jsonl",
+      "window_min": 11520,
+      "enabled": true,
+      "note": "B8-9: the bandit stamps every run, so this proves it ran"
+    },
+    {
+      "id": "ns.alive",
+      "type": "cadence",
+      "tag": "[NS] ",
+      "min": 1,
+      "window_min": 180,
+      "enabled": true,
+      "note": "B11-NS: the new engine processes every closed 1H candle"
+    },
+    {
+      "id": "ns.no_errors",
+      "type": "cadence",
+      "tag": "[NS] .* engine error",
+      "max": 0,
+      "window_min": 1440,
+      "enabled": true,
+      "note": "B11-NS: any engine error is loud"
+    }
   ]
 }

@@ -568,6 +568,14 @@ class VeteranTradeManager:
         self.brc_ref_tier               = _cs.get("brc_ref_tier")   # PPL S9c
         self.brc_h2                     = _cs.get("brc_h2")         # PPL S9c
         self.brc_gear                   = _cs.get("brc_gear")       # PPL S9c
+        # B11-NS: the tested per-market rules ride on the proof (see ns_engine.py)
+        self.ns_exit       = _cs.get("ns_exit")
+        self.ns_target_atr = _cs.get("ns_target_atr")
+        self.ns_r2         = _cs.get("ns_r2")
+        self.ns_atr1       = _cs.get("ns_atr1")
+        self.ns_armed      = False
+        self.ns_peak       = None
+        self._ns_last_bar  = 0
         # STOP-2 SEG F: the references the proof was built on. REF-1 froze
         # R2 (the level broken), R1 (the origin) and H (the trigger) on the
         # composite state, but nothing copied them here, so trade management
@@ -1202,6 +1210,86 @@ class VeteranTradeManager:
                 )
 
         return True, tp, "ok"
+
+    # -- B11-NS: the tested per-market stop, target and exits (see ns_engine.py) -------------
+    def _ns_active(self) -> bool:
+        return (getattr(self, "ns_exit", None) in ("FIXED", "RUNNER")
+                and bool(getattr(self, "ns_r2", None)) and bool(getattr(self, "ns_atr1", None)))
+
+    def _ns_finalise(self, sl, tp):
+        """B11-NS: the tested gates only -- no walking, no capping, no blending.
+        R:R is screened on a 2.5-move reward for every market, as tested; the $5 minimum
+        is checked on the real target (on 2.5 moves for the runner)."""
+        from src.execution.ns_engine import GATE_TARGET_ATR
+        _bad = getattr(self, "_ns_bad", None)
+        if _bad:
+            return sl, tp, False, "ns: " + _bad
+        _d = 1 if self.side == "long" else -1
+        risk = abs(float(self.entry_price) - float(sl))
+        atr1 = float(self.ns_atr1)
+        if risk <= 0 or (_d == 1 and sl >= self.entry_price) or (_d == -1 and sl <= self.entry_price):
+            return sl, tp, False, "ns: stop on the wrong side"
+        min_rr = float(self.risk_config.get("min_rr", 0.5))
+        rr = GATE_TARGET_ATR * atr1 / risk
+        rr_net, cost = rr, 0.0
+        _pc4 = self.risk_config.get("phase_config", {}) or {}
+        _use4 = bool(_pc4.get("gate4_net_rr_enabled", False))
+        try:
+            from src.execution.shadow_trader import FRICTION_PENALTIES as _FP4, _DEFAULT_FRICTION as _DF4
+            cost = float(self.entry_price) * float(_FP4.get(str(self.asset).upper(), _DF4)) * \
+                float((_pc4.get("gate4_real_cost_mult", {}) or {}).get(str(self.asset).upper(), 1.0))
+            rr_net = (GATE_TARGET_ATR * atr1 - cost) / (risk + cost)
+        except Exception as _e4:
+            logger.debug(f"[RR-NET] {self.asset}: cost read failed ({_e4})")
+        logger.info("[RR-NET] %s %s: rr(2.5 moves) %.2f -> after costs %.2f (cost %.5g) | min %.2f | deciding=%s (B11-NS)",
+                    self.asset, self.side, rr, rr_net, cost, min_rr, _use4)
+        if (rr_net if _use4 else rr) < min_rr:
+            return sl, tp, False, "ns: rr %.2f < %.2f" % ((rr_net if _use4 else rr), min_rr)
+        reward_dist = abs(float(tp) - float(self.entry_price)) if tp else GATE_TARGET_ATR * atr1
+        reward = reward_dist * float(self.position_size or 0) * float(self._quote_to_usd_rate())
+        min_ccy = float(_pc4.get("min_reward_ccy", 5.0))
+        if reward < min_ccy:
+            return sl, tp, False, "ns: reward $%.2f < $%.2f" % (reward, min_ccy)
+        logger.info("[NS-FINAL] %s %s: stop=%.5g target=%s reward=$%.2f -- accepted",
+                    self.asset, self.side, float(sl), ("%.5g" % tp) if tp else "none (runner)", reward)
+        return sl, tp, True, None
+
+    def _ns_check_exit(self, current_price: float):
+        """B11-NS: exactly the tested exits. FIXED: the stop stays where it was set, the target
+        is fixed, out after 168 1H candles. RUNNER (BTC): no target; once per closed candle,
+        lock +0.2R at +1R, then trail behind the latest confirmed 1H swing."""
+        from src.execution.ns_engine import runner_step, TRADE_BARS
+        long_ = self.side == "long"
+        stop = self.current_stop_loss
+        if stop is not None and ((long_ and current_price <= stop) or ((not long_) and current_price >= stop)):
+            _moved = self.initial_stop_loss is not None and abs(float(stop) - float(self.initial_stop_loss)) > 1e-12
+            return {"reason": ExitReason.TRAILING_STOP if _moved else ExitReason.STOP_LOSS,
+                    "price": current_price, "size": self.remaining_position}
+        if self.ns_exit == "FIXED" and self.take_profit_levels:
+            _tp = float(self.take_profit_levels[0])
+            if (long_ and current_price >= _tp) or ((not long_) and current_price <= _tp):
+                return {"reason": ExitReason.TAKE_PROFIT_1, "price": current_price, "size": self.remaining_position}
+        if self.bars_in_trade >= TRADE_BARS:
+            logger.info("[NS-EXIT] %s: 7 days (%d candles) -- time exit at %.5g",
+                        self.asset, self.bars_in_trade, current_price)
+            return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
+        if self.ns_exit == "RUNNER" and self.bars_in_trade > int(getattr(self, "_ns_last_bar", 0) or 0):
+            self._ns_last_bar = self.bars_in_trade
+            try:
+                _pc = self.risk_config.get("phase_config", {}) or {}
+                _d = 1 if long_ else -1
+                _risk0 = abs(float(self.entry_price) - float(self.initial_stop_loss))
+                _new, self.ns_armed, self.ns_peak, _why = runner_step(
+                    _d, float(self.entry_price), float(self.current_stop_loss), _risk0,
+                    self.high, self.low, self.close, int(self.bars_in_trade), bool(self.ns_armed),
+                    self.ns_peak if self.ns_peak is not None else float(self.entry_price),
+                    float(_pc.get("r_breakeven_trigger", 1.0)), float(_pc.get("r_breakeven_lock", 0.2)))
+                if _new is not None:
+                    logger.info("[NS-RUNNER] %s: %s -> stop %.5g", self.asset, _why, _new)
+                    self._propose_stop(float(_new), _why)
+            except Exception as _re:
+                logger.warning(f"[NS-RUNNER] {self.asset}: runner update skipped ({_re})")
+        return None
 
     def _finalise_stop_and_target(self, candidate_sl: float, candidate_tp: float, atr: float, source: str):
         """
@@ -2007,10 +2095,30 @@ class VeteranTradeManager:
             # is candidate selection; nothing below is allowed to move the
             # stop or target again except real management moves later in
             # the trade's life.
+            # B11-NS: the tested per-market stop and target replace every candidate chosen above.
+            if self._ns_active():
+                from src.execution.ns_engine import ns_levels as _ns_levels
+                _d_ns = 1 if self.side == "long" else -1
+                _st_ns, _tp_ns = _ns_levels(_d_ns, self.entry_price, float(self.ns_r2), float(self.ns_atr1),
+                                            float(self.risk_config.get("min_sl_pct", 0.0) or 0.0), self.ns_target_atr)
+                if _st_ns is None:
+                    self._ns_bad = "no valid tested stop (entry %.5g, R2 %.5g)" % (float(self.entry_price), float(self.ns_r2))
+                    logger.warning("[NS-LEVELS] %s: %s -- the trade will be refused", self.asset, self._ns_bad)
+                else:
+                    self.initial_stop_loss = float(_st_ns)
+                    self.take_profit_levels = [float(_tp_ns)] if _tp_ns else []
+                    self.stop_type = "ns_structural"
+                    self.time_stop_bars = 168
+                    logger.info("[NS-LEVELS] %s %s entry=%.5g R2=%.5g atr=%.5g -> stop=%.5g target=%s exit=%s",
+                                self.asset, self.side, float(self.entry_price), float(self.ns_r2), float(self.ns_atr1),
+                                self.initial_stop_loss, ("%.5g" % _tp_ns) if _tp_ns else "none (runner)", self.ns_exit)
             _candidate_tp = self.take_profit_levels[0] if self.take_profit_levels else None
-            _final_sl, _final_tp, _geo_ok, _geo_reason = self._finalise_stop_and_target(
-                self.initial_stop_loss, _candidate_tp, atr, source=self.trade_type,
-            )
+            if self._ns_active():
+                _final_sl, _final_tp, _geo_ok, _geo_reason = self._ns_finalise(self.initial_stop_loss, _candidate_tp)
+            else:
+                _final_sl, _final_tp, _geo_ok, _geo_reason = self._finalise_stop_and_target(
+                    self.initial_stop_loss, _candidate_tp, atr, source=self.trade_type,
+                )
             self.initial_stop_loss = _final_sl
             if self.take_profit_levels:
                 self.take_profit_levels[0] = _final_tp
@@ -3086,6 +3194,8 @@ class VeteranTradeManager:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         self._last_atr = atr_value  # MANUAL-AUTHORITY BATCH: feeds _queue_move_notification's trail digest threshold
+        if self._ns_active():
+            return self._ns_check_exit(current_price)   # B11-NS: the tested exits only
         if self.remaining_position <= 0: return None
 
         # ── FIX-A/E2: R-based break-even, first in the management pass ─────
@@ -3359,6 +3469,7 @@ class VeteranTradeManager:
                 )
 
                 if bearish_reversal or bullish_reversal:
+                    rev_size = 0.0   # B11: was never set when partials are off -> silent crash
                     if not (self.partials_enabled and self._can_partial(0.50)):
                         logger.debug(f"[VTM] Reversal Candle partial suppressed — letting trade run.")
                     else:
@@ -4037,6 +4148,11 @@ class VeteranTradeManager:
             # Snapshot of the ADX-adjusted partial targets used at open — needed so
             # from_dict() can pass them to risk_config and avoid recalculation drift
             "partial_targets_snapshot": list(self.partial_targets),
+            # B11-NS: the per-market rules and the runner's progress survive a restart
+            "ns_exit": getattr(self, "ns_exit", None), "ns_target_atr": getattr(self, "ns_target_atr", None),
+            "ns_r2": getattr(self, "ns_r2", None), "ns_atr1": getattr(self, "ns_atr1", None),
+            "ns_armed": getattr(self, "ns_armed", False), "ns_peak": getattr(self, "ns_peak", None),
+            "_ns_last_bar": getattr(self, "_ns_last_bar", 0),
         }
 
     @classmethod
@@ -4079,6 +4195,13 @@ class VeteranTradeManager:
         vtm.has_pyramided = state.get("has_pyramided", False)
         vtm._greed_mode_activated = state.get("_greed_mode_activated", False)
         vtm._early_scaled = state.get("_early_scaled", False)
+        vtm.ns_exit = state.get("ns_exit")                            # B11-NS
+        vtm.ns_target_atr = state.get("ns_target_atr")
+        vtm.ns_r2 = state.get("ns_r2")
+        vtm.ns_atr1 = state.get("ns_atr1")
+        vtm.ns_armed = bool(state.get("ns_armed", False))
+        vtm.ns_peak = state.get("ns_peak")
+        vtm._ns_last_bar = int(state.get("_ns_last_bar", 0) or 0)
         vtm._time_stop_extended = state.get("_time_stop_extended", False)
         vtm._counter_momentum_cut = state.get("_counter_momentum_cut", False)
         return vtm
@@ -4170,6 +4293,12 @@ class VeteranTradeManager:
             # would have thrown inside this try and silently left the
             # movers enabled -- the exact failure mode this file warns
             # about elsewhere.
+            # B11-NS: in the new modes nothing moves the stop except the runner's own lock/trail.
+            # Every other automated mover is held and logged; /set_sl does not come through here.
+            if (not initial) and self._ns_active() and reason not in ("ns_runner_lock", "ns_runner_trail"):
+                logger.info("[NS-STOP-HOLD] %s: %s held -- would have moved SL to %s (current %s)",
+                            self.asset, reason, candidate, self.current_stop_loss)
+                return False
             _ARITH_MOVERS = {
                 "soft_risk_cut", "intermediate_trail", "r_breakeven_lock",
                 "breakeven_atr", "breakeven_time",

@@ -393,8 +393,62 @@ class AIVisualizationGenerator:
         it was worse than an honest empty state.
         """
         _cs = details.get("composite_state") if isinstance(details, dict) else None
+        if isinstance(_cs, dict) and (_cs.get("ns_ladder") or _cs.get("ns_setups")):
+            return self._plot_ns_ladder(ax, df_4h, current_price, _cs)      # B11-NS
         _ladder = (_cs or {}).get("zone_ladder_4h", []) if isinstance(_cs, dict) else []
         self._plot_real_zone_ladder(ax, df_4h, current_price, _ladder, _cs)
+
+    def _plot_ns_ladder(self, ax, df_4h, current_price, cs):
+        """B11-NS: the two-layer ladder -- 4H swing zones (close to wick) and both brains'
+        levels -- plus the live setups and the brains' labels."""
+        import logging as _lg
+        try:
+            price = float(current_price)
+            if df_4h is not None and len(df_4h) >= 10:
+                _d4 = df_4h.tail(60)
+                _x = range(len(_d4))
+                ax.plot(_x, _d4["close"].values, color="cyan", linewidth=2, alpha=0.8, label="4H close", zorder=5)
+                ax.fill_between(_x, _d4["low"].values, _d4["high"].values, color="gray", alpha=0.15, zorder=1)
+                lo, hi, x_end = float(_d4["low"].min()), float(_d4["high"].max()), len(_d4) - 1
+            else:
+                lo, hi, x_end = price, price, 1
+            for r in cs.get("ns_ladder") or []:
+                a, b = sorted((float(r["close"]), float(r["edge"])))
+                lo, hi = min(lo, a), max(hi, b)
+                if r.get("layer") == 1:
+                    col = "red" if a > price else "lime"
+                    ax.axhspan(a, b if b > a else a * 1.0000001, color=col, alpha=0.18, zorder=2)
+                    ax.axhline(float(r["close"]), color=col, linewidth=1.0, alpha=0.8, zorder=3)
+                else:
+                    col = "orange" if r.get("tf") == "1H" else "violet"
+                    ax.axhline(a, color=col, linewidth=1.0, linestyle="--", alpha=0.9, zorder=3)
+                    ax.text(x_end, a, " %s %s" % (r.get("tf"), r.get("type")), color=col, fontsize=7, va="center")
+            _stages = ("waiting for the break", "waiting for the retest", "waiting for the trigger")
+            for s in cs.get("ns_setups") or []:
+                _st = _stages[min(2, max(0, int(s.get("stage", 0))))]
+                ax.axhline(float(s["r2"]), color="deepskyblue", linewidth=2.0, zorder=4)
+                ax.axhline(float(s["r1"]), color="gray", linewidth=1.0, linestyle=":", zorder=4)
+                ax.text(0, float(s["r2"]), " R2 %s (%s, %s)" % ("long" if int(s["d"]) == 1 else "short",
+                                                               s.get("kind"), _st),
+                        color="deepskyblue", fontsize=7, va="bottom")
+                lo, hi = min(lo, float(s["r1"])), max(hi, float(s["r2"]))
+            _lines = []
+            for tf, b in sorted((cs.get("ns_brains") or {}).items()):
+                _ma = b.get("moves_above")
+                _mb = b.get("moves_below")
+                _lines.append("%s brain: %s, %.1f days%s | flips above %s (%s) / below %s (%s)" % (
+                    tf, b.get("state"), float(b.get("age_days") or 0), " (STALE)" if b.get("stale") else "",
+                    b.get("flips_above"), ("%.1f moves" % _ma) if _ma is not None else "n/a",
+                    b.get("flips_below"), ("%.1f moves" % _mb) if _mb is not None else "n/a"))
+            if _lines:
+                ax.text(0.01, 0.99, "\n".join(_lines), transform=ax.transAxes, fontsize=7, va="top", ha="left",
+                        color="white", bbox=dict(facecolor="black", alpha=0.6, edgecolor="none"))
+            ax.axhline(price, color="yellow", linewidth=1.0, linestyle="-.", zorder=6)
+            pad = (hi - lo) * 0.08 or price * 0.002
+            ax.set_ylim(lo - pad, hi + pad)
+            ax.set_title("Ladder: 4H swing zones (bands), brains (dashed), live setups (blue)", fontsize=9)
+        except Exception as _e:
+            _lg.getLogger(__name__).warning(f"[CHART] new ladder drawing failed: {_e}")
 
     def _plot_real_zone_ladder(
         self, ax, df_4h: pd.DataFrame, current_price: float,

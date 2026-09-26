@@ -48,25 +48,25 @@ logger = logging.getLogger(__name__)
 # Applied before ML labelling so models learn from net, not gross, P&L.
 # ─────────────────────────────────────────────────────────────────────────────
 FRICTION_PENALTIES: Dict[str, float] = {
-    "BTC":    0.0003,   # 0.03% round-trip
-    "BTCUSDT": 0.0003,
-    "GOLD":   0.0008,   # 0.08%
-    "XAUUSD": 0.0008,
-    "XAUUSDm": 0.0008,
-    "USTEC":  0.0005,   # 0.05%
-    "USTECm": 0.0005,
+    "BTC":    0.00034,   # B11-NS S9h: real-measured cost (25 Sep)
+    "BTCUSDT": 0.00034,
+    "GOLD":   0.0002,   # B11-NS S9h: real-measured cost (25 Sep)
+    "XAUUSD": 0.0002,
+    "XAUUSDm": 0.0002,
+    "USTEC":  0.00008,   # B11-NS S9h: real-measured cost (25 Sep)
+    "USTECm": 0.00008,
     "EURJPY": 0.0004,   # 0.04%
     "EURJPYm": 0.0004,
-    "EURUSD": 0.0003,
-    "EURUSDm": 0.0003,
+    "EURUSD": 0.00018,   # B11-NS S9h: real-measured cost (25 Sep)
+    "EURUSDm": 0.00018,
     "GBPUSD": 0.0003,   # 0.03% — tight spread major pair
     "GBPUSDm": 0.0003,
     "USDJPY": 0.0002,   # 0.02% — tightest spread major
     "USDJPYm": 0.0002,
-    "USOIL":  0.0006,   # 0.06% round-trip (oil has wider spreads)
-    "USOILm": 0.0006,
-    "GBPAUD": 0.0005,   # 0.05% round-trip
-    "GBPAUDm": 0.0005,
+    "USOIL":  0.00055,   # B11-NS S9h: real-measured cost (25 Sep)
+    "USOILm": 0.00055,
+    "GBPAUD": 0.00028,   # B11-NS S9h: real-measured cost (25 Sep)
+    "GBPAUDm": 0.00028,
 }
 # S7a: lookups are .upper() — normalize keys so mixed-case MT5 variants
 # ("XAUUSDm") can actually match instead of silently falling to default.
@@ -190,6 +190,11 @@ class ShadowPosition:
     gate_stage: str = "unknown"      # B3 GATE-1 G2
     lane: str = "A"                 # LANES L1: which shadow lane produced this
     resumed: bool = False               # MEASURE-2 S1: survived at least one restart
+    ns_exit: str = ""                   # B11-NS: "" | "FIXED" | "RUNNER"
+    ns_risk0: float = 0.0               # B11-NS: starting risk (entry to first stop)
+    ns_armed: bool = False              # B11-NS: runner lock taken
+    ns_peak: float = 0.0                # B11-NS: runner's best price
+    ns_setup_id: int = 0                # B11-NS: the proof this practice trade belongs to
     resume_count: int = 0               # MEASURE-2 S1: how many
     restart_gap_minutes: float = 0.0    # MEASURE-2 S1: blind window -- MFE/MAE unknown across it
     rolls_taken: int = 0            # TARGET-1 T9c: how many times the target rolled
@@ -223,6 +228,16 @@ class ShadowPosition:
 
         # J2.3: TP1 touch tracking retained for MFE/peak bookkeeping — no
         # longer moves the stop (S7c below replaces the BE trigger).
+        if getattr(self, "ns_exit", ""):
+            # B11-NS: exactly the live per-market exits -- no breakeven, no trail, no target rolling.
+            if self.stop_loss > 0 and ((self.side == "long" and current_price <= self.stop_loss) or
+                                       (self.side == "short" and current_price >= self.stop_loss)):
+                return self._close(current_price, "stop_loss")
+            if self.ns_exit == "FIXED" and self.take_profit > 0 and (
+                    (self.side == "long" and current_price >= self.take_profit) or
+                    (self.side == "short" and current_price <= self.take_profit)):
+                return self._close(current_price, "take_profit")
+            return False
         if not self.tp1_reached and self.tp1_price > 0:
             if (self.side == "long" and current_price >= self.tp1_price) or \
                (self.side == "short" and current_price <= self.tp1_price):
@@ -320,7 +335,7 @@ class ShadowPosition:
         # Wall-clock comparison is used instead of bar count because candle_update()
         # is called every 5-min bot loop — 72 bars would only be 6 hours, not 3 days.
         elapsed_hours = (datetime.now(timezone.utc) - self.entry_time).total_seconds() / 3600.0
-        if elapsed_hours >= 72.0:
+        if elapsed_hours >= (168.0 if getattr(self, "ns_exit", "") else 72.0):   # B11-NS: 7 days for new-engine trades
             self._close(self.current_price, "time_stop_72h")
 
     def _close(self, price: float, reason: str) -> bool:
@@ -441,6 +456,8 @@ class ShadowPosition:
             "episode_id": self.episode_id,   # DATA-1 ITEM 1
             "entry_atr":  self.entry_atr,    # FRAME-1 SEG 6: captured at open since 610 ITEM 4, never persisted
             "lane":       self.lane,         # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
+            "ns_exit": self.ns_exit, "ns_risk0": self.ns_risk0, "ns_armed": self.ns_armed,   # B11-NS
+            "ns_peak": self.ns_peak, "ns_setup_id": self.ns_setup_id,
             "resumed":             self.resumed,               # MEASURE-2 S1
             "resume_count":        self.resume_count,          # MEASURE-2 S1
             "restart_gap_minutes": self.restart_gap_minutes,   # MEASURE-2 S1
@@ -612,6 +629,14 @@ class ShadowTradingEngine:
 
         asset_key = asset.upper()
         now = datetime.now(timezone.utc)
+        # B11-NS: one practice trade per proof (a proof lives for one candle; the council sits many times in it)
+        try:
+            _ns_sid = int(((composite_state or {}).get("ns_setup_id")) or 0)
+            if _ns_sid and (asset_key, _ns_sid) in getattr(self, "_ns_practiced", set()):
+                self._refuse(asset, side, gate_id, "ns_one_practice_per_proof")
+                return None
+        except Exception:
+            _ns_sid = 0
 
         # S5.1 — Dedup: skip if a shadow position already open for same
         # asset+side+gate_id. B5-5b: was asset+side ONLY -- a signal blocked
@@ -956,6 +981,33 @@ class ShadowTradingEngine:
             be_r=be_r,   # S7c
         )
 
+        # B11-NS: practice trades on a new-engine proof use exactly the live per-market rules
+        try:
+            _cs_ns = composite_state or {}
+            if _cs_ns.get("ns_exit") and _cs_ns.get("ns_r2") and _cs_ns.get("ns_atr1"):
+                from src.execution.ns_engine import ns_levels as _nsl, market_settings as _nsm
+                _d_ns = 1 if pos.side == "long" else -1
+                _cfg_ns = _nsm(asset_key, (_cs_ns.get("phase_config") or {})) or {}
+                _st_ns, _tp_ns = _nsl(_d_ns, pos.entry_price, float(_cs_ns["ns_r2"]), float(_cs_ns["ns_atr1"]),
+                                      _cfg_ns.get("min_sl_pct", 0.0), _cs_ns.get("ns_target_atr"))
+                if _st_ns is not None:
+                    pos.stop_loss = pos.initial_stop_loss = float(_st_ns)
+                    pos.take_profit = float(_tp_ns) if _tp_ns else 0.0
+                    pos.tp1_price = 0.0
+                    pos.trailing_distance = 0.0
+                    pos.trailing_activation_pct = 0.0
+                    pos.be_r = 1e9
+                    pos.ns_exit = str(_cs_ns["ns_exit"])
+                    pos.ns_risk0 = abs(pos.entry_price - float(_st_ns))
+                    pos.ns_peak = pos.entry_price
+                    pos.ns_setup_id = int(_cs_ns.get("ns_setup_id") or 0)
+                    if pos.ns_setup_id:
+                        self._ns_practiced = getattr(self, "_ns_practiced", set()) | {(asset_key, pos.ns_setup_id)}
+                    logger.info(f"[NS-PRACTICE] {asset_key} {pos.side}: stop {_st_ns:.5g} target "
+                                f"{(_tp_ns or 0):.5g} exit {pos.ns_exit} (proof {pos.ns_setup_id})")
+        except Exception as _ns_e:
+            logger.warning(f"[NS-PRACTICE] {asset_key}: new-engine levels not applied ({_ns_e})")
+
         self.open_positions.append(pos)
         logger.info(
             f"[SHADOW] Opened {side.upper()} {asset} @ {entry_price:.5f} "
@@ -963,6 +1015,36 @@ class ShadowTradingEngine:
             f"variant={variant or '-'} pair={(pair_id or '-')[-6:]}"
         )
         return pos
+
+    def ns_bar_update(self, asset: str, df_1h) -> None:
+        """B11-NS: the runner's lock and trail for open practice trades, once per closed 1H candle.
+        Same code as the live trade manager (ns_engine.runner_step)."""
+        try:
+            from src.execution.ns_engine import runner_step, close_times
+            if df_1h is None or len(df_1h) < 30:
+                return
+            t_last = close_times(df_1h, 1)[-1]
+            hi, lo, cl = (df_1h[c].astype(float).values for c in ("high", "low", "close"))
+            for pos in list(self.open_positions):
+                if pos.closed or pos.asset.upper() != str(asset).upper() or getattr(pos, "ns_exit", "") != "RUNNER":
+                    continue
+                if getattr(pos, "_ns_last_ts", None) == t_last:
+                    continue
+                pos._ns_last_ts = t_last
+                _et = pos.entry_time.astimezone(timezone.utc).replace(tzinfo=None) if pos.entry_time.tzinfo else pos.entry_time
+                bars = int((t_last - _et).total_seconds() // 3600)
+                if bars < 1 or pos.ns_risk0 <= 0:
+                    continue
+                d = 1 if pos.side == "long" else -1
+                new, pos.ns_armed, pos.ns_peak, why = runner_step(
+                    d, pos.entry_price, pos.stop_loss, pos.ns_risk0, hi, lo, cl, bars,
+                    pos.ns_armed, pos.ns_peak or pos.entry_price)
+                if new is not None:
+                    pos.sl_path.append((datetime.utcnow().isoformat(), float(pos.stop_loss), float(new), why))
+                    pos.sl_path = pos.sl_path[-200:]
+                    pos.stop_loss = float(new)
+        except Exception as _e:
+            logger.warning(f"[NS-PRACTICE] {asset}: runner update skipped ({_e})")
 
     def tick_update_all(self, price_map: Dict[str, float]) -> int:
         """

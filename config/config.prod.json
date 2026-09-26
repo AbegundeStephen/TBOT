@@ -1332,7 +1332,7 @@
     "max_simultaneous_positions": 10,
     "position_timeout_hours": 720,
     "min_time_between_trades_minutes": 240,
-    "natural_cycle_min_bars": 8,
+    "natural_cycle_min_bars": 0,
     "min_regime_confidence": 0.6,
     "confidence_gate_pattern_veto": -1.0,
     "check_interval_seconds": 300,
@@ -1346,7 +1346,7 @@
     "vtm_update_interval_seconds": 2,
     "vtm_pyramiding_enabled": false,
     "exchange_reconcile_interval_seconds": 60,
-    "session_filter_enabled": true,
+    "session_filter_enabled": false,
     "pullback_min_shadow_signals": 30,
     "pullback_min_expectancy_ratio": 0.95,
     "pullback_min_positive_rate": 0.6,
@@ -1497,11 +1497,15 @@
     "gate3_d4_extension_enabled": true,
     "disagreement_gate_shadow_enabled": false,
     "council_counter_trend_cap": 3.5,
-    "council_trial_addons_off": false,
+    "council_trial_addons_off": true,
     "council_trial_loss_limit_r": 10.0,
-    "council_trial_max_trades": 30,
+    "council_trial_max_trades": 9999,
     "council_trial_max_days": 28,
-    "trial_min_size_assets": ["EURUSD", "USOIL", "USTEC"],
+    "trial_min_size_assets": [
+      "EURUSD",
+      "USOIL",
+      "USTEC"
+    ],
     "trial_min_size_until": "",
     "emergency_close_unanchored_weak_signal_enabled": false,
     "mr_rebound_short_enabled": true,
@@ -1528,7 +1532,9 @@
     "dead_judge_streak_n": 20,
     "ppl_break_band_atr4_ladder": 0.05,
     "max_adx_ceiling_penalty": 0.35,
-    "dead_judge_exempt": ["volume"],
+    "dead_judge_exempt": [
+      "volume"
+    ],
     "b9_setup_merge_atr": 0.33,
     "lane_b_enabled": true,
     "lane_c_enabled": true,
@@ -1551,20 +1557,98 @@
     "deploy_hygiene_max_age_h": 6,
     "proof_held_alarm_min": 60,
     "mood_against_raise": 0.25,
-    "gate4_net_rr_enabled": false,
-    "gate4_real_cost_mult": {"EURUSD": 2.6, "USOIL": 4.0, "GBPAUD": 0.45},
+    "gate4_net_rr_enabled": true,
+    "gate4_real_cost_mult": {
+      "GOLD": 1.0,
+      "USOIL": 1.0,
+      "USTEC": 1.0,
+      "EURUSD": 1.0,
+      "GBPAUD": 1.0,
+      "BTC": 1.0
+    },
     "ppl_proof_tolerance_atr4": 0.15,
     "ppl_proof_spread_floor_mult": 2.0,
     "ppl_break_band_atr4_untested": 0.1,
     "lane_c_paired_enabled": true,
-    "lane_c_variants": [ { "name": "std", "trail_mult": 0.8, "be_r": 1.0 }, { "name": "wide", "trail_mult": 1.3, "be_r": 0.75 } ],
+    "lane_c_variants": [
+      {
+        "name": "std",
+        "trail_mult": 0.8,
+        "be_r": 1.0
+      },
+      {
+        "name": "wide",
+        "trail_mult": 1.3,
+        "be_r": 0.75
+      }
+    ],
     "builder_state_max_bars": 120,
     "ppl_stop_grade_allowance_mult": {
       "CLEAN": 1.0,
       "WICK": 1.33,
       "BREAKOUT": 1.0,
       "NONE": 1.0
-    }
+    },
+    "ns_markets": {
+      "GOLD": {
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.48,
+        "min_sl_pct": 0.0035
+      },
+      "USOIL": {
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.48,
+        "min_sl_pct": 0.0055
+      },
+      "USTEC": {
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.67,
+        "min_sl_pct": 0.0025
+      },
+      "EURUSD": {
+        "entry": "E",
+        "target_atr": 2.5,
+        "exit": "FIXED",
+        "cont_only": true,
+        "no_spike": true,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0012
+      },
+      "GBPAUD": {
+        "entry": "E",
+        "target_atr": 2.5,
+        "exit": "FIXED",
+        "cont_only": true,
+        "no_spike": true,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0025
+      },
+      "BTC": {
+        "entry": "E",
+        "target_atr": null,
+        "exit": "RUNNER",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.6,
+        "min_sl_pct": 0.006
+      }
+    },
+    "ns_pause_limits_r": {
+      "BTC": 6.0
+    },
+    "council_trial_min_trades": 20
   },
   "btc_volume_source": "binance"
 }
