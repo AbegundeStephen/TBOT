@@ -215,6 +215,9 @@ class Position:
                     "ref_1": _get("ref_1"), "ref_2": _get("ref_2"), "ref_h": _get("ref_h"),
                     "brc_retest_depth": _get("brc_retest_depth"),
                     "nearby_4h_level": _get("nearby_4h_level"),
+                    # B11-NS: the per-market rules must survive a rebuild after a restart
+                    "ns_exit": _get("ns_exit"), "ns_target_atr": _get("ns_target_atr"),
+                    "ns_r2": _get("ns_r2"), "ns_atr1": _get("ns_atr1"), "ns_entry": _get("ns_entry"),
                 },
                 "trade_type": _sd.get("trade_type", "TREND"),
                 "structure_levels_ref": _sd.get("structure_levels_ref"),
@@ -4346,6 +4349,15 @@ class PortfolioManager:
                 if _exit_vtm else None
             ),   # DIARY-1 D3
         })
+
+        # B11-NS (S7b part 3): every closed LIVE trade of a tracked market (BTC)
+        # reports its R -- unconditional, not gated on trial_only. See
+        # TradingBot._ns_record_close (the -6R pause and its Telegram line).
+        if getattr(self, "_ns_close_callback", None):
+            try:
+                self._ns_close_callback(position.asset, _gross_r)
+            except Exception as _ns_cc_e:
+                logger.error(f"[NS-PAUSE] close report failed: {_ns_cc_e}")
 
         # B7-14: trial-only trades report their result to the trial ledger
         # (loss limit, trade count, length) -- see TradingBot._on_trial_trade_closed.

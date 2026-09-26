@@ -340,7 +340,7 @@ class HeartbeatMonitor:
         # heartbeat would read instance A's episode ledger.
         from src.utils.instance_paths import suffixed_path as _p_inst_ep
         rows = []
-        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/*.jsonl"))[-2:]:
+        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/episodes_*.jsonl"))[-2:]:   # B11: diary files only
             try:
                 for line in open(f, encoding="utf-8", errors="ignore"):
                     if line.strip():
@@ -362,7 +362,7 @@ class HeartbeatMonitor:
         days_back = max(1, int(window_min / 1440) + 2)
         cutoff = time.time() - window_min * 60
         rows = []
-        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/*.jsonl"))[-days_back:]:
+        for f in sorted(glob.glob(f"{_p_inst_ep('logs/episodes')}/episodes_*.jsonl"))[-days_back:]:   # B11
             try:
                 for line in open(f, encoding="utf-8", errors="ignore"):
                     if not line.strip():
@@ -612,6 +612,8 @@ class HeartbeatMonitor:
                 continue
             a = self._asset_of(m) if p.get("per_asset") else None
             if a is not None and self._in_daily_break(a):
+                continue
+            if a is not None and self._is_market_closed(a):   # B11: check at the market's first open cycle
                 continue
             if not any(ts <= fts <= ts + within * 60 and (a is None or self._asset_of(fm_) == a)
                        for fts, fm_ in fol):

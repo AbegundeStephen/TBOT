@@ -20,6 +20,7 @@
     "ownership_rule":     {"stage": "post_council"},
     "tier3_divergence":   {"stage": "post_council"},
     "natural_cycle":      {"stage": "post_council"},
+    "market_paused":      {"stage": "post_council", "note": "B11-NS: a market (BTC) at its -6R pause limit trades on paper only until /resume"},
     "aggregator_other":   {"stage": "post_council"},
     "proof_reused":       {"stage": "post_approval"},
     "same_side_active":   {"stage": "post_approval"},

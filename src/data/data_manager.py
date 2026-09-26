@@ -700,7 +700,10 @@ class DataManager:
                         # 27/200=14%). Consistent units per window: only
                         # apply the overlay when the WHOLE window is covered;
                         # otherwise leave every bar as tick volume.
-                        if _swapped == _total and _total > 0:
+                        # B11: the still-forming last bar never has Binance volume yet; it must not
+                        # veto the overlay for every closed bar (main drops that bar later anyway).
+                        _b11_forming_only = (_total > 1 and _swapped == _total - 1 and bool(_m.iloc[:-1].notna().all()))
+                        if (_swapped == _total or _b11_forming_only) and _total > 0:
                             # BATCH-A A4: MT5 tick_volume arrives as an integer
                             # dtype; Binance volumes are floats. Assigning
                             # floats into an int column raised a

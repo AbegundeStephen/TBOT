@@ -627,6 +627,18 @@ class MT5ExecutionHandler:
                     initial_sl_dist = current_price * sl_pct
                     logger.info(f"[TACTICAL] ⚠️ ATR not found, using static SL: {sl_pct:.2%}")
 
+                # B11-NS: size on the tested stop (R2 - 0.3 moves), not on an ATR guess.
+                try:
+                    from src.execution.ns_engine import ns_levels as _ns_levels_sz
+                    _cs_sz = (signal_details or {}).get("composite_state") or {}
+                    if _cs_sz.get("ns_exit") and _cs_sz.get("ns_r2") and _cs_sz.get("ns_atr1"):
+                        _st_sz, _ = _ns_levels_sz(1 if signal == 1 else -1, float(current_price), float(_cs_sz["ns_r2"]),
+                                                  float(_cs_sz["ns_atr1"]), float(risk_config.get("min_sl_pct", 0.0) or 0.0), None)
+                        if _st_sz is not None:
+                            initial_sl_dist = abs(float(current_price) - float(_st_sz))
+                            logger.info(f"[NS-SIZE] {asset}: sizing on the tested stop {_st_sz:.5g} ({initial_sl_dist:.5g} away)")
+                except Exception as _nsz_e:
+                    logger.warning(f"[NS-SIZE] {asset}: fell back to the ATR stop for sizing ({_nsz_e})")
                 side = "long" if signal == 1 else "short"
                 if side == "long":
                     initial_stop = current_price - initial_sl_dist

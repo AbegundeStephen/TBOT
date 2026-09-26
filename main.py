@@ -659,6 +659,11 @@ class TradingBot:
         # B7-14: trial-only trades report to the trial ledger when they close.
         if getattr(self, "portfolio_manager", None) is not None:
             self.portfolio_manager._trial_close_callback = self._on_trial_trade_closed
+            # B11-NS (S7b part 3, CONFIRM FIRST -- traced to portfolio_manager.py's
+            # close_position, the one call site that computes _gross_r for every
+            # closed LIVE trade): every tracked market (BTC) reports its R here,
+            # unconditionally -- not gated on trial_only like the callback above.
+            self.portfolio_manager._ns_close_callback = self._ns_record_close
 
         # B8-3: one line at start listing every phase_config setting, so what the
         # bot is really running with is visible in the log.
@@ -2965,7 +2970,7 @@ class TradingBot:
             except Exception as e:
                 logger.warning(f"[AI] Logging config failed: {e}")
 
-        if self.ai_validator and self.telegram_bot and self.analyst:
+        if self.telegram_bot and self.analyst:   # B11: charts no longer depend on the AI validator
             # sniper may be None (disconnected in Phase 0B) — that's fine,
             # visualization works without it.
             try:
@@ -3140,6 +3145,60 @@ class TradingBot:
         except Exception as _e:
             logger.debug(f"[TRIAL] telegram failed: {_e}")
 
+    # -- B11-NS: per-market pause (BTC at -6R, Desire 25 Sep) -------------------------------
+    _NS_PAUSE_PATH = "data/ns_market_pause.json"
+
+    def _ns_pause_load(self):
+        import json as _j, os as _o
+        try:
+            if _o.path.exists(self._NS_PAUSE_PATH):
+                with open(self._NS_PAUSE_PATH, encoding="utf-8") as _fh:
+                    return _j.load(_fh)
+        except Exception as _e:
+            logger.error(f"[NS-PAUSE] read failed: {_e}")
+        return {}
+
+    def _ns_pause_save(self, data):
+        import json as _j, os as _o
+        try:
+            _o.makedirs("data", exist_ok=True)
+            _tmp = self._NS_PAUSE_PATH + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _fh:
+                _j.dump(data, _fh, indent=2, default=str)
+            _o.replace(_tmp, self._NS_PAUSE_PATH)
+        except Exception as _e:
+            logger.error(f"[NS-PAUSE] save failed: {_e}")
+
+    def _ns_market_paused(self, asset_name):
+        return bool((self._ns_pause_load().get(str(asset_name).upper()) or {}).get("paused", False))
+
+    def _ns_record_close(self, asset_name, r_value):
+        """Every closed LIVE trade of a tracked market (BTC): its own Telegram line,
+        a running total, and the pause at the limit."""
+        _a = str(asset_name).upper()
+        _limits = (self.config.get("phase_config", {}) or {}).get("ns_pause_limits_r", {"BTC": 6.0}) or {}
+        if _a not in _limits:
+            return
+        _data = self._ns_pause_load()
+        _rec = _data.get(_a) or {"total_r": 0.0, "trades": 0, "paused": False}
+        _rec["total_r"] = float(_rec.get("total_r", 0.0)) + float(r_value or 0.0)
+        _rec["trades"] = int(_rec.get("trades", 0)) + 1
+        _lim = float(_limits[_a])
+        _line = ("%s: live trade closed %+.2fR -- running total %+.2fR over %d trade(s) (pause at -%.0fR)"
+                 % (_a, float(r_value or 0.0), _rec["total_r"], _rec["trades"], _lim))
+        logger.info("[NS-PAUSE] " + _line)
+        if not _rec.get("paused") and _rec["total_r"] <= -_lim:
+            _rec["paused"] = True
+            _rec["paused_at"] = datetime.now().isoformat(timespec="seconds")
+            _alert = ("<b>%s PAUSED</b> at %+.2fR (limit -%.0fR). Real trades stopped; practice trades "
+                      "continue. Send /resume %s to switch it back on." % (_a, _rec["total_r"], _lim, _a))
+            logger.warning("[NS-PAUSE] " + _alert)
+            self._b7_telegram(_alert)
+        else:
+            self._b7_telegram(_line)
+        _data[_a] = _rec
+        self._ns_pause_save(_data)
+
     def _council_trial_active(self):
         """B7-14: the trial is on when phase_config.council_trial_addons_off is
         true (default false) and the loss limit has not switched it back."""
@@ -3158,6 +3217,16 @@ class TradingBot:
         except Exception:
             _days = 0
         _max_days = int(self._b7_trial_cfg().get("council_trial_max_days", 28))
+        # B11 (Desire, ruling 8): check in at 4 weeks, but decide only with 20+ trial trades.
+        _min_tr = int(self._b7_trial_cfg().get("council_trial_min_trades", 20))
+        if _days >= _max_days and int(led.get("trades", 0)) < _min_tr:
+            if not led.get("checkin_alerted"):
+                led["checkin_alerted"] = True
+                self._b7_trial_ledger_save()
+                self._b7_telegram("<b>COUNCIL TRIAL CHECK-IN</b> (%d days): %d trial trades, %+.2fR. "
+                                  "The decision waits for %d trades." % (_days, int(led.get("trades", 0)),
+                                                                          float(led.get("total_r", 0.0)), _min_tr))
+            return not led.get("reverted", False)
         if not led.get("completed_alerted") and _days >= _max_days:
             led["completed_alerted"] = True
             self._b7_trial_ledger_save()
@@ -6587,6 +6656,8 @@ class TradingBot:
 
             # Cache the closed 1H dataframe so the VTM circuit breaker can see it.
             self._df_1h_cache[asset_name] = df
+            if getattr(self, "shadow_trader", None) is not None:
+                self.shadow_trader.ns_bar_update(asset_name, df)   # B11-NS: practice runner lock/trail
 
             # Fetch and cache 4H data for VTM loop
             self._df_4h_cache[asset_name] = self._fetch_4h_data(asset_name)
@@ -7017,7 +7088,7 @@ class TradingBot:
                         position=_position,
                     )
                 except Exception as _chart_err:
-                    logger.debug(f"[CHART] Dashboard chart generation failed for {asset_name}: {_chart_err}")
+                    logger.warning(f"[CHART] Dashboard chart generation failed for {asset_name}: {_chart_err}")   # B11: was debug (silent)
 
             # Personal scalp-alignment alert (off by default, see
             # config["scalp_alerts"]). Pure observer — never affects signal,
@@ -8025,7 +8096,7 @@ class TradingBot:
                 # merged alongside CompositeState's setup_ref/setup_age fields.
                 # Using the real key so dist doesn't read a constant -1.00.
                 # DATA-2: composite_state fallback chain added per this batch.
-                _m_atr = float(details.get("atr_fast") or _cs_get("atr_1h") or _cs_get("atr") or 0.0)
+                _m_atr = float(_cs_get("ns_atr1") or details.get("atr_fast") or _cs_get("atr_1h") or _cs_get("atr") or 0.0)   # B11-NS
                 _m_dist = (
                     abs(current_price - _pr_ref) / _m_atr
                     if (_pr_ref > 0 and _m_atr > 0) else -1.0
@@ -8100,6 +8171,28 @@ class TradingBot:
             # ── Natural cycle elapsed gate ────────────────────────────────────
             # Block MR re-entries in the same Livermore NATURAL phase until
             # the state has aged sufficiently (≥ natural_cycle_min_bars, default 8).
+            # B11-NS: a paused market (BTC at -6R) trades on paper only until /resume.
+            if self._ns_market_paused(asset_name):
+                self._notify_blocked(
+                    asset=asset_name,
+                    signal=signal,
+                    block_source="Market paused",
+                    block_reason="its live trades reached the pause limit -- practice trades only until /resume",
+                    details=details,
+                    price=details.get("price"),
+                )
+                self._shadow_open_blocked(
+                    asset_name, signal, details, df, current_price,
+                    "market_paused", asset_cfg,
+                    gate_id="market_paused", gate_stage="post_council",
+                )
+                if getattr(self, "funnel_logger", None) is not None:
+                    try:
+                        self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_market_paused",
+                                                                  "episode_id": details.get("episode_id")})
+                    except Exception:
+                        pass
+                return
             _current_lsm_age = 0
             try:
                 if hasattr(self, "_current_regime_data"):
