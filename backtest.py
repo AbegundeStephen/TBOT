@@ -606,8 +606,8 @@ class MLStrategy(bt.Strategy):
         ("aggregator_preset",      "balanced"),
         ("aggregator_type",        "performance"),  # "performance" | "council"
         ("exit_on_opposite_signal", True),
-        # AI validation
-        ("use_ai_validation",              True),
+        # AI validation -- off by default (see --with-ai)
+        ("use_ai_validation",              False),
         ("ai_sr_threshold",                0.015),
         ("ai_pattern_confidence",          0.50),
         ("ai_enable_adaptive",             True),
@@ -1211,7 +1211,7 @@ def run_backtest(
     asset_key: str,
     aggregator_type: str = "performance",
     aggregator_preset: str = "balanced",
-    use_ai: bool = True,
+    use_ai: bool = False,
     use_macro_gov: bool = True,
     use_gatekeeper: bool = True,
     initial_capital: float = None,
@@ -1325,7 +1325,7 @@ def run_backtest(
     logger.info(f"   Max Drawdown: {max_dd:.2f}%")
     logger.info(f"   Trades: {closed}  Win rate: {win_rate:.1f}%  Avg PnL: ${avg_pnl:.2f}")
     if closed == 0:
-        logger.warning("⚠️  NO TRADES — try --preset aggressive or --no-ai")
+        logger.warning("⚠️  NO TRADES — try --preset aggressive")
     logger.info("=" * 70)
 
     return {
@@ -1356,7 +1356,7 @@ def run_backtest(
 def run_comparison(
     assets: list,
     preset: str = None,
-    use_ai: bool = True,
+    use_ai: bool = False,
     use_macro_gov: bool = True,
     use_gatekeeper: bool = True,
     initial_capital: float = None,
@@ -1455,8 +1455,11 @@ Examples:
   # Compare both on multiple assets
   python backtest.py --assets EURUSD GBPAUD USTEC --compare-both
 
-  # No AI filter, aggressive preset
-  python backtest.py --asset BTC --preset aggressive --no-ai
+  # AI validation layer is OFF by default (see --with-ai below); aggressive preset
+  python backtest.py --asset BTC --preset aggressive
+
+  # Put the AI validation layer back on, to compare against it
+  python backtest.py --asset BTC --with-ai
 
   # Full sweep of all assets
   python backtest.py --assets BTC GOLD EURUSD GBPAUD GBPUSD USOIL USTEC USDJPY --compare-both
@@ -1489,7 +1492,11 @@ Examples:
         "--compare-both", action="store_true",
         help="Run BOTH aggregators and print a side-by-side comparison table",
     )
-    parser.add_argument("--no-ai",          action="store_true", help="Disable AI validation layer")
+    # AI validation layer (HybridSignalValidator: S/R-proximity + candlestick-pattern
+    # heuristics, not a trained model -- see CLAUDE.md) is OFF by default in backtest.
+    # Pass --with-ai to re-enable it for comparison. --no-ai is kept as a no-op alias.
+    parser.add_argument("--no-ai",          action="store_true", help="[legacy] Disable AI validation layer (already off by default)")
+    parser.add_argument("--with-ai",        action="store_true", help="Enable the AI validation layer, to compare against it")
     # Governor and Gatekeeper are OFF by default in backtest (no live MTF governor is running).
     # Pass --with-gov / --with-gatekeeper to re-enable them (e.g. to replicate live behaviour).
     parser.add_argument("--no-gov",         action="store_true", help="[legacy] Disable Macro Governor (already off by default)")
@@ -1566,7 +1573,7 @@ Examples:
     _dash_params = {
         "asset": asset_list[0], "aggregator": args.aggregator,
         "preset": args.preset, "capital": args.capital, "lookback": args.lookback,
-        "no_ai": args.no_ai, "no_gov": args.no_gov, "no_gatekeeper": args.no_gatekeeper,
+        "with_ai": args.with_ai, "no_gov": args.no_gov, "no_gatekeeper": args.no_gatekeeper,
         "range_preset": args.range_preset,
     } if _dash_run else None
     _dash_started_at = datetime.now(timezone.utc).isoformat() if _dash_run else None
@@ -1581,7 +1588,7 @@ Examples:
         run_comparison(
             assets=asset_list,
             preset=args.preset,
-            use_ai=not args.no_ai,
+            use_ai=args.with_ai and not args.no_ai,
             use_macro_gov=use_gov,
             use_gatekeeper=use_gatekeeper,
             initial_capital=args.capital,
@@ -1595,7 +1602,7 @@ Examples:
                     asset_key=asset,
                     aggregator_type=args.aggregator,
                     aggregator_preset=_resolve_preset(asset, args.aggregator, args.preset),
-                    use_ai=not args.no_ai,
+                    use_ai=args.with_ai and not args.no_ai,
                     use_macro_gov=use_gov,
                     use_gatekeeper=use_gatekeeper,
                     initial_capital=args.capital,
