@@ -606,6 +606,10 @@ class MLStrategy(bt.Strategy):
         ("aggregator_preset",      "balanced"),
         ("aggregator_type",        "performance"),  # "performance" | "council"
         ("exit_on_opposite_signal", True),
+        # Overrides both InstitutionalCouncilAggregator thresholds (trend_aligned
+        # and counter_trend) to this exact value, instead of the preset's pair --
+        # see --council-min-score. None = use the preset as-is.
+        ("council_min_score",      None),
         # AI validation -- off by default (see --with-ai)
         ("use_ai_validation",              False),
         ("ai_sr_threshold",                0.015),
@@ -673,6 +677,12 @@ class MLStrategy(bt.Strategy):
 
         preset_name      = self.params.aggregator_preset
         confidence_config = get_aggregator_preset(self.asset_key, preset_name)
+        if self.params.council_min_score is not None:
+            _cms = float(self.params.council_min_score)
+            confidence_config["trend_aligned_threshold"] = _cms
+            confidence_config["counter_trend_threshold"] = _cms
+            logger.info(f"[COUNCIL] Score threshold overridden to {_cms:.2f} "
+                        f"(preset '{preset_name}' otherwise unchanged)")
 
         # ── Aggregator selection ─────────────────────────────────────────────
         agg_type = self.params.aggregator_type.lower()
@@ -1217,6 +1227,7 @@ def run_backtest(
     initial_capital: float = None,
     lookback: int = 300,           # bars fed to strategies per step (≥200 for EMA200 warmup)
     range_preset: str = None,      # e.g. "6m"/"2y" -- restricts total backtest span; None = full history
+    council_min_score: float = None,  # override both council thresholds; None = use the preset's pair
 ) -> dict:
     """
     Run a single backtest. Returns a results dict for comparison tables.
@@ -1275,6 +1286,7 @@ def run_backtest(
         use_macro_governor=use_macro_gov,
         use_gatekeeper=use_gatekeeper,
         lookback=lookback,
+        council_min_score=council_min_score,
     )
 
     cap = initial_capital or config["backtesting"]["initial_capital"]
@@ -1362,6 +1374,7 @@ def run_comparison(
     initial_capital: float = None,
     lookback: int = 300,
     range_preset: str = None,
+    council_min_score: float = None,
 ):
     """
     Run Performance then Council on each asset and print a comparison table.
@@ -1384,6 +1397,7 @@ def run_comparison(
                 initial_capital=initial_capital,
                 lookback=lookback,
                 range_preset=range_preset,
+                council_min_score=council_min_score,
             )
             all_results.append(r)
 
@@ -1455,6 +1469,9 @@ Examples:
   # Compare both on multiple assets
   python backtest.py --assets EURUSD GBPAUD USTEC --compare-both
 
+  # Council aggregator with its confluence score gate effectively bypassed
+  python backtest.py --asset BTC --aggregator council --council-min-score 0
+
   # AI validation layer is OFF by default (see --with-ai below); aggressive preset
   python backtest.py --asset BTC --preset aggressive
 
@@ -1491,6 +1508,15 @@ Examples:
     parser.add_argument(
         "--compare-both", action="store_true",
         help="Run BOTH aggregators and print a side-by-side comparison table",
+    )
+    parser.add_argument(
+        "--council-min-score", type=float, default=None,
+        help="Override the InstitutionalCouncilAggregator's trend_aligned/"
+             "counter_trend thresholds to this single value (e.g. 0 to "
+             "effectively bypass the confluence score gate). Ignored for the "
+             "performance aggregator. Omit to use the preset's own pair "
+             "(conservative 3.0/3.5, balanced 2.5/3.0, aggressive 2.0/2.5, "
+             "scalper 1.8/2.2).",
     )
     # AI validation layer (HybridSignalValidator: S/R-proximity + candlestick-pattern
     # heuristics, not a trained model -- see CLAUDE.md) is OFF by default in backtest.
@@ -1574,7 +1600,7 @@ Examples:
         "asset": asset_list[0], "aggregator": args.aggregator,
         "preset": args.preset, "capital": args.capital, "lookback": args.lookback,
         "with_ai": args.with_ai, "no_gov": args.no_gov, "no_gatekeeper": args.no_gatekeeper,
-        "range_preset": args.range_preset,
+        "range_preset": args.range_preset, "council_min_score": args.council_min_score,
     } if _dash_run else None
     _dash_started_at = datetime.now(timezone.utc).isoformat() if _dash_run else None
     if _dash_run:
@@ -1594,6 +1620,7 @@ Examples:
             initial_capital=args.capital,
             lookback=args.lookback,
             range_preset=args.range_preset,
+            council_min_score=args.council_min_score,
         )
     else:
         try:
@@ -1608,6 +1635,7 @@ Examples:
                     initial_capital=args.capital,
                     lookback=args.lookback,
                     range_preset=args.range_preset,
+                    council_min_score=args.council_min_score,
                 )
             if _dash_run:
                 # result.json written BEFORE status flips to "completed" so a
