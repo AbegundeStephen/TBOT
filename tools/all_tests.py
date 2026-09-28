@@ -19,6 +19,7 @@ PAPER    every run (and --weekly): ideas 2 to 6 measured on candles the rules ha
 WEEKLY   --weekly : the forward test, the paper ideas, proof supply, and (B12) the council's vote, the A+ / watch
          labels and the exploration lanes, from the diary (Saturday's run).
 All tests run on the research engine already verified on this box (tools/realistic_test.py, fingerprint checked).
+TEST 7   --research7 : reversals at levels, broken levels as proof lines, candle shapes and colours, UKOIL vs USOIL.
 Run:  python tools/all_tests.py            (everything)
       python tools/all_tests.py --weekly   (Saturday)
 """
@@ -61,6 +62,11 @@ def research_ns(variant=None):
             raise RuntimeError("research engine layout not recognised -- the gear test is skipped")
         src = src.replace(brk, "                if ((d == 1 and c1[i] > R2) or (d == -1 and c1[i] < R2)):")
         src = src.replace("                    j = max(0, i - 3)", "                    j = i")
+    if variant == "ALT":      # TEST 7b: the proof lines come from another source (brain levels, 1H gaps)
+        line = "    for conf, typ, lvl, edge in swings(h4):"
+        if src.count(line) != 1:
+            raise RuntimeError("research engine layout not recognised -- test 7b is skipped")
+        src = src.replace(line, "    for conf, typ, lvl, edge in SWING_SRC(asset, h4, h1):")
     ns = {"__name__": "research"}
     exec(compile(src, "research", "exec"), ns)
     return ns
@@ -170,6 +176,20 @@ def test2(ns, bt):
         if a != "ALL":
             print("   %-8s%10s%10s%12s%13s   trades a week: forward %.1f, backtest %.1f" % ("", "", "", "", "", (n + n_open) / fwd_weeks, per_wk))
     done_all = fm[~fm["open"]] if len(fm) else fm
+    if len(fm):
+        start_live, seen = _live_log()
+        print("\n   EVERY FORWARD TRADE, and what the live bot did with the same proof (matched on market, direction, R2):")
+        for r in fm.sort_values("t").itertuples():
+            key = (r.asset, int(r.d), "%.5g" % float(r.R2))
+            if start_live is None or pd.Timestamp(r.t) < start_live:
+                live = "before B11 went live"
+            elif key in seen:
+                live = seen[key]
+            else:
+                live = "!! NOT SEEN LIVE -- investigate (rule 13)"
+            print("     %-7s %s  %-5s entry %-2s R2 %-10s %-8s | live: %s" % (
+                r.asset, pd.Timestamp(r.t).strftime("%d %b %H:%M"), "long" if int(r.d) == 1 else "short", r.entry,
+                "%.5g" % float(r.R2), "open" if r.open else "%+.2fR" % r.net, live))
     print("\n   RULE (agreed in advance, printed every run): at 30+ finished forward trades in total --")
     print("     forward mean below 0R            -> STOP and investigate before anything else changes")
     print("     below the band but above 0R      -> watch; re-check at 60 trades")
@@ -212,6 +232,87 @@ def test2(ns, bt):
                                            (", mean %+.2fR" % (sum(rr) / len(rr))) if rr else "",
                                            (" (%d without an R field)" % nr) if nr else ""))
     return fdf
+
+
+def _live_log():
+    """The live engine's own lines since it started: (first new-engine time, {(market, dir, R2): what happened})."""
+    start, seen = None, {}
+    pat = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[(NS-PROOF|NS-MISSED)\] (\w+): .*?dir=([+-]\d) R2=([0-9.e+-]+)")
+    for fpath in sorted(glob.glob(os.path.join("logs", "trading_bot.log*")), key=os.path.getmtime):
+        try:
+            for line in open(fpath, encoding="utf-8", errors="replace"):
+                if "[NS" not in line:
+                    continue
+                if start is None and ("[NS] " in line or "[DEPLOY-HYGIENE]" in line) and len(line) > 19:
+                    try:
+                        start = pd.Timestamp(line[:19])
+                    except Exception:
+                        pass
+                m = pat.search(line)
+                if m:
+                    key = (m.group(3), int(m.group(4)), "%.5g" % float(m.group(5)))
+                    seen[key] = ("PROOF at %s" % m.group(1)[5:16]) if m.group(2) == "NS-PROOF" else \
+                        ("MISSED at %s (bot was catching up)" % m.group(1)[5:16])
+        except Exception:
+            continue
+    return start, seen
+
+
+# ============================================================================================================
+# CANDIDATE MARKETS on new candles (paper) -- the passes from the market scans
+# ============================================================================================================
+CANDIDATES = [("JP225", "JP225m", "B", "SIMPLE4"), ("EURJPY", "EURJPYm", "B", "SIMPLE4"),
+              ("UKOIL", "UKOILm", "B", "SIMPLE4"), ("SILVER", "XAGUSDm", "B", "SIMPLE4"),
+              ("US500", "US500m", "E", "RUNNER"), ("AUDJPY", "AUDJPYm", "E", "SIMPLE+F")]
+
+
+def candidates_forward(ns):
+    print("\n" + "=" * 110)
+    print("CANDIDATE MARKETS ON NEW CANDLES -- the market-scan passes, their passing profile, the same forward window as")
+    print("Test 2 (after %s). Paper only; fresh candles are fetched for these markets each run." % FREEZE.strftime("%d %b"))
+    print("=" * 110)
+    known_costs = [v for v in ns["COST"].values() if v == v]
+    base_cost = float(np.median(known_costs)) if known_costs else 0.0002
+    live_tpl = dict(next(iter(ns["LIVE"].values()))) if ns.get("LIVE") else {}
+    s0, e0 = ns["START"], ns["END"]
+    print("   %-8s%-22s%10s%8s%12s" % ("market", "profile", "finished", "open", "R a trade"))
+    for name, sym, e, m in CANDIDATES:
+        status, sp = _fetch(sym, refresh=True)
+        if status not in ("fetched from MT5", "on file"):
+            print("   %-8s skipped: %s" % (name, status))
+            continue
+        ns["SYM"][name] = sym
+        ns["MIN_RR"][name] = 0.5
+        ns["MIN_SL_PCT"][name] = STOP_FLOOR[_market_class(sym)]
+        if live_tpl:
+            ns["LIVE"][name] = dict(live_tpl)
+        for h in range(24):
+            ns["COST"][(name, h)] = sp if sp else base_cost
+        ns["START"], ns["END"] = FREEZE + pd.Timedelta(minutes=1), pd.Timestamp("2100-01-01")
+        try:
+            rows = pd.DataFrame(ns["run_market"](name))
+        except Exception as ex:
+            print("   %-8s failed: %s" % (name, ex))
+            continue
+        finally:
+            ns["START"], ns["END"] = s0, e0
+        if len(rows):
+            mm = "SIMPLE" if m == "SIMPLE+F" else m
+            g = rows[(rows.asset == name) & (rows.entry == e) & (rows["mode"] == mm)]
+            if m == "SIMPLE+F":
+                g = g[(g.kind == "continuation") & ~(g.strength > SPIKE)]
+            g = one_at_a_time(g)
+            last = ns["load"](sym, "1h").index[-1] + pd.Timedelta(hours=1)
+            opn = [(r.exit_t >= last) and (r.exit_t - r.t < pd.Timedelta(days=7)) for r in g.itertuples()]
+            g = g.assign(open=opn)
+            done = g[~g["open"]]
+        else:
+            g = done = rows
+        prof = {"SIMPLE4": "break + 4-move target", "RUNNER": "today's entry + runner",
+                "SIMPLE+F": "filtered FX profile"}.get(m, m)
+        print("   %-8s%-22s%10d%8d%12s" % (name, prof, len(done), len(g) - len(done),
+                                         ("%+.2f" % done.net.mean()) if len(done) else "-"))
+    print("   the live trial at the smallest size is the proof; this table is the free early read on new candles.")
 
 
 # ============================================================================================================
@@ -963,7 +1064,7 @@ def _market_class(sym):
     return "fx"
 
 
-def _fetch(sym):
+def _fetch(sym, refresh=False):
     """Price files for a market the bot does not trade: written once to data/raw, never overwriting anything.
     Returns (status, spread as a fraction of price or None)."""
     p1, p4 = os.path.join("data", "raw", "%s_1h.csv" % sym), os.path.join("data", "raw", "%s_4h.csv" % sym)
@@ -985,7 +1086,10 @@ def _fetch(sym):
                     spread = ((ask - bid) / bid) if ask > bid else float(info.spread) * float(info.point) / bid
                     break
                 _t.sleep(0.5)
-            if not (os.path.exists(p1) and os.path.exists(p4)):
+            _own = sym in [v for v in globals().get("_OWN_SYMS", [])]
+            if refresh and _own:
+                refresh = False                      # the bot's own markets: never touched by this tool
+            if refresh or not (os.path.exists(p1) and os.path.exists(p4)):
                 for tf, path, min_bars in ((mt5.TIMEFRAME_H1, p1, 3000), (mt5.TIMEFRAME_H4, p4, 700)):
                     r = mt5.copy_rates_range(sym, tf, datetime(2025, 6, 1), datetime.now())
                     if r is None or len(r) < min_bars:
@@ -1154,6 +1258,249 @@ def variants_forward(ns, fdf):
 
 
 # ============================================================================================================
+
+# ============================================================================================================
+# TEST 7 -- Desire's four new questions (28 Sep, decisions 4, 10, 11, 12)
+#   7a reversals confirmed at levels | 7b broken levels as proof lines | 7c candle shapes and colours
+#   7d UKOIL's overlap with USOIL
+# ============================================================================================================
+LV7 = ["4H brain level", "1H brain level", "open FVG (1H)", "open FVG (4H)"]
+
+
+def _halves(v, split):
+    a_ = [x for t, x in v if t < split]
+    b_ = [x for t, x in v if t >= split]
+    m = lambda z: (sum(z) / len(z)) if z else float("nan")
+    return len(v), m([x for t, x in v]), m(a_), m(b_), len(a_), len(b_)
+
+
+def test7a(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 7a -- REVERSALS AT LEVELS (decision 10): a reversal's turning point is R1 (the swing low of a long, the swing")
+    print("           high of a short). Did reversals whose R1 sat on a level known BEFORE the setup do better? Continuations")
+    print("           shown alongside as a check. 'At a level' = R1 within half a typical move of it (or inside its zone).")
+    print("           AGREED IN ADVANCE: a level type CONFIRMS reversals if reversals at it beat reversals not at it by 0.2R+")
+    print("           in BOTH halves, with 20+ trades on each side. That earns a live label first -- not a rule.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    sig = mix_rows(bt)
+    rec = []
+    for r in sig.itertuples():
+        M = _market(ns, r.asset)
+        ic = int(M["t1"].searchsorted(pd.Timestamp(r.conf), side="left"))
+        if ic < 2 or ic >= len(M["c1"]):
+            continue
+        atr = M["a1"][ic]
+        if not (atr == atr and atr > 0):
+            continue
+        lv = _levels_at(M, ic, int(r.d) == 1)
+        near = {typ: any(l - 0.5 * atr <= float(r.R1) <= h + 0.5 * atr for (tt, l, h) in lv if tt == typ) for typ in LV7}
+        rec.append((str(r.kind), pd.Timestamp(r.t), float(r.net), near))
+    print("   %-13s%-16s%22s%22s%10s   %s" % ("kind", "level at R1", "at it: n / R", "not at it: n / R", "", "(1st / 2nd half) at / not -> verdict"))
+    for kind in ("reversal", "continuation"):
+        for typ in LV7:
+            at = [(t, x) for k, t, x, nr in rec if k == kind and nr[typ]]
+            no = [(t, x) for k, t, x, nr in rec if k == kind and not nr[typ]]
+            A, N = _halves(at, split), _halves(no, split)
+            ok = (kind == "reversal" and A[4] >= 20 and A[5] >= 20 and N[4] >= 20 and N[5] >= 20
+                  and A[2] - N[2] >= 0.2 and A[3] - N[3] >= 0.2)
+            print("   %-13s%-16s%22s%22s%10s   (%+.2f / %+.2f) vs (%+.2f / %+.2f)%s" % (
+                kind, typ, "%d / %+.2f" % (A[0], A[1]), "%d / %+.2f" % (N[0], N[1]), "", A[2], A[3], N[2], N[3],
+                "  -> CONFIRMS" if ok else ""))
+
+
+def _brain_events(asset, h4):
+    """Every level the 4H brain set, typed: resistance (H) = main-up high / natural high, support (L) = main-down
+    low / natural low -- with the close time of the 4H candle when it became known. As (conf, typ, lvl, edge)."""
+    m4, m1, lsm = _brain_states(asset, h4)
+    if m4 is None:
+        return []
+    atr = lsm.atr14(h4)
+    ev, last = [], {}
+    for t, c, a in zip(h4.index, h4["close"].values, atr.values):
+        try:
+            s = m4.update(float(c), float(a))
+        except Exception:
+            continue
+        up = s.state in UP
+        for key, typ, v in (("up", "H", s.anchor_main_up_max if up else None), ("down", "L", None if up else s.anchor_main_down_min),
+                            ("nhigh", "H", s.anchor_natural_high), ("nlow", "L", s.anchor_natural_low)):
+            if v is not None and v == v and last.get(key) != v:
+                ev.append((t + pd.Timedelta(hours=4), typ, float(v), float(v)))
+                last[key] = v
+    return sorted(ev, key=lambda x: x[0])
+
+
+def _gap_events(h1):
+    """Every 1H fair-value gap as a zone: a gap below price (bullish) is support (L) from its top to its bottom,
+    a gap above (bearish) is resistance (H) from its bottom to its top."""
+    hi, lo = h1["high"].values, h1["low"].values
+    t1 = h1.index + pd.Timedelta(hours=1)
+    ev = []
+    for k in range(2, len(hi)):
+        if lo[k] > hi[k - 2]:
+            ev.append((t1[k], "L", float(lo[k]), float(hi[k - 2])))
+        elif hi[k] < lo[k - 2]:
+            ev.append((t1[k], "H", float(hi[k]), float(lo[k - 2])))
+    return ev
+
+
+def test7b(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 7b -- BROKEN LEVELS AS PROOF LINES (decision 11): the same proof steps and per-market rules, but the proof")
+    print("           line (R2) and the kill line (R1) come from (i) the 4H brain's levels or (ii) open 1H gaps, instead of")
+    print("           4H swing closes. 'Extra' = trades that do NOT coincide with a tested trade (same market and direction,")
+    print("           entry within 4 hours).")
+    print("           AGREED IN ADVANCE: a new source earns a PAPER lane if its trades make over +0.10R in BOTH halves with")
+    print("           30+ in each half, AND its extra trades are positive in both halves. Live only after that.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
+    base = one_at_a_time(mix_rows(bt))
+    try:
+        nsa = research_ns(variant="ALT")
+    except Exception as ex:
+        print("   skipped: %s" % ex)
+        return
+    nsa["START"], nsa["END"] = ns["START"], ns["END"]
+    print("   %-26s%8s%11s%18s%10s%9s%16s" % ("proof lines from", "trades", "R a trade", "(1st / 2nd)", "R a week", "extra", "extra R (1/2)"))
+    b_st = _stat(base, split, weeks)
+    print("   %-26s%8d%+11.2f%18s%+10.2f" % ("4H swing closes (today)", b_st[0], b_st[1], "(%+.2f / %+.2f)" % (b_st[2], b_st[3]), b_st[4]))
+    for lab, src in (("the 4H brain's levels", lambda a, h4, h1: _brain_events(a, h4)),
+                     ("open 1H gaps", lambda a, h4, h1: _gap_events(h1))):
+        nsa["SWING_SRC"] = src
+        rows = run_window(nsa, ns["START"], ns["END"])
+        if not len(rows):
+            print("   %-26s  no trades" % lab)
+            continue
+        alt = one_at_a_time(mix_rows(rows))
+        st = _stat(alt, split, weeks)
+        extra = []
+        for r in alt.itertuples():
+            b = base[(base.asset == r.asset) & (base.d == r.d)]
+            dup = len(b) and (abs(b["t"] - r.t) <= pd.Timedelta(hours=4)).any()
+            if not dup:
+                extra.append((pd.Timestamp(r.t), float(r.net)))
+        E = _halves(extra, split)
+        ok = st[5] >= 30 and st[6] >= 30 and st[2] > 0.10 and st[3] > 0.10 and E[2] > 0 and E[3] > 0
+        print("   %-26s%8d%+11.2f%18s%+10.2f%9d%16s   %s" % (lab, st[0], st[1], "(%+.2f / %+.2f)" % (st[2], st[3]), st[4],
+                                                           E[0], "(%+.2f / %+.2f)" % (E[2], E[3]), "-> PAPER LANE" if ok else ""))
+    ns["START"], ns["END"] = ns_start_bt, ns_end_bt
+
+
+def test7c(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 7c -- CANDLE SHAPES AND COLOURS (decision 12): the entry candle of every tested signal, sorted by shape,")
+    print("           size and colour; R a trade for each group against the rest, after costs.")
+    print("           AGREED IN ADVANCE: a shape MATTERS if its group differs from the rest by 0.2R+ in the same direction in")
+    print("           BOTH halves, with 30+ trades on each side. That earns a live label first -- not a rule.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    sig = mix_rows(bt)
+    rec = []
+    for r in sig.itertuples():
+        M = _market(ns, r.asset)
+        i, d = int(r.i), int(r.d)
+        if i < 1:
+            continue
+        op = M["h1"]["open"].values
+        o, h, l, c = float(op[i]), float(M["hi1"][i]), float(M["lo1"][i]), float(M["c1"][i])
+        po, ph, pl, pc = float(op[i - 1]), float(M["hi1"][i - 1]), float(M["lo1"][i - 1]), float(M["c1"][i - 1])
+        atr = float(M["a1"][i])
+        rng, body = h - l, abs(c - o)
+        if not (atr > 0 and rng > 0):
+            continue
+        against_wick = (min(o, c) - l) if d == 1 else (h - max(o, c))       # the tail pointing away from the trade
+        into_wick = (h - max(o, c)) if d == 1 else (min(o, c) - l)          # the tail in the trade's direction
+        f = {"colour": "with the trade" if (c - o) * d > 0 else "against the trade",
+             "body": "small body (<0.3 move)" if body < 0.3 * atr else ("medium body" if body < 1.0 * atr else "big body (1+ move)"),
+             "range": "small candle (<0.8 move)" if rng < 0.8 * atr else ("normal candle" if rng < 1.6 * atr else "big candle (1.6+ moves)"),
+             "tail behind": "long tail behind (>= body)" if against_wick >= body and body > 0 else "no long tail behind",
+             "tail ahead": "long tail ahead (>= body)" if into_wick >= body and body > 0 else "no long tail ahead",
+             "doji": "doji (body <10% of range)" if body < 0.1 * rng else "not a doji",
+             "engulfing": "engulfing, with the trade" if ((c - o) * d > 0 and max(o, c) >= max(po, pc) and min(o, c) <= min(po, pc)) else "not engulfing",
+             "inside": "inside bar" if (h <= ph and l >= pl) else "not an inside bar"}
+        rec.append((pd.Timestamp(r.t), float(r.net), f))
+    print("   %-34s%16s%16s   %s" % ("entry candle", "with it: n / R", "rest: n / R", "(1st / 2nd) with vs rest -> verdict"))
+    for feat in ("colour", "body", "range", "tail behind", "tail ahead", "doji", "engulfing", "inside"):
+        for val in sorted({x[2][feat] for x in rec}):
+            w = [(t, x) for t, x, f in rec if f[feat] == val]
+            o_ = [(t, x) for t, x, f in rec if f[feat] != val]
+            A, N = _halves(w, split), _halves(o_, split)
+            if A[0] == 0 or N[0] == 0:
+                continue
+            d1, d2 = A[2] - N[2], A[3] - N[3]
+            ok = A[4] >= 30 and A[5] >= 30 and N[4] >= 30 and N[5] >= 30 and abs(d1) >= 0.2 and abs(d2) >= 0.2 and d1 * d2 > 0
+            print("   %-34s%16s%16s   (%+.2f / %+.2f) vs (%+.2f / %+.2f)%s" % (
+                val[:33], "%d / %+.2f" % (A[0], A[1]), "%d / %+.2f" % (N[0], N[1]), A[2], A[3], N[2], N[3],
+                ("  -> MATTERS (%s)" % ("better" if d1 > 0 else "worse")) if ok else ""))
+    print("   %d shapes checked -- with this many, one can look good by luck." % sum(len({x[2][f] for x in rec}) for f in rec[0][2]) if rec else "")
+
+
+def test7d(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 7d -- UKOIL AGAINST USOIL (decision 4): both on the break entry + 4-move target, same window. How often are")
+    print("           they in a trade at the same time, and what would 'one oil trade at a time' make?")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
+    status, sp = _fetch("UKOILm")
+    if status not in ("fetched from MT5", "on file"):
+        print("   skipped: UKOIL %s" % status)
+        return
+    ns["SYM"]["UKOIL"] = "UKOILm"
+    ns["MIN_RR"]["UKOIL"] = 0.5
+    ns["MIN_SL_PCT"]["UKOIL"] = STOP_FLOOR["energy"]
+    if ns.get("LIVE"):
+        ns["LIVE"]["UKOIL"] = dict(next(iter(ns["LIVE"].values())))
+    known = [v for v in ns["COST"].values() if v == v]
+    for h in range(24):
+        ns["COST"][("UKOIL", h)] = sp if sp else float(np.median(known))
+    ns["START"], ns["END"] = ns_start_bt, ns_end_bt
+    uk = pd.DataFrame(ns["run_market"]("UKOIL"))
+    uk = one_at_a_time(uk[(uk.entry == "B") & (uk["mode"] == "SIMPLE4")]) if len(uk) else uk
+    us = one_at_a_time(bt[(bt.asset == "USOIL") & (bt.entry == "B") & (bt["mode"] == "SIMPLE4")])
+    same = opp = 0
+    for r in uk.itertuples():
+        ov = us[(us["t"] < r.exit_t) & (us["exit_t"] > r.t)]
+        if len(ov):
+            if (ov.d == r.d).any():
+                same += 1
+            else:
+                opp += 1
+    both = pd.concat([us.assign(src="USOIL"), uk.assign(src="UKOIL")]).sort_values(["t", "src"], kind="mergesort")
+    one, free = [], None
+    for r in both.itertuples():
+        if free is None or r.t >= free:
+            one.append(r)
+            free = r.exit_t
+    one = pd.DataFrame([r._asdict() for r in one]) if one else both.iloc[0:0]
+    for lab, g in (("USOIL alone (today)", us), ("UKOIL alone", uk), ("both, as two markets", both), ("one oil trade at a time", one)):
+        s = _stat(g, split, weeks) if len(g) else (0, float("nan"), float("nan"), float("nan"), 0.0, 0, 0)
+        print("   %-26s%6d trades%+9.2f R a trade%18s%+9.2f R a week" % (lab, s[0], s[1], "(%+.2f / %+.2f)" % (s[2], s[3]), s[4]))
+    print("   UKOIL trades open while a USOIL trade was open: %d of %d in the SAME direction (%.0f%%), %d in the opposite"
+          % (same, len(uk), 100.0 * same / max(1, len(uk)), opp))
+    print("   (same direction = one oil move carried twice: double the risk on the same idea)")
+
+
+def research7():
+    """python tools/all_tests.py --research7 : tests 7a-7d only."""
+    global ns_start_bt, ns_end_bt
+    print("TEST 7 -- %s -- read-only" % datetime.now().strftime("%d %b %Y %H:%M"))
+    ns = research_ns()
+    globals()["_OWN_SYMS"] = list(ns["SYM"].values())
+    ns_start_bt, ns_end_bt = ns["START"], ns["END"]
+    print("   (building the tested backtest record ...)")
+    bt = run_window(ns, ns_start_bt, ns_end_bt)
+    for fn in (test7a, test7b, test7c, test7d):
+        try:
+            fn(ns, bt)
+        except Exception as ex:
+            print("%s FAILED: %s: %s" % (fn.__name__, type(ex).__name__, ex))
+    print("\nDone. Measured on the backtest window -- anything that passes goes to paper or a label first, then the forward test.")
+
+
+
 def markets_only(arg):
     """python tools/all_tests.py --markets GBPJPYm,AUDJPYm,... : only the new-market test, for the listed symbols."""
     global ns_start_bt, ns_end_bt
@@ -1168,6 +1515,8 @@ def markets_only(arg):
 
 
 def main():
+    if "--research7" in sys.argv:
+        return research7()
     if "--markets" in sys.argv:
         i = sys.argv.index("--markets")
         return markets_only(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
@@ -1181,6 +1530,7 @@ def main():
         print("\nALL TESTS SKIPPED: %s" % ex)
         return
     ns_start_bt, ns_end_bt = ns["START"], ns["END"]
+    globals()["_OWN_SYMS"] = list(ns["SYM"].values())
     print("\n   (building the tested backtest record: %s -> %s ...)" % (ns_start_bt.strftime("%d %b %Y"), ns_end_bt.strftime("%d %b %Y")))
     bt = run_window(ns, ns_start_bt, ns_end_bt)
     if not weekly:
@@ -1195,6 +1545,10 @@ def main():
     except Exception as ex:
         print("TEST 2 FAILED: %s: %s" % (type(ex).__name__, ex))
     ns["START"], ns["END"] = ns_start_bt, ns_end_bt
+    try:
+        candidates_forward(ns)
+    except Exception as ex:
+        print("CANDIDATE MARKETS FAILED: %s: %s" % (type(ex).__name__, ex))
     try:
         variants_forward(ns, fdf if fdf is not None else pd.DataFrame())
     except Exception as ex:
