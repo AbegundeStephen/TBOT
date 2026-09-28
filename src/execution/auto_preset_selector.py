@@ -122,7 +122,7 @@ class DynamicPresetSelector:
         ✅ ENHANCED: Asset-DNA Gating & MR Preset Support.
         """
         try:
-            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY"}
+            _FX_ASSETS = {"EURUSD", "EURJPY", "GBPUSD", "GBPAUD", "USDJPY", "AUDJPY"}   # B12: AUDJPY added
             if 'BTC' in asset_name.upper() or 'USTEC' in asset_name.upper():
                 asset_type = 'BTC'
             elif asset_name.upper() in _FX_ASSETS:

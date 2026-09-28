@@ -159,6 +159,15 @@ class FunnelLogger:
                 day = self._today()
                 ck = (day, asset)
                 self._counts[ck]["evaluations"] += 1
+                if str(details.get("reasoning", "")).startswith("HOLD (no proof"):
+                    # B12 (Desire 28 Sep, funnel option B): no proof = nothing to decide. Counted for the daily
+                    # [FUNNEL] line (the heartbeat's funnel.daily promise reads it), never written as a row.
+                    self._counts[ck]["no_proof"] += 1
+                    self._since_summary += 1
+                    if self._since_summary >= self.summary_every:
+                        self._since_summary = 0
+                        self._log_summary_locked(day)
+                    return
                 if self._raw_fired(details):
                     self._counts[ck]["raw_signal"] += 1
                 stage = self._classify_stage(signal, details)
@@ -244,7 +253,7 @@ class FunnelLogger:
                 continue
             blocks = " ".join(
                 f"{k}={v}" for k, v in sorted(c.items())
-                if k.startswith("blocked") or k == "no_raw_signal"
+                if k.startswith("blocked") or k == "no_raw_signal" or k == "no_proof"
                 or k == "risk_capped_shared_budget"
             )
             logger.info(

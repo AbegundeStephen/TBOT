@@ -128,7 +128,12 @@ class CompositeStateBuilder:
         # the same H keeps its counts.
         self._ppl = {}
         self._ns_state = {}        # B11-NS: the new engine's memory (saved with the other stores)
+        self._ns_x_state = {}      # B12: the exploration engines' memory (saved with the other stores)
+        self._ns_x_engines = {}    # B12: the exploration engines themselves (rebuilt when needed; not saved)
         self._ns_engine = None     # B11-NS: built on first use (not saved)
+        self._ns_ladder_last = {}  # B12 (decision 13): each market's new ladder from the last cycle (the council's levels)
+        self._ns_rungs = {}        # B12 (decision 13): test counts per new-ladder rung, kept like the old levels'
+        self._council_ladder_warned = {}   # B12: one log line per market while the new ladder isn't ready
         self._atr4_cache = {}
         self._gear_cache = None
         self._struct4h = {}
@@ -142,7 +147,7 @@ class CompositeStateBuilder:
             "_livermore_last_1h_ts", "_brc_log_ts",
             "_squeeze_was_active", "_spread_history",
             "_ref_h_anchor", "_ref_state_last", "_ref_dead_pending", "_retest_failed_pending",
-            "_ppl", "_atr4_cache", "_gear_cache", "_struct4h", "_ns_state",
+            "_ppl", "_atr4_cache", "_gear_cache", "_struct4h", "_ns_state", "_ns_x_state",
         )
         logger.info("[BUILDER-INIT] %s: id=%s", self.asset_type, id(self))
         # Last cycle's compression dial per asset — used to classify the
@@ -2253,15 +2258,54 @@ class CompositeStateBuilder:
                 self._ns_engine = NSEngine(self.asset_type)
             _res_ns = self._ns_engine.update(self._ns_state.get(self.asset_type), df, df_4h, _pcfg_ns, state)
             self._ns_state[self.asset_type] = _res_ns["state"]
+            # HF-1 (28 Sep): the old engine must never reach the council -- not even from old stores restored
+            # after a weekend. Empty its lanes every cycle and clear anything it confirmed; only the new
+            # engine's proof fields (set just below) may switch brc_confirmed back on.
+            for _lane in (self._active_setup, self._active_setup_mr):
+                for _k in list(_lane.keys()):
+                    _lane[_k] = []
+            state.brc_confirmed = False
             state.brc_gear = "%s/%s" % self._ppl_gear(_pcfg_ns)   # keeps the [GEAR] alarm fed
             state.ns_ladder = _res_ns["ladder"]
+            self._ns_ladder_last[self.asset_type] = list(_res_ns["ladder"] or [])   # B12 (decision 13)
             state.ns_setups = _res_ns["setups"]
             state.ns_brains = _res_ns["brains"]
+            state.ns_proofs_hist = _res_ns.get("proofs_hist", [])   # B12: the chart's proof cards
+            # B12 (Desire 28 Sep, rulings A+B): exploration ideas -> practice lane ONLY (state.ns_explore)
+            try:
+                from src.execution.ns_engine import bounce_candidates
+                _xcfg = _pcfg_ns.get("ns_explore") or {}
+                _xs = []
+                if _xcfg.get("enabled", False):
+                    for _var, _mk in (("1H_BREAK", _xcfg.get("1h_break_markets") or []),
+                                      ("ALL_PROOFS", _xcfg.get("all_proofs_markets") or [])):
+                        if self.asset_type not in [str(_m).upper() for _m in _mk]:
+                            continue
+                        _xk = "%s|%s" % (self.asset_type, _var)
+                        if self._ns_x_engines.get(_xk) is None:
+                            self._ns_x_engines[_xk] = NSEngine(self.asset_type, variant=_var)
+                        _rx = self._ns_x_engines[_xk].update(self._ns_x_state.get(_xk), df, df_4h, _pcfg_ns, state)
+                        self._ns_x_state[_xk] = _rx["state"]
+                        _xs += [(_var, _xp) for _xp in _rx["proofs"]]
+                    _bk = "%s|BOUNCE" % self.asset_type
+                    _bp, self._ns_x_state[_bk] = bounce_candidates(
+                        self.asset_type, df, df_4h, _res_ns["state"], self._ns_x_state.get(_bk), _pcfg_ns,
+                        _xcfg.get("bounce_pockets") or {})
+                    _xs += [("BOUNCE", _xp) for _xp in _bp]
+                # B12 (Desire 28 Sep, decision 7): a paper-only market's proofs go to the practice lane, never the council
+                if self.asset_type in [str(_m).upper() for _m in (_pcfg_ns.get("ns_paper_markets") or [])]:
+                    _xs += [("PAPER", _xp) for _xp in _res_ns["proofs"]]
+                state.ns_explore = _xs
+            except Exception as _x_err:
+                logger.warning("[NS-EXPLORE] %s: exploration skipped this cycle: %s", self.asset_type, _x_err)
             state.proofs = _res_ns["proofs"]
             if _res_ns["head"]:
                 for _f, _v in _res_ns["head"].items():
                     setattr(state, _f, _v)
-            if _res_ns["proofs"]:
+            _paper_ns = self.asset_type in [str(_m).upper() for _m in (_pcfg_ns.get("ns_paper_markets") or [])]
+            if _paper_ns:
+                state.proofs = []          # B12 (decision 7): a paper-only market never shows the council a proof
+            if _res_ns["proofs"] and not _paper_ns:
                 _p0 = _res_ns["proofs"][0]
                 for _f, _v in _p0["fields"].items():
                     setattr(state, _f, _v)
@@ -2908,6 +2952,28 @@ class CompositeStateBuilder:
 
     # ── E.2: MTF Structure Memory ─────────────────────────────────────────
 
+    def _council_rungs(self, asset):
+        """B12 (Desire 28 Sep, decision 13): the new two-layer ladder (4H swing zones + both brains' levels, from the
+        last cycle) as council levels -- same shape as the old ones, test counts remembered per rung."""
+        mem = self._ns_rungs.setdefault(asset, {})
+        out, keys = [], set()
+        for r in self._ns_ladder_last.get(asset) or []:
+            try:
+                typ = str(r.get("type", ""))
+                k = (str(r.get("tf")), typ, round(float(r["close"]), 8))
+            except Exception:
+                continue
+            keys.add(k)
+            if k not in mem:
+                mem[k] = {"price": float(r["close"]), "tests": 0, "source": "ns_ladder", "tf": r.get("tf"),
+                          "layer": r.get("layer"),
+                          "type": "swing_high" if typ in ("H", "main_up_max", "natural_high") else "swing_low"}
+            out.append(mem[k])
+        for k in list(mem):
+            if k not in keys:
+                del mem[k]
+        return out
+
     def _update_structure_memory(self, state, df, df_4h):
         """Track 4H swing levels. Delete broken ones. Link to state."""
         import talib as ta
@@ -3068,8 +3134,18 @@ class CompositeStateBuilder:
             # Sort by quality: most-tested first, then nearest.
             # A level tested 3 times at a price is more significant
             # than a fresh level 0.1 ATR closer.
+            # B12 (Desire 28 Sep, decision 13): the council reads the NEW two-layer ladder when phase_config.council_ladder
+            # is "new" (last cycle's -- this step runs before the engine). Everything below is unchanged.
+            _src_levels = self._structure_levels[asset]
+            if str((getattr(state, "phase_config", {}) or {}).get("council_ladder", "old")).lower() == "new":
+                _rungs_b12 = self._council_rungs(asset)
+                if _rungs_b12:
+                    _src_levels = _rungs_b12
+                elif not self._council_ladder_warned.get(asset):
+                    self._council_ladder_warned[asset] = True
+                    logger.info("[COUNCIL-LADDER] %s: new ladder not ready yet (first cycle) -- old levels used this once", asset)
             candidates = [
-                lvl for lvl in self._structure_levels[asset]
+                lvl for lvl in _src_levels
                 if abs(current_price - lvl["price"]) / _atr <= 3.0
             ]
             candidates.sort(

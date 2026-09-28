@@ -16,19 +16,19 @@ $fail = 0
 "`n--- refresh 15-minute price files ---" | Out-File $out -Append -Encoding utf8
 & $py tools\refresh_15m.py 2>&1 | Out-File $out -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
-foreach ($k in "trail_mult", "be_r", "grade_table") {
-    "`n--- replayer arms: $k ---" | Out-File $out -Append -Encoding utf8
-    & $py tools\replayer.py --arms $k 2>&1 | Out-File $out -Append -Encoding utf8
-    if ($LASTEXITCODE -ne 0) { $fail = 1 }
-}
-"`n--- bandit (suggestions only) ---" | Out-File $out -Append -Encoding utf8
-& $py tools\bandit.py 2>&1 | Out-File $out -Append -Encoding utf8
+# B12 (Desire 28 Sep, RL ruling C): RL-1's three knobs are off for new-engine trades -- its arms are no longer run.
+# B12 (decisions 36 A and 37 A): first repair the saved price files from MT5 (a backup is kept), then check them.
+"`n--- B12: repair the saved price files (decision 36) ---" | Out-File $out -Append -Encoding utf8
+& $py tools\data_repair.py 2>&1 | Out-File $out -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
-"`n--- replayer by asset ---" | Out-File $out -Append -Encoding utf8
-& $py tools\replayer.py --by asset 2>&1 | Out-File $out -Append -Encoding utf8
+"`n--- B12: saved price files against MT5 (decision 37) ---" | Out-File $out -Append -Encoding utf8
+& $py tools\data_check.py 2>&1 | Out-File $out -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
-"`n--- B10 D3: trail x breakeven grid ---" | Out-File $out -Append -Encoding utf8
-& $py tools\replayer.py --grid 2>&1 | Out-File $out -Append -Encoding utf8
+"`n--- B12: forward test, paper ideas, proof supply, council vote, labels, exploration ---" | Out-File $out -Append -Encoding utf8
+& $py tools\all_tests.py --weekly 2>&1 | Out-File $out -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+"`n--- B12: every label, yesterday's high/low, the paper market, the new markets ---" | Out-File $out -Append -Encoding utf8
+& $py tools\weekly_b12.py 2>&1 | Out-File $out -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 "`n--- B10 D4: proofs versus random ---" | Out-File $out -Append -Encoding utf8
 & $py tools\weekly_report.py 2>&1 | Out-File $out -Append -Encoding utf8

@@ -176,18 +176,16 @@ class HistoricalDataUpdater:
                         if pd.notna(last_date):
                             logger.info(f"Last Date: {last_date}")
                             
-                            # Start from 1 period after last date
+                            # B12 (Desire 28 Sep, decision 40 A): re-read the last 6 candles every run. MT5 revises
+                            # recent candles after they close (around midnight most of all); starting after the last
+                            # saved candle meant a wrong one was never looked at again.
                             if timeframe == '1h':
-                                start_time = last_date + timedelta(hours=1)
+                                _period_b12 = timedelta(hours=1)
                             elif timeframe == '4h':
-                                start_time = last_date + timedelta(hours=4)
+                                _period_b12 = timedelta(hours=4)
                             else:  # 1d
-                                start_time = last_date + timedelta(days=1)
-                            
-                            # ✅ FIX: Ensure start_time is not in the future
-                            if start_time > end_time:
-                                logger.info(f"[UPDATE] Last date {last_date} is current. No update needed.")
-                                return True
+                                _period_b12 = timedelta(days=1)
+                            start_time = last_date - 6 * _period_b12
                         else:
                             logger.warning(f"[UPDATE] No valid dates in existing file")
                             existing_df = None
@@ -222,7 +220,7 @@ class HistoricalDataUpdater:
                 new_df = self.data_manager.fetch_mt5_data(
                     symbol=symbol,
                     timeframe=tf_config['mt5_timeframe'],
-                    start_date=start_time.strftime("%Y-%m-%d"),
+                    start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),   # B12 (40 A): the exact time
                     end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
             
@@ -235,6 +233,26 @@ class HistoricalDataUpdater:
             
             # Normalize datetime column to 'date'
             new_df = self._normalize_datetime(new_df)
+            # B12 (decision 40 A): never save the candle that is still forming; say when a saved candle was corrected
+            try:
+                _period_b12 = {'1h': timedelta(hours=1), '4h': timedelta(hours=4)}.get(timeframe, timedelta(days=1))
+                new_df = new_df[new_df['date'] + _period_b12 <= end_time]
+                if existing_df is not None and len(new_df):
+                    _tc_b12 = self._find_timestamp_column(existing_df)
+                    if _tc_b12:
+                        _old_b12 = existing_df.set_index(pd.to_datetime(existing_df[_tc_b12], utc=True, errors='coerce'))['close']
+                        _old_b12 = _old_b12[~_old_b12.index.duplicated(keep='last')].astype(float)
+                        _new_b12 = new_df.set_index('date')['close'].astype(float)
+                        _both_b12 = _old_b12.index.intersection(_new_b12.index)
+                        _rev_b12 = int(((_old_b12.loc[_both_b12] - _new_b12.loc[_both_b12]).abs()
+                                        > 1e-4 * _new_b12.loc[_both_b12].abs()).sum())
+                        if _rev_b12:
+                            logger.warning(f"[UPDATE-REVISED] {asset_name} {timeframe.upper()}: {_rev_b12} saved candle(s) corrected from MT5")
+            except Exception as _b12_err:
+                logger.warning(f"[UPDATE] {asset_name} {timeframe.upper()}: forming-candle/revision step skipped: {_b12_err}")
+            if len(new_df) == 0:
+                logger.info("[UPDATE] No closed candles to save yet")
+                return True
             
             # Merge with existing data if available
             if existing_df is not None:

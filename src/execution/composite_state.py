@@ -135,6 +135,8 @@ class CompositeState:
     ns_ladder: List[Dict] = field(default_factory=list)   # B11-NS: two-layer ladder (charts)
     ns_setups: List[Dict] = field(default_factory=list)   # B11-NS: live setups (charts)
     ns_brains: Dict = field(default_factory=dict)         # B11-NS: brain labels (charts)
+    ns_proofs_hist: List[Dict] = field(default_factory=list)   # B12: recent proofs (chart cards)
+    ns_explore: List = field(default_factory=list)              # B12: exploration proofs (practice lane only)
     bos_bullish_4h: bool = False
     bos_bearish_4h: bool = False
     choch_bullish_4h: bool = False

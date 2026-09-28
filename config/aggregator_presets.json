@@ -887,6 +887,27 @@
       "atr_period": 14,
       "_calibration": "USDJPY 4H Mar-Jul2026 (543 bars): 1.05 t/w, main_frac=30%, avg_main_dur=41 bars — reconfirmed via scripts/calibrate_livermore_atr.py (same major/minor/dual_confirm as prior Feb-Jun2026 calibration: 1.11 t/w, main_frac=31%)",
       "_watch": "main_frac consistently sits just below the 40% target floor both calibration runs — USDJPY spends more time in NATURAL/SECONDARY states than most other assets, by design of the real data, not a mis-tune"
+    },
+    "JP225": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "B12: defaults, as tested in Test 6 (not calibrated)"
+    },
+    "SILVER": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "B12: defaults, as tested in Test 6 (not calibrated)"
+    },
+    "AUDJPY": {
+      "major_mult": 3.5,
+      "minor_mult": 1.0,
+      "dual_confirm": 2,
+      "atr_period": 14,
+      "_calibration": "B12: defaults, as tested in Test 6 (not calibrated)"
     }
   },
   "REQUIRED_SCORE_MODIFIER": {

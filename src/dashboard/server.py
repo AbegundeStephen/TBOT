@@ -223,6 +223,9 @@ def get_history(asset):
         "EURUSD": "EURUSDm_1h.csv",
         "USOIL":  "USOILm_1h.csv",
         "GBPAUD": "GBPAUDm_1h.csv",
+        "JP225":  "JP225m_1h.csv",    # B12 new markets
+        "SILVER": "XAGUSDm_1h.csv",
+        "AUDJPY": "AUDJPYm_1h.csv",
     }
 
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1008,6 +1011,28 @@ def get_market_scanner():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/chart/<asset>")
+def ns_interactive_chart(asset):
+    """B12 (was B11 addendum A8): the live interactive chart page (the bot rewrites it every cycle)."""
+    from flask import send_file
+    p = os.path.join(project_root, "logs", "charts", "%s.html" % str(asset).upper())
+    if not os.path.exists(p):
+        return jsonify({"error": "no interactive chart yet for %s" % asset}), 404
+    resp = send_file(p, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/charts")
+def ns_interactive_charts_index():
+    """B12 (was B11 addendum A8): one link per market."""
+    d = os.path.join(project_root, "logs", "charts")
+    names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".html")) if os.path.isdir(d) else []
+    links = "".join('<li style="margin:8px 0"><a href="/chart/%s">%s</a></li>' % (n, n) for n in names) or "<li>no charts yet</li>"
+    return ("<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><title>Live charts</title>"
+            "</head><body style='font-family:sans-serif'><h2>Live charts</h2><ul>%s</ul></body></html>" % links)
+
+
 @app.route("/api/chart/<asset>")
 def get_chart_image(asset):
     """
@@ -1163,7 +1188,7 @@ _EDITABLE_FIELDS = [
 # BATCH-W1 SEG 11: GBPUSD/USDJPY are not in config.json at all -- the
 # dashboard was requesting regime data for assets that do not exist,
 # erroring roughly every 30s all day. EURJPY stays (disabled stub in config).
-_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD"]
+_ASSETS = ["BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "JP225", "SILVER", "AUDJPY"]   # B12
 _ASSET_FIELDS = [
     # (sub_path,                            label,                           type,    extra)
     ("enabled",                             "Enabled",                       "bool",  {}),

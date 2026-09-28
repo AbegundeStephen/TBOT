@@ -6073,7 +6073,7 @@ class InstitutionalCouncilAggregator:
                 return cs.get(attr, default) if isinstance(cs, dict) else getattr(cs, attr, default)
 
             buy_parts, sell_parts = [], []
-            _is_mt5 = self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY"]
+            _is_mt5 = self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY", "JP225", "SILVER", "AUDJPY"]   # B12: new markets
 
             # ── Segment 1: volume ratio (BTC) / spread ratio (MT5) — 0.45 ──
             if _is_mt5:
@@ -6153,7 +6153,7 @@ class InstitutionalCouncilAggregator:
         """
         JUDGE 5: VOLUME (Same for both directions)
         """
-        if self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY"]:
+        if self.asset_type in ["GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY", "JP225", "SILVER", "AUDJPY"]:   # B12: new markets
             # Tick volume is confirmed unreliable for MT5 CFD assets
             # (data_manager.py:611 renames tick_volume → volume at fetch time).
             # Replaced unconditional 0.5×weight-both-sides with real broker
