@@ -223,6 +223,26 @@ class Position:
                 "structure_levels_ref": _sd.get("structure_levels_ref"),
                 "retest_type": _sd.get("retest_type"),
             }
+            # B12 (Desire 28 Sep, decision 38): every new-engine proof detail rides on the position for RL-2 -- plain
+            # values only (it survives a restart), without the big chart lists.
+            def _plain_b12(v, depth=0):
+                if v is None or isinstance(v, (bool, int, float, str)):
+                    return v
+                if depth < 3 and isinstance(v, (list, tuple)):
+                    return [_plain_b12(x, depth + 1) for x in v]
+                if depth < 3 and isinstance(v, dict):
+                    return {str(k): _plain_b12(x, depth + 1) for k, x in v.items()}
+                if hasattr(v, "item"):
+                    try:
+                        return v.item()
+                    except Exception:
+                        pass
+                return str(v)
+            _keys_b12 = list(_cs.keys()) if isinstance(_cs, dict) else list(getattr(_cs, "__dict__", {}).keys())
+            for _k in _keys_b12:
+                if str(_k).startswith("ns_") and _k not in ("ns_ladder", "ns_setups", "ns_brains", "ns_explore", "ns_proofs_hist") \
+                        and _k not in self.proof_snapshot["composite_state"]:
+                    self.proof_snapshot["composite_state"][_k] = _plain_b12(_get(_k))
         except Exception:
             self.proof_snapshot = {}
         # B7-2 / B7-14: plain flags, kept on the position for the same reason
@@ -230,6 +250,8 @@ class Position:
         self.external = bool((signal_details or {}).get("external", False))     # opened outside the bot
         self.adopted = bool((signal_details or {}).get("adopted", False))       # taken over from MT5
         self.trial_only = bool((signal_details or {}).get("trial_only", False)) # passed only with the council's add-ons off
+        self.ns_labels = (signal_details or {}).get("ns_labels")          # B12: A+ / watch labels (tracking only)
+        self.council_vote = (signal_details or {}).get("council_vote")    # B12: the council's vote (advisory mode)
         self.leverage = leverage
         self.margin_type = margin_type
         self.is_futures = is_futures
@@ -1289,8 +1311,8 @@ class PortfolioManager:
         ):
             return 1.0
 
-        # JPY-quoted: need 1/USDJPY
-        if base.endswith("JPY"):
+        # JPY-quoted: need 1/USDJPY. B12: JP225 (the Nikkei index) is priced in yen too, though its name doesn't say so.
+        if base.endswith("JPY") or base.startswith("JP225"):
             now = datetime.now()
             cached_rate, cached_ts = getattr(self, "_usdjpy_cache", (None, None))
             if cached_rate and cached_ts and (now - cached_ts).total_seconds() < 300:
@@ -2647,6 +2669,8 @@ class PortfolioManager:
         ("GBPAUD", "short"): "neutral",
         ("GOLD", "long"): "usd_short",
         ("GOLD", "short"): "usd_long",
+        ("SILVER", "long"): "usd_short",   # B12: like GOLD
+        ("SILVER", "short"): "usd_long",
         ("USOIL", "long"): "usd_short",
         ("USOIL", "short"): "usd_long",
         ("USTEC", "long"): "neutral",
@@ -4321,6 +4345,11 @@ class PortfolioManager:
             "external": bool(getattr(position, "external", False)),     # B7-2
             "adopted": bool(getattr(position, "adopted", False)),       # B7-2
             "trial_only": bool(getattr(position, "trial_only", False)), # B7-14
+            "ns_labels": getattr(position, "ns_labels", None),            # B12: tracking labels
+            "council_vote": getattr(position, "council_vote", None),      # B12: PASS / HOLD
+            # B12 (Desire 28 Sep, decision 38): every proof detail, for RL-2 -- the diary stores it once in its
+            # snapshot file and links it from this row (the same way practice rows already work)
+            "composite_state": dict(((getattr(position, "proof_snapshot", None) or {}).get("composite_state")) or {}),
             "mfe_r": round(_mfe_r, 3) if _mfe_r is not None else None,
             # B7-5: same sign as practice trades (negative = price went against
             # the trade). The live calc above measures it as a positive distance,
@@ -4353,9 +4382,13 @@ class PortfolioManager:
         # B11-NS (S7b part 3): every closed LIVE trade of a tracked market (BTC)
         # reports its R -- unconditional, not gated on trial_only. See
         # TradingBot._ns_record_close (the -6R pause and its Telegram line).
-        if getattr(self, "_ns_close_callback", None):
+        if getattr(self, "_ns_close_callback", None) and not getattr(position, "external", False) \
+                and not getattr(position, "adopted", False):   # B12 (review fix R2): hand trades stay out
             try:
-                self._ns_close_callback(position.asset, _gross_r)
+                if _gross_r is None:
+                    logger.warning(f"[NS-PAUSE] {position.asset}: closed trade has no R (risk unknown) -- not counted")
+                else:
+                    self._ns_close_callback(position.asset, _gross_r)
             except Exception as _ns_cc_e:
                 logger.error(f"[NS-PAUSE] close report failed: {_ns_cc_e}")
 

@@ -369,7 +369,8 @@ async def cmd_close_asset(self, update: Update, context: ContextTypes.DEFAULT_TY
         
         asset = context.args[0].upper()
         
-        valid_assets = ["BTC", "GOLD", "EURUSD", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY", "EURJPY"]
+        valid_assets = ["BTC", "GOLD", "EURUSD", "USTEC", "USOIL", "GBPAUD", "GBPUSD", "USDJPY", "EURJPY",
+                        "JP225", "SILVER", "AUDJPY"]   # B12 new markets
         if asset not in valid_assets:
             await update.message.reply_text(f"⚠️ Invalid asset. Valid: {', '.join(valid_assets)}")
             return

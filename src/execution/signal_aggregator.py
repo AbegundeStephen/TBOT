@@ -351,6 +351,9 @@ class PerformanceWeightedAggregator:
                 "GBPAUD": 90,
                 "GBPUSD": 90,
                 "USDJPY": 90,
+                "JP225": 90,    # B12 new markets
+                "SILVER": 90,
+                "AUDJPY": 90,
             }
         )
 

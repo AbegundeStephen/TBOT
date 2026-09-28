@@ -1616,7 +1616,7 @@ class TradingBot:
             # distribution was measured independently, so it no longer
             # inherits EURJPY/GBPUSD/USDJPY's shared, unmeasured-for-it bars.
             _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD", "GBPAUD"}
-            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY"}
+            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY", "AUDJPY"}   # B12: AUDJPY added
             _asset_upper = asset_name.upper()
             if _asset_upper in _DEDICATED_ASSETS:
                 config_key = _asset_upper
@@ -3236,10 +3236,84 @@ class TradingBot:
             self._b7_telegram(_msg)
         return not led.get("reverted", False)
 
+    def _council_advisory_active(self):
+        """B12 (Desire 28 Sep, ruling 1A): the council votes but does not decide -- every new-engine proof that
+        passed the engine's tested rules and the safety gates trades. On when phase_config.council_advisory is
+        true and the -10R limit has not switched it back. Shares the trial ledger (data/council_trial.json):
+        trades the council refused are marked trial_only, so they close into the same -10R check."""
+        if not bool(self._b7_trial_cfg().get("council_advisory", False)):
+            return False
+        led = self._b7_trial_ledger()
+        if not led.get("started"):
+            led["started"] = datetime.now().isoformat(timespec="seconds")
+            led["mode"] = "advisory"
+            self._b7_trial_ledger_save()
+            logger.info("[ADVISORY] Council advisory started: the council votes, every proof trades; "
+                        "trades it refused go at the smallest size; off by itself at -10R.")
+            self._b7_telegram("<b>COUNCIL ADVISORY STARTED</b>\nThe council votes; every proof trades. "
+                              "Trades it refused: smallest size, recorded, off by itself at -10R.")
+        return not led.get("reverted", False)
+
+    def _b12_council_advisory(self, asset_name, signal, details, cs):
+        """B12 (Desire 28 Sep, rulings 1A and 2): record the council's vote and the proof's tracking labels on
+        the trade; in advisory mode a proof the council refused trades anyway (smallest size, trial_only)."""
+        details = dict(details or {})
+        if str(asset_name).upper() in [str(_m).upper() for _m in (self._b7_trial_cfg().get("ns_paper_markets") or [])]:
+            # B12 (Desire 28 Sep, decision 7): a paper-only market never trades live -- its proofs go to the practice lane
+            if int(signal or 0):
+                logger.warning("[PAPER-MARKET] %s: a live signal appeared on a paper-only market -- stopped here", asset_name)
+            details["final_signal"] = 0
+            details["reasoning"] = "B12: paper-only market (practice lane only)"
+            return 0, details
+        try:
+            _proofs = list(getattr(cs, "proofs", None) or []) if cs is not None else []
+            if not _proofs:
+                return signal, details
+            _ref = details.get("setup_ref")
+            _p = next((p for p in _proofs if _ref is not None and p.get("ref") == _ref), _proofs[0])
+            _f = _p.get("fields") or {}
+            details["ns_labels"] = {"aplus": list(_f.get("ns_aplus") or []), "watch": list(_f.get("ns_watch") or []),
+                                    "yday_hl": _f.get("ns_yday_hl")}          # decision 34: tracked, never traded on
+            details["council_vote"] = "PASS" if int(signal or 0) else "HOLD"
+            _dir = int(_p.get("dir", 0) or 0)
+            if int(signal or 0) or not _dir or not self._council_advisory_active():
+                return signal, details
+            _minq = float(self.config.get("trading", {}).get("min_signal_quality", 0.40))
+            details["signal_quality"] = max(float(details.get("signal_quality") or 0.0), _minq)
+            details["trial_only"] = True
+            details["council_advisory_override"] = True
+            details["final_signal"] = _dir
+            logger.info("[COUNCIL-ADVISORY] %s: council said HOLD (score %.2f/%.2f) -- proof %s dir=%+d H=%.5g "
+                        "trades anyway at the smallest size; vote recorded", asset_name,
+                        float(details.get("total_score") or 0.0), float(details.get("required_score") or 0.0),
+                        _p.get("kind"), _dir, float(_p.get("ref") or 0.0))
+            return _dir, details
+        except Exception as _ae:
+            logger.warning(f"[COUNCIL-ADVISORY] {asset_name}: advisory step failed -- the council's vote stands: {_ae}")
+            return signal, details
+
+    def _b12_explore(self, asset_name, cs, df, current_price, asset_cfg):
+        """B12 (Desire 28 Sep, rulings A+B): the ideas we set aside, traded on PAPER only -- the 1H-break engine,
+        EURUSD/GBPAUD with every proof, and the four bounce pockets. Each fresh proof opens one practice trade
+        (gate_id explore_<idea>). Never touches the real trade path."""
+        try:
+            for _var, _p in list(getattr(cs, "ns_explore", None) or []):
+                _d = int(_p.get("dir", 0) or 0)
+                if not _d:
+                    continue
+                _det = {"composite_state": dict(_p.get("fields") or {}), "setup_ref": _p.get("ref"),
+                        "explore": _var, "reasoning": "B12 exploration (paper only): %s" % _var}
+                self._shadow_open_blocked(asset_name, _d, _det, df, current_price, "explore_" + _var.lower(),
+                                          asset_cfg, gate_id="explore_" + _var.lower(), gate_stage="explore")
+        except Exception as _xe:
+            logger.warning(f"[NS-EXPLORE] {asset_name}: practice trade not opened: {_xe}")
+
     def _trial_min_size(self, asset_name, details):
         """B7-14 / B7-15: (True, reason) when this entry must use the smallest size."""
         if (details or {}).get("trial_only"):
-            return True, "trial-only: passed only because the council's add-ons were off"
+            return True, ("advisory: the council said HOLD -- smallest size (B12)"
+                          if (details or {}).get("council_advisory_override")
+                          else "trial-only: passed only because the council's add-ons were off")
         _cfg = self._b7_trial_cfg()
         _assets = [str(a).upper() for a in _cfg.get("trial_min_size_assets", ["EURUSD", "USOIL", "USTEC"])]
         if asset_name.upper() in _assets:
@@ -3266,8 +3340,12 @@ class TradingBot:
         _msg = None
         if not led.get("reverted") and led["total_r"] <= -_limit:
             led["reverted"] = True
-            _msg = (f"🛑 <b>COUNCIL TRIAL SWITCHED OFF</b>: trial trades reached {led['total_r']:+.2f}R "
-                    f"(limit -{_limit:.0f}R). The full council bars are back.")
+            if bool(_cfg.get("council_advisory", False)):   # B12: the same ledger serves advisory mode
+                _msg = (f"<b>COUNCIL ADVISORY SWITCHED OFF</b>: trades the council refused reached "
+                        f"{led['total_r']:+.2f}R (limit -{_limit:.0f}R). The council decides again.")
+            else:
+                _msg = (f"🛑 <b>COUNCIL TRIAL SWITCHED OFF</b>: trial trades reached {led['total_r']:+.2f}R "
+                        f"(limit -{_limit:.0f}R). The full council bars are back.")
             logger.warning("[TRIAL] " + _msg)
         elif not led.get("completed_alerted") and led["trades"] >= _max_trades:
             led["completed_alerted"] = True
@@ -3884,7 +3962,7 @@ class TradingBot:
             # 2.7) and USOIL / USTEC on GOLD's 3.1 (own 2.6 / 2.5).
             # Confirmed live 21 Sep 19:01:56.
             _DEDICATED_ASSETS = {"BTC", "GOLD", "USTEC", "USOIL", "EURUSD", "GBPAUD"}
-            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY"}
+            _FX_ASSETS = {"EURJPY", "GBPUSD", "USDJPY", "AUDJPY"}   # B12: AUDJPY added
             _au_b7 = asset_name.upper()
             if "BTC" in _au_b7:
                 _preset_key = "BTC"
@@ -4576,6 +4654,7 @@ class TradingBot:
             # with its live setups (ns_engine.py already attaches dist_atr /
             # next_stage to each, display-only, no effect on trading decisions).
             try:
+                import os as _os, json as _json   # B12 (review fix R3): don't rely on the block above
                 _ns_mk_cfg = (self.config.get("phase_config", {}) or {}).get("ns_markets", {}) or {}
                 _scan_snapshot = {}
                 for _scan_asset, _mk_cfg in _ns_mk_cfg.items():
@@ -4598,7 +4677,7 @@ class TradingBot:
                         _scan_f,
                     )
             except Exception as _scane:
-                logger.debug(f"[SCANNER-DASH] State dump failed: {_scane}")
+                logger.warning(f"[SCANNER-DASH] State dump failed: {_scane}")
 
             # ✨ NEW: Update positions with OHLC data for VTM
             try:
@@ -6903,6 +6982,11 @@ class TradingBot:
                             live_price=current_price
                         )
                 details["aggregator_mode"] = "council"
+                # B12 (Desire 28 Sep, rulings 1A and 2): the council votes; a new-engine proof decides (advisory
+                # mode), and the proof's tracking labels ride on the trade.
+                signal, details = self._b12_council_advisory(asset_name, signal, details, _cs)
+                # B12 (rulings A+B): exploration ideas go to the practice lane -- paper only, never this trade.
+                self._b12_explore(asset_name, _cs, df, current_price, asset_cfg)
                 # Surface Livermore context so the trade manager doesn't open
                 # council trades blind (no entry_type, no state-aware stops,
                 # mislabeled trade_type).
@@ -7118,6 +7202,17 @@ class TradingBot:
                     )
                 except Exception as _chart_err:
                     logger.warning(f"[CHART] Dashboard chart generation failed for {asset_name}: {_chart_err}")   # B11: was debug (silent)
+
+            # B12 (was B11 addendum A5): the live interactive chart (logs/charts/<ASSET>.html) -- every cycle,
+            # independent of the picture system above. Display only.
+            try:
+                from src.ai.ns_chart import write_chart as _ns_write_chart
+                _ns_cs = details.get("composite_state") if isinstance(details, dict) else None
+                _ns_df4 = mtf_regime.get("df_4h") if isinstance(mtf_regime, dict) else None
+                if _ns_cs and df is not None and _ns_df4 is not None and len(df) > 30 and len(_ns_df4) > 10:
+                    _ns_write_chart(asset_name, df, _ns_df4, _ns_cs)
+            except Exception as _ns_ce:
+                logger.warning(f"[NS-CHART] {asset_name}: interactive chart not written: {_ns_ce}")
 
             # Personal scalp-alignment alert (off by default, see
             # config["scalp_alerts"]). Pure observer — never affects signal,
@@ -8614,6 +8709,14 @@ class TradingBot:
                                     )
 
                         logger.info(f"[VIZ] Sending chart to Telegram...")
+                        try:   # B12 (was addendum A6): the interactive page with every decision picture
+                            import os as _os_dc
+                            _nsc_p = _os_dc.path.join("logs", "charts", "%s.html" % asset_name)
+                            if _os_dc.path.exists(_nsc_p) and getattr(self.telegram_bot, "send_document_file", None):
+                                self._send_telegram_notification(self.telegram_bot.send_document_file(
+                                    _nsc_p, "%s -- interactive chart at this decision: open it, zoom, hover the triangles" % asset_name))
+                        except Exception as _nsc_e:
+                            logger.warning(f"[NS-CHART] decision page not sent: {_nsc_e}")
                         self._send_telegram_notification(
                             self.chart_sender.send_decision_chart(
                                 asset_name=asset_name,
@@ -9155,13 +9258,20 @@ class TradingBot:
                     # trade_asset call site, this one is a genuine gap:
                     # gate rows written from this pass would have been null.
                     mtf_regime["episode_id"] = self._episode_id_for(asset_name, mtf_regime)
-                    signal, details = aggregator["council"].get_aggregated_signal(
-                        df,
-                        current_regime=mtf_regime.get("regime", "NEUTRAL"),
-                        is_bull_market=mtf_regime.get("is_bull", False),
-                        governor_data=mtf_regime,
-                        live_price=current_price
-                    )
+                    # B12 (B11 S16 item 1, ruled "fix"): this ranking pass sits the council too, so its memory
+                    # (score history, dead-judge streaks) would move twice a cycle. Put it back afterwards: only
+                    # the trading pass's sitting counts -- the same method the per-proof sittings use.
+                    _mem_rank = self._council_memory_snapshot(aggregator["council"])
+                    try:
+                        signal, details = aggregator["council"].get_aggregated_signal(
+                            df,
+                            current_regime=mtf_regime.get("regime", "NEUTRAL"),
+                            is_bull_market=mtf_regime.get("is_bull", False),
+                            governor_data=mtf_regime,
+                            live_price=current_price
+                        )
+                    finally:
+                        self._council_memory_restore(aggregator["council"], _mem_rank)
                 details["aggregator_mode"] = "council"
                 # Surface Livermore context so the trade manager doesn't open
                 # council trades blind (no entry_type, no state-aware stops,

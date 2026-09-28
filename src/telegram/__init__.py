@@ -3135,6 +3135,23 @@ class TradingTelegramBot:
             logger.error(f"Test viz error: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
 
+    async def send_document_file(self, path, caption=""):
+        """B12 (was B11 addendum A7a): send a file (the interactive chart) to the bot's chat."""
+        try:
+            import os as _os_sd
+            _chat = (getattr(self, "chat_id", None) or getattr(self, "admin_chat_id", None)
+                     or getattr(self, "default_chat_id", None)
+                     or (sorted(self.admin_ids)[0] if getattr(self, "admin_ids", None) else None))
+            if not _chat:
+                logger.warning("[NS-CHART] no chat id found -- page not sent")
+                return
+            with open(path, "rb") as _fh:
+                await self.application.bot.send_document(chat_id=_chat, document=_fh,
+                                                         filename=_os_sd.path.basename(path).replace(".html", "_live_chart.html"),
+                                                         caption=str(caption)[:1000])
+        except Exception as _e:
+            logger.warning(f"[NS-CHART] sending the page failed: {_e}")
+
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """B11-NS: /resume BTC -- switch a paused market back on (its running total restarts at 0R)."""
         try:
@@ -3160,6 +3177,22 @@ class TradingTelegramBot:
         """
         ✅ FIXED: Chart command that anchors to active loop
         """
+        # B12 (was addendum A7b): the interactive page (open in the browser) -- then the usual picture below
+        try:
+            import os as _os_c
+            _args = [a.upper() for a in (context.args or [])]
+            _all = list(((self.trading_bot.config.get("phase_config", {}) or {}).get("ns_markets", {}) or {}).keys())
+            for _a in (_args or _all):
+                _p = _os_c.path.join("logs", "charts", "%s.html" % _a)
+                if _os_c.path.exists(_p):
+                    with open(_p, "rb") as _fh:
+                        await update.message.reply_document(
+                            document=_fh, filename="%s_live_chart.html" % _a,
+                            caption="%s -- interactive chart: open it, then zoom, hover, tap the legend" % _a)
+                elif _args:
+                    await update.message.reply_text("%s: no interactive chart yet (it is written every cycle)" % _a)
+        except Exception as _ce:
+            logger.warning(f"[NS-CHART] /chart could not send the interactive page: {_ce}")
         try:
             user_id = update.effective_user.id
             if user_id not in self.admin_ids:

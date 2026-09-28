@@ -393,11 +393,12 @@
           "old_state_min_age": 20
         },
         "min_stop_atr_mult": 1.0,
-        "min_sl_pct": 0.0015,
+        "min_sl_pct": 0.0012,
         "min_rr": 0.5,
         "structure_target_min_rr": 0.8,
         "structural_stop_allowance_atr": 0.3
-      }
+      },
+      "_comment_b12": "B12: lot size and step come from MT5 itself (volume_min / volume_step)"
     },
     "EURUSD": {
       "enabled": true,
@@ -652,6 +653,260 @@
         "structure_target_min_rr": 0.8,
         "structural_stop_allowance_atr": 0.3
       }
+    },
+    "JP225": {
+      "enabled": true,
+      "allow_shorts": true,
+      "symbol": "JP225m",
+      "exchange": "mt5",
+      "timeframe": "H1",
+      "min_bars_training": 5000,
+      "lookback_days": 730,
+      "weight": 0.4,
+      "force_min_lot": false,
+      "allow_scalps": false,
+      "backtest_slippage_pct": 5e-05,
+      "min_position_usd": 2000,
+      "max_position_usd": 30000,
+      "lot_size": 0.02,
+      "lot_step": 0.02,
+      "leverage": 100,
+      "strategies": {
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        },
+        "trend_following": {
+          "enabled": true,
+          "weight": 0.6,
+          "min_confidence": 0.45
+        },
+        "exponential_moving_averages": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        }
+      },
+      "risk": {
+        "stop_loss_pct": 0.015,
+        "take_profit_pct": 0.035,
+        "trailing_stop_pct": 0.012,
+        "max_holding_hours": 72,
+        "atr_multiplier": 1.8,
+        "pivot_lookback": 25,
+        "partial_targets": [
+          1.2,
+          2.0,
+          3.5
+        ],
+        "partial_sizes": [
+          0.45,
+          0.3,
+          0.25
+        ],
+        "runner_trail_pct": 0.02,
+        "time_stop_bars": 60,
+        "use_ema_structure": true,
+        "use_structure_targets": true,
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 2,
+        "breakeven_profit_threshold": 0.01,
+        "early_scale_enabled": false,
+        "early_scale_threshold": 0.012,
+        "early_scale_bars": 4,
+        "early_lock_atr_multiplier": 0.5,
+        "runner_trail_atr_multiplier": 0.8,
+        "livermore_atr_adjustments": {
+          "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
+          "main_stop_add": 0.3,
+          "secondary_stop_sub": 0.2,
+          "main_trail_mult": 1.0,
+          "secondary_trail_mult": 1.0,
+          "breakeven_atr_young_state": 1.8,
+          "breakeven_atr_mid_state": 1.5,
+          "breakeven_atr_old_state": 1.2,
+          "young_state_max_age": 5,
+          "old_state_min_age": 20
+        },
+        "tp_ratio": 2.5,
+        "min_sl_pct": 0.0025,
+        "min_rr": 0.67,
+        "structure_target_min_rr": 1.0,
+        "structural_stop_allowance_atr": 0.3
+      },
+      "_comment_b12": "B12: lot size and step come from MT5 itself (volume_min / volume_step)"
+    },
+    "SILVER": {
+      "enabled": true,
+      "allow_shorts": true,
+      "symbol": "XAGUSDm",
+      "exchange": "mt5",
+      "timeframe": "H1",
+      "min_bars_training": 5000,
+      "lookback_days": 730,
+      "weight": 0.5,
+      "force_min_lot": false,
+      "allow_scalps": false,
+      "backtest_slippage_pct": 5e-05,
+      "min_position_usd": 4000,
+      "max_position_usd": 50000,
+      "lot_size": 0.01,
+      "lot_step": 0.01,
+      "leverage": 100,
+      "strategies": {
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.6,
+          "min_confidence": 0.45
+        },
+        "trend_following": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        },
+        "exponential_moving_averages": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        }
+      },
+      "risk": {
+        "stop_loss_pct": 0.008,
+        "take_profit_pct": 0.025,
+        "trailing_stop_pct": 0.012,
+        "max_holding_hours": 72,
+        "atr_multiplier": 2.5,
+        "pivot_lookback": 25,
+        "partial_targets": [
+          1.2,
+          2.0,
+          3.5
+        ],
+        "partial_sizes": [
+          0.45,
+          0.3,
+          0.25
+        ],
+        "runner_trail_pct": 0.015,
+        "time_stop_bars": 90,
+        "time_stop_trend": 90,
+        "time_stop_reversion": 24,
+        "use_ema_structure": true,
+        "use_structure_targets": true,
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 2,
+        "breakeven_profit_threshold": 0.008,
+        "early_scale_enabled": false,
+        "early_scale_threshold": 0.01,
+        "early_scale_bars": 4,
+        "early_lock_atr_multiplier": 0.5,
+        "runner_trail_atr_multiplier": 0.8,
+        "livermore_atr_adjustments": {
+          "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
+          "main_stop_add": 0.3,
+          "secondary_stop_sub": 0.2,
+          "main_trail_mult": 1.0,
+          "secondary_trail_mult": 1.0,
+          "breakeven_atr_young_state": 1.8,
+          "breakeven_atr_mid_state": 1.5,
+          "breakeven_atr_old_state": 1.2,
+          "young_state_max_age": 5,
+          "old_state_min_age": 20
+        },
+        "tp_ratio": 2.5,
+        "min_stop_atr_mult": 2.0,
+        "min_sl_pct": 0.0035,
+        "min_rr": 0.48,
+        "structure_target_min_rr": 1.0,
+        "structural_stop_allowance_atr": 0.3
+      },
+      "_comment_b12": "B12: lot size and step come from MT5 itself (volume_min / volume_step)"
+    },
+    "AUDJPY": {
+      "enabled": true,
+      "allow_shorts": true,
+      "symbol": "AUDJPYm",
+      "exchange": "mt5",
+      "timeframe": "H1",
+      "min_bars_training": 5000,
+      "lookback_days": 730,
+      "weight": 0.3,
+      "force_min_lot": false,
+      "allow_scalps": false,
+      "backtest_slippage_pct": 5e-05,
+      "min_position_usd": 1000,
+      "max_position_usd": 20000,
+      "lot_size": 0.02,
+      "lot_step": 0.02,
+      "leverage": 100,
+      "strategies": {
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "trend_following": {
+          "enabled": true,
+          "weight": 0.5,
+          "min_confidence": 0.45
+        },
+        "exponential_moving_averages": {
+          "enabled": true,
+          "weight": 0.4,
+          "min_confidence": 0.45
+        }
+      },
+      "risk": {
+        "stop_loss_pct": 0.005,
+        "take_profit_pct": 0.02,
+        "trailing_stop_pct": 0.008,
+        "max_holding_hours": 72,
+        "atr_multiplier": 2.0,
+        "pivot_lookback": 25,
+        "partial_targets": [
+          1.0,
+          2.0,
+          3.5
+        ],
+        "partial_sizes": [
+          0.45,
+          0.3,
+          0.25
+        ],
+        "runner_trail_pct": 0.015,
+        "time_stop_bars": 48,
+        "time_stop_trend": 72,
+        "time_stop_reversion": 48,
+        "use_ema_structure": true,
+        "use_structure_targets": true,
+        "max_hold_bars": 60,
+        "breakeven_after_bars": 8,
+        "breakeven_profit_threshold": 0.006,
+        "early_scale_enabled": false,
+        "early_scale_threshold": 0.008,
+        "early_scale_bars": 4,
+        "early_lock_atr_multiplier": 2.0,
+        "runner_trail_atr_multiplier": 0.8,
+        "livermore_atr_adjustments": {
+          "_comment": "ATR multiplier overlays applied at trade entry based on Livermore 4H state.",
+          "main_stop_add": 0.3,
+          "secondary_stop_sub": 0.2,
+          "main_trail_mult": 1.0,
+          "secondary_trail_mult": 1.0,
+          "breakeven_atr_young_state": 1.8,
+          "breakeven_atr_mid_state": 1.5,
+          "breakeven_atr_old_state": 1.2,
+          "young_state_max_age": 5,
+          "old_state_min_age": 20
+        },
+        "min_stop_atr_mult": 1.0,
+        "min_sl_pct": 0.0012,
+        "min_rr": 0.5,
+        "structure_target_min_rr": 0.8,
+        "structural_stop_allowance_atr": 0.3
+      },
+      "_comment_b12": "B12: lot size and step come from MT5 itself (volume_min / volume_step)"
     }
   },
   "strategy_configs": {
@@ -876,6 +1131,102 @@
           "max_features": "sqrt",
           "class_weight": "balanced_subsample"
         }
+      },
+      "JP225": {
+        "bb_period": 20,
+        "bb_std": 1.8,
+        "rsi_period": 14,
+        "rsi_overbought": 70,
+        "rsi_oversold": 35,
+        "bb_lower_threshold": 0.25,
+        "bb_upper_threshold": 0.75,
+        "adx_threshold": 10,
+        "require_adx_check": false,
+        "reversion_window": 12,
+        "min_conditions": 3.0,
+        "min_score": 3.0,
+        "min_adx": 10,
+        "min_return_threshold": 0.0005,
+        "stoch_k": 12,
+        "stoch_d": 3,
+        "remove_outliers": true,
+        "outlier_std": 4.5,
+        "min_confidence": 0.55,
+        "stop_loss_pct": 0.018,
+        "take_profit_pct": 0.032,
+        "max_holding_bars": 36,
+        "use_4h_context": true,
+        "h4_reversion_mode": "smart",
+        "h4_extreme_weight": 1.2,
+        "h4_trend_penalty": 0.1,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "SILVER": {
+        "bb_period": 20,
+        "bb_std": 1.8,
+        "rsi_period": 14,
+        "rsi_overbought": 68,
+        "rsi_oversold": 32,
+        "bb_lower_threshold": 0.25,
+        "bb_upper_threshold": 0.75,
+        "adx_threshold": 10,
+        "require_adx_check": false,
+        "reversion_window": 18,
+        "min_conditions": 3.0,
+        "min_score": 3.0,
+        "min_adx": 10,
+        "min_return_threshold": 0.0005,
+        "stoch_k": 12,
+        "stoch_d": 3,
+        "remove_outliers": true,
+        "outlier_std": 4.5,
+        "min_confidence": 0.55,
+        "stop_loss_pct": 0.018,
+        "take_profit_pct": 0.032,
+        "max_holding_bars": 36,
+        "use_4h_context": true,
+        "h4_reversion_mode": "smart",
+        "h4_extreme_weight": 1.2,
+        "h4_trend_penalty": 0.1,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "AUDJPY": {
+        "bb_period": 20,
+        "bb_std": 1.8,
+        "rsi_period": 14,
+        "rsi_overbought": 65,
+        "rsi_oversold": 35,
+        "bb_lower_threshold": 0.25,
+        "bb_upper_threshold": 0.75,
+        "adx_threshold": 10,
+        "require_adx_check": false,
+        "reversion_window": 12,
+        "min_conditions": 3.0,
+        "min_score": 3.0,
+        "min_adx": 10,
+        "min_return_threshold": 0.0005,
+        "stoch_k": 12,
+        "stoch_d": 3,
+        "remove_outliers": true,
+        "outlier_std": 4.5,
+        "min_confidence": 0.55,
+        "stop_loss_pct": 0.018,
+        "take_profit_pct": 0.032,
+        "max_holding_bars": 36,
+        "use_4h_context": true,
+        "h4_reversion_mode": "smart",
+        "h4_extreme_weight": 1.2,
+        "h4_trend_penalty": 0.1,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
       }
     },
     "trend_following": {
@@ -1025,6 +1376,79 @@
         }
       },
       "GBPAUD": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 20,
+        "adx_required": false,
+        "min_return_threshold": 0.001,
+        "min_return_pct": 0.0015,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "JP225": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 22,
+        "require_adx": true,
+        "max_adx_ceiling": 30,
+        "min_return_threshold": 0.001,
+        "min_return_pct": 0.0015,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "SILVER": {
+        "fast_ma": 20,
+        "slow_ma": 50,
+        "adx_threshold": 22,
+        "adx_required": false,
+        "min_return_threshold": 0.001,
+        "min_return_pct": 0.0015,
+        "min_score": 1.5,
+        "min_conditions": 2.5,
+        "volume_confirmation": false,
+        "use_ema_slope": true,
+        "pullback_filter": true,
+        "remove_outliers": true,
+        "outlier_std": 4.0,
+        "min_confidence": 0.52,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "max_features": "sqrt",
+          "class_weight": "balanced_subsample"
+        }
+      },
+      "AUDJPY": {
         "fast_ma": 20,
         "slow_ma": 50,
         "adx_threshold": 20,
@@ -1209,6 +1633,75 @@
           "min_samples_leaf": 15,
           "class_weight": "balanced"
         }
+      },
+      "JP225": {
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "min_distance_pct": 0.002,
+        "min_return_threshold": 0.0025,
+        "min_conditions": 3,
+        "min_score": 1,
+        "use_price_confirmation": true,
+        "use_volume_filter": false,
+        "min_confidence": 0.55,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "n_estimators": 300,
+          "max_depth": 7,
+          "min_samples_split": 30,
+          "max_features": "sqrt",
+          "min_samples_leaf": 15,
+          "class_weight": "balanced"
+        }
+      },
+      "SILVER": {
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "min_distance_pct": 0.001,
+        "min_return_threshold": 0.0025,
+        "min_conditions": 3,
+        "min_score": 1,
+        "use_price_confirmation": true,
+        "use_volume_filter": false,
+        "min_confidence": 0.55,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "n_estimators": 300,
+          "max_depth": 7,
+          "min_samples_split": 30,
+          "max_features": "sqrt",
+          "min_samples_leaf": 15,
+          "class_weight": "balanced"
+        }
+      },
+      "AUDJPY": {
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "min_distance_pct": 0.001,
+        "min_return_threshold": 0.0025,
+        "min_conditions": 3,
+        "min_score": 1,
+        "use_price_confirmation": true,
+        "use_volume_filter": false,
+        "min_confidence": 0.55,
+        "use_4h_context": true,
+        "require_4h_alignment": false,
+        "h4_trend_weight": 1.5,
+        "h4_counter_penalty": 1.5,
+        "model_params": {
+          "n_estimators": 300,
+          "max_depth": 7,
+          "min_samples_split": 30,
+          "max_features": "sqrt",
+          "min_samples_leaf": 15,
+          "class_weight": "balanced"
+        }
       }
     },
     "volume_order_flow": {
@@ -1273,6 +1766,36 @@
         "min_conditions": 3
       },
       "EURJPY": {
+        "mfi_period": 14,
+        "mfi_overbought": 75,
+        "mfi_oversold": 25,
+        "cmf_period": 20,
+        "obv_slope_period": 10,
+        "volume_ma_period": 20,
+        "volume_surge_threshold": 1.3,
+        "min_conditions": 3
+      },
+      "JP225": {
+        "mfi_period": 14,
+        "mfi_overbought": 75,
+        "mfi_oversold": 25,
+        "cmf_period": 20,
+        "obv_slope_period": 10,
+        "volume_ma_period": 20,
+        "volume_surge_threshold": 1.5,
+        "min_conditions": 3
+      },
+      "SILVER": {
+        "mfi_period": 14,
+        "mfi_overbought": 75,
+        "mfi_oversold": 25,
+        "cmf_period": 20,
+        "obv_slope_period": 10,
+        "volume_ma_period": 20,
+        "volume_surge_threshold": 1.5,
+        "min_conditions": 3
+      },
+      "AUDJPY": {
         "mfi_period": 14,
         "mfi_overbought": 75,
         "mfi_oversold": 25,
@@ -1469,7 +1992,7 @@
     "strategy_livermore_awareness_enabled": false,
     "pyramid_livermore_maturity_gate_enabled": true,
     "council_counter_trend_cap": 3.5,
-    "council_trial_addons_off": true,
+    "council_trial_addons_off": false,
     "council_trial_loss_limit_r": 10.0,
     "council_trial_max_trades": 9999,
     "council_trial_max_days": 28,
@@ -1603,7 +2126,8 @@
         "cont_only": true,
         "no_spike": true,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0012
+        "min_sl_pct": 0.0012,
+        "min_reward_ccy": 0.0
       },
       "GBPAUD": {
         "entry": "E",
@@ -1612,22 +2136,90 @@
         "cont_only": true,
         "no_spike": true,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0025
+        "min_sl_pct": 0.0025,
+        "min_reward_ccy": 0.0
       },
       "BTC": {
-        "entry": "E",
+        "entry": "E2",
         "target_atr": null,
         "exit": "RUNNER",
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.6,
         "min_sl_pct": 0.006
+      },
+      "EURJPY": {
+        "min_reward_ccy": 0.0,
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0012
+      },
+      "JP225": {
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0025
+      },
+      "SILVER": {
+        "entry": "B",
+        "target_atr": 4.0,
+        "exit": "FIXED",
+        "cont_only": false,
+        "no_spike": false,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0035
+      },
+      "AUDJPY": {
+        "entry": "E",
+        "target_atr": 2.5,
+        "exit": "FIXED",
+        "cont_only": true,
+        "no_spike": true,
+        "min_rr": 0.5,
+        "min_sl_pct": 0.0012
       }
     },
     "ns_pause_limits_r": {
       "BTC": 6.0
     },
-    "council_trial_min_trades": 20
+    "council_trial_min_trades": 20,
+    "council_advisory": true,
+    "ns_paper_markets": [
+      "AUDJPY"
+    ],
+    "council_ladder": "new",
+    "ns_explore": {
+      "enabled": true,
+      "1h_break_markets": [
+        "GOLD",
+        "USOIL",
+        "USTEC",
+        "BTC",
+        "EURUSD",
+        "GBPAUD"
+      ],
+      "all_proofs_markets": [
+        "EURUSD",
+        "GBPAUD"
+      ],
+      "bounce_pockets": {
+        "USTEC": [
+          "open FVG (4H)",
+          "4H brain level"
+        ],
+        "GOLD": [
+          "1H brain level",
+          "EMA 20 (1H)"
+        ]
+      }
+    }
   },
   "btc_volume_source": "binance"
 }

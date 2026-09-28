@@ -55,8 +55,8 @@ FRICTION_PENALTIES: Dict[str, float] = {
     "XAUUSDm": 0.0002,
     "USTEC":  0.00008,   # B11-NS S9h: real-measured cost (25 Sep)
     "USTECm": 0.00008,
-    "EURJPY": 0.0004,   # 0.04%
-    "EURJPYm": 0.0004,
+    "EURJPY": 0.00009,   # B12: real-measured cost (28 Sep)
+    "EURJPYm": 0.00009,
     "EURUSD": 0.00018,   # B11-NS S9h: real-measured cost (25 Sep)
     "EURUSDm": 0.00018,
     "GBPUSD": 0.0003,   # 0.03% — tight spread major pair
@@ -67,6 +67,10 @@ FRICTION_PENALTIES: Dict[str, float] = {
     "USOILm": 0.00055,
     "GBPAUD": 0.00028,   # B11-NS S9h: real-measured cost (25 Sep)
     "GBPAUDm": 0.00028,
+    "JP225":  0.000047,  # B12: real-measured cost (28 Sep)
+    "JP225m": 0.000047,
+    "SILVER": 0.000489,  # B12: real-measured cost (28 Sep)
+    "XAGUSDm": 0.000489,
 }
 # S7a: lookups are .upper() — normalize keys so mixed-case MT5 variants
 # ("XAUUSDm") can actually match instead of silently falling to default.
@@ -898,6 +902,8 @@ class ShadowTradingEngine:
         # S7e: machine-stable gate identity — text before the first "(",
         # e.g. "HOLD (Score: 2.71/4.1)" -> "HOLD"; "NY_OPEN (session)" -> "NY_OPEN"
         _gate_code = (gate_blocked_by or "UNKNOWN").split("(")[0].strip() or "UNKNOWN"
+        if _gate_code.upper() == "HOLD":        # B12 (B11 S16 item 2, ruled "merge"): one name for a council refusal
+            _gate_code = "council_hold"
 
         pos = ShadowPosition(
             asset=asset,

@@ -1248,6 +1248,9 @@ class VeteranTradeManager:
         reward_dist = abs(float(tp) - float(self.entry_price)) if tp else GATE_TARGET_ATR * atr1
         reward = reward_dist * float(self.position_size or 0) * float(self._quote_to_usd_rate())
         min_ccy = float(_pc4.get("min_reward_ccy", 5.0))
+        _mk_min = ((_pc4.get("ns_markets") or {}).get(str(self.asset).upper()) or {})
+        if "min_reward_ccy" in _mk_min:   # B12 (Desire 28 Sep): a market's own minimum -- EURUSD, GBPAUD: none
+            min_ccy = float(_mk_min.get("min_reward_ccy") or 0.0)
         if reward < min_ccy:
             return sl, tp, False, "ns: reward $%.2f < $%.2f" % (reward, min_ccy)
         logger.info("[NS-FINAL] %s %s: stop=%.5g target=%s reward=$%.2f -- accepted",
@@ -3194,9 +3197,9 @@ class VeteranTradeManager:
         if atr_value is None:
             atr_value = self._calculate_atr() # Fallback if ATR not passed
         self._last_atr = atr_value  # MANUAL-AUTHORITY BATCH: feeds _queue_move_notification's trail digest threshold
+        if self.remaining_position <= 0: return None
         if self._ns_active():
             return self._ns_check_exit(current_price)   # B11-NS: the tested exits only
-        if self.remaining_position <= 0: return None
 
         # ── FIX-A/E2: R-based break-even, first in the management pass ─────
         # Ships OFF (r_breakeven_enabled defaults false in config); additive,
