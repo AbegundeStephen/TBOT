@@ -242,7 +242,7 @@
         /* ── Regime Strip ──────────────────────── */
         .regime-strip {
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
             gap: 10px;
             margin-bottom: 16px;
         }
@@ -815,7 +815,6 @@
         @media (max-width: 768px) {
             .stat-row { grid-template-columns: repeat(2, 1fr); }
             .charts-row { grid-template-columns: 1fr; }
-            .regime-strip { grid-template-columns: repeat(2, 1fr); }
             .strat-row { grid-template-columns: 1fr; }
             .topbar-nav .tb-btn span { display: none; }
         }
@@ -1053,7 +1052,7 @@
     <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">
         📡 MTF Regime
     </div>
-    <div class="regime-strip" id="regime-strip" style="grid-template-columns: repeat(10, 1fr);">
+    <div class="regime-strip" id="regime-strip">
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">BTC</div><div class="regime-label" id="reg-btc">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">GOLD</div><div class="regime-label" id="reg-gold">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">EURUSD</div><div class="regime-label" id="reg-eurusd">Loading…</div></div></div>
